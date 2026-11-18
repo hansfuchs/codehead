@@ -181,8 +181,11 @@ impl Thread {
                 self.busy.remove(&agent);
                 // a turn ends: its open asks are moot
                 self.asks.retain(|a| a.agent != agent);
-                if let Some(err) = error.as_deref().filter(|e| *e != "session ended") {
-                    self.items.push(Item::Note { agent, text: err.to_string(), color: theme::pal().danger });
+                match error.as_deref() {
+                    None | Some("session ended") => {}
+                    // the owner's esc: a note, 0 error hint
+                    Some(crate::engine::host::INTERRUPTED) => self.items.push(Item::Note { agent, text: "interrupted".into(), color: theme::pal().muted }),
+                    Some(err) => self.items.push(Item::Note { agent, text: err.to_string(), color: theme::pal().danger }),
                 }
             }
             Kind::Session { model, .. } => {
@@ -1207,6 +1210,18 @@ mod tests {
         let s = text(&draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]));
         let tail: Vec<&str> = s.lines().rev().take(4).collect();
         assert!(tail.iter().any(|r| r.starts_with("│ denied")) && tail[0].starts_with('╰'), "{s}");
+    }
+
+    #[test]
+    fn interrupted_turns_are_no_errors() {
+        let mut t = Thread::default();
+        let end = |error: &str| Kind::TurnEnd { cost: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0, ctx: 0, ms: 1, error: Some(error.into()) };
+        t.push(&ev(Some("ada"), Kind::TurnStart));
+        t.push(&ev(Some("ada"), end(crate::engine::host::INTERRUPTED)));
+        assert!(matches!(t.items.last(), Some(Item::Note { text, color, .. }) if text == "interrupted" && *color == theme::pal().muted));
+        t.push(&ev(Some("ada"), Kind::TurnStart));
+        t.push(&ev(Some("ada"), end("error_during_execution")));
+        assert!(matches!(t.items.last(), Some(Item::Note { color, .. }) if *color == theme::pal().danger));
     }
 
     #[test]

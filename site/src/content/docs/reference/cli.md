@@ -4,6 +4,7 @@ description: codehead's command line.
 ---
 
 ```text
+codehead
 codehead [-a agent[,agent…]] [-b branch] [-c] [-n] [title...]
 codehead --view <thread>
 codehead --cost <thread>
@@ -14,6 +15,7 @@ codehead --update
 
 | Option | Effect |
 | --- | --- |
+| (0 options) | the thread view of the thread updated last; 0 threads: the start screen. `esc esc`: the start screen |
 | `-a agent[,agent…]` | agents preselected for the new thread (default: the default agent) |
 | `-b branch` | branch for a new worktree (default: `<prefix>/<title slug>`) |
 | `-c` | copy the picked note paths to the clipboard, start nothing |

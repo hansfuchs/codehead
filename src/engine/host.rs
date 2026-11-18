@@ -32,6 +32,8 @@ use super::roster;
 use super::store::{self, Event, Kind};
 
 const IDLE: Duration = Duration::from_secs(15 * 60);
+/// Error of a turn the owner interrupted (the stream shows it as a note, not an error).
+pub const INTERRUPTED: &str = "interrupted";
 
 pub fn socket(id: &str) -> PathBuf {
     super::run_dir().join(format!("{id}.sock"))
@@ -45,6 +47,8 @@ enum Input {
 struct Live {
     session: Session,
     busy: bool,
+    /// The owner interrupted the running turn: its end is no error.
+    interrupted: bool,
 }
 
 struct Host {
@@ -104,7 +108,7 @@ impl Host {
         let dir = t.work_dir();
         let spec = harness::Spec { agent: &a, thread: &self.id, dir: &dir, resume: t.sessions.get(agent).map(String::as_str), fork: t.fork.iter().any(|a| a == agent), system: &system, exe: &self.exe };
         let session = harness::spawn(&spec, self.harness_tx.clone())?;
-        self.sessions.insert(agent.to_string(), Live { session, busy: false });
+        self.sessions.insert(agent.to_string(), Live { session, busy: false, interrupted: false });
         Ok(())
     }
 
@@ -201,6 +205,7 @@ impl Host {
                 let mut n = 0;
                 for live in self.sessions.values_mut().filter(|l| l.busy) {
                     live.session.interrupt()?;
+                    live.interrupted = true;
                     n += 1;
                 }
                 Ok(json!({"interrupted": n}))
@@ -261,7 +266,15 @@ impl Host {
     fn harness(&mut self, agent: String, o: Out) {
         self.last = Instant::now();
         match o {
-            Out::Event(kind) => {
+            Out::Event(mut kind) => {
+                // an interrupted turn: Claude Code ends it with `error_during_execution`
+                if let Kind::TurnEnd { error, .. } = &mut kind
+                    && let Some(l) = self.sessions.get_mut(&agent)
+                    && std::mem::take(&mut l.interrupted)
+                    && error.is_some()
+                {
+                    *error = Some(INTERRUPTED.into());
+                }
                 match &kind {
                     Kind::Session { session, .. } => {
                         // stream-json repeats its init line every turn: 1 event per new session

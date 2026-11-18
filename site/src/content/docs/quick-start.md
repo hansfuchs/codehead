@@ -30,4 +30,4 @@ description: From 0 to a running thread in a few minutes.
    prompt below. Send more with `ctrl+enter`.
 
 `esc esc` goes back to the start screen. The thread keeps running: open it again from the
-**threads** tab, or with `codehead --view <thread>`.
+**threads** tab, or with `codehead --view <thread>`. Plain `codehead` opens the thread updated last.

@@ -52,7 +52,8 @@ use app::{App, Config, Outcome, Suspend, Target};
 
 const HELP: &str = "codehead: write the task (+ notes, + Claude Code context), then work the thread with its agents.
 
-usage: codehead [-a agent[,agent…]] [-b branch] [-c] [-n] [title...]
+usage: codehead                    the thread updated last (0 threads: the start screen)
+       codehead [-a agent[,agent…]] [-b branch] [-c] [-n] [title...]
        codehead --view <thread>   thread view of a thread (id or id prefix)
        codehead --cost <thread>   cost box of a thread, full screen
        codehead --version         print the version
@@ -466,11 +467,17 @@ fn start(args: Args) {
         }
     };
 
-    if let Some(id) = &args.view {
+    // plain `codehead` (0 options, 0 title): the thread updated last; esc esc: the start screen
+    let plain = args.view.is_none() && args.title.is_empty() && args.agent.is_none() && args.branch.is_none() && !args.copy && !args.dry;
+    let latest = plain.then(|| engine::store::all().into_iter().next().map(|t| t.id)).flatten();
+    if let Some(id) = args.view.as_ref().or(latest.as_ref()) {
         let t = threads::all_threads().into_iter().find(|t| t.id.starts_with(id));
         let Some(t) = t else { tty.leave(&mut out); fail(&format!("no thread {id}"), 2) };
         let dir = [t.worktree.clone(), t.dir.clone()].into_iter().flatten().map(PathBuf::from).find(|p| p.is_dir()).unwrap_or_else(|| cwd.clone());
-        wake(&t.id);
+        // --view opens a done thread again; the auto-open leaves its state as it is
+        if args.view.is_some() {
+            wake(&t.id);
+        }
         let tab = open_view(&mut term, &mut tty, &mut out, &t.id, &dir, &t.title, &cwd);
         app.return_from_thread();
         if let Some(tab) = tab { app.go_home(tab); }
