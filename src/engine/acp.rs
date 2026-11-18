@@ -68,6 +68,26 @@ struct State {
 #[derive(Clone)]
 pub struct Conn(Arc<Mutex<State>>);
 
+/// A JSON-RPC error E as text: its message, the server's own message (`data.message`, e.g. the
+/// model API's 400) after it.
+fn error_text(e: &Value) -> String {
+    let msg = e["message"].as_str().unwrap_or("error").to_string();
+    let data = e["data"]["message"].as_str().or_else(|| e["data"].as_str()).unwrap_or_default();
+    // `data.message` may hold the API's error JSON: its `error.message`
+    let inner = serde_json::from_str::<Value>(data).ok().and_then(|v| v["error"]["message"].as_str().map(String::from)).unwrap_or_else(|| data.to_string());
+    if inner.is_empty() || inner == msg { msg } else { format!("{msg}: {inner}") }
+}
+
+/// The model of a new session R and whether it sets models as config options: `configOptions`
+/// (id `model`, ACP config options) or the older `models.currentModelId`.
+fn session_model(r: &Value) -> (String, bool) {
+    let opt = r["configOptions"].as_array().and_then(|o| o.iter().find(|c| c["id"] == "model" || c["category"] == "model"));
+    match opt {
+        Some(o) => (o["currentValue"].as_str().unwrap_or_default().to_string(), true),
+        None => (r["models"]["currentModelId"].as_str().unwrap_or_default().to_string(), false),
+    }
+}
+
 fn mcp_servers(s: &Setup) -> Value {
     let (cmd, args, env) = &s.mcp;
     json!([{"name": "codehead", "command": cmd, "args": args, "env": env.iter().map(|(k, v)| json!({"name": k, "value": v})).collect::<Vec<_>>()}])
@@ -121,7 +141,7 @@ impl State {
     }
 
     fn reply(&mut self, why: Pending, v: &Value) -> Result<(), String> {
-        let err = v.get("error").map(|e| e["message"].as_str().unwrap_or("error").to_string());
+        let err = v.get("error").map(error_text);
         let r = &v["result"];
         match why {
             Pending::Init => {
@@ -161,15 +181,26 @@ impl State {
                 if why == Pending::Load {
                     self.preamble = None;
                 }
-                let model = r["models"]["currentModelId"].as_str().unwrap_or_default().to_string();
+                let (model, options) = session_model(r);
                 self.out(Out::Event(Kind::Session { session: sid.clone(), model }));
                 self.session = Some(sid.clone());
                 if let Some(m) = self.setup.model.clone() {
-                    self.request("session/set_model", json!({"sessionId": sid, "modelId": m}), Pending::Model)?;
+                    // ACP config options (codex-acp ≥ 0.16: 0 `session/set_model`), else the older call
+                    if options {
+                        self.request("session/set_config_option", json!({"sessionId": sid, "configId": "model", "value": m}), Pending::Model)?;
+                    } else {
+                        self.request("session/set_model", json!({"sessionId": sid, "modelId": m}), Pending::Model)?;
+                    }
                 }
                 self.pump()?;
             }
-            Pending::Model => {}
+            // the model the agent's profile names: unknown to the harness → a note in the stream
+            Pending::Model => {
+                if let Some(e) = err {
+                    let m = self.setup.model.clone().unwrap_or_default();
+                    self.out(Out::Event(Kind::Error { message: format!("model {m}: {e}") }));
+                }
+            }
             Pending::Prompt => {
                 self.flush_text();
                 self.busy = false;
@@ -470,6 +501,19 @@ impl Conn {
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn codex_acp_016_config_options_and_api_errors() {
+        // codex-acp 0.16: the model as a config option
+        let r = json!({"sessionId": "s", "configOptions": [{"id": "model", "category": "model", "type": "select", "currentValue": "gpt-5.6-sol", "options": []}]});
+        assert_eq!(session_model(&r), ("gpt-5.6-sol".to_string(), true));
+        // older: models.currentModelId
+        assert_eq!(session_model(&json!({"models": {"currentModelId": "gpt-5.5"}})), ("gpt-5.5".to_string(), false));
+        // the API's 400 behind "Internal error"
+        let e = json!({"code": -32603, "message": "Internal error", "data": {"message": "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\"}}"}});
+        assert_eq!(error_text(&e), "Internal error: The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.");
+        assert_eq!(error_text(&json!({"code": -32601, "message": "Method not found", "data": "session/set_model"})), "Method not found: session/set_model");
+    }
     #[test]
     fn tool_calls_map_to_familiar_names() {
         let (n, i) = tool_of(&json!({"kind": "execute", "title": "Run tests", "rawInput": {"command": "cargo test"}}));
