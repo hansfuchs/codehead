@@ -15,6 +15,8 @@ pub enum Kind {
     JetBrains,
     /// Anything else: `file:line`.
     Other,
+    /// `terminal`: $VISUAL / $EDITOR full screen in codehead's terminal: `+line file`.
+    Terminal,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -64,6 +66,12 @@ pub fn find() -> Option<Editor> {
     {
         return Some(Editor { kind: Kind::VsCode, bin: p });
     }
+    // `terminal`: $VISUAL, else $EDITOR, else nvim / vi (run full screen by the thread view)
+    if want == "terminal" {
+        let ed = std::env::var("VISUAL").ok().filter(|s| !s.trim().is_empty()).or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.trim().is_empty()));
+        let name = ed.as_deref().and_then(|e| e.split_whitespace().next()).map(str::to_string).or_else(|| on_path("nvim").map(|_| "nvim".into())).unwrap_or_else(|| "vi".into());
+        return on_path(&name).map(|bin| Editor { bin, kind: Kind::Terminal });
+    }
     let bin = if want == "auto" {
         ["code", "codium", "code-insiders", "cursor", "zed", "idea", "webstorm", "pycharm", "rustrover"].iter().find_map(|n| on_path(n)).or_else(in_apps)
     } else {
@@ -80,6 +88,7 @@ pub fn args_at(kind: Kind, wt: &Path, file: &str, line: u32) -> Vec<OsString> {
     match kind {
         Kind::VsCode => vec![wt.into(), "-g".into(), format!("{}:{line}", full.display()).into()],
         Kind::JetBrains => vec!["--line".into(), line.to_string().into(), full.into()],
+        Kind::Terminal => vec![format!("+{line}").into(), full.into()],
         Kind::Zed | Kind::Other => vec![format!("{}:{line}", full.display()).into()],
     }
 }
@@ -134,6 +143,7 @@ mod tests {
         assert_eq!(s(args_at(Kind::Zed, wt, "src/a.rs", 12)), ["/w/src/a.rs:12"]);
         assert_eq!(s(args_at(Kind::JetBrains, wt, "src/a.rs", 12)), ["--line", "12", "/w/src/a.rs"]);
         assert_eq!(s(args_dir(Kind::VsCode, wt)), ["-n", "/w"]);
+        assert_eq!(s(args_at(Kind::Terminal, wt, "src/a.rs", 12)), ["+12", "/w/src/a.rs"]);
         assert_eq!(kind_of(Path::new("/usr/local/bin/cursor")), Kind::VsCode);
         assert_eq!(kind_of(Path::new("rustrover")), Kind::JetBrains);
         assert_eq!(kind_of(Path::new("hx")), Kind::Other);

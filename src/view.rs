@@ -180,6 +180,8 @@ struct View {
     files: crate::files::View,
     /// yazi on this path: the view loop runs it full screen (codehead suspends).
     yazi: Option<PathBuf>,
+    /// A program to run full screen (a terminal editor): the view loop runs it.
+    outside: Option<Vec<std::ffi::OsString>>,
     prompt_focus: bool,
     bar_rects: Vec<(Rect, Pane)>,
     /// The changes view with the chat left of it (wide terminals; alt+\ toggles); the view's area.
@@ -281,6 +283,7 @@ impl View {
             changes: crate::changes::View::new(id, cwd),
             files: crate::files::View::new(id, cwd),
             yazi: None,
+            outside: None,
             prompt_focus: false,
             bar_rects: Vec::new(),
             split: true,
@@ -966,6 +969,13 @@ impl View {
             self.toast("IDE: 0 found · setting editor (code, cursor, zed, idea …)");
             return;
         };
+        // a terminal editor: full screen in this terminal (the view loop suspends codehead)
+        if e.kind == crate::editor::Kind::Terminal {
+            let mut argv: Vec<std::ffi::OsString> = vec![e.bin.clone().into()];
+            argv.extend(args(e.kind));
+            self.outside = Some(argv);
+            return;
+        }
         match crate::editor::spawn(&e, &args(e.kind)) {
             Ok(()) => {
                 let hint = crate::editor::trust_hint(&self.cwd);
@@ -1929,15 +1939,28 @@ fn open_url(url: &str) {
 /// Run yazi on TARGET full screen: the terminal modes off (raw, mouse, paste, keyboard flags,
 /// alternate screen), yazi, the modes on again, a full redraw. Returns yazi's picked paths.
 fn run_outside<B: Backend>(term: &mut Terminal<B>, target: &Path) -> Result<Vec<String>, String> {
-    use ratatui::crossterm::{cursor, event, execute, terminal};
     if std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("yazi")).find(|p| p.is_file())).is_none() {
         return Err("yazi: not on PATH (brew install yazi)".into());
     }
     let (argv, env, chooser) = crate::files::yazi_cmd(target);
+    let argv: Vec<std::ffi::OsString> = argv.into_iter().map(Into::into).collect();
+    let status = suspended(term, &argv, &env).map_err(|e| format!("yazi: {e}"))?;
+    if !status.success() {
+        return Err(format!("yazi exited with {status} (config: {})", crate::files::yazi_config().display()));
+    }
+    let picked = std::fs::read_to_string(&chooser).unwrap_or_default();
+    let _ = std::fs::remove_file(&chooser);
+    Ok(picked.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+}
+
+/// Run ARGV (with ENV) full screen: codehead's terminal modes off (raw, mouse, paste,
+/// keyboard flags, alternate screen), the program, the modes on again, a full redraw.
+fn suspended<B: Backend>(term: &mut Terminal<B>, argv: &[std::ffi::OsString], env: &[(String, String)]) -> std::io::Result<std::process::ExitStatus> {
+    use ratatui::crossterm::{cursor, event, execute, terminal};
     let mut out = std::io::stdout();
     let _ = execute!(out, event::PopKeyboardEnhancementFlags, event::DisableMouseCapture, event::DisableBracketedPaste, terminal::LeaveAlternateScreen, cursor::Show);
     let _ = terminal::disable_raw_mode();
-    let status = std::process::Command::new(&argv[0]).args(&argv[1..]).envs(env).status();
+    let status = std::process::Command::new(&argv[0]).args(&argv[1..]).envs(env.iter().cloned()).status();
     let _ = terminal::enable_raw_mode();
     let _ = execute!(
         out,
@@ -1947,13 +1970,7 @@ fn run_outside<B: Backend>(term: &mut Terminal<B>, target: &Path) -> Result<Vec<
         event::PushKeyboardEnhancementFlags(event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     );
     let _ = term.clear();
-    let status = status.map_err(|e| format!("yazi: {e}"))?;
-    if !status.success() {
-        return Err(format!("yazi exited with {status} (config: {})", crate::files::yazi_config().display()));
-    }
-    let picked = std::fs::read_to_string(&chooser).unwrap_or_default();
-    let _ = std::fs::remove_file(&chooser);
-    Ok(picked.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+    status
 }
 
 /// The view of thread ID until it ends. NOTE: a toast at the start (why the view opened).
@@ -2068,6 +2085,15 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
             }
         }
         // yazi: full screen, codehead suspended; its pick into the prompt
+        // a terminal editor: full screen, codehead suspended
+        if let Some(argv) = v.outside.take() {
+            match suspended(term, &argv, &[]) {
+                Ok(s) if s.success() => {}
+                Ok(s) => v.toast(format!("editor exited with {s}")),
+                Err(e) => v.toast(format!("editor: {e}")),
+            }
+            dirty = true;
+        }
         if let Some(target) = v.yazi.take() {
             match run_outside(term, &target) {
                 Ok(picked) => v.yazi_picked(&picked),
