@@ -30,6 +30,10 @@ pub fn data_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("CODEHEAD_HOME").filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }
+    // tests never write to the owner's data dir: 1 temp dir per test process
+    if cfg!(test) {
+        return std::env::temp_dir().join(format!("codehead-test-{}", std::process::id()));
+    }
     std::env::var_os("XDG_DATA_HOME")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)

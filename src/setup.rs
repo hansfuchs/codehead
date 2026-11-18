@@ -103,7 +103,10 @@ pub fn env(root: &Path, wt: &Path, id: &str, branch: &str, port: Option<u16>) ->
 pub fn run(argv: &[String], wt: &Path, env: &[(String, String)], max: Duration) -> (bool, String) {
     use std::io::Read;
     use std::os::unix::process::CommandExt;
-    let log = std::env::temp_dir().join(format!("codehead-setup-{}-{}.log", std::process::id(), crate::engine::now_ms()));
+    // 1 log per run: 2 runs in the same ms (tests in parallel) never share 1 file
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let log = std::env::temp_dir().join(format!("codehead-setup-{}-{}-{n}.log", std::process::id(), crate::engine::now_ms()));
     let Ok(file) = std::fs::File::create(&log) else { return (false, "0 log file".into()) };
     let Ok(err) = file.try_clone() else { return (false, "0 log file".into()) };
     let child = Command::new(&argv[0]).args(&argv[1..]).current_dir(wt).envs(env.iter().cloned()).stdin(Stdio::null()).stdout(file).stderr(err).process_group(0).spawn();

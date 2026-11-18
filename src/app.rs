@@ -904,6 +904,13 @@ impl App {
     }
 
     fn refresh_threads(&mut self) {
+        // tests: the reads give back the rows the test set (0 reads of the machine's threads)
+        if cfg!(test) {
+            let (rows, sessions) = (self.worktrees.clone().unwrap_or_default(), self.sessions.clone());
+            self.thread_reads.request((), move || rows);
+            self.session_reads.request((), move || sessions);
+            return;
+        }
         let repo = self.cfg.repo.clone();
         let name = format!("threads-{}", background::scope(repo.as_deref().unwrap_or(&self.cfg.cwd)));
         self.thread_reads.request((), move || {

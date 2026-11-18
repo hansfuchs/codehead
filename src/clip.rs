@@ -15,6 +15,23 @@ fn wayland() -> bool {
 
 /// Copy TEXT. false = 0 clipboard tools found.
 pub fn copy(text: &str) -> bool {
+    // tests: 0 writes to the owner's clipboard; the text for asserts
+    #[cfg(test)]
+    {
+        LAST.with_borrow_mut(|l| *l = text.to_string());
+        return true;
+    }
+    #[allow(unreachable_code)]
+    copy_tools(text)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The text the last `copy` of this test thread got.
+    pub static LAST: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+fn copy_tools(text: &str) -> bool {
     let tools: [(&str, &[&str]); 4] = [("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["-ib"]), ("pbcopy", &[])];
     for (bin, args) in tools {
         if !have(bin) || (bin == "wl-copy" && !wayland()) {
