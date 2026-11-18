@@ -417,8 +417,20 @@ impl View {
             }
             return;
         }
+        self.send_prompt(text);
+    }
+
+    /// An owner message: TEXT to its @names, else to the agents of the owner's last message.
+    fn send_prompt(&mut self, text: String) {
+        // @name of any agent: the host routes (and brings a new one in); else the default
+        let names: Vec<String> = self.names.iter().map(|n| n.0.clone()).chain(self.members.iter().cloned()).collect();
+        let named = crate::engine::host::mentions(&text, &names);
         self.pending.push((text.clone(), Instant::now(), None));
-        self.host("send", json!({"op": "prompt", "text": text}));
+        if named.is_empty() {
+            self.host("send", json!({"op": "prompt", "text": text, "to": self.default_to()}));
+        } else {
+            self.host("send", json!({"op": "prompt", "text": text}));
+        }
     }
 
     /// NEW takes over from OLD: a handoff file (task, recent messages, changed files), OLD
@@ -782,9 +794,9 @@ impl View {
             }
             crate::changes::Act::Send(text) => {
                 self.back = 0;
-                self.pending.push((text.clone(), Instant::now(), None));
-                self.host("send", json!({"op": "prompt", "text": text}));
-                self.toast("review comments sent to the lead");
+                let to = self.default_to().join(", ");
+                self.send_prompt(text);
+                self.toast(format!("review comments sent to {to}"));
             }
         }
     }
@@ -1321,7 +1333,20 @@ impl View {
     fn recipients(&self) -> Vec<String> {
         let text = self.input.text();
         let named = crate::engine::host::mentions(&crate::mention::strip_replaces(&text), &self.members);
-        if named.is_empty() { self.members.first().cloned().into_iter().collect() } else { named }
+        if named.is_empty() { self.default_to() } else { named }
+    }
+
+    /// Who a message without @name goes to: the agents of the owner's last message (still on the
+    /// thread), else the lead.
+    fn default_to(&self) -> Vec<String> {
+        let last = self.thread.items.iter().rev().find_map(|i| match i {
+            stream::Item::Prompt { from, to, .. } if from == "owner" => Some(to.iter().filter(|a| self.members.contains(a)).cloned().collect::<Vec<_>>()),
+            _ => None,
+        });
+        match last {
+            Some(to) if !to.is_empty() => to,
+            _ => self.members.first().cloned().into_iter().collect(),
+        }
     }
 
     /// The stream in ST: the thread's items, sends below them, waves, selection, hover.
@@ -2202,5 +2227,36 @@ mod comment_tests {
         assert_eq!(v.changes.comment_count(), 1);
         assert_eq!(v.input.text(), "half a message");
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("commenttest-0000"));
+    }
+}
+
+#[cfg(test)]
+mod default_to_tests {
+    use super::*;
+
+    #[test]
+    fn a_message_without_a_name_goes_to_the_agents_of_the_last_one() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("defaulttest-0000", Path::new("/tmp"), "t", tx);
+        v.members = vec!["ada".into(), "bob".into()];
+        // 0 owner message yet: the lead
+        assert_eq!(v.default_to(), ["ada"]);
+        v.thread.push(&store::Event { ts: 1, agent: None, kind: store::Kind::Prompt { from: "owner".into(), to: vec!["bob".into()], text: "@bob look".into() } });
+        // an agent's message in between changes 0
+        v.thread.push(&store::Event { ts: 2, agent: Some("ada".into()), kind: store::Kind::Prompt { from: "ada".into(), to: vec!["bob".into()], text: "hi".into() } });
+        assert_eq!(v.default_to(), ["bob"]);
+        v.input.set_text("and now?");
+        assert_eq!(v.recipients(), ["bob"]);
+        v.send_prompt("and now?".into());
+        let ops = v.ops.borrow().clone();
+        assert!(ops.iter().any(|o| o["op"] == "prompt" && o["to"] == serde_json::json!(["bob"])), "{ops:?}");
+        // bob left: the lead again
+        v.members = vec!["ada".into()];
+        assert_eq!(v.default_to(), ["ada"]);
+        // @name of a known agent: the host routes (0 `to`)
+        v.names = vec![("cleo".into(), Color::Reset)];
+        v.send_prompt("@cleo join".into());
+        let last = v.ops.borrow().last().cloned().unwrap();
+        assert!(last["to"].is_null(), "{last:?}");
     }
 }

@@ -37,8 +37,10 @@ the cost box read only this log; `$CODEHEAD_HOME` moves the whole folder.
 
 ## Messages
 
-An owner message without `@name` goes to the **lead**, the 1st agent of the thread. `@name`
-sends it to that agent instead; an agent not on the thread joins it.
+An owner message without `@name` goes to the agents of your last message (still on the
+thread); the 1st one goes to the **lead**, the 1st agent of the thread. The hint row under the
+prompt shows who gets it. `@name` sends it to that agent instead; an agent not on the thread
+joins it.
 
 ## Scripting
 
