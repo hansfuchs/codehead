@@ -50,8 +50,9 @@ description: Every key, per screen.
 | `ctrl+i` | the IDE (setting `editor`) on the thread's worktree (`⌘i`) |
 | `pgup` `pgdn`, `shift+↑↓`, wheel | scroll the stream |
 | `tab` | thread header: the open threads (`←→` pick, `enter` open) |
-| `shift+tab` | next view of the thread: chat → changes |
-| `alt+1` / `alt+2` | chat / changes view |
+| `shift+tab` | next view of the thread: chat → changes → files |
+| `alt+1` `alt+2` `alt+3` | chat / changes / files view |
+| `ctrl+y` | yazi (full screen) on the worktree; a picked file goes into the prompt as its path |
 
 ## Changes view
 
@@ -86,4 +87,20 @@ diff changes later, it shows `updated`.
 | `O` | ship: push + open the pull request (`gh pr create --fill`); the summary row shows `PR #n` and its checks `✓ ✗ ●` (read every 30 s) |
 | `F` | CI failed: the latest failed run's log (last 150 lines) goes to the agents of your last message |
 | `M` | merge the PR when its checks pass (`gh pr merge --squash --auto`) |
+| `i` | the prompt gets the keys; `esc` gives them back |
+
+## Files view
+
+The files the thread's agents wrote or edited (their Write / Edit calls) and the home repo's
+notes of the thread (`thread: <id>` on line 1), newest first; a preview right (Markdown
+rendered, code in syntax colors).
+
+| Key | Action |
+| --- | --- |
+| `j` / `k`, `↑` `↓` | pick a file |
+| `space`, `pgup` `pgdn`, wheel | scroll the preview |
+| `o` | the IDE at the file |
+| `y` | yazi on the file (full screen; codehead's own yazi config, themed from the palette) |
+| `c` | copy the file's path |
+| `r` | read the list again |
 | `i` | the prompt gets the keys; `esc` gives them back |

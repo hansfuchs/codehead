@@ -42,10 +42,11 @@ pub enum Pane {
     #[default]
     Chat,
     Changes,
+    Files,
 }
 
 impl Pane {
-    const ALL: [Pane; 2] = [Pane::Chat, Pane::Changes];
+    const ALL: [Pane; 3] = [Pane::Chat, Pane::Changes, Pane::Files];
 
     fn next(self) -> Pane {
         let i = Pane::ALL.iter().position(|p| *p == self).unwrap_or(0);
@@ -174,6 +175,9 @@ struct View {
     // views of the thread (view bar): chat or changes; the prompt's focus outside chat
     pane: Pane,
     changes: crate::changes::View,
+    files: crate::files::View,
+    /// yazi on this path: the view loop runs it full screen (codehead suspends).
+    yazi: Option<PathBuf>,
     prompt_focus: bool,
     bar_rects: Vec<(Rect, Pane)>,
     /// A review comment in the prompt: file, line, the draft the prompt had before.
@@ -270,6 +274,8 @@ impl View {
             live: Vec::new(),
             pane: Pane::Chat,
             changes: crate::changes::View::new(id, cwd),
+            files: crate::files::View::new(id, cwd),
+            yazi: None,
             prompt_focus: false,
             bar_rects: Vec::new(),
             commenting: None,
@@ -669,15 +675,20 @@ impl View {
             return false;
         }
         // the changes view with the focus: its keys (esc, tab, ctrl+c and the menu key: as in chat)
-        if self.pane == Pane::Changes && !self.prompt_focus {
-            let through = matches!(k.code, KeyCode::Esc | KeyCode::Tab) || (ctrl && k.code == KeyCode::Char('c')) || crate::config::menu_key().matches(&k);
+        if self.pane != Pane::Chat && !self.prompt_focus {
+            let through = matches!(k.code, KeyCode::Esc | KeyCode::Tab) || (ctrl && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('y'))) || crate::config::menu_key().matches(&k);
             if !through {
                 if k.code == KeyCode::Char('i') && !ctrl && !alt {
                     self.prompt_focus = true;
                     return false;
                 }
-                let act = self.changes.key(k);
-                self.changes_act(act);
+                if self.pane == Pane::Files {
+                    let act = self.files.key(k);
+                    self.files_act(act);
+                } else {
+                    let act = self.changes.key(k);
+                    self.changes_act(act);
+                }
                 return false;
             }
         }
@@ -714,7 +725,7 @@ impl View {
                 return false;
             }
             // the prompt in the changes view: esc gives the keys back to the view
-            KeyCode::Esc if self.pane == Pane::Changes && self.prompt_focus => {
+            KeyCode::Esc if self.pane != Pane::Chat && self.prompt_focus => {
                 if let Some((_, _, draft)) = self.commenting.take() {
                     self.input.set_text(&draft);
                 }
@@ -778,6 +789,11 @@ impl View {
                     self.drafting = Some(rx);
                     self.toast("drafting the commit message…");
                 }
+                return false;
+            }
+            // ctrl+y: yazi (full screen) on the worktree; its pick goes into the prompt
+            KeyCode::Char('y') if ctrl => {
+                self.yazi = Some(self.cwd.clone());
                 return false;
             }
             KeyCode::Char('t') if ctrl => {
@@ -857,6 +873,9 @@ impl View {
         self.pane = p;
         self.prompt_focus = false;
         self.dirty = true;
+        if p == Pane::Files {
+            self.files.refresh(true);
+        }
         if p == Pane::Changes {
             self.changes.refresh(true);
         }
@@ -887,6 +906,28 @@ impl View {
                 self.toast(format!("review comments sent to {to}"));
             }
         }
+    }
+
+    fn files_act(&mut self, a: crate::files::Act) {
+        match a {
+            crate::files::Act::None => {}
+            crate::files::Act::Toast(t) => self.toast(t),
+            crate::files::Act::Open(p) => {
+                let file = p.strip_prefix(&self.cwd).map_or_else(|_| p.display().to_string(), |r| r.display().to_string());
+                self.open_at(&file, 1);
+            }
+            crate::files::Act::Yazi(p) => self.yazi = Some(p),
+        }
+    }
+
+    /// yazi's pick (the chooser file): its paths into the prompt.
+    fn yazi_picked(&mut self, paths: &[String]) {
+        if paths.is_empty() {
+            return;
+        }
+        let shown: Vec<String> = paths.iter().map(|p| Path::new(p).strip_prefix(&self.cwd).map_or_else(|_| p.clone(), |r| r.display().to_string())).collect();
+        self.input.insert(&format!("{} ", shown.join(" ")));
+        self.toast(format!("yazi: {} path(s) in the prompt", shown.len()));
     }
 
     /// The IDE (setting `editor`) at FILE:LINE of the worktree (VS Code: the window that has it open).
@@ -1213,10 +1254,10 @@ impl View {
             return;
         }
         let in_stream = self.stream_rect.contains(at);
-        if self.pane == Pane::Changes {
+        if self.pane != Pane::Chat {
             if in_stream {
                 self.prompt_focus = self.prompt_focus && !click;
-                self.changes.mouse(m);
+                if self.pane == Pane::Files { self.files.mouse(m) } else { self.changes.mouse(m) }
                 return;
             }
             if click && self.input_rect.contains(at) {
@@ -1590,7 +1631,9 @@ impl View {
         let st = Rect { x: area.x, y: area.y, width: area.width, height: mon.y.saturating_sub(area.y) };
         self.stream_rect = st;
 
-        if self.pane == Pane::Chat {
+        if self.pane == Pane::Files {
+            self.files.draw(f, st);
+        } else if self.pane == Pane::Chat {
             self.draw_stream(f, st);
         } else {
             self.changes.draw(f, st);
@@ -1633,6 +1676,10 @@ impl View {
                     let n = self.changes.comment_count();
                     let c = if n > 0 { format!("✎{n} ") } else { String::new() };
                     if all == 0 { format!(" changes {c}") } else { format!(" changes {done}/{all} {c}") }
+                }
+                Pane::Files => {
+                    let n = self.files.count();
+                    if n == 0 { " files ".to_string() } else { format!(" files {n} ") }
                 }
             };
             let st = if p == self.pane { theme::pill() } else { theme::muted() };
@@ -1744,7 +1791,8 @@ impl View {
             ),
             _ if let Some((file, line, _)) = &self.commenting => Span::styled(format!("comment on {file}:{line} · ⌘/ctrl+⏎: add to the batch · esc: cancel "), theme::accent()),
             _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled("j k · space: reviewed · c: comment · C: send · o: IDE · s: layout · i: prompt ", theme::muted()),
-            _ if self.pane == Pane::Changes => Span::styled("esc: back to the changes · shift+tab: chat ", theme::muted()),
+            _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · space pgup pgdn: scroll · o: IDE · y: yazi · c: copy path · ctrl+y: yazi on the worktree · i: prompt ", theme::muted()),
+            _ if self.pane != Pane::Chat => Span::styled("esc: back to the view · shift+tab: next view ", theme::muted()),
             _ => Span::styled(format!("tab: threads · shift+tab: changes · esc: interrupt · esc esc: codehead · {}: menu ", crate::config::menu_key().label), theme::muted()),
         };
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), foot);
@@ -1836,6 +1884,36 @@ fn word_at(text: &str, col: u16) -> (u16, u16) {
 fn open_url(url: &str) {
     let bin = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     let _ = std::process::Command::new(bin).arg(url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+}
+
+/// Run yazi on TARGET full screen: the terminal modes off (raw, mouse, paste, keyboard flags,
+/// alternate screen), yazi, the modes on again, a full redraw. Returns yazi's picked paths.
+fn run_outside<B: Backend>(term: &mut Terminal<B>, target: &Path) -> Result<Vec<String>, String> {
+    use ratatui::crossterm::{cursor, event, execute, terminal};
+    if std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("yazi")).find(|p| p.is_file())).is_none() {
+        return Err("yazi: not on PATH (brew install yazi)".into());
+    }
+    let (argv, env, chooser) = crate::files::yazi_cmd(target);
+    let mut out = std::io::stdout();
+    let _ = execute!(out, event::PopKeyboardEnhancementFlags, event::DisableMouseCapture, event::DisableBracketedPaste, terminal::LeaveAlternateScreen, cursor::Show);
+    let _ = terminal::disable_raw_mode();
+    let status = std::process::Command::new(&argv[0]).args(&argv[1..]).envs(env).status();
+    let _ = terminal::enable_raw_mode();
+    let _ = execute!(
+        out,
+        terminal::EnterAlternateScreen,
+        event::EnableMouseCapture,
+        event::EnableBracketedPaste,
+        event::PushKeyboardEnhancementFlags(event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
+    let _ = term.clear();
+    let status = status.map_err(|e| format!("yazi: {e}"))?;
+    if !status.success() {
+        return Err(format!("yazi exited with {status} (config: {})", crate::files::yazi_config().display()));
+    }
+    let picked = std::fs::read_to_string(&chooser).unwrap_or_default();
+    let _ = std::fs::remove_file(&chooser);
+    Ok(picked.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
 }
 
 /// The view of thread ID until it ends. NOTE: a toast at the start (why the view opened).
@@ -1948,6 +2026,14 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
                 crate::nav::mark_seen_now(id);
                 return Ok(std::mem::replace(&mut v.exit, Exit::Back));
             }
+        }
+        // yazi: full screen, codehead suspended; its pick into the prompt
+        if let Some(target) = v.yazi.take() {
+            match run_outside(term, &target) {
+                Ok(picked) => v.yazi_picked(&picked),
+                Err(e) => v.toast(e),
+            }
+            dirty = true;
         }
         if v.handoff_due() {
             crate::nav::mark_seen_now(id);
@@ -2236,6 +2322,8 @@ mod nav_tests {
         v.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert!(!v.nav_on && v.pane == Pane::Changes, "shift+tab: changes view");
         v.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(v.pane, Pane::Files);
+        v.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(v.pane, Pane::Chat);
         v.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(v.nav_on, "tab: header open");
@@ -2279,7 +2367,7 @@ mod pane_tests {
     fn view_bar_shows_both_views_and_alt_digits_switch() {
         let mut v = view();
         let s = screen(&mut v);
-        assert!(s.contains(" chat   changes  │ thread p"), "{s}");
+        assert!(s.contains(" chat   changes   files  │ thread p"), "{s}");
         assert!(s.contains("shift+tab: changes"), "{s}");
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
         assert_eq!(v.pane, Pane::Changes);
@@ -2375,5 +2463,30 @@ mod default_to_tests {
         v.send_prompt("@cleo join".into());
         let last = v.ops.borrow().last().cloned().unwrap();
         assert!(last["to"].is_null(), "{last:?}");
+    }
+}
+
+#[cfg(test)]
+mod files_pane_tests {
+    use super::*;
+
+    #[test]
+    fn files_is_the_3rd_view_with_its_keys() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("filestest-0000", Path::new("/tmp"), "t", tx);
+        v.key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::ALT));
+        assert_eq!(v.pane, Pane::Files);
+        // letters: view keys, 0 prompt text
+        v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(v.input.text(), "");
+        // ctrl+y: yazi on the worktree, for the view loop
+        v.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(v.yazi.as_deref(), Some(Path::new("/tmp")));
+        // a pick: its path into the prompt, relative to the worktree
+        v.yazi_picked(&["/tmp/src/a.rs".to_string()]);
+        assert_eq!(v.input.text(), "src/a.rs ");
+        // shift+tab from files: back to chat
+        v.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(v.pane, Pane::Chat);
     }
 }
