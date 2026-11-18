@@ -7,7 +7,8 @@ The thread view has these parts, top to bottom:
 
 - **Threads** (`tab`): a card per open thread: title, a wave while agents work, `●` unread.
   `←` `→` pick, `enter` or a click switches, `esc` closes.
-- **Stream**: every message, tool run and question of the thread. Agent text renders
+- **Stream**: every message, tool run and question of the thread. Agent text streams in as
+  the harness writes it (Claude Code's partial messages, ACP chunks). It renders
   Markdown (tables too) with syntax colors in code blocks. Links open on a click. Scrolled
   up, its last row is a `┄` fold line.
 - **Title row**: the thread title, the scroll position (`↑12 · esc: live`).
@@ -29,7 +30,10 @@ The `messages` setting picks how messages look:
   right with their time.
 
 A message the host has not taken yet shows `sending…` below it, and `send failed: …` when it
-fails.
+fails. A turn you interrupt ends with a muted **interrupted** note, not an error.
+
+Only what changed is drawn again: a long thread (20k+ rows) redraws in about 10 ms, and an idle
+view draws 0 frames.
 
 ## Select and copy
 

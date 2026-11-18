@@ -25,6 +25,13 @@
   --ink: #3c231c;
   --tint: #876960;
   --code-bg: #2d1a14;
+  --dither-color: var(--tint);
+}
+
+/* reverse-video surfaces: the dither in paper */
+:root[data-theme='light'] [aria-current='page'],
+:root[data-theme='light'] .button:not(.outline) {
+  --dither-color: var(--paper);
 }
 
 @media (min-width: 735px) {
@@ -92,7 +99,7 @@ th {
   opacity: 0;
   pointer-events: none;
 }
-.frame:hover::after,
+.frame:hover:not([data-dither])::after,
 .frame:focus-visible::after {
   opacity: 1;
 }
@@ -587,4 +594,209 @@ kbd {
 .footer .grow {
   flex: 1;
   border-right: 0;
+}
+
+/* ---------- dither (src/lib/fx.ts) ---------- */
+.glow {
+  position: absolute;
+  display: block;
+  pointer-events: none;
+  color: var(--amber);
+  opacity: 0.5;
+}
+.glow canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+[data-dither] {
+  --dither-alpha: 0.2;
+}
+.code .copy[data-dither] {
+  position: absolute;
+}
+[data-life] {
+  --life-color: var(--amber);
+  --life-alpha: 0.14;
+}
+
+/* status dot: on 5s, blink, on 1s, blink */
+.dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .dot {
+    animation: blink 6.4s step-end infinite;
+  }
+}
+@keyframes blink {
+  0%,
+  81.25% {
+    opacity: 1;
+  }
+  78.125%,
+  96.875% {
+    opacity: 0;
+  }
+}
+.bar .status {
+  gap: 10px;
+  min-width: 0;
+  color: var(--soft);
+}
+.truncate {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------- landing sections ---------- */
+.hero {
+  position: relative;
+  isolation: isolate;
+}
+.hero-glow {
+  z-index: -1;
+  top: -10%;
+  right: -12%;
+  width: min(720px, 90vw);
+  aspect-ratio: 1;
+}
+.hero .tag {
+  margin: 0 0 20px;
+  color: var(--soft);
+}
+.install-row {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--line-faint);
+}
+.install-row .term {
+  flex: 1;
+  min-width: 0;
+}
+.copy-cmd {
+  flex: none;
+  padding: 0 var(--gutter);
+  border: 0;
+  border-left: 1px solid var(--line-faint);
+  background: var(--code-bg);
+  color: #e3d2be;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.install .note {
+  margin: 12px 0 0;
+}
+.section-title {
+  margin: 0 0 24px;
+  color: var(--soft);
+}
+.steps {
+  margin: 72px 0 0;
+}
+.steps ol {
+  display: grid;
+  gap: 32px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+@media (min-width: 735px) {
+  .steps ol {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0;
+  }
+  .steps ol .box + .box {
+    border-left: 0;
+  }
+}
+.steps .num {
+  display: block;
+  margin-bottom: 24px;
+  color: var(--amber);
+  font-size: 32px;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+.steps h3 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+.steps p {
+  margin: 0;
+  color: var(--soft);
+}
+.feature {
+  display: flex;
+  flex-direction: column;
+  text-decoration: none;
+}
+.feature p {
+  flex: 1;
+}
+.feature .more {
+  margin-top: 16px;
+  color: var(--soft);
+}
+.feature:hover .more {
+  color: var(--amber);
+}
+.harnesses ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  margin: 24px 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line-faint);
+  border-left: 1px solid var(--line-faint);
+}
+.harnesses li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border-right: 1px solid var(--line-faint);
+  border-bottom: 1px solid var(--line-faint);
+}
+.harnesses li code {
+  align-self: flex-start;
+  color: var(--soft);
+  font-size: 12px;
+}
+.harnesses .muted {
+  max-width: 70ch;
+  margin: 8px 0 0;
+}
+.cta {
+  position: relative;
+  isolation: isolate;
+  margin: 96px 0;
+  padding: 72px 0;
+  text-align: center;
+}
+.cta h2 {
+  margin: 0 0 28px;
+  font-size: clamp(32px, 5vw, 52px);
+  letter-spacing: -0.05em;
+  line-height: 1.05;
+}
+.cta .actions {
+  justify-content: center;
+}
+.cta-glow {
+  z-index: -1;
+  inset: 0;
+}
+
+body {
+  overflow-x: clip;
 }

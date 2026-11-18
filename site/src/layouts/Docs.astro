@@ -30,7 +30,7 @@ const next = i >= 0 && i < flat.length - 1 ? flat[i + 1] : undefined;
               <ul>
                 {g.items.map((p) => (
                   <li>
-                    <a href={href(p.slug)} aria-current={p.slug === slug ? 'page' : undefined}>
+                    <a data-dither href={href(p.slug)} aria-current={p.slug === slug ? 'page' : undefined}>
                       {p.label}
                     </a>
                   </li>
@@ -54,7 +54,7 @@ const next = i >= 0 && i < flat.length - 1 ? flat[i + 1] : undefined;
         <nav class="pager" aria-label="pages">
           {
             prev ? (
-              <a class="frame" href={href(prev.slug)}>
+              <a class="frame" data-dither href={href(prev.slug)}>
                 <span class="label">← previous</span>
                 {prev.label}
               </a>
@@ -64,7 +64,7 @@ const next = i >= 0 && i < flat.length - 1 ? flat[i + 1] : undefined;
           }
           {
             next && (
-              <a class="frame" href={href(next.slug)}>
+              <a class="frame" data-dither href={href(next.slug)}>
                 <span class="label">next →</span>
                 {next.label}
               </a>

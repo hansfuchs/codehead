@@ -17,6 +17,7 @@ description: Every file codehead reads and writes.
 | `~/.cache/codehead/drafts` | unsent tasks |
 | `~/.cache/codehead/seen.json` | unread state of the thread cards |
 | `~/.cache/codehead/release` | daily update check cache |
+| `~/.cache/codehead/keys.log` | key events, with `CODEHEAD_KEYLOG=1` |
 | `~/.claude/projects/…/<session>.jsonl` | Claude Code's own transcripts of the agents' sessions |
 
 `$CODEHEAD_HOME` replaces `~/.local/share/codehead`, `$XDG_CONFIG_HOME` and

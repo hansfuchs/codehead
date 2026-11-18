@@ -1,92 +1,193 @@
 ---
 import Base from '../layouts/Base.astro';
+import DitherGlow from '../components/DitherGlow.astro';
+
+const harnesses: [string, string][] = [
+  ['Claude Code', 'claude -p'],
+  ['Codex', 'codex-acp'],
+  ['OpenCode', 'opencode acp'],
+  ['Goose', 'goose acp'],
+  ['Cursor', 'cursor-agent acp'],
+  ['Pi', 'pi-acp'],
+  ['Oh My Pi', 'omp acp'],
+  ['Devin', 'devin acp'],
+  ['Grok Build', 'grok agent stdio'],
+  ['Kimi Code', 'kimi acp'],
+  ['Amp', 'amp-acp'],
+  ['Hermes Agent', 'hermes-acp'],
+  ['OpenClaw', 'openclaw acp'],
+];
+
+const features: { title: string; body: string; href: string; busy?: boolean }[] = [
+  {
+    title: 'write the task',
+    body: 'Prompt first, the title is optional. <code>@</code> picks agents from cards grouped by harness, <code>&gt;</code> mentions files, notes, threads and skills, paths complete as you type. Pasted images and long texts go in as attachments.',
+    href: '/docs/concepts/tasks/',
+  },
+  {
+    title: 'named agents',
+    body: 'A name, a harness and model, an effort, a mode, an output style, a voice and a 7×4 sprite. 1 TOML file per agent. Edit 1: its idle sessions restart with the new profile, the conversation kept.',
+    href: '/docs/concepts/agents/',
+  },
+  {
+    title: 'agents together',
+    body: 'Agents message each other with <code>send</code> and bring each other in. Replace an agent mid-thread: <code>@new (replaces @old)</code> hands over its last messages. A step its harness cannot do goes to an agent that can.',
+    href: '/docs/concepts/messaging/',
+  },
+  {
+    title: 'a live stream',
+    body: 'Tokens show up as the agent writes them. Markdown with tables and syntax colors, tool runs folded into 1 row, opened as code blocks and diffs with a copy button. Thoughts hidden, folded or open.',
+    href: '/docs/concepts/thread-view/',
+    busy: true,
+  },
+  {
+    title: 'questions in the stream',
+    body: 'Permission requests and agent questions appear below the stream. <code>↑↓</code> and <code>enter</code>, <code>1</code>-<code>9</code>, <code>space</code> for several, or type an <em>other</em> answer. Autopilot, edits, supervised or plan: per agent.',
+    href: '/docs/concepts/thread-view/#questions',
+  },
+  {
+    title: 'tokens and cost',
+    body: 'Tokens, cost and context per agent, the last hour as a sparkline, and the usage windows of your plan, in the header of every thread. <code>codehead --cost</code> opens the full view.',
+    href: '/docs/concepts/thread-view/',
+  },
+  {
+    title: 'threads that keep going',
+    body: '1 detached host process per thread. Close the terminal: the agents finish their turns. Open the thread from any terminal again, or branch it into a copy that goes its own way.',
+    href: '/docs/concepts/threads/',
+  },
+  {
+    title: 'branches and worktrees',
+    body: 'Work on the current branch, switch, start a new branch, or give the thread its own worktree. The threads tab lists them with their unpushed commits.',
+    href: '/docs/concepts/tasks/#where-the-work-runs',
+  },
+  {
+    title: 'plain files',
+    body: 'A thread is a folder: <code>thread.json</code> and an append-only <code>events.jsonl</code>. Read it, grep it, or script the host with <code>codehead ctl</code>.',
+    href: '/docs/concepts/threads/#scripting',
+  },
+];
 ---
 
-<Base title="codehead · agent work in one terminal" description="Write the task with your notes, pick named agents and a branch, then follow and steer the thread in one terminal. codehead runs the agents itself, on Claude Code.">
+<Base
+  title="codehead · agent work in one terminal"
+  description="Write the task with your notes, pick named agents and a branch, then follow and steer the thread in one terminal. codehead runs the agents itself, on Claude Code, Codex, OpenCode, Goose, Cursor, Pi, Amp and 6 more harnesses."
+>
   <header class="bar">
-    <a class="cell first frame" href="/"><span class="logo"><span class="mark">ch</span></span></a>
-    <span class="cell grow label">codehead</span>
-    <a class="cell frame label" href="/docs/">docs</a>
-    <a class="cell frame label" href="https://github.com/hansfuchs/codehead">github</a>
-    <button class="cell frame label" type="button" data-theme-toggle aria-label="switch theme">◐</button>
+    <a class="cell first frame" href="/" aria-label="codehead"><span class="logo"><span class="mark">ch</span></span></a>
+    <span class="cell grow status label"><span class="dot" aria-hidden="true"></span><span class="truncate">every green commit on main ships</span></span>
+    <a class="cell frame label" data-dither href="/docs/">docs</a>
+    <a class="cell frame label" data-dither href="https://github.com/hansfuchs/codehead">github</a>
+    <button class="cell frame label" data-dither type="button" data-theme-toggle aria-label="switch theme">theme</button>
   </header>
 
   <main class="content">
     <section class="hero">
+      <DitherGlow class="hero-glow" peak={0.55} />
+      <p class="tag label">[ codehead · terminal app for agent work ]</p>
       <h1>Agent work, in one terminal.</h1>
-      <p>
+      <p class="lead">
         Write the task with your notes. Pick named agents and a branch. Then follow every message, tool run and
-        question of the thread, and steer it, without leaving the terminal. codehead runs the agents itself, on
-        Claude Code, Codex, OpenCode, Goose, Cursor, Pi, Amp and more.
+        question of the thread as it streams, and steer it, without leaving the terminal. codehead runs the agents
+        itself, on the harness you already use.
       </p>
       <div class="actions">
-        <a class="button frame" href="/docs/quick-start/">quick start →</a>
-        <a class="button outline frame" href="/docs/">read the docs</a>
+        <a class="button frame" data-dither href="/docs/quick-start/">quick start →</a>
+        <a class="button outline frame" data-dither href="/docs/">read the docs</a>
       </div>
     </section>
 
-    <section class="box">
+    <section class="box install">
       <h2 class="box-title">install</h2>
-      <pre class="term"><span class="d">$</span> curl -fsSL https://codehead.sh/install | sh</pre>
-      <p class="muted" style="margin:12px 0 0">Linux and macOS · x86_64 and arm64 · needs git and 1 harness: Claude Code, Codex, OpenCode, Goose, Cursor, Pi, Amp, …</p>
+      <div class="install-row">
+        <pre class="term"><span class="d">$</span> <span id="install-cmd">curl -fsSL https://codehead.sh/install | sh</span></pre>
+        <button class="copy-cmd frame label" data-dither type="button" data-copy="install-cmd">copy</button>
+      </div>
+      <p class="muted note">Linux and macOS · x86_64 and arm64 · needs git and 1 harness, logged in · update with <code>codehead --update</code></p>
     </section>
 
-    <section class="box" style="margin-top:48px">
-      <h2 class="box-title">a thread</h2>
-      <pre class="term"><span class="d"> ╭─────╮</span>  <span class="a">ada ★</span>          <span class="d">╭─────╮</span>  <span class="a">bob</span>
-<span class="d"> │⢀⢀⢐⢀⢀│</span>  Opus 5.5       <span class="d">│ ⣀⣀⣀ │</span>  Sonnet 5.5
-<span class="d"> │  ⢐  │</span>  ▒▓▒ working   <span class="d">│ ⠉⠉⠉ │</span>  idle
-<span class="d"> ╰─────╯</span>                 <span class="d">╰─────╯</span>
-
-<span class="r"> you </span> <span class="d">14:02</span>
-<span class="a">▌</span> add retries to the webhook sender, then ask @bob for a review
-
-<span class="r"> ada </span> <span class="d">14:02</span>
-<span class="d">│</span> <span class="a">▸</span> <span class="d">Read: src/webhook.rs · Edit: src/webhook.rs and 2 more · 4 calls · 21.3s</span>
-<span class="d">│</span> Retries are in: 3 tries, backoff 1s / 4s / 16s, only on 5xx and timeouts.
-<span class="d">│</span> <span class="a">▸</span> <span class="d">codehead:send: → bob · 1 call · 0.4s</span>
-
-<span class="r"> bob </span> <span class="d">14:04 → ada</span>
-<span class="d">┆</span> <span class="d">Looks right. One nit: cap the total wait at 30s.</span>
-
-<span class="d">╭──────────────────────────────────────────────────────────╮</span>
-<span class="d">│</span><span class="a">›</span> message the thread · @name: an agent · ⌘/ctrl+⏎ sends    <span class="d">│</span>
-<span class="d">╰──────────────────────────────────── ▒▓▒ working · esc: interrupt ╯</span></pre>
+    <section class="steps" aria-labelledby="how">
+      <h2 class="section-title label" id="how">[ how a thread works ]</h2>
+      <ol>
+        <li class="box">
+          <span class="num">01</span>
+          <h3>write the task</h3>
+          <p>The prompt, notes from your notes folder, context from a Claude Code session or another thread. Pick agents and where the work runs.</p>
+        </li>
+        <li class="box">
+          <span class="num">02</span>
+          <h3>the host runs the agents</h3>
+          <p>A detached process per thread starts 1 session per agent on its harness and gives each the codehead MCP server: <code>send</code>, <code>set_status</code>, <code>list_agents</code>.</p>
+        </li>
+        <li class="box">
+          <span class="num">03</span>
+          <h3>follow and steer</h3>
+          <p>The stream shows every token, tool run and question. Answer, interrupt with <code>esc</code>, message 1 agent with <code>@name</code>, add or replace agents.</p>
+        </li>
+      </ol>
     </section>
 
-    <section class="grid three">
-      <div class="box">
-        <h2 class="box-title">write the task</h2>
-        <p>A title, the prompt, notes from your notes folder, context from a Claude Code session. <code>@</code> names agents, <code>&gt;</code> mentions files, notes, threads and skills, paths complete as you type.</p>
-      </div>
-      <div class="box">
-        <h2 class="box-title">named agents</h2>
-        <p>Each agent has a name, a model, a mode, an output style and a 7×4 sprite. 1 TOML file per agent. They message each other and bring each other in.</p>
-      </div>
-      <div class="box">
-        <h2 class="box-title">threads that keep going</h2>
-        <p>A thread runs in its own host process: close the terminal, the agents keep working. Open it again from any terminal, branch it, settle it.</p>
-      </div>
-      <div class="box">
-        <h2 class="box-title">questions in the stream</h2>
-        <p>Permission requests and agent questions show up in the thread. Answer with ↑↓ and enter, or 1-9. Autopilot, edits, supervised or plan: per agent.</p>
-      </div>
-      <div class="box">
-        <h2 class="box-title">branches and worktrees</h2>
-        <p>Work on the current branch, switch, start a new branch, or give the thread its own worktree. The threads tab lists them with unpushed commits.</p>
-      </div>
-      <div class="box">
-        <h2 class="box-title">plain files</h2>
-        <p>A thread is a folder: <code>thread.json</code> and an append-only <code>events.jsonl</code>. Read it, grep it, script it with <code>codehead ctl</code>.</p>
+    <section class="grid three" aria-label="features">
+      {
+        features.map((f) => (
+          <a class="box feature frame" data-dither href={f.href} {...(f.busy ? { 'data-life': '', 'aria-busy': 'true' } : {})}>
+            <h2 class="box-title">{f.title}</h2>
+            <p set:html={f.body} />
+            <span class="more label" aria-hidden="true">
+              read more →
+            </span>
+          </a>
+        ))
+      }
+    </section>
+
+    <section class="box harnesses">
+      <h2 class="box-title">13 harnesses</h2>
+      <p class="muted">
+        Claude Code runs as <code>claude -p</code> over stream-json. Every other harness runs over the{' '}
+        <a href="https://agentclientprotocol.com">Agent Client Protocol</a>. Mix them on 1 thread: an agent on Codex reviews what an agent on Claude Code wrote.
+      </p>
+      <ul>
+        {
+          harnesses.map(([name, cmd]) => (
+            <li>
+              <span>{name}</span>
+              <code>{cmd}</code>
+            </li>
+          ))
+        }
+      </ul>
+      <a class="button outline frame" data-dither href="/docs/requirements/#a-harness">install commands →</a>
+    </section>
+
+    <section class="cta">
+      <DitherGlow class="cta-glow" peak={0.45} />
+      <h2>Start a thread.</h2>
+      <div class="actions">
+        <a class="button frame" data-dither href="/docs/quick-start/">quick start →</a>
+        <a class="button outline frame" data-dither href="/docs/reference/keys/">every key</a>
       </div>
     </section>
   </main>
 
   <footer class="footer">
-    <a class="frame" href="https://github.com/hansfuchs/codehead">github</a>
-    <a class="frame" href="/docs/">docs</a>
-    <a class="frame" href="/llms.txt">llms.txt</a>
+    <a class="frame" data-dither href="https://github.com/hansfuchs/codehead">github</a>
+    <a class="frame" data-dither href="/docs/">docs</a>
+    <a class="frame" data-dither href="/llms.txt">llms.txt</a>
     <span class="grow"></span>
     <span>apache-2.0</span>
   </footer>
+
+  <script is:inline>
+    document.querySelectorAll('[data-copy]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(document.getElementById(b.dataset.copy).textContent);
+          b.textContent = 'copied';
+        } catch {
+          b.textContent = 'select + copy';
+        }
+        setTimeout(() => (b.textContent = 'copy'), 1500);
+      }),
+    );
+  </script>
 </Base>

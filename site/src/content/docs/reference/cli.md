@@ -36,13 +36,14 @@ agents' MCP server). codehead starts them; you do not need to.
 | Variable | Effect |
 | --- | --- |
 | `CODEHEAD_CONFIG` | config file path (default `~/.config/codehead.toml`) |
-| `CODEHEAD_NOTES`, `CODEHEAD_STYLES`, `CODEHEAD_AGENT`, `CODEHEAD_PREFIX`, `CODEHEAD_MODELS` | override the [config keys](/docs/reference/configuration/) |
+| `CODEHEAD_NOTES`, `CODEHEAD_STYLES`, `CODEHEAD_AGENT`, `CODEHEAD_PREFIX`, `CODEHEAD_MODELS`, `CODEHEAD_MESSAGES`, `CODEHEAD_THOUGHTS`, `CODEHEAD_SCHEME`, `CODEHEAD_MENU_KEY`, `CODEHEAD_COMMAND_KEY` | override the [config keys](/docs/reference/configuration/) |
 | `CODEHEAD_HOME` | data folder (default `~/.local/share/codehead`) |
 | `CODEHEAD_RUN` | socket folder (default `$XDG_RUNTIME_DIR/codehead`) |
 | `CODEHEAD_ACP_<NAME>` | the ACP command of harness NAME (`CODEHEAD_ACP_PI="npx pi-acp"`) |
 | `CODEHEAD_VSCODE` | VS Code binary for `ctrl+i` |
 | `CODEHEAD_DRAFTS` | drafts folder (default `~/.cache/codehead/drafts`) |
 | `CODEHEAD_NO_UPDATE_CHECK` | `1`: no daily release check |
-| `CODEHEAD_KEYLOG` | file: log every key of the text inputs |
+| `CODEHEAD_KEYLOG` | `1`: log every key event to `~/.cache/codehead/keys.log` (what the terminal sends) |
 | `CODEHEAD_INSTALL_DIR` | install script target (default `~/.local/bin`) |
+| `CODEHEAD_THREAD`, `CODEHEAD_AGENT` | codehead sets them for each agent session: the thread id and the agent's name |
 | `CLAUDE_CODE_ARTIFACT` | codehead sets `1` for its sessions unless set (Artifact tools on) |

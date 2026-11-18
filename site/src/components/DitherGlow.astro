@@ -1,0 +1,11 @@
+---
+interface Props {
+  class?: string;
+  /** Fill value at the center, 0..1. */
+  peak?: number;
+}
+const { class: className, peak = 0.5 } = Astro.props;
+---
+
+<!-- Elliptic dithered glow that fills its box. Place it with `class`; the cell color is the `color` of the element. -->
+<dither-glow data-peak={peak} aria-hidden="true" class:list={['glow', className]}><canvas></canvas></dither-glow>

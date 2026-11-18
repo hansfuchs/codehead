@@ -17,6 +17,12 @@ to its agent and resumes the agent's last session on the thread, so the conversa
 over. 15 minutes after the last turn (0 open questions), the host ends its sessions and exits.
 The next message starts it again.
 
+The host runs each harness in its own process group, so a stop or an interrupt reaches the
+harness's children too. `SIGTERM`, `SIGINT` and `SIGHUP` stop the host cleanly: it closes cut
+and crashed turns in the log. An ACP harness with 0 session after 120 s ends that session with
+an error. File locks guard `thread.json`, `limits.json` and the host socket, so 2 codeheads
+never write over each other.
+
 ## Records
 
 ```
@@ -25,7 +31,7 @@ The next message starts it again.
   events.jsonl   1 JSON event per line, append only
 ```
 
-Events: `prompt`, `text`, `tool`, `tool_result`, `ask`, `answer`, `turn_start`, `turn_end`
+Events: `prompt`, `text`, `thought`, `tool`, `tool_result`, `ask`, `answer`, `turn_start`, `turn_end`
 (cost, tokens, context), `session`, `status`, `join`, `leave`, `error`. The thread view and
 the cost box read only this log; `$CODEHEAD_HOME` moves the whole folder.
 
@@ -48,12 +54,15 @@ codehead ctl 6a1f3c '{"op":"stop"}'
 | op | fields | effect |
 | --- | --- | --- |
 | `prompt` | `text`, `to?` | an owner message |
+| `send` | `from`, `to`, `text` | a message from 1 agent to others (what the MCP `send` tool does) |
+| `status` | `agent`, `state`, `note?` | a status row (`working`, `blocked`, `done`) |
 | `answer` | `id`, `allow`, `answers?`, `label` | answer an open question |
 | `interrupt` |  | stop the running turns |
 | `join` / `leave` | `agent`, `text?` | add / remove an agent |
 | `reload` | `agent`, `fresh?` | end an agent's idle session (its profile changed) |
 | `ping` |  | live and busy agents, open questions |
 | `stop` |  | end every session, exit |
+| `subscribe` |  | keep the connection open: `live` / `delta` (text as it streams), `wake` (new events in the log) |
 
 ## Branching
 
