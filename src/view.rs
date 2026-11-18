@@ -1597,6 +1597,12 @@ impl View {
             if let Some(n) = self.changes.take_note() {
                 self.toast(n);
             }
+            // the CI fix: the failed log to the agents of the last message
+            if let Some(m) = self.changes.take_send() {
+                let to = self.default_to().join(", ");
+                self.send_prompt(m);
+                self.toast(format!("CI log sent to {to}"));
+            }
             // a model's commit message draft: into the prompt (still in commit mode)
             if let Some(rx) = &self.drafting
                 && let Ok(r) = rx.try_recv()

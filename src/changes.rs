@@ -366,6 +366,62 @@ pub fn load(dir: &Path) -> Result<Changes, String> {
     Ok(Changes { base: label, files, staged, stopped, ahead, behind })
 }
 
+/// The branch's pull request (gh): number, url, state, checks passed / failed / pending.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Pr {
+    pub number: u64,
+    pub url: String,
+    pub state: String,
+    pub pass: usize,
+    pub fail: usize,
+    pub pending: usize,
+}
+
+/// The pull request of DIR's branch (gh pr view). None: 0 PR, 0 gh.
+pub fn pr_state(dir: &Path) -> Option<Pr> {
+    let out = Command::new("gh").current_dir(dir).args(["pr", "view", "--json", "number,url,state,statusCheckRollup"]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    parse_pr(&v)
+}
+
+fn parse_pr(v: &serde_json::Value) -> Option<Pr> {
+    let mut pr = Pr { number: v["number"].as_u64()?, url: v["url"].as_str().unwrap_or_default().into(), state: v["state"].as_str().unwrap_or_default().into(), ..Default::default() };
+    for c in v["statusCheckRollup"].as_array().into_iter().flatten() {
+        // check runs: status + conclusion; status contexts: state
+        let verdict = c["conclusion"].as_str().filter(|s| !s.is_empty()).or_else(|| c["state"].as_str()).unwrap_or_default().to_ascii_uppercase();
+        match verdict.as_str() {
+            "SUCCESS" | "NEUTRAL" | "SKIPPED" => pr.pass += 1,
+            "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => pr.fail += 1,
+            _ => pr.pending += 1,
+        }
+    }
+    Some(pr)
+}
+
+/// The failed CI log of DIR's branch (the latest failed run, last 150 lines) as a message for
+/// the lead.
+pub fn ci_fix_message(dir: &Path) -> Result<String, String> {
+    let gh = |args: &[&str]| -> Result<String, String> {
+        let o = Command::new("gh").current_dir(dir).args(args).stdin(Stdio::null()).output().map_err(|e| format!("gh: {e}"))?;
+        if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).into_owned()) } else { Err(String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("gh failed").to_string()) }
+    };
+    let branch = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string();
+    let runs: serde_json::Value = serde_json::from_str(&gh(&["run", "list", "--branch", &branch, "--limit", "10", "--json", "databaseId,conclusion,name,url"])?).map_err(|e| e.to_string())?;
+    let run = runs.as_array().into_iter().flatten().find(|r| r["conclusion"] == "failure").ok_or("0 failed CI runs on this branch")?;
+    let id = run["databaseId"].as_u64().ok_or("0 run id")?.to_string();
+    let log = gh(&["run", "view", &id, "--log-failed"])?;
+    let lines: Vec<&str> = log.lines().collect();
+    let tail = lines[lines.len().saturating_sub(150)..].join("\n");
+    Ok(format!(
+        "CI failed on this branch: {} ({}). Find the cause, fix it, run the check locally if you can, commit and push. The failed log (last 150 lines):\n\n```text\n{tail}\n```",
+        run["name"].as_str().unwrap_or("run"),
+        run["url"].as_str().unwrap_or_default()
+    ))
+}
+
 /// A git step of the changes view (run on a thread; hooks, signing, ssh as the git CLI does).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
@@ -377,6 +433,10 @@ pub enum Op {
     Update(String),
     Continue,
     Abort,
+    /// Push, then `gh pr create --fill`.
+    OpenPr,
+    /// `gh pr merge --squash --auto` (merges when the checks pass).
+    Merge,
 }
 
 impl Op {
@@ -389,6 +449,8 @@ impl Op {
             Op::Update(b) => format!("rebased on {b}"),
             Op::Continue => "rebase continued".into(),
             Op::Abort => "rebase aborted".into(),
+            Op::OpenPr => "pull request opened".into(),
+            Op::Merge => "merge on green set".into(),
         }
     }
 }
@@ -423,6 +485,18 @@ pub fn run_op(dir: &Path, op: &Op) -> Result<String, String> {
         }
         Op::Continue => git(dir, &["-c", "core.editor=true", "rebase", "--continue"]),
         Op::Abort => git(dir, &["rebase", "--abort"]),
+        Op::OpenPr | Op::Merge => {
+            if *op == Op::OpenPr {
+                git(dir, &["push", "-u", "origin", "HEAD"])?;
+            }
+            let args: &[&str] = if *op == Op::OpenPr { &["pr", "create", "--fill"] } else { &["pr", "merge", "--squash", "--auto"] };
+            let o = Command::new("gh").current_dir(dir).args(args).stdin(Stdio::null()).output().map_err(|e| format!("gh: {e}"))?;
+            if o.status.success() {
+                Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+            } else {
+                Err(String::from_utf8_lossy(&o.stderr).lines().find(|l| !l.trim().is_empty()).unwrap_or("gh failed").to_string())
+            }
+        }
     }
     .map(|_| op.label())
 }
@@ -796,6 +870,13 @@ pub struct View {
     reviewing: Option<Receiver<Result<crate::review::Review, String>>>,
     review_error: Option<String>,
     review_model: Option<String>,
+    /// The branch's pull request (read every 30 s while the view is open), the read on its way.
+    pr: Option<Pr>,
+    pr_read: Option<Receiver<Option<Pr>>>,
+    pr_at: Option<Instant>,
+    /// The CI fix message on its way; a message for the thread (the view sends it).
+    ci: Option<Receiver<Result<String, String>>>,
+    outbox: Option<String>,
     /// A git step on its way, and what the last one did (the thread view shows it).
     op: Option<Receiver<Result<String, String>>>,
     note: Option<String>,
@@ -828,6 +909,11 @@ impl View {
             reviewing: None,
             review_error: None,
             review_model: if cfg!(test) { None } else { crate::config::review_model() },
+            pr: None,
+            pr_read: None,
+            pr_at: None,
+            ci: None,
+            outbox: None,
             op: None,
             note: None,
         }
@@ -916,6 +1002,12 @@ impl View {
         if self.op.is_some() {
             s.push_str(" · git…");
         }
+        if let Some(p) = &self.pr {
+            s.push_str(&format!(" · PR #{} {}", p.number, p.state.to_lowercase()));
+            if p.pass + p.fail + p.pending > 0 {
+                s.push_str(&format!(" ✓{} ✗{} ●{}", p.pass, p.fail, p.pending));
+            }
+        }
         if self.reviewing.is_some() {
             s.push_str(" · reviewing…");
         } else if let Some(e) = &self.review_error {
@@ -986,6 +1078,44 @@ impl View {
     /// What the last git step did, once (the thread view toasts it).
     pub fn take_note(&mut self) -> Option<String> {
         self.note.take()
+    }
+
+    /// A message for the thread, once (the CI fix; the thread view sends it).
+    pub fn take_send(&mut self) -> Option<String> {
+        self.outbox.take()
+    }
+
+    /// The PR read (30 s) and the CI fix message: finished ones apply. True: something changed.
+    fn poll_ship(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(rx) = &self.pr_read
+            && let Ok(p) = rx.try_recv()
+        {
+            self.pr_read = None;
+            changed = self.pr != p;
+            self.pr = p;
+        }
+        let on_branch = !cfg!(test) && self.changes.base != "HEAD" && !self.changes.base.is_empty();
+        if on_branch && self.pr_read.is_none() && self.pr_at.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
+            self.pr_at = Some(Instant::now());
+            let (tx, rx) = mpsc::channel();
+            let dir = self.dir.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(pr_state(&dir));
+            });
+            self.pr_read = Some(rx);
+        }
+        if let Some(rx) = &self.ci
+            && let Ok(r) = rx.try_recv()
+        {
+            self.ci = None;
+            match r {
+                Ok(m) => self.outbox = Some(m),
+                Err(e) => self.note = Some(format!("CI: {e}")),
+            }
+            changed = true;
+        }
+        changed
     }
 
     fn poll_op(&mut self) -> bool {
@@ -1309,6 +1439,9 @@ impl View {
         if self.poll_review() {
             self.built = None;
         }
+        if self.poll_ship() {
+            self.built = None;
+        }
         if self.poll_op() {
             self.built = None;
         }
@@ -1468,6 +1601,33 @@ impl View {
                 }
             }
             KeyCode::Char('V') => return self.start_review(),
+            // ship: open the PR (push + gh pr create --fill), merge on green, the lead fixes CI
+            KeyCode::Char('O') => {
+                if self.pr.is_some() {
+                    return Act::Toast(format!("PR exists: {}", self.pr.as_ref().map(|p| p.url.clone()).unwrap_or_default()));
+                }
+                self.pr_at = None;
+                return self.start_op(Op::OpenPr);
+            }
+            KeyCode::Char('M') => {
+                if self.pr.is_none() {
+                    return Act::Toast("0 PR · O: open one".into());
+                }
+                self.pr_at = None;
+                return self.start_op(Op::Merge);
+            }
+            KeyCode::Char('F') => {
+                if self.ci.is_some() {
+                    return Act::Toast("CI: reading the log…".into());
+                }
+                let (tx, rx) = mpsc::channel();
+                let dir = self.dir.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(ci_fix_message(&dir));
+                });
+                self.ci = Some(rx);
+                return Act::Toast("CI: reading the failed log for the lead…".into());
+            }
             KeyCode::Char('C') => {
                 let Some(text) = batch(&self.comments) else { return Act::Toast("0 comments · c: comment on the line".into()) };
                 self.comments.clear();
@@ -1826,6 +1986,19 @@ Binary files a/img.png and b/img.png differ
         run_op(&d, &Op::Abort).unwrap();
         assert!(load(&d).unwrap().stopped.is_none());
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn pr_checks_count_by_verdict() {
+        let v = serde_json::json!({"number": 12, "url": "https://x/12", "state": "OPEN", "statusCheckRollup": [
+            {"status": "COMPLETED", "conclusion": "SUCCESS"}, {"status": "COMPLETED", "conclusion": "FAILURE"},
+            {"status": "IN_PROGRESS", "conclusion": ""}, {"state": "SUCCESS"}, {"state": "PENDING"}
+        ]});
+        assert_eq!(parse_pr(&v), Some(Pr { number: 12, url: "https://x/12".into(), state: "OPEN".into(), pass: 2, fail: 1, pending: 2 }));
+        let mut view = view(parse(DIFF));
+        view.pr = parse_pr(&v);
+        view.build(140);
+        assert!(text(&view)[0].contains("PR #12 open ✓2 ✗1 ●2"), "{:?}", text(&view)[0]);
     }
 
     #[test]

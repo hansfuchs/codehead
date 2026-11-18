@@ -83,4 +83,7 @@ diff changes later, it shows `updated`.
 | `A` / `K` / `X` | a rebase stopped on conflicts: the agent resolves / continue / abort |
 | `V` | the reviewer (setting `review`) reads the diff: findings show under their line (`⚠ severity · title`) |
 | `y` | on a finding: into the comment batch (`C` sends it) |
+| `O` | ship: push + open the pull request (`gh pr create --fill`); the summary row shows `PR #n` and its checks `✓ ✗ ●` (read every 30 s) |
+| `F` | CI failed: the latest failed run's log (last 150 lines) goes to the agents of your last message |
+| `M` | merge the PR when its checks pass (`gh pr merge --squash --auto`) |
 | `i` | the prompt gets the keys; `esc` gives them back |
