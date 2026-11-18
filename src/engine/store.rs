@@ -300,6 +300,7 @@ mod tests {
     #[test]
     fn events_round_trip_and_tail_reads_only_new_lines() {
         let home = std::env::temp_dir().join(format!("codehead-store-{}", super::super::new_id()));
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: test-local env; the tests of this module do not run other env readers.
         unsafe { std::env::set_var("CODEHEAD_HOME", &home) };
         let t = Thread::new("t", "do it", Path::new("/tmp"), vec!["ada".into()]);

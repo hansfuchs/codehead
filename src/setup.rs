@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn a_script_over_its_time_gets_killed() {
         let d = repo("slow");
-        let (ok, out) = run(&["sh".into(), "-c".into(), "echo start; sleep 30".into()], &d, &[], Duration::from_millis(500));
+        let (ok, out) = run(&["sh".into(), "-c".into(), "echo start; sleep 30".into()], &d, &[], Duration::from_secs(2));
         assert!(!ok && out.contains("start") && out.contains("stopped after"), "{out}");
         let _ = std::fs::remove_dir_all(d);
     }

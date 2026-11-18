@@ -648,6 +648,8 @@ mod tests {
 
     #[test]
     fn a_pending_setup_runs_first_and_messages_wait_for_it() {
+        // the data dir stays put while this runs
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let wt = std::env::temp_dir().join(format!("codehead-host-setup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&wt);
         std::fs::create_dir_all(wt.join(".codehead")).unwrap();

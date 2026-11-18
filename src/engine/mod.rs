@@ -21,6 +21,10 @@ pub mod store;
 
 use std::path::PathBuf;
 
+/// Tests that set $CODEHEAD_HOME, and tests that need the data dir to stay put while they run.
+#[cfg(test)]
+pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Data dir: $CODEHEAD_HOME, else $XDG_DATA_HOME/codehead, else ~/.local/share/codehead.
 pub fn data_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("CODEHEAD_HOME").filter(|p| !p.is_empty()) {
