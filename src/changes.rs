@@ -324,6 +324,17 @@ fn untracked(dir: &Path, path: &str) -> FileDiff {
 pub struct Changes {
     pub base: String,
     pub files: Vec<FileDiff>,
+    /// Staged paths: true all of the file's uncommitted change, false a part.
+    pub staged: HashMap<String, bool>,
+    /// A rebase / merge stopped: its conflicted paths.
+    pub stopped: Option<Vec<String>>,
+    /// Commits ahead of / behind the base.
+    pub ahead: usize,
+    pub behind: usize,
+}
+
+fn z_paths(s: &str) -> Vec<String> {
+    s.split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect()
 }
 
 pub fn load(dir: &Path) -> Result<Changes, String> {
@@ -336,7 +347,121 @@ pub fn load(dir: &Path) -> Result<Changes, String> {
         files.push(untracked(dir, p));
     }
     order(&mut files);
-    Ok(Changes { base: label, files })
+    // staged: in the index diff; a part: also in the worktree diff
+    let cached = z_paths(&git(dir, &["diff", "--cached", "--name-only", "-z"]).unwrap_or_default());
+    let unstaged = z_paths(&git(dir, &["diff", "--name-only", "-z"]).unwrap_or_default());
+    let staged = cached.into_iter().map(|p| (p.clone(), !unstaged.contains(&p))).collect();
+    let in_progress = ["rebase-merge", "rebase-apply", "MERGE_HEAD"].iter().any(|p| git(dir, &["rev-parse", "--git-path", p]).is_ok_and(|g| {
+        let g = PathBuf::from(g.trim());
+        if g.is_absolute() { g.exists() } else { dir.join(g).exists() }
+    }));
+    let stopped = in_progress.then(|| z_paths(&git(dir, &["diff", "--name-only", "--diff-filter=U", "-z"]).unwrap_or_default()));
+    let (ahead, behind) = if label == "HEAD" {
+        (0, 0)
+    } else {
+        let lr = git(dir, &["rev-list", "--left-right", "--count", &format!("HEAD...{label}")]).unwrap_or_default();
+        let mut it = lr.split_whitespace().map(|x| x.parse::<usize>().unwrap_or(0));
+        (it.next().unwrap_or(0), it.next().unwrap_or(0))
+    };
+    Ok(Changes { base: label, files, staged, stopped, ahead, behind })
+}
+
+/// A git step of the changes view (run on a thread; hooks, signing, ssh as the git CLI does).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Op {
+    Stage(String),
+    Unstage(String),
+    Commit(String),
+    Push,
+    /// Fetch, then rebase on BASE (`origin/main`).
+    Update(String),
+    Continue,
+    Abort,
+}
+
+impl Op {
+    pub fn label(&self) -> String {
+        match self {
+            Op::Stage(p) => format!("staged {p}"),
+            Op::Unstage(p) => format!("unstaged {p}"),
+            Op::Commit(_) => "committed".into(),
+            Op::Push => "pushed".into(),
+            Op::Update(b) => format!("rebased on {b}"),
+            Op::Continue => "rebase continued".into(),
+            Op::Abort => "rebase aborted".into(),
+        }
+    }
+}
+
+/// Run OP in DIR: Ok(what happened) / Err(git's 1st error line).
+pub fn run_op(dir: &Path, op: &Op) -> Result<String, String> {
+    match op {
+        Op::Stage(p) => git(dir, &["add", "-A", "--", p]),
+        Op::Unstage(p) => git(dir, &["restore", "--staged", "--", p]).or_else(|_| git(dir, &["rm", "--cached", "-q", "--", p])),
+        Op::Commit(msg) => {
+            use std::io::Write;
+            let mut c = Command::new("git").arg("-C").arg(dir).args(["commit", "-q", "-F", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("git: {e}"))?;
+            if let Some(mut i) = c.stdin.take() {
+                let _ = i.write_all(msg.as_bytes());
+            }
+            let out = c.wait_with_output().map_err(|e| format!("git: {e}"))?;
+            if out.status.success() {
+                Ok(String::new())
+            } else {
+                let err = String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout);
+                Err(err.lines().find(|l| !l.trim().is_empty()).unwrap_or("commit failed").to_string())
+            }
+        }
+        Op::Push => git(dir, &["push", "-u", "origin", "HEAD"]),
+        Op::Update(base) => {
+            // `origin/main`: fetch origin first; a local branch: 0 fetch
+            let remote = base.split_once('/').map(|(r, _)| r).unwrap_or_default();
+            if git(dir, &["remote"]).unwrap_or_default().lines().any(|r| r == remote) {
+                git(dir, &["fetch", "-q", remote])?;
+            }
+            git(dir, &["-c", "core.editor=true", "rebase", base])
+        }
+        Op::Continue => git(dir, &["-c", "core.editor=true", "rebase", "--continue"]),
+        Op::Abort => git(dir, &["rebase", "--abort"]),
+    }
+    .map(|_| op.label())
+}
+
+/// A commit message for DIR's staged diff by MODEL (blocking): subject + body, as the repo's
+/// recent subjects look. The owner edits it before the commit.
+pub fn draft_message(dir: &Path, model: &str) -> Result<String, String> {
+    let diff = git(dir, &["diff", "--cached", "--no-color", "--no-ext-diff", "-U2"])?;
+    if diff.trim().is_empty() {
+        return Err("0 staged changes".into());
+    }
+    let log = git(dir, &["log", "-8", "--format=%s"]).unwrap_or_default();
+    let diff: String = diff.lines().take(1500).collect::<Vec<_>>().join("\n");
+    let prompt = format!(
+        "Write the git commit message for this staged diff.\n- Subject: max. 72 chars, imperative, the same style (prefixes like feat: / fix:) as these recent subjects:\n{log}\n- Then 1 blank line and a short body: what changed and why, as `- ` lines, max. 72 chars each.\n- Output only the message.\n\n```diff\n{diff}\n```"
+    );
+    let out = Command::new("claude")
+        .current_dir(dir)
+        .args(["-p", "--model", model, "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands", "--no-session-persistence"])
+        .args(["--system-prompt", "You write git commit messages. Output only the message: 0 notes, 0 fences, 0 extra text."])
+        .args(["--output-format", "json"])
+        .arg(prompt)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("claude: {e}"))?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("claude: {e}"))?;
+    let text = v["result"].as_str().unwrap_or_default();
+    if v["is_error"] == true {
+        return Err(text.lines().next().unwrap_or("claude failed").to_string());
+    }
+    Ok(clean_message(text))
+}
+
+/// A model's commit message without fences and without a trailing note paragraph.
+fn clean_message(text: &str) -> String {
+    let t = text.trim().trim_start_matches("```").trim_end_matches("```").trim();
+    let paras: Vec<&str> = t.split("\n\n").take_while(|p| !p.trim_start().starts_with("Note:") && !p.contains("doinstruct.tools")).collect();
+    paras.join("\n\n").trim().to_string()
 }
 
 /// A diff line ready to draw: its chars in syntax colors, the chars of the changed words.
@@ -580,6 +705,8 @@ pub enum Act {
     Comment(String, u32),
     /// Send this text to the thread (the review comments batch).
     Send(String),
+    /// Write the commit message of the staged files (the prompt takes it).
+    CommitMessage,
 }
 
 /// A drawn row: its line, the file it belongs to, the new-side line it points at.
@@ -662,6 +789,9 @@ pub struct View {
     rank_model: Option<String>,
     /// Review comments, for 1 batch message (`C`).
     comments: Vec<Comment>,
+    /// A git step on its way, and what the last one did (the thread view shows it).
+    op: Option<Receiver<Result<String, String>>>,
+    note: Option<String>,
 }
 
 impl View {
@@ -687,6 +817,8 @@ impl View {
             rank_error: None,
             rank_model: if cfg!(test) { None } else { crate::config::rank_model() },
             comments: read_comments(id),
+            op: None,
+            note: None,
         }
     }
 
@@ -756,7 +888,62 @@ impl View {
             Span::styled(format!("+{add}"), Style::default().fg(theme::pal().ok)),
             Span::styled(format!(" −{del}"), Style::default().fg(theme::pal().danger)),
             Span::styled(format!(" · {done}/{all} reviewed · against {} · {order}", self.changes.base), theme::muted()),
+            Span::styled(self.git_state(), theme::accent()),
         ])
+    }
+
+    /// ` · 2 staged · ↑1 ↓3 · git…`: the git side of the summary.
+    fn git_state(&self) -> String {
+        let mut s = String::new();
+        let n = self.changes.staged.len();
+        if n > 0 {
+            s.push_str(&format!(" · {n} staged"));
+        }
+        if self.changes.ahead + self.changes.behind > 0 {
+            s.push_str(&format!(" · ↑{} ↓{}", self.changes.ahead, self.changes.behind));
+        }
+        if self.op.is_some() {
+            s.push_str(" · git…");
+        }
+        s
+    }
+
+    /// Run git step OP on a thread; its end re-reads git.
+    pub fn start_op(&mut self, op: Op) -> Act {
+        if self.op.is_some() {
+            return Act::Toast("git: 1 step at a time".into());
+        }
+        let (tx, rx) = mpsc::channel();
+        let dir = self.dir.clone();
+        let label = op.label();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_op(&dir, &op));
+        });
+        self.op = Some(rx);
+        self.built = None;
+        Act::Toast(format!("git … {label}"))
+    }
+
+    /// What the last git step did, once (the thread view toasts it).
+    pub fn take_note(&mut self) -> Option<String> {
+        self.note.take()
+    }
+
+    fn poll_op(&mut self) -> bool {
+        let Some(rx) = &self.op else { return false };
+        let Ok(r) = rx.try_recv() else { return false };
+        self.op = None;
+        self.note = Some(match r {
+            Ok(s) => format!("git: {s}"),
+            Err(e) => format!("git: {e}"),
+        });
+        self.refresh(true);
+        true
+    }
+
+    /// Staged files exist (a commit can start).
+    pub fn has_staged(&self) -> bool {
+        !self.changes.staged.is_empty()
     }
 
     /// Read git in the background (NOW: even if the last read is fresh).
@@ -826,6 +1013,14 @@ impl View {
         }
         let w = usize::from(width);
         let mut rows: Vec<Row> = vec![Row { line: self.summary(), file: 0, at: None, head: false, hunk: false, comment: None }];
+        if let Some(c) = &self.changes.stopped {
+            let files = if c.is_empty() { "0 conflicts".to_string() } else { format!("{} conflicts: {}", c.len(), c.join(", ")) };
+            let line = Line::from(vec![
+                Span::styled(" rebase stopped ", theme::pill()),
+                Span::styled(crate::nav::fit(&format!(" {files} · A: agent resolves · K: continue · X: abort"), w.saturating_sub(16)), Style::default().fg(theme::pal().warn)),
+            ]);
+            rows.push(Row { line, file: 0, at: None, head: false, hunk: false, comment: None });
+        }
         // group heads: the model's groups (title, why), else the path-rule categories
         let mut last: Option<(Option<usize>, Cat)> = None;
         for (i, f) in self.changes.files.iter().enumerate() {
@@ -882,7 +1077,12 @@ impl View {
         let right = if f.binary { "binary".to_string() } else { format!("+{} −{}", f.add, f.del) };
         let right = format!(" {}{tag} · {right} ", f.cat.label());
         let room = w.saturating_sub(right.width() + 8 + if updated { 9 } else { 0 });
-        let mut head = vec![Span::styled("╭─ ", border), mark, Span::styled(crate::nav::fit(&name, room), theme::bold())];
+        let stage = match self.changes.staged.get(&f.path) {
+            Some(true) => Span::styled("● ", Style::default().fg(theme::pal().ok)),
+            Some(false) => Span::styled("◐ ", Style::default().fg(theme::pal().warn)),
+            None => Span::raw(""),
+        };
+        let mut head = vec![Span::styled("╭─ ", border), mark, stage, Span::styled(crate::nav::fit(&name, room), theme::bold())];
         if updated {
             head.push(Span::styled(" updated", Style::default().fg(theme::pal().warn)));
         }
@@ -1016,6 +1216,9 @@ impl View {
 
     pub fn draw(&mut self, f: &mut Frame, area: Rect) {
         self.area = area;
+        if self.poll_op() {
+            self.built = None;
+        }
         if self.poll_rank() {
             self.built = None;
         }
@@ -1108,6 +1311,40 @@ impl View {
             KeyCode::Char('r') => {
                 self.refresh(true);
                 return Act::Toast("changes: reading git".into());
+            }
+            KeyCode::Char('a') => {
+                if let Some(p) = self.file_at().map(|f| f.path.clone()) {
+                    return self.start_op(Op::Stage(p));
+                }
+            }
+            KeyCode::Char('u') => {
+                if let Some(p) = self.file_at().map(|f| f.path.clone()) {
+                    return self.start_op(Op::Unstage(p));
+                }
+            }
+            KeyCode::Char('m') => {
+                if !self.has_staged() {
+                    return Act::Toast("0 staged files · a: stage the box".into());
+                }
+                return Act::CommitMessage;
+            }
+            KeyCode::Char('P') => return self.start_op(Op::Push),
+            KeyCode::Char('U') => {
+                if self.changes.base == "HEAD" {
+                    return Act::Toast("0 remote base (on the default branch, or 0 origin)".into());
+                }
+                return self.start_op(Op::Update(self.changes.base.clone()));
+            }
+            KeyCode::Char('K') if self.changes.stopped.is_some() => return self.start_op(Op::Continue),
+            KeyCode::Char('X') if self.changes.stopped.is_some() => return self.start_op(Op::Abort),
+            KeyCode::Char('A') => {
+                if let Some(c) = &self.changes.stopped {
+                    return Act::Send(format!(
+                        "The rebase on {} stopped with conflicts in: {}. Resolve each conflict (keep the intent of both sides), `git add` the files, then run `git -c core.editor=true rebase --continue`. Repeat until the rebase is done; report what you decided per conflict.",
+                        self.changes.base,
+                        c.join(", ")
+                    ));
+                }
             }
             KeyCode::Char('c') => {
                 if let (Some(f), Some(r)) = (self.file_at(), self.rows.get(self.at)) {
@@ -1266,7 +1503,7 @@ Binary files a/img.png and b/img.png differ
         order(&mut files);
         let mut v = View::new("changes-test-0000", Path::new("/tmp"));
         v.marks.clear();
-        v.changes = Changes { base: "origin/main".into(), files };
+        v.changes = Changes { base: "origin/main".into(), files, ..Default::default() };
         v.loaded = Some(Instant::now());
         v
     }
@@ -1422,6 +1659,43 @@ Binary files a/img.png and b/img.png differ
 
     fn text_of(r: &Row) -> String {
         r.line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn git_steps_stage_unstage_commit_and_see_a_stopped_rebase() {
+        let d = std::env::temp_dir().join(format!("codehead-gitops-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let sh = |c: &str| assert!(Command::new("sh").arg("-c").arg(c).current_dir(&d).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "{c}");
+        sh("git init -q -b main && git config user.email t@t && git config user.name t && printf 'a\\nb\\n' > x.rs && git add -A && git commit -qm init");
+        sh("printf 'a\\nB\\n' > x.rs && printf 'n\\n' > y.rs");
+        run_op(&d, &Op::Stage("x.rs".into())).unwrap();
+        run_op(&d, &Op::Stage("y.rs".into())).unwrap();
+        let c = load(&d).unwrap();
+        assert_eq!((c.staged.get("x.rs"), c.staged.get("y.rs")), (Some(&true), Some(&true)));
+        // a part staged: another edit after the stage
+        sh("printf 'a\\nB\\nc\\n' > x.rs");
+        assert_eq!(load(&d).unwrap().staged.get("x.rs"), Some(&false));
+        run_op(&d, &Op::Unstage("y.rs".into())).unwrap();
+        assert!(!load(&d).unwrap().staged.contains_key("y.rs"));
+        assert_eq!(run_op(&d, &Op::Commit("fix: b is B\n\n- body".into())).unwrap(), "committed");
+        let (_, log) = (0, git(&d, &["log", "-1", "--format=%B"]).unwrap());
+        assert_eq!(log.trim(), "fix: b is B\n\n- body");
+        assert!(load(&d).unwrap().stopped.is_none());
+        // a conflict: 2 branches change line 1, rebase stops
+        sh("git add -A && git commit -qm wip && git checkout -qb other HEAD~1 && printf 'Z\\nB\\n' > x.rs && git commit -qam other && git checkout -q main && printf 'Q\\nB\\nc\\n' > x.rs && git commit -qam main");
+        assert!(run_op(&d, &Op::Update("other".into())).is_err(), "a conflict: the rebase stops");
+        let c = load(&d).unwrap();
+        assert_eq!(c.stopped, Some(vec!["x.rs".to_string()]));
+        run_op(&d, &Op::Abort).unwrap();
+        assert!(load(&d).unwrap().stopped.is_none());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn commit_drafts_lose_fences_and_notes() {
+        assert_eq!(clean_message("```\nfix: x\n\n- y\n```"), "fix: x\n\n- y");
+        assert_eq!(clean_message("fix: x\n\n- y\n\nNote: I could not check doinstruct.tools"), "fix: x\n\n- y");
     }
 
     #[test]

@@ -178,6 +178,9 @@ struct View {
     bar_rects: Vec<(Rect, Pane)>,
     /// A review comment in the prompt: file, line, the draft the prompt had before.
     commenting: Option<(String, u32, String)>,
+    /// A commit message in the prompt: the draft the prompt had before; a model's draft on its way.
+    committing: Option<String>,
+    drafting: Option<Receiver<Result<String, String>>>,
     // thread header: cards of the open threads (tab)
     nav_on: bool,
     nav_cards: Vec<crate::nav::Card>,
@@ -268,6 +271,8 @@ impl View {
             prompt_focus: false,
             bar_rects: Vec::new(),
             commenting: None,
+            committing: None,
+            drafting: None,
             // tests: 0 shared state between parallel views
             nav_on: !cfg!(test) && NAV_ON.load(std::sync::atomic::Ordering::Relaxed),
             nav_cards: Vec::new(),
@@ -383,6 +388,21 @@ impl View {
     // ---------- send ----------
 
     fn submit(&mut self) {
+        // a commit message: commit the staged files, the draft back
+        if let Some(draft) = self.committing.take() {
+            let msg = self.input.text().trim().to_string();
+            if msg.is_empty() {
+                self.committing = Some(draft);
+                self.toast("0 message · ctrl+g: draft one");
+                return;
+            }
+            let act = self.changes.start_op(crate::changes::Op::Commit(msg));
+            self.input.set_text(&draft);
+            self.prompt_focus = false;
+            self.drafting = None;
+            self.changes_act(act);
+            return;
+        }
         // a review comment: into the batch, the draft back, the keys back to the changes view
         if let Some((file, line, draft)) = self.commenting.take() {
             let text = self.input.text();
@@ -654,6 +674,10 @@ impl View {
                 if let Some((_, _, draft)) = self.commenting.take() {
                     self.input.set_text(&draft);
                 }
+                if let Some(draft) = self.committing.take() {
+                    self.input.set_text(&draft);
+                    self.drafting = None;
+                }
                 self.prompt_focus = false;
                 return false;
             }
@@ -696,6 +720,20 @@ impl View {
                 }
                 self.last_ctrl_c = Some(Instant::now());
                 self.toast("ctrl+c again: quit");
+                return false;
+            }
+            // a commit message in the prompt: ctrl+g has a model draft it from the staged diff
+            KeyCode::Char('g') if ctrl && self.committing.is_some() => {
+                if self.drafting.is_none() {
+                    let (tx, rx) = mpsc::channel();
+                    let dir = self.cwd.clone();
+                    let model = crate::config::rank_model().unwrap_or_else(|| "haiku".into());
+                    std::thread::spawn(move || {
+                        let _ = tx.send(crate::changes::draft_message(&dir, &model));
+                    });
+                    self.drafting = Some(rx);
+                    self.toast("drafting the commit message…");
+                }
                 return false;
             }
             KeyCode::Char('t') if ctrl => {
@@ -790,6 +828,12 @@ impl View {
                 let draft = self.input.text();
                 self.input.set_text("");
                 self.commenting = Some((file, line, draft));
+                self.prompt_focus = true;
+            }
+            crate::changes::Act::CommitMessage => {
+                let draft = self.input.text();
+                self.input.set_text("");
+                self.committing = Some(draft);
                 self.prompt_focus = true;
             }
             crate::changes::Act::Send(text) => {
@@ -1507,6 +1551,20 @@ impl View {
             self.draw_stream(f, st);
         } else {
             self.changes.draw(f, st);
+            if let Some(n) = self.changes.take_note() {
+                self.toast(n);
+            }
+            // a model's commit message draft: into the prompt (still in commit mode)
+            if let Some(rx) = &self.drafting
+                && let Ok(r) = rx.try_recv()
+            {
+                self.drafting = None;
+                match r {
+                    Ok(m) if self.committing.is_some() => self.input.set_text(&m),
+                    Ok(_) => {}
+                    Err(e) => self.toast(format!("draft: {e}")),
+                }
+            }
         }
         if mon_h > 0 {
             self.monitors.render(f, mon, self.tick());
@@ -1631,6 +1689,10 @@ impl View {
         let right = match &self.toast {
             Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Span::styled(format!("{m} "), theme::accent()),
             _ if self.nav_on => Span::styled("←→: pick thread · enter: open · tab / esc: close ", theme::accent()),
+            _ if self.committing.is_some() => Span::styled(
+                if self.drafting.is_some() { "drafting… · esc: cancel ".to_string() } else { "commit message · ctrl+g: draft by model · ⌘/ctrl+⏎: commit the staged files · esc: cancel ".to_string() },
+                theme::accent(),
+            ),
             _ if let Some((file, line, _)) = &self.commenting => Span::styled(format!("comment on {file}:{line} · ⌘/ctrl+⏎: add to the batch · esc: cancel "), theme::accent()),
             _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled("j k · space: reviewed · c: comment · C: send · o: IDE · s: layout · i: prompt ", theme::muted()),
             _ if self.pane == Pane::Changes => Span::styled("esc: back to the changes · shift+tab: chat ", theme::muted()),
@@ -2227,6 +2289,21 @@ mod comment_tests {
         assert_eq!(v.changes.comment_count(), 1);
         assert_eq!(v.input.text(), "half a message");
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("commenttest-0000"));
+    }
+
+    #[test]
+    fn a_commit_message_borrows_the_prompt_too() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("committest-0000", Path::new("/tmp"), "t", tx);
+        v.set_pane(Pane::Changes);
+        v.input.set_text("draft");
+        v.changes_act(crate::changes::Act::CommitMessage);
+        assert!(v.prompt_focus && v.input.text().is_empty() && v.committing.is_some());
+        // an empty message: 0 commit, still in commit mode
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(v.committing.is_some());
+        v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(v.committing.is_none() && v.input.text() == "draft" && !v.prompt_focus);
     }
 }
 
