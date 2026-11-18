@@ -626,7 +626,7 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                     spans.push(Span::styled(" ".repeat(pad + 2), bg));
                     let shift = (left + 2) as u16;
                     copies.extend(r.copies.into_iter().map(|(a, b, u)| (a + shift, b + shift, u)));
-                    d.rows.push(Row { line: Line::from(spans), links: r.links.into_iter().map(|(a, b, u)| (a + shift, b + shift, u)).collect(), copies });
+                    d.rows.push(Row { wrap: r.wrap, line: Line::from(spans), links: r.links.into_iter().map(|(a, b, u)| (a + shift, b + shift, u)).collect(), copies });
                 }
                 last_agent = None;
             }

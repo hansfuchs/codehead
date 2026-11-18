@@ -459,20 +459,46 @@ impl View {
         self.toast("replacing…");
     }
 
-    /// Plain text of the selection.
+    /// Plain text of the selection: the message's text only (0 borders, 0 time, 0 copy button);
+    /// rows a wrap split joined again (Row::wrap), so the copy has the source's lines.
     fn selected(&self) -> Option<String> {
         let ((r0, c0), (r1, c1)) = self.sel?;
         let ((r0, c0), (r1, c1)) = if (r0, c0) <= (r1, c1) { ((r0, c0), (r1, c1)) } else { ((r1, c1), (r0, c0)) };
-        let mut out = Vec::new();
+        let mut out: Vec<String> = Vec::new();
         for r in r0..=r1.min(self.drawn.rows.len().saturating_sub(1)) {
-            let text: String = self.drawn.rows[r].line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let row = &self.drawn.rows[r];
+            let text: String = row.line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let Some((a, b)) = content_cols(&text) else { continue };
             let chars: Vec<char> = text.chars().collect();
-            let (a, b) = (if r == r0 { usize::from(c0) } else { 0 }, if r == r1 { usize::from(c1) + 1 } else { chars.len() });
-            let piece: String = chars.get(a.min(chars.len())..b.min(chars.len())).map(|c| c.iter().collect()).unwrap_or_default();
-            out.push(unframe(piece.trim_end()));
+            let a = if r == r0 { a.max(usize::from(c0)) } else { a };
+            let b = if r == r1 { b.min(usize::from(c1) + 1) } else { b };
+            let piece: String = chars.get(a.min(b)..b).map(|c| c.iter().collect()).unwrap_or_default();
+            let piece = piece.trim_end();
+            let piece = piece.strip_prefix("↪ ").or_else(|| piece.trim_start().strip_prefix("↪ ")).unwrap_or(piece);
+            match out.last_mut() {
+                Some(last) if row.wrap == 1 && r != r0 => {
+                    last.push(' ');
+                    last.push_str(piece.trim_start());
+                }
+                Some(last) if row.wrap == 2 && r != r0 => last.push_str(piece.trim_start()),
+                _ => out.push(piece.to_string()),
+            }
         }
-        let t = out.join("\n");
+        // the common indent of the lines off; blank lines at the ends off
+        let indent = out.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
+        let lines: Vec<String> = out.iter().map(|l| l.get(indent..).unwrap_or("").to_string()).collect();
+        let t = lines.join("\n").trim_matches('\n').to_string();
         (!t.trim().is_empty()).then_some(t)
+    }
+
+    /// The rows of the message (stream item) at ROW: first, last.
+    fn item_rows(&self, row: usize) -> (usize, usize) {
+        let s = &self.drawn.starts;
+        let last = self.drawn.rows.len().saturating_sub(1);
+        match s.partition_point(|&x| x <= row).checked_sub(1) {
+            Some(i) => (s[i], s.get(i + 1).map_or(last, |n| n.saturating_sub(1)).max(s[i])),
+            None => (0, s.first().map_or(last, |n| n.saturating_sub(1))),
+        }
     }
 
     fn copy(&mut self, text: &str) {
@@ -1192,7 +1218,10 @@ impl View {
                 }
                 let y = at.y.clamp(self.stream_rect.y, self.stream_rect.bottom().saturating_sub(1));
                 if let (Some(from), Some(row)) = (self.drag_from, self.row_at(y)) {
-                    self.sel = Some((from, (row, at.x.saturating_sub(self.stream_rect.x))));
+                    // the selection stays in the message it started in
+                    let (first, last) = self.item_rows(from.0);
+                    let to = if row < first { (first, 0) } else if row > last { (last, u16::MAX) } else { (row, at.x.saturating_sub(self.stream_rect.x)) };
+                    self.sel = Some((from, to));
                 }
             }
             MouseEventKind::Up(MouseButton::Left) if self.dragging => {
@@ -1416,7 +1445,17 @@ impl View {
                 if r < r0 || r > r1 {
                     continue;
                 }
-                let (a, b) = (if r == r0 { c0 } else { 0 }, if r == r1 { c1 } else { st.width.saturating_sub(1) });
+                // the text columns of the row only (0 border, 0 margin)
+                let text: String = self.drawn.rows[r].line.spans.iter().map(|s| s.content.as_ref()).collect();
+                let Some((ta, tb)) = content_cols(&text) else { continue };
+                if tb <= ta {
+                    continue;
+                }
+                let (ta, tb) = (ta as u16, tb as u16 - 1);
+                let (a, b) = (if r == r0 { c0.max(ta) } else { ta }, if r == r1 { c1.min(tb) } else { tb });
+                if b < a {
+                    continue;
+                }
                 for x in a..=b.min(st.width.saturating_sub(1)) {
                     let cell = &mut buf[(st.x + x, y)];
                     cell.set_style(Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent));
@@ -1750,13 +1789,23 @@ fn effort_label(level: &str) -> String {
 }
 
 /// A stream row's text without the message bar on its left.
-fn unframe(row: &str) -> String {
-    for bar in ["│     ", "│   ", "│ ", "┆ ", "▌ ", "┃ "] {
-        if let Some(rest) = row.strip_prefix(bar) {
-            return rest.to_string();
-        }
+/// The text columns of a stream row (chars, end exclusive): inside its box or right of its bar,
+/// trailing spaces off. None: a border row (`╭─ … ╮`, `╰─ copy ─╯`).
+fn content_cols(row: &str) -> Option<(usize, usize)> {
+    let chars: Vec<char> = row.chars().collect();
+    let t = row.trim_start();
+    if t.starts_with('╭') || t.starts_with('╰') {
+        return None;
     }
-    row.to_string()
+    let bar = |c: char| "│┃▌┆".contains(c);
+    let Some(l) = chars.iter().position(|c| !c.is_whitespace()) else { return Some((0, 0)) };
+    let a = if bar(chars[l]) { l + 1 + usize::from(chars.get(l + 1) == Some(&' ')) } else { 0 };
+    let r = chars.iter().rposition(|c| !c.is_whitespace()).unwrap_or(l);
+    let mut b = if r > l && bar(chars[r]) { r } else { r + 1 };
+    while b > a && chars[b - 1] == ' ' {
+        b -= 1;
+    }
+    Some((a, b.max(a)))
 }
 
 /// Column range of the word at COL of TEXT.
@@ -2347,3 +2396,52 @@ mod split_tests {
         assert_eq!(v.view_rect.x, 0);
     }
 }
+
+/// Mouse selection in the stream: it stays in its message, the copy has the message's lines.
+#[cfg(test)]
+mod select_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn screen(v: &mut View) -> Vec<String> {
+        let mut t = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        t.draw(|f| v.draw(f)).unwrap();
+        let b = t.backend().buffer().clone();
+        (0..30).map(|y| (0..60).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect()
+    }
+
+    fn mouse(v: &mut View, kind: MouseEventKind, x: u16, y: u16) {
+        v.mouse(MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE });
+    }
+
+    #[test]
+    fn a_drag_stays_in_its_message_and_copies_unwrapped_lines() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("selecttest-0000", Path::new("/tmp"), "t", tx);
+        v.members = vec!["ada".into()];
+        let long = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho";
+        v.thread.push(&store::Event { ts: 1, agent: None, kind: store::Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text: format!("{long}\nsecond line") } });
+        v.thread.push(&store::Event { ts: 2, agent: Some("ada".into()), kind: store::Kind::Text { text: "the agent answers here".into() } });
+        let s = screen(&mut v);
+        let y = s.iter().position(|r| r.contains("alpha")).unwrap() as u16;
+        let x = s[y as usize].find("alpha").map(|b| s[y as usize][..b].chars().count()).unwrap() as u16;
+        let agent = s.iter().position(|r| r.contains("agent answers")).unwrap() as u16;
+        assert!(agent > y + 2, "{s:#?}");
+        mouse(&mut v, MouseEventKind::Down(MouseButton::Left), x, y);
+        // past the message into the agent's: clamped to the owner's message
+        mouse(&mut v, MouseEventKind::Drag(MouseButton::Left), 0, agent);
+        mouse(&mut v, MouseEventKind::Up(MouseButton::Left), 0, agent);
+        let got = crate::clip::LAST.with_borrow(|l| l.clone());
+        assert_eq!(got, format!("{long}\nsecond line"));
+        // the highlight: 0 cells left of the bubble's text
+        let s = screen(&mut v);
+        let mut t = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        t.draw(|f| v.draw(f)).unwrap();
+        let b = t.backend().buffer().clone();
+        let lit = |yy: u16| (0..60).filter(|&xx| b[(xx, yy)].bg == theme::pal().accent).collect::<Vec<u16>>();
+        let row2 = lit(y + 1);
+        assert!(!row2.is_empty() && row2[0] >= x, "row {}: {row2:?}\n{s:#?}", y + 1);
+        assert!(lit(agent).is_empty(), "agent row unlit");
+    }
+}
+

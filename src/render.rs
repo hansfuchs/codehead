@@ -16,6 +16,8 @@ pub struct Row {
     pub line: Line<'static>,
     pub links: Vec<(u16, u16, String)>,
     pub copies: Vec<(u16, u16, String)>,
+    /// The row goes on from the row above: 1 a wrap at a space, 2 a cut word. 0: a line of its own.
+    pub wrap: u8,
 }
 
 impl Row {
@@ -108,8 +110,10 @@ fn wrap(pieces: &[Piece], width: usize, first: &[Span<'static>], rest: &[Span<'s
     let mut col = pre_w(first);
     let mut limit = width.max(pre_w(first) + 1);
     let mut empty = true;
-    let push_row = |cur: &mut Vec<Span<'static>>, links: &mut Vec<(u16, u16, String)>, copies: &mut Vec<(u16, u16, String)>, rows: &mut Vec<Row>| {
-        rows.push(Row { line: Line::from(std::mem::take(cur)), links: std::mem::take(links), copies: std::mem::take(copies) });
+    // how the row in the works goes on from the row above (Row::wrap)
+    let mut kind = 0u8;
+    let push_row = |cur: &mut Vec<Span<'static>>, links: &mut Vec<(u16, u16, String)>, copies: &mut Vec<(u16, u16, String)>, rows: &mut Vec<Row>, kind: u8| {
+        rows.push(Row { line: Line::from(std::mem::take(cur)), links: std::mem::take(links), copies: std::mem::take(copies), wrap: kind });
     };
     // split into words with their trailing spaces kept apart
     let mut words: Vec<(Piece, bool)> = Vec::new();
@@ -149,7 +153,8 @@ fn wrap(pieces: &[Piece], width: usize, first: &[Span<'static>], rest: &[Span<'s
             if cur.last().is_some_and(|s| s.content == " ") {
                 cur.pop();
             }
-            push_row(&mut cur, &mut links, &mut copies, &mut rows);
+            push_row(&mut cur, &mut links, &mut copies, &mut rows, kind);
+            kind = 1;
             cur = rest.to_vec();
             col = pre_w(rest);
             limit = width.max(col + 1);
@@ -168,7 +173,8 @@ fn wrap(pieces: &[Piece], width: usize, first: &[Span<'static>], rest: &[Span<'s
             if cur.last().is_some_and(|s| s.content == " ") {
                 cur.pop();
             }
-            push_row(&mut cur, &mut links, &mut copies, &mut rows);
+            push_row(&mut cur, &mut links, &mut copies, &mut rows, kind);
+            kind = 1;
             cur = rest.to_vec();
             col = pre_w(rest);
             limit = width.max(col + 1);
@@ -198,7 +204,8 @@ fn wrap(pieces: &[Piece], width: usize, first: &[Span<'static>], rest: &[Span<'s
                 copies.push((col as u16, (col + cw) as u16, c.clone()));
             }
             cur.push(Span::styled(cut, w.style));
-            push_row(&mut cur, &mut links, &mut copies, &mut rows);
+            push_row(&mut cur, &mut links, &mut copies, &mut rows, kind);
+            kind = 2;
             cur = rest.to_vec();
             col = pre_w(rest);
             limit = width.max(col + 1);
@@ -214,7 +221,7 @@ fn wrap(pieces: &[Piece], width: usize, first: &[Span<'static>], rest: &[Span<'s
         empty = false;
     }
     if !empty || rows.is_empty() {
-        push_row(&mut cur, &mut links, &mut copies, &mut rows);
+        push_row(&mut cur, &mut links, &mut copies, &mut rows, kind);
     }
     rows
 }
