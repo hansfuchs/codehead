@@ -926,11 +926,14 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
             d.rows.push(Row::plain(Line::raw("")));
         }
     };
-    // last item of each agent at work: its box gets the wave
+    // last item of each agent at work: its box gets the wave, unless a message or an answer came
+    // after it (a new turn: 0 output yet, the wave goes into a box of its own at the end)
     let last_of: HashMap<&str, usize> = t.items.iter().enumerate().filter_map(|(i, it)| match it {
         Item::Text { agent, .. } | Item::Run { agent, .. } => Some((agent.as_str(), i)),
         _ => None,
     }).collect();
+    let turn_at = t.items.iter().rposition(|it| matches!(it, Item::Prompt { .. } | Item::Settled { .. }));
+    let last_of: HashMap<&str, usize> = last_of.into_iter().filter(|&(_, l)| turn_at.is_none_or(|p| l > p)).collect();
     for (idx, item) in t.items.iter().enumerate() {
         match item {
             Item::Prompt { from, to, text, ts } if from == "owner" => {
@@ -1089,6 +1092,21 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
         }
     }
     close(&mut d, &mut cur);
+    // agents at work with 0 output in this turn yet: an empty box with the wave
+    let mut starting: Vec<&String> = t.busy.iter().filter(|a| !last_of.contains_key(a.as_str())).collect();
+    starting.sort();
+    for agent in starting {
+        gap(&mut d);
+        let c = color_of(colors, agent);
+        let border = Style::default().fg(theme::desaturate(c, 0.4));
+        let name = vec![Span::styled(agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD))];
+        let (top, wave_at) = top_border(w, border, name, true, "");
+        d.waves.push((d.rows.len(), wave_at, c));
+        cur = Some(Open { start: d.rows.len(), border, agent: Some(agent.clone()) });
+        d.rows.push(top);
+        d.rows.push(Row::plain(Line::from(vec![Span::styled("│ ", border)])));
+        close(&mut d, &mut cur);
+    }
     // the 1st open ask: a yellow box below everything, its choices clickable
     if let Some(a) = t.asks.first() {
         gap(&mut d);
@@ -1208,8 +1226,36 @@ mod tests {
         t.push(&ev(Some("ada"), Kind::Ask { id: "p".into(), tool: "Bash".into(), input: json!({"command": "rm x"}) }));
         t.push(&ev(Some("ada"), Kind::Answer { id: "p".into(), allow: false, label: "deny".into() }));
         let s = text(&draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]));
-        let tail: Vec<&str> = s.lines().rev().take(4).collect();
-        assert!(tail.iter().any(|r| r.starts_with("│ denied")) && tail[0].starts_with('╰'), "{s}");
+        // ada still at work: its wave box below the declined ask
+        let tail: Vec<&str> = s.lines().rev().take(8).collect();
+        assert!(tail.iter().any(|r| r.starts_with("│ denied")) && tail[0].starts_with('╰') && tail[2].starts_with("╭─ ada "), "{s}");
+    }
+
+    #[test]
+    fn a_new_turn_waves_below_the_message_not_on_the_last_box() {
+        let mut t = Thread::default();
+        t.push(&ev(Some("ada"), Kind::TurnStart));
+        t.push(&ev(Some("ada"), Kind::Text { text: "first answer".into() }));
+        t.push(&ev(Some("ada"), Kind::TurnEnd { cost: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0, ctx: 0, ms: 1, error: None }));
+        t.push(&ev(None, Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text: "next".into() }));
+        t.push(&ev(Some("ada"), Kind::TurnStart));
+        let fold = Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false };
+        let d = draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &fold, 0, &HashSet::new(), &[]);
+        let s = text(&d);
+        let rows: Vec<&str> = s.lines().collect();
+        let first = rows.iter().position(|r| r.starts_with("╭─ ada")).unwrap();
+        let bubble = rows.iter().position(|r| r.contains("next")).unwrap();
+        // 1 wave: in a box below the owner's message, 0 on the answer above it
+        assert_eq!(d.waves.len(), 1, "{s}");
+        assert!(d.waves[0].0 > bubble && d.waves[0].0 != first, "{s}");
+        assert!(rows[d.waves[0].0].starts_with("╭─ ada"), "{s}");
+        // the 1st output of the turn: the wave moves into its box, 0 empty box
+        t.push(&ev(Some("ada"), Kind::Text { text: "second".into() }));
+        let d = draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &fold, 0, &HashSet::new(), &[]);
+        let s = text(&d);
+        let rows: Vec<&str> = s.lines().collect();
+        assert_eq!(d.waves.len(), 1, "{s}");
+        assert!(rows[d.waves[0].0 + 2].contains("second"), "{s}");
     }
 
     #[test]
