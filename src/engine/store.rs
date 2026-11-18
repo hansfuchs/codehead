@@ -26,6 +26,13 @@ pub struct Thread {
     pub worktree: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// 1st port of the thread's block of 10 (worktree threads): $CODEHEAD_PORT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// The worktree's setup script: `pending` (the host runs it before the 1st turn), `done`,
+    /// `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
     /// `open` or `done`.
     #[serde(default = "open")]
     pub state: String,

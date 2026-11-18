@@ -47,6 +47,8 @@ enum Input {
     /// A view subscribed: lines for it (`wake`, `delta`) go to this sender.
     Subscribe(Sender<String>),
     Harness(String, Out),
+    /// The worktree setup ended: its label, ok, output.
+    Setup(String, bool, String),
 }
 
 struct Live {
@@ -70,6 +72,9 @@ struct Host {
     subs: std::cell::RefCell<Vec<Sender<String>>>,
     /// Per agent: live text since its last logged message: a new subscriber gets it first.
     live: HashMap<String, String>,
+    /// The worktree setup runs: messages wait in QUEUE (agent, text) until it ends.
+    setup_running: bool,
+    queue: Vec<(String, String)>,
 }
 
 /// @names in TEXT that name an active agent, in order, once each.
@@ -137,6 +142,11 @@ impl Host {
     }
 
     fn deliver(&mut self, agent: &str, text: &str) -> Result<(), String> {
+        // the worktree setup runs: the message waits for its end
+        if self.setup_running {
+            self.queue.push((agent.to_string(), text.to_string()));
+            return Ok(());
+        }
         self.ensure(agent)?;
         let mut text = text.to_string();
         // a new turn: edits in the worktree since the agent's last turn, not its own, go first
@@ -435,6 +445,37 @@ impl Host {
         }
     }
 
+    /// Thread T's setup is pending: it runs on a thread (a `setup` tool run in the log); the
+    /// messages wait until it ends.
+    fn start_setup(&mut self, t: &store::Thread, tx: Sender<Input>) {
+        let Some(wt) = t.worktree.as_deref() else { return };
+        let Some((_, label, _)) = crate::setup::script(Path::new(wt), "setup") else {
+            let _ = store::update(&self.id, |t| t.setup = None);
+            return;
+        };
+        self.setup_running = true;
+        self.log(Some("setup"), Kind::Tool { id: "setup".into(), name: "Bash".into(), input: json!({"command": label, "description": "worktree setup: the 1st turn waits for it"}) });
+        let t = t.clone();
+        std::thread::spawn(move || {
+            let (label, ok, out) = crate::setup::run_setup(&t).unwrap_or_else(|| ("setup".into(), true, String::new()));
+            let _ = tx.send(Input::Setup(label, ok, out));
+        });
+    }
+
+    /// The setup ended: its result in the log, the waiting messages go out (a failed setup: with
+    /// a note on it).
+    fn setup_done(&mut self, label: String, ok: bool, out: String) {
+        self.setup_running = false;
+        self.log(Some("setup"), Kind::ToolResult { id: "setup".into(), ok, output: out });
+        let _ = store::update(&self.id, |t| t.setup = Some(if ok { "done" } else { "failed" }.into()));
+        for (agent, text) in std::mem::take(&mut self.queue) {
+            let text = if ok { text } else { format!("[codehead: the worktree setup (`{label}`) failed; its output is in the thread. Make the environment work first.]\n\n{text}") };
+            if let Err(e) = self.deliver(&agent, &text) {
+                self.log(Some(&agent), Kind::Error { message: e });
+            }
+        }
+    }
+
     fn stop(&mut self) {
         let sessions: Vec<(String, Live)> = self.sessions.drain().collect();
         for (agent, mut l) in sessions {
@@ -560,9 +601,12 @@ pub fn run(id: &str) -> ! {
         }
     });
     let exe = std::env::current_exe().unwrap_or_else(|_| Path::new("codehead").to_path_buf());
-    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new() };
+    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new() };
     catch_signals();
     h.close_open_turns();
+    if t.setup.as_deref() == Some("pending") {
+        h.start_setup(&t, tx.clone());
+    }
     loop {
         // 1 s: a signal ends the host within a second
         match rx.recv_timeout(Duration::from_secs(1)) {
@@ -578,6 +622,7 @@ pub fn run(id: &str) -> ! {
             }
             Ok(Input::Subscribe(s)) => h.subscribe(s),
             Ok(Input::Harness(a, o)) => h.harness(a, o),
+            Ok(Input::Setup(label, ok, out)) => h.setup_done(label, ok, out),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -585,7 +630,7 @@ pub fn run(id: &str) -> ! {
             break;
         }
         let busy = h.sessions.values().any(|l| l.busy);
-        if !busy && h.asks.is_empty() && h.last.elapsed() >= IDLE {
+        if !busy && !h.setup_running && h.asks.is_empty() && h.last.elapsed() >= IDLE {
             break;
         }
         // the thread was deleted: end with it
@@ -602,6 +647,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_pending_setup_runs_first_and_messages_wait_for_it() {
+        let wt = std::env::temp_dir().join(format!("codehead-host-setup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wt);
+        std::fs::create_dir_all(wt.join(".codehead")).unwrap();
+        std::fs::write(wt.join(".codehead/setup"), "echo installed on $CODEHEAD_PORT\n").unwrap();
+        let mut t = store::Thread::new("setup test", "task", &wt, vec!["nobody-agent".into()]);
+        t.worktree = Some(wt.display().to_string());
+        t.port = Some(40090);
+        t.setup = Some("pending".into());
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (htx, _hrx) = mpsc::channel();
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new() };
+        let (tx, rx) = mpsc::channel();
+        h.start_setup(&t, tx);
+        assert!(h.setup_running);
+        // a message now: it waits
+        h.deliver("nobody-agent", "go").unwrap();
+        assert_eq!(h.queue.len(), 1);
+        let Ok(Input::Setup(label, ok, out)) = rx.recv_timeout(Duration::from_secs(10)) else { panic!("0 setup end") };
+        assert_eq!((label.as_str(), ok, out.trim()), (".codehead/setup", true, "installed on 40090"));
+        h.setup_done(label, ok, out);
+        assert!(!h.setup_running && h.queue.is_empty());
+        assert_eq!(store::load(&t.id).unwrap().setup.as_deref(), Some("done"));
+        let kinds: Vec<String> = store::events(&t.id).iter().map(|e| format!("{:?}", e.kind).split([' ', '{', '(']).next().unwrap().to_string()).collect();
+        assert!(kinds.starts_with(&["Tool".to_string(), "ToolResult".to_string()]), "{kinds:?}");
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(wt);
+    }
+
+    #[test]
     fn subscribers_get_live_text_then_chunks_and_wakes() {
         let (a, b) = UnixStream::pair().unwrap();
         let (tx, rx) = mpsc::channel::<Input>();
@@ -610,7 +686,7 @@ mod tests {
         writeln!(w, "{}", json!({"op": "subscribe"})).unwrap();
         let Ok(Input::Subscribe(s)) = rx.recv() else { panic!("0 subscribe") };
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: "t".into(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new() };
+        let mut h = Host { id: "t".into(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new() };
         h.live.insert("ada".into(), "Hel".into());
         h.subscribe(s);
         h.harness("ada".into(), Out::Delta("lo".into()));

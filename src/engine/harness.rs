@@ -145,6 +145,9 @@ fn harness_command(bin: &str, s: &Spec) -> Command {
     if let Some(h) = crate::config::home_repo() {
         c.env("CODEHEAD_HOME_REPO", h);
     }
+    if let Some(p) = super::store::load(s.thread).and_then(|t| t.port) {
+        c.env("CODEHEAD_PORT", p.to_string());
+    }
     c
 }
 
@@ -496,6 +499,12 @@ Thread: {title}\nAgents on the thread: {list}",
     );
     if let Some(h) = crate::config::home_repo() {
         s.push_str(&home_block(&h));
+    }
+    if let Some(p) = thread.port {
+        s.push_str(&format!(
+            "\nPorts of this thread: {p}-{} ($CODEHEAD_PORT = {p}). Start dev servers and other listeners on these, never on the defaults: other threads run next to you.",
+            p + crate::setup::PORTS - 1
+        ));
     }
     let profile = crate::agents::session_prompt(agent);
     if !profile.is_empty() {

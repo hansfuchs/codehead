@@ -152,7 +152,9 @@ pub fn add_worktree(repo: &Path, branch: &str) -> Result<PathBuf, String> {
     }
     let p = path.display().to_string();
     let exists = git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).0;
-    let args: Vec<&str> = if exists { vec!["worktree", "add", &p, branch] } else { vec!["worktree", "add", "-b", branch, &p] };
+    // a new branch starts from origin/<default> (fetched), else HEAD
+    let base = if exists { String::new() } else { crate::setup::new_branch_base(repo) };
+    let args: Vec<&str> = if exists { vec!["worktree", "add", &p, branch] } else { vec!["worktree", "add", "--no-track", "-b", branch, &p, &base] };
     let (ok, _, err) = git(repo, &args);
     if ok { Ok(path) } else { Err(format!("git worktree add: {err}")) }
 }
@@ -284,6 +286,17 @@ pub fn remove(repo: &Path, items: &[Worktree], logs: &Path) -> Vec<Line<'static>
         // the worktree's own repo (can differ from the repo codehead runs in)
         let repo = repo_of(p).unwrap_or_else(|| repo.to_path_buf());
         let repo = repo.as_path();
+        // the teardown script (docker down, test DB …) before the worktree goes
+        if let Some(t) = &w.thread
+            && let Some(st) = store::load(&t.id)
+            && let Some((label, ok, output)) = crate::setup::run_teardown(&st)
+        {
+            let st = if ok { theme::muted() } else { warn };
+            out.push(Line::styled(format!("  {label}: {}", if ok { "ran" } else { "failed" }), st));
+            if !ok {
+                out.extend(output.lines().rev().take(3).collect::<Vec<_>>().into_iter().rev().map(|l| Line::styled(format!("    {l}"), theme::muted())));
+            }
+        }
         let (_, dirty, _) = git(p, &["status", "--porcelain"]);
         let n_dirty = dirty.lines().count();
         if n_dirty > 0 {

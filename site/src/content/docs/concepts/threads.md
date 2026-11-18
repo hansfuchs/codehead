@@ -97,3 +97,30 @@ untracked files, ignored ones left out) through a temp index, so your index, HEA
 stay as they are. Your edits are the changes while 0 agents work; an edit you make while an
 agent works counts as that agent's. A worktree with more than 2000 untracked files gets 0
 note. State: `threads/<id>/edits.json`.
+
+## Worktrees
+
+A thread on a new branch + worktree works like the main checkout, with 0 manual steps:
+
+- **Base**: a new branch starts from `origin/<default>` (fetched first), else from HEAD.
+- **Local files**: the paths in `.worktreeinclude` (repo root, 1 per line, `#` comments) are
+  copied from the main checkout: an APFS clone on macOS, a reflink where the file system has
+  one. 0 file: every gitignored `.env*` file of the root. A path the worktree has stays.
+- **Ports**: each worktree thread gets 10 ports, `$CODEHEAD_PORT` (40000, 40010, …) to `+9`.
+  Agents get them in their env and their system prompt.
+- **Setup**: `.codehead/setup`, else `.agents/setup`, else `conductor.json` `scripts.setup`
+  runs in the new worktree before the 1st turn (20 min max). The thread shows it as a `setup`
+  tool run; messages wait for it. A failed setup: the agents get its output and a note.
+- **Teardown**: `.codehead/teardown`, else `conductor.json` `scripts.archive`, runs before
+  codehead removes the worktree.
+
+Scripts get `CODEHEAD_ROOT` (main checkout), `CODEHEAD_WORKTREE`, `CODEHEAD_THREAD`,
+`CODEHEAD_BRANCH`, `CODEHEAD_PORT` (and `CONDUCTOR_ROOT_PATH`, `CONDUCTOR_PORT`).
+
+```sh
+#!/bin/sh
+# .codehead/setup
+set -e
+pnpm install --frozen-lockfile
+echo "PORT=$CODEHEAD_PORT" >> .env.local
+```

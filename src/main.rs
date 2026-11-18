@@ -29,6 +29,7 @@ mod rank;
 mod review;
 mod render;
 mod settings;
+mod setup;
 mod skills;
 mod sprites;
 mod stream;
@@ -690,6 +691,12 @@ fn start(args: Args) {
             if let Some(b) = &worktree {
                 match threads::add_worktree(&repo, b) {
                     Ok(p) => {
+                        // local files (.env …), a port block, the setup script before the 1st turn
+                        crate::setup::copy_includes(&repo, &p);
+                        t.port = Some(crate::setup::free_port(&engine::store::all()));
+                        if crate::setup::script(&p, "setup").is_some() {
+                            t.setup = Some("pending".into());
+                        }
                         t.worktree = Some(p.display().to_string());
                         t.branch = Some(b.clone());
                     }
