@@ -529,11 +529,12 @@ impl TextArea {
     }
 
     fn backspace(&mut self, word: bool) {
-        // empty Markdown list item, cursor after its marker: 1 layer out
+        // Markdown list item, cursor right after its marker: 1 layer out (with text after the
+        // cursor too); at indent 0 only an empty item (its marker goes), else 1 char as usual
         if self.range().is_none() && !self.single
             && let Some((indent, w, _)) = list_item(&self.lines[self.cur.row])
-            && self.lines[self.cur.row].len() == indent + w
             && self.cur.col == indent + w
+            && (indent > 0 || self.lines[self.cur.row].len() == indent + w)
         {
             self.snapshot(Op::Other);
             self.outdent(indent, w);
@@ -799,15 +800,16 @@ impl TextArea {
         self.want_x = None;
     }
 
-    /// Space on an empty Markdown list item, cursor after its marker: 1 layer in (2 spaces of
-    /// indent), the counterpart of backspace. false: not such an item, the space goes in as text.
-    fn indent_empty_item(&mut self) -> bool {
+    /// Space on a Markdown list item, cursor right after its marker (empty item or text after the
+    /// cursor): 1 layer in (2 spaces of indent), the counterpart of backspace. false: not such an
+    /// item, the space goes in as text.
+    fn indent_item(&mut self) -> bool {
         if self.single || self.range().is_some() {
             return false;
         }
         let row = self.cur.row;
         let Some((indent, w, _)) = list_item(&self.lines[row]) else { return false };
-        if self.lines[row].len() != indent + w || self.cur.col != indent + w {
+        if self.cur.col != indent + w {
             return false;
         }
         self.snapshot(Op::Other);
@@ -818,8 +820,8 @@ impl TextArea {
         true
     }
 
-    /// Empty list item of the cursor row (INDENT, marker width W): 2 spaces of indent go, at
-    /// indent 0 the marker goes.
+    /// List item of the cursor row (INDENT, marker width W): 2 spaces of indent go, at indent 0
+    /// (an empty item only) the marker goes.
     fn outdent(&mut self, indent: usize, w: usize) {
         // a click leaves anchor = cursor (0 selection): past the new line end after the drain
         self.anchor = None;
@@ -937,7 +939,7 @@ impl TextArea {
             KeyCode::Char('d') if alt => self.delete(true),
             KeyCode::Char('B') if alt => self.move_to(self.word_left(self.cur), true),
             KeyCode::Char('F') if alt => self.move_to(self.word_right(self.cur), true),
-            KeyCode::Char(' ') if !alt && self.indent_empty_item() => {}
+            KeyCode::Char(' ') if !alt && self.indent_item() => {}
             KeyCode::Char(c) if !alt => self.insert(&c.to_string()),
             KeyCode::Enter if !self.single && !ctrl && !alt => self.newline(),
             // ⌘⌫ with the kitty protocol: super+backspace
@@ -1367,6 +1369,76 @@ mod tests {
         t.move_start();
         t.key(k(KeyCode::Char(' ')));
         assert_eq!(t.text(), " - ");
+    }
+
+    #[test]
+    fn space_and_backspace_right_after_the_marker_of_an_item_with_text() {
+        let k = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+        let undo = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+        let redo = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
+        // cursor right after `- ` of `- foo`: space → 1 layer in, the cursor stays before `foo`
+        let mut t = ta("- a\n- foo");
+        t.move_end();
+        for _ in 0..3 {
+            t.key(k(KeyCode::Left));
+        }
+        t.key(k(KeyCode::Char(' ')));
+        assert_eq!(t.text(), "- a\n  - foo");
+        t.key(k(KeyCode::Char(' ')));
+        assert_eq!(t.text(), "- a\n    - foo");
+        t.key(k(KeyCode::Char('x')));
+        assert_eq!(t.text(), "- a\n    - xfoo");
+        t.key(k(KeyCode::Backspace));
+        // backspace right after the marker: 1 layer out
+        t.key(k(KeyCode::Backspace));
+        assert_eq!(t.text(), "- a\n  - foo");
+        t.key(k(KeyCode::Backspace));
+        assert_eq!(t.text(), "- a\n- foo");
+        // indent 0 + text: backspace as before (1 char)
+        t.key(k(KeyCode::Backspace));
+        assert_eq!(t.text(), "- a\n-foo");
+        // undo: 1 step per press, back through the layers; redo forward
+        t.key(undo);
+        assert_eq!(t.text(), "- a\n- foo");
+        t.key(undo);
+        assert_eq!(t.text(), "- a\n  - foo");
+        t.key(undo);
+        assert_eq!(t.text(), "- a\n    - foo");
+        t.key(redo);
+        assert_eq!(t.text(), "- a\n  - foo");
+        // numbers and check boxes: right after the whole marker
+        let mut t = ta("1. one");
+        t.move_start();
+        for _ in 0..3 {
+            t.key(k(KeyCode::Right));
+        }
+        t.key(k(KeyCode::Char(' ')));
+        assert_eq!(t.text(), "  1. one");
+        let mut t = ta("* [ ] task");
+        t.move_start();
+        for _ in 0..6 {
+            t.key(k(KeyCode::Right));
+        }
+        t.key(k(KeyCode::Char(' ')));
+        assert_eq!(t.text(), "  * [ ] task");
+        t.key(k(KeyCode::Backspace));
+        assert_eq!(t.text(), "* [ ] task");
+        // inside the text: plain space / backspace
+        let mut t = ta("  - foo");
+        t.move_end();
+        t.key(k(KeyCode::Left));
+        t.key(k(KeyCode::Char(' ')));
+        assert_eq!(t.text(), "  - fo o");
+        t.key(k(KeyCode::Backspace));
+        assert_eq!(t.text(), "  - foo");
+        // a single-line input: 0 list keys
+        let mut t = TextArea::new(true, "");
+        t.set_text("- foo");
+        t.move_start();
+        t.key(k(KeyCode::Right));
+        t.key(k(KeyCode::Right));
+        t.key(k(KeyCode::Char(' ')));
+        assert_eq!(t.text(), "-  foo");
     }
 
     #[test]
