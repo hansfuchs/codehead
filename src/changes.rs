@@ -339,6 +339,221 @@ pub fn load(dir: &Path) -> Result<Changes, String> {
     Ok(Changes { base: label, files })
 }
 
+/// A diff line ready to draw: its chars in syntax colors, the chars of the changed words.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Painted {
+    chars: Vec<(ratatui::style::Color, char)>,
+    marks: Vec<bool>,
+}
+
+/// Syntax token of PATH: its extension (`rs`, `ts` …), else `text`.
+fn lang_of(path: &str) -> &str {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match name.rsplit_once('.') {
+        Some((_, e)) if !e.is_empty() => e,
+        _ if name.eq_ignore_ascii_case("dockerfile") => "dockerfile",
+        _ if name.eq_ignore_ascii_case("makefile") || name == "justfile" => "makefile",
+        _ => "text",
+    }
+}
+
+/// Word tokens of CHARS: a run of letters / digits / `_`, a run of spaces, else 1 char.
+fn tokens(chars: &[char]) -> Vec<std::ops::Range<usize>> {
+    let class = |c: char| if c.is_alphanumeric() || c == '_' { 0 } else if c.is_whitespace() { 1 } else { 2 };
+    let mut out = Vec::new();
+    let mut s = 0;
+    while s < chars.len() {
+        let k = class(chars[s]);
+        let mut e = s + 1;
+        if k != 2 {
+            while e < chars.len() && class(chars[e]) == k {
+                e += 1;
+            }
+        }
+        out.push(s..e);
+        s = e;
+    }
+    out
+}
+
+/// Changed chars of OLD and NEW (a removed line and the added line it pairs with): the tokens
+/// outside their longest common token run. 0 marks when the lines share under 1/3 of their
+/// tokens (a rewrite: the line tint says enough) or the lines are long.
+pub fn word_marks(old: &[char], new: &[char]) -> (Vec<bool>, Vec<bool>) {
+    let (to, tn) = (tokens(old), tokens(new));
+    let none = || (vec![false; old.len()], vec![false; new.len()]);
+    if to.len() > 300 || tn.len() > 300 {
+        return none();
+    }
+    let eq = |a: &std::ops::Range<usize>, b: &std::ops::Range<usize>| old[a.clone()] == new[b.clone()];
+    // LCS table over tokens
+    let (n, m) = (to.len(), tn.len());
+    let mut dp = vec![vec![0u16; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if eq(&to[i], &tn[j]) { dp[i + 1][j + 1] + 1 } else { dp[i + 1][j].max(dp[i][j + 1]) };
+        }
+    }
+    let (mut keep_o, mut keep_n) = (vec![false; n], vec![false; m]);
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if eq(&to[i], &tn[j]) {
+            keep_o[i] = true;
+            keep_n[j] = true;
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    let solid = |t: &[std::ops::Range<usize>], c: &[char], k: &[bool]| -> (usize, usize) {
+        let words: Vec<usize> = (0..t.len()).filter(|&x| !c[t[x].start].is_whitespace()).collect();
+        (words.iter().filter(|&&x| k[x]).count(), words.len())
+    };
+    let (ko, no) = solid(&to, old, &keep_o);
+    let (kn, nn) = solid(&tn, new, &keep_n);
+    if (ko + kn) * 3 < no + nn {
+        return none();
+    }
+    let mark = |t: &[std::ops::Range<usize>], len: usize, k: &[bool]| {
+        let mut v = vec![false; len];
+        for (x, r) in t.iter().enumerate() {
+            if !k[x] {
+                v[r.clone()].iter_mut().for_each(|b| *b = true);
+            }
+        }
+        v
+    };
+    (mark(&to, old.len(), &keep_o), mark(&tn, new.len(), &keep_n))
+}
+
+/// The lines of hunk H of F painted: syntax colors (old side / new side highlighted apart), the
+/// changed words of each removed line and the added line it pairs with.
+fn paint(f: &FileDiff, h: &Hunk) -> Vec<Painted> {
+    let lang = lang_of(&f.path);
+    let side = |keep: Kind| -> crate::code::Lines {
+        let text: Vec<&str> = h.lines.iter().filter(|l| l.kind != keep).map(|l| l.text.as_str()).collect();
+        crate::code::highlight(&text.join("\n"), lang)
+    };
+    let (new_c, old_c) = (side(Kind::Del), side(Kind::Add));
+    let (mut io, mut inew) = (0, 0);
+    let mut out: Vec<Painted> = h
+        .lines
+        .iter()
+        .map(|l| {
+            let src = match l.kind {
+                Kind::Del => {
+                    io += 1;
+                    old_c.get(io - 1)
+                }
+                Kind::Add => {
+                    inew += 1;
+                    new_c.get(inew - 1)
+                }
+                Kind::Ctx => {
+                    io += 1;
+                    inew += 1;
+                    new_c.get(inew - 1)
+                }
+            };
+            let plain: Vec<char> = l.text.chars().collect();
+            let chars = match src {
+                Some(c) if c.len() == plain.len() => c.clone(),
+                _ => plain.iter().map(|&c| (theme::pal().text, c)).collect(),
+            };
+            Painted { marks: vec![false; chars.len()], chars }
+        })
+        .collect();
+    // pairs: a run of removed lines with the added lines right after it
+    let ls = &h.lines;
+    let mut k = 0;
+    while k < ls.len() {
+        if ls[k].kind != Kind::Del {
+            k += 1;
+            continue;
+        }
+        let d = ls[k..].iter().take_while(|l| l.kind == Kind::Del).count();
+        let a = ls[k + d..].iter().take_while(|l| l.kind == Kind::Add).count();
+        for j in 0..d.min(a) {
+            let (o, n) = (k + j, k + d + j);
+            let oc: Vec<char> = out[o].chars.iter().map(|x| x.1).collect();
+            let nc: Vec<char> = out[n].chars.iter().map(|x| x.1).collect();
+            let (mo, mn) = word_marks(&oc, &nc);
+            out[o].marks = mo;
+            out[n].marks = mn;
+        }
+        k += d + a;
+    }
+    out
+}
+
+/// ` + ` / ` - ` / 3 spaces in the color of KIND, on its line tint.
+fn sign_span(kind: Kind) -> Span<'static> {
+    let (bg, _) = tints(kind);
+    let (sign, fg) = match kind {
+        Kind::Add => ("+", theme::pal().ok),
+        Kind::Del => ("-", theme::pal().danger),
+        Kind::Ctx => (" ", theme::pal().text),
+    };
+    let st = Style::default().fg(fg);
+    Span::styled(format!(" {sign} "), bg.map_or(st, |b| st.bg(b)))
+}
+
+/// Line tint and changed-word tint of KIND (0 for context lines).
+fn tints(kind: Kind) -> (Option<ratatui::style::Color>, Option<ratatui::style::Color>) {
+    let base = theme::pal().panel;
+    match kind {
+        Kind::Add => (Some(theme::tint(theme::pal().ok, base, 0.18)), Some(theme::tint(theme::pal().ok, base, 0.42))),
+        Kind::Del => (Some(theme::tint(theme::pal().danger, base, 0.18)), Some(theme::tint(theme::pal().danger, base, 0.42))),
+        Kind::Ctx => (None, None),
+    }
+}
+
+/// P as spans in ROOM columns (cut with `…`), padded to ROOM with the line tint of KIND.
+fn painted_spans(p: &Painted, kind: Kind, room: usize) -> Vec<Span<'static>> {
+    let (bg, mark) = tints(kind);
+    let style = |color, marked: bool| {
+        let s = Style::default().fg(color);
+        match (marked, mark, bg) {
+            (true, Some(m), _) => s.bg(m),
+            (_, _, Some(b)) => s.bg(b),
+            _ => s,
+        }
+    };
+    let total: usize = p.chars.iter().map(|x| unicode_width::UnicodeWidthChar::width(x.1).unwrap_or(0)).sum();
+    let limit = if total > room { room.saturating_sub(1) } else { room };
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let (mut run, mut key, mut w) = (String::new(), None, 0);
+    for (i, &(color, c)) in p.chars.iter().enumerate() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if w + cw > limit {
+            break;
+        }
+        let k = (color, p.marks.get(i).copied().unwrap_or(false));
+        if key != Some(k) && !run.is_empty() {
+            let (c0, m0) = key.unwrap_or(k);
+            out.push(Span::styled(std::mem::take(&mut run), style(c0, m0)));
+        }
+        key = Some(k);
+        run.push(c);
+        w += cw;
+    }
+    if let Some((c0, m0)) = key
+        && !run.is_empty()
+    {
+        out.push(Span::styled(run, style(c0, m0)));
+    }
+    if total > room {
+        out.push(Span::styled("…", style(theme::pal().muted, false)));
+        w += 1;
+    }
+    let pad = Style::default();
+    out.push(Span::styled(" ".repeat(room.saturating_sub(w)), bg.map_or(pad, |b| pad.bg(b))));
+    out
+}
+
 /// Review marks of thread ID: path → diff hash at the mark.
 fn marks_path(id: &str) -> PathBuf {
     crate::engine::store::thread_dir(id).join("review.json")
@@ -551,24 +766,20 @@ impl View {
             let label = format!("⋯ {}", if h.ctx.is_empty() { format!("line {}", h.new) } else { h.ctx.clone() });
             rows.push(Row { line: bar(vec![Span::styled(crate::nav::fit(&label, inner), theme::muted())]), file: i, at: Some(h.new.max(1)), head: false, hunk: true });
             // a new or deleted file: 1 side only, unified uses the room
+            let painted = paint(f, h);
             if side && !matches!(f.status, Status::New | Status::Deleted) {
-                self.side_rows(rows, i, h, inner, num_w, &bar);
+                self.side_rows(rows, i, h, &painted, inner, num_w, &bar);
             } else {
-                for l in &h.lines {
-                    let (sign, st, num) = match l.kind {
-                        Kind::Add => ("+", Style::default().fg(theme::pal().ok), format!("{:>num_w$} {:>num_w$}", "", l.new.unwrap_or(0))),
-                        Kind::Del => ("-", Style::default().fg(theme::pal().danger), format!("{:>num_w$} {:>num_w$}", l.old.unwrap_or(0), "")),
-                        Kind::Ctx => (" ", theme::text(), format!("{:>num_w$} {:>num_w$}", l.old.unwrap_or(0), l.new.unwrap_or(0))),
+                for (l, p) in h.lines.iter().zip(&painted) {
+                    let num = match l.kind {
+                        Kind::Add => format!("{:>num_w$} {:>num_w$}", "", l.new.unwrap_or(0)),
+                        Kind::Del => format!("{:>num_w$} {:>num_w$}", l.old.unwrap_or(0), ""),
+                        Kind::Ctx => format!("{:>num_w$} {:>num_w$}", l.old.unwrap_or(0), l.new.unwrap_or(0)),
                     };
                     let room = inner.saturating_sub(num.len() + 3);
-                    let at = l.new.or(l.old);
-                    rows.push(Row {
-                        line: bar(vec![Span::styled(num, theme::muted()), Span::styled(format!(" {sign} "), st), Span::styled(crate::nav::fit(&l.text, room), st)]),
-                        file: i,
-                        at,
-                        head: false,
-                        hunk: false,
-                    });
+                    let mut spans = vec![Span::styled(num, theme::muted()), sign_span(l.kind)];
+                    spans.extend(painted_spans(p, l.kind, room));
+                    rows.push(Row { line: bar(spans), file: i, at: l.new.or(l.old), head: false, hunk: false });
                 }
             }
         }
@@ -577,43 +788,39 @@ impl View {
 
     /// Hunk H side by side: the old side left, the new side right; a run of removed lines pairs
     /// with the added lines after it.
-    fn side_rows(&self, rows: &mut Vec<Row>, i: usize, h: &Hunk, inner: usize, num_w: usize, bar: &dyn Fn(Vec<Span<'static>>) -> Line<'static>) {
+    #[allow(clippy::too_many_arguments)]
+    fn side_rows(&self, rows: &mut Vec<Row>, i: usize, h: &Hunk, painted: &[Painted], inner: usize, num_w: usize, bar: &dyn Fn(Vec<Span<'static>>) -> Line<'static>) {
         let half = inner.saturating_sub(3) / 2;
-        let cell = |l: Option<&DLine>, left: bool| -> Vec<Span<'static>> {
-            let Some(l) = l else { return vec![Span::raw(" ".repeat(half))] };
-            let (st, sign) = match l.kind {
-                Kind::Add => (Style::default().fg(theme::pal().ok), "+"),
-                Kind::Del => (Style::default().fg(theme::pal().danger), "-"),
-                Kind::Ctx => (theme::text(), " "),
-            };
+        let cell = |k: Option<usize>, left: bool| -> Vec<Span<'static>> {
+            let Some(k) = k else { return vec![Span::raw(" ".repeat(half))] };
+            let l = &h.lines[k];
             let n = if left { l.old } else { l.new }.unwrap_or(0);
-            let room = half.saturating_sub(num_w + 3);
-            let text = crate::nav::fit(&l.text, room);
-            let pad = room.saturating_sub(text.width());
-            vec![Span::styled(format!("{n:>num_w$}"), theme::muted()), Span::styled(format!(" {sign} "), st), Span::styled(text, st), Span::raw(" ".repeat(pad))]
+            let mut v = vec![Span::styled(format!("{n:>num_w$}"), theme::muted()), sign_span(l.kind)];
+            v.extend(painted_spans(&painted[k], l.kind, half.saturating_sub(num_w + 3)));
+            v
         };
         let mut k = 0;
         let ls = &h.lines;
         while k < ls.len() {
             if ls[k].kind == Kind::Ctx {
-                let mut s = cell(Some(&ls[k]), true);
+                let mut s = cell(Some(k), true);
                 s.push(Span::styled(" │ ", theme::line()));
-                s.extend(cell(Some(&ls[k]), false));
+                s.extend(cell(Some(k), false));
                 rows.push(Row { line: bar(s), file: i, at: ls[k].new, head: false, hunk: false });
                 k += 1;
                 continue;
             }
-            let dels: Vec<&DLine> = ls[k..].iter().take_while(|l| l.kind == Kind::Del).collect();
-            let adds: Vec<&DLine> = ls[k + dels.len()..].iter().take_while(|l| l.kind == Kind::Add).collect();
-            for j in 0..dels.len().max(adds.len()) {
-                let (d, a) = (dels.get(j).copied(), adds.get(j).copied());
-                let mut s = cell(d, true);
+            let d = ls[k..].iter().take_while(|l| l.kind == Kind::Del).count();
+            let a = ls[k + d..].iter().take_while(|l| l.kind == Kind::Add).count();
+            for j in 0..d.max(a) {
+                let (dk, ak) = ((j < d).then_some(k + j), (j < a).then_some(k + d + j));
+                let mut s = cell(dk, true);
                 s.push(Span::styled(" │ ", theme::line()));
-                s.extend(cell(a, false));
-                let at = a.and_then(|a| a.new).or_else(|| adds.first().and_then(|a| a.new)).or_else(|| d.and_then(|d| d.old));
+                s.extend(cell(ak, false));
+                let at = ak.and_then(|x| ls[x].new).or_else(|| (a > 0).then(|| ls[k + d].new).flatten()).or_else(|| dk.and_then(|x| ls[x].old));
                 rows.push(Row { line: bar(s), file: i, at, head: false, hunk: false });
             }
-            k += dels.len() + adds.len();
+            k += d + a;
         }
     }
 
@@ -858,6 +1065,36 @@ Binary files a/img.png and b/img.png differ
         // a new file stays unified: 0 empty left half
         let new = t.iter().find(|l| l.contains("fn t() {}")).unwrap();
         assert!(!new.contains(" │ "), "{new}");
+    }
+
+    #[test]
+    fn word_marks_hit_only_the_changed_tokens() {
+        let c = |s: &str| s.chars().collect::<Vec<char>>();
+        let (o, n) = word_marks(&c("let b = 2;"), &c("let b = 3;"));
+        let on = |v: &[bool], s: &str| s.chars().zip(v).filter(|x| *x.1).map(|x| x.0).collect::<String>();
+        assert_eq!((on(&o, "let b = 2;"), on(&n, "let b = 3;")), ("2".into(), "3".into()));
+        // a rewrite: 0 marks
+        let (o, n) = word_marks(&c("alpha beta gamma"), &c("one two three"));
+        assert!(!o.contains(&true) && !n.contains(&true));
+    }
+
+    #[test]
+    fn rows_have_syntax_colors_line_tints_and_word_marks() {
+        let mut v = view(parse(DIFF));
+        v.build(100);
+        let row = v.rows.iter().find(|r| text_of(r).contains("+ let b = 3;")).unwrap();
+        let add_bg = tints(Kind::Add).0;
+        let mark_bg = tints(Kind::Add).1;
+        // `let`: a keyword color (0 plain text color), on the add tint
+        let kw = row.line.spans.iter().find(|s| s.content.starts_with("let")).unwrap();
+        assert_ne!(kw.style.fg, Some(theme::pal().text), "syntax color");
+        assert_eq!(kw.style.bg, add_bg);
+        // `3`: the changed word, the strong tint
+        let three = row.line.spans.iter().find(|s| s.content.contains('3')).unwrap();
+        assert_eq!(three.style.bg, mark_bg, "{:?}", row.line.spans);
+        // context rows: 0 tint
+        let ctx = v.rows.iter().find(|r| text_of(r).contains("let a = 1;")).unwrap();
+        assert!(ctx.line.spans.iter().filter(|s| s.content.contains("let")).all(|s| s.style.bg.is_none()));
     }
 
     #[test]
