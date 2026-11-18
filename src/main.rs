@@ -16,6 +16,7 @@ mod config;
 mod cost;
 mod drafts;
 mod handoff;
+mod home;
 mod editor;
 mod files;
 mod engine;
@@ -615,7 +616,15 @@ fn start(args: Args) {
             }
             break 'screens;
         }
-        Outcome::New { message, target, agents: picked } => {
+        Outcome::New { message, target, agents: picked, clone } => {
+            // a home repo not on disk yet: clone it first
+            if let Some((url, path)) = &clone {
+                let _ = term.draw(|f| app::draw_status(f, &format!("cloning {url}…"), 0));
+                if let Err(e) = home::clone(url, path) {
+                    tty.leave(&mut out);
+                    fail(&e, 1)
+                }
+            }
             let a = &app.cfg;
             // git first: switch the main checkout (existing branch not checked out anywhere, new branch)
             let mut prep: Option<Vec<String>> = None;

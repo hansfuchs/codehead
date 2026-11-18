@@ -1,7 +1,7 @@
 //! Screens: new (compose, the start) | threads | agents; notes = sub-screen of task. Modals: F2 menu, y/n confirm, info.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -72,7 +72,8 @@ pub enum Outcome {
     Quit,
     Copy(Vec<PathBuf>),
     /// AGENTS: first starts the thread, the others join it.
-    New { message: String, target: Target, agents: Vec<String> },
+    /// CLONE: a home repo to clone first (url, path).
+    New { message: String, target: Target, agents: Vec<String>, clone: Option<(String, PathBuf)> },
     Resume(Box<Worktree>),
 }
 
@@ -127,6 +128,35 @@ enum Where {
     Branch(String),
     NewBranch,
     NewWorktree,
+}
+
+/// The where row's choices for a repo: the choices, branches checked out elsewhere, the repo's
+/// branch, the branch and top dir of the current directory.
+#[derive(Default)]
+struct Choices {
+    wheres: Vec<Where>,
+    checkouts: HashMap<String, String>,
+    repo_branch: String,
+    here_branch: String,
+    here_dir: String,
+}
+
+/// Choices of REPO (CWD: the dir codehead runs in): current branch, new branch, new branch +
+/// worktree, default branch (main, else master), the other branches (newest commit first).
+fn where_choices(repo: &Path, cwd: &Path) -> Choices {
+    let bs = threads::branches(repo);
+    let here_branch = threads::current_branch(cwd);
+    let mut here_dir = threads::git(cwd, &["rev-parse", "--show-toplevel"]).1.trim().to_string();
+    if here_dir.is_empty() {
+        here_dir = repo.display().to_string();
+    }
+    let default = ["main", "master"].into_iter().find(|d| bs.iter().any(|b| b == d)).map(String::from);
+    let mut wheres = vec![Where::Current, Where::NewBranch, Where::NewWorktree];
+    if let Some(d) = default.as_ref().filter(|d| **d != here_branch) {
+        wheres.push(Where::Branch(d.clone()));
+    }
+    wheres.extend(bs.into_iter().filter(|b| *b != here_branch && Some(b) != default.as_ref()).map(Where::Branch));
+    Choices { wheres, checkouts: threads::checkouts(repo), repo_branch: threads::current_branch(repo), here_branch, here_dir }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -507,6 +537,11 @@ pub struct App {
     target: Option<Target>,
     /// Choices of the where row: branches (default branch first), new branch, new worktree.
     wheres: Vec<Where>,
+    /// Repos of the where row (r cycles): the start repo, then the home repo's others; the
+    /// dir codehead started in.
+    repos: Vec<crate::home::Repo>,
+    repo_i: usize,
+    start_cwd: PathBuf,
     where_i: usize,
     /// Checkouts by branch, and the main checkout's branch (read once: the where row draws often).
     checkouts: HashMap<String, String>,
@@ -700,29 +735,24 @@ impl App {
         }
         // where: current branch, new branch, new branch + worktree, default branch (main, else master),
         // the other branches (newest commit first)
-        let (mut wheres, mut checkouts, mut repo_branch) = (Vec::new(), HashMap::new(), String::new());
-        let (mut here_branch, mut here_dir) = (String::new(), String::new());
-        if let Some(repo) = &cfg.repo {
-            let bs = threads::branches(repo);
-            repo_branch = threads::current_branch(repo);
-            here_branch = threads::current_branch(&cfg.cwd);
-            here_dir = threads::git(&cfg.cwd, &["rev-parse", "--show-toplevel"]).1.trim().to_string();
-            if here_dir.is_empty() {
-                here_dir = repo.display().to_string();
-            }
-            let default = ["main", "master"].into_iter().find(|d| bs.iter().any(|b| b == d)).map(String::from);
-            wheres.extend([Where::Current, Where::NewBranch, Where::NewWorktree]);
-            if let Some(d) = default.as_ref().filter(|d| **d != here_branch) {
-                wheres.push(Where::Branch(d.clone()));
-            }
-            wheres.extend(bs.into_iter().filter(|b| *b != here_branch && Some(b) != default.as_ref()).map(Where::Branch));
-            checkouts = threads::checkouts(repo);
+        let Choices { wheres, checkouts, repo_branch, here_branch, here_dir } = cfg.repo.as_deref().map(|r| where_choices(r, &cfg.cwd)).unwrap_or_default();
+        // repos: the one codehead started in, then the home repo's other repos
+        let mut repos: Vec<crate::home::Repo> = Vec::new();
+        if let Some(r) = &cfg.repo {
+            repos.push(crate::home::Repo { name: r.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), path: r.clone(), url: None });
         }
+        if !cfg!(test) {
+            repos.extend(crate::home::repos().into_iter().filter(|h| Some(&h.path) != cfg.repo.as_ref()));
+        }
+        let start_cwd = cfg.cwd.clone();
         let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
         let paster = Paster::new(home.join(".cache/codehead/paste").join(format!("new-{}", (crate::engine::now_ms() / 1000))));
         // -b: new worktree on that branch
         let where_i = if cfg.branch.is_some() { wheres.iter().position(|w| *w == Where::NewWorktree).unwrap_or(0) } else { 0 };
         let mut app = App {
+            repos,
+            repo_i: 0,
+            start_cwd,
             wheres,
             where_i,
             checkouts,
@@ -1242,6 +1272,39 @@ impl App {
         }
     }
 
+    /// r on the where row: the next repo (the start repo, then the home repo's others). A repo
+    /// on disk: its branch choices; 0 clone yet: a new branch + worktree after the clone.
+    fn step_repo(&mut self, d: isize) {
+        let n = self.repos.len();
+        if n < 2 {
+            return self.toast("1 repo · more: the home repo's AGENTS.md (setting home)", true);
+        }
+        self.target = None;
+        self.repo_i = (self.repo_i as isize + d).rem_euclid(n as isize) as usize;
+        let r = self.repos[self.repo_i].clone();
+        // the start repo: the dir codehead started in; another repo: its root
+        let cwd = if self.repo_i == 0 { self.start_cwd.clone() } else { r.path.clone() };
+        self.cfg.repo = Some(r.path.clone());
+        self.cfg.cwd = cwd.clone();
+        let c = if r.path.join(".git").exists() {
+            where_choices(&r.path, &cwd)
+        } else {
+            Choices { wheres: vec![Where::NewWorktree], here_dir: r.path.display().to_string(), ..Default::default() }
+        };
+        self.wheres = c.wheres;
+        self.checkouts = c.checkouts;
+        self.repo_branch = c.repo_branch;
+        self.here_branch = c.here_branch;
+        self.here_dir = c.here_dir;
+        self.where_i = if self.repo_i == 0 { 0 } else { self.wheres.iter().position(|w| *w == Where::NewWorktree).unwrap_or(0) };
+    }
+
+    /// The where row's repo, when it needs a clone first: (url, path).
+    fn clone_first(&self) -> Option<(String, PathBuf)> {
+        let r = self.repos.get(self.repo_i)?;
+        (!r.path.join(".git").exists()).then(|| r.url.clone().map(|u| (u, r.path.clone()))).flatten()
+    }
+
     /// ←→ on the where row. A target from the threads tab gives way to the choices.
     fn step_where(&mut self, d: isize) {
         let n = self.wheres.len();
@@ -1288,6 +1351,13 @@ impl App {
     }
 
     fn where_text(&self) -> String {
+        if let Some((url, path)) = self.clone_first() {
+            let b = match self.target() {
+                Ok(Target::Branch(b)) => b,
+                _ => "…".into(),
+            };
+            return format!("clones {url} into {}, then a new worktree · branch {b}", tilde(&path.display().to_string()));
+        }
         if self.target.is_none() && self.wheres.get(self.where_i) == Some(&Where::Current) {
             return format!("works in {} · 0 checkout", tilde(&self.here_dir));
         }
@@ -1359,7 +1429,7 @@ impl App {
             }
             Ok(target) => {
                 let agents = self.agents.iter().filter(|a| self.picks.contains(&a.name)).map(|a| a.name.clone()).collect();
-                self.outcome = Some(Outcome::New { message: self.message(), target, agents })
+                self.outcome = Some(Outcome::New { message: self.message(), target, agents, clone: self.clone_first() })
             }
             Err(e) => {
                 self.field = Field::Title;
@@ -2567,6 +2637,8 @@ impl App {
             match k.code {
                 KeyCode::Left | KeyCode::Char('h') => self.step_where(-1),
                 KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => self.step_where(1),
+                KeyCode::Char('r') => self.step_repo(1),
+                KeyCode::Char('R') => self.step_repo(-1),
                 KeyCode::Up => self.go_field(-1),
                 KeyCode::Enter | KeyCode::Down => self.go_field(1),
                 _ => {}
@@ -3549,6 +3621,12 @@ impl App {
         // where: ‹ choice › + what it does
         let on = self.field == Field::Where;
         let mut spans = vec![Span::styled("where ", if on { theme::accent_bold() } else { theme::muted() })];
+        // the repo (r cycles): only with more than 1
+        if self.repos.len() > 1
+            && let Some(r) = self.repos.get(self.repo_i)
+        {
+            spans.push(Span::styled(format!("{} ", r.name), if self.repo_i > 0 { theme::accent_bold() } else { theme::bold() }));
+        }
         if !self.wheres.is_empty() {
             let chip = Style::default().fg(theme::pal().text).add_modifier(Modifier::BOLD);
             spans.push(Span::styled(if on { "‹" } else { " " }, theme::accent()));
@@ -3646,7 +3724,7 @@ impl App {
         let hints: &[(&str, &str)] = match self.screen {
             _ if self.tabs_focus => &[("←→", "tab"), ("↓ / esc", "back"), ("q", "quit")],
             Screen::Compose if self.field == Field::Agents => &[("↑↓←→", "move"), ("space", "pick"), ("enter", "notes"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
-            Screen::Compose if self.field == Field::Where => &[("←→", "current · new branch · new worktree · main · recent"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
+            Screen::Compose if self.field == Field::Where => &[("←→", "current · new branch · new worktree · main · recent"), ("r", "repo"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.field == Field::Opts => &[("←→", "box"), ("space", "check / uncheck"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.drafts_menu.is_some() => &[("↑↓", "move"), ("enter", "load"), ("d", "delete"), ("esc", "back")],
             Screen::Compose if self.field == Field::Drafts => &[("enter", "list drafts"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("alt+1-4", "tabs")],
@@ -3941,6 +4019,44 @@ mod render_tests {
         a.worktrees = Some(Vec::new());
         a.sessions.clear();
         a
+    }
+
+    #[test]
+    fn r_cycles_the_home_repos_and_a_missing_one_gets_cloned_first() {
+        let base = std::env::temp_dir().join(format!("ch-repos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mk = |n: &str| {
+            let d = base.join(n);
+            std::fs::create_dir_all(&d).unwrap();
+            assert!(std::process::Command::new("sh").arg("-c").arg("git init -q -b main && git config user.email t@t && git config user.name t && echo x > a && git add -A && git commit -qm i && git branch feat").current_dir(&d).status().unwrap().success());
+            d
+        };
+        let (start, other) = (mk("start"), mk("other"));
+        let mut a = app();
+        a.cfg.repo = Some(start.clone());
+        a.repos = vec![
+            crate::home::Repo { name: "start".into(), path: start.clone(), url: None },
+            crate::home::Repo { name: "other".into(), path: other.clone(), url: None },
+            crate::home::Repo { name: "gone".into(), path: base.join("gone"), url: Some("git@x:y/gone.git".into()) },
+        ];
+        a.screen = Screen::Compose;
+        a.field = Field::Where;
+        a.title.set_text("fix it");
+        key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!(a.cfg.repo.as_deref(), Some(other.as_path()));
+        assert_eq!(a.wheres.get(a.where_i), Some(&Where::NewWorktree), "another repo: a new worktree first");
+        assert!(a.wheres.contains(&Where::Branch("feat".into())));
+        assert!(a.clone_first().is_none());
+        key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!(a.wheres, [Where::NewWorktree]);
+        assert_eq!(a.clone_first(), Some(("git@x:y/gone.git".to_string(), base.join("gone"))));
+        assert!(a.where_text().starts_with("clones git@x:y/gone.git into"), "{}", a.where_text());
+        // back round to the start repo and its dir
+        key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!((a.cfg.repo.as_deref(), a.where_i), (Some(start.as_path()), 0));
+        let s = dump(&mut a, 120, 30);
+        assert!(s.contains("where start"), "{s}");
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

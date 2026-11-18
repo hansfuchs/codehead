@@ -27,6 +27,7 @@ description: Every key, per screen.
 | `ctrl+c` | quit |
 | `@` / `>` | agents (cards by harness) / commands dropdown in the prompt |
 | `←` `→` | the **where** row: branch or worktree |
+| `r` / `R` | the **where** row: next / previous repo: the one codehead started in, then the home repo's other repos (its `AGENTS.md`); a repo not on disk gets cloned at the start |
 | `ctrl+v` | paste a clipboard image |
 | `ctrl+s` / `ctrl+r` | settings: save / reload |
 | `esc` | settings: undo the field's edit (0 apply); agent form with edits: asks first |
