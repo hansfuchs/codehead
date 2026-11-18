@@ -172,6 +172,7 @@ struct View {
     handing: Option<Receiver<Result<String, String>>>,
     // chrome
     monitors: crate::monitors::Monitors,
+    subagents: crate::subagents::Subagents,
     menu: Option<crate::menu::Menu>,
     cost: Option<crate::cost::Snap>,
     cost_at: Instant,
@@ -261,6 +262,7 @@ impl View {
             handing: None,
             // tests: 0 shared state between parallel views
             monitors: crate::monitors::Monitors::new(id),
+            subagents: Default::default(),
             menu: None,
             cost: None,
             cost_at: Instant::now() - Duration::from_secs(60),
@@ -431,6 +433,24 @@ impl View {
         }
     }
 
+    /// Lost subagent I: its master picks up its work (its transcript, its task), as a message of
+    /// the owner to the master.
+    fn pick_up(&mut self, i: usize) {
+        let Some(s) = self.thread.subs.get(i).cloned() else { return };
+        let mut text = format!("@{} your subagent “{}” ended without a report ({}). Pick up its work from its context.", s.master, s.description, s.result.lines().next().unwrap_or("lost"));
+        if !s.transcript.is_empty() {
+            text.push_str(&format!(" Its transcript: `{}` (its last steps show where it stopped).", s.transcript));
+        }
+        if !s.prompt.trim().is_empty() {
+            let quoted: String = s.prompt.trim().lines().map(|l| format!("> {l}\n")).collect();
+            text.push_str(&format!("\n\nIts task was:\n\n{quoted}"));
+        }
+        text.push_str("\nFinish the task yourself, or start a new subagent with this context.");
+        self.pending.push((text.clone(), Instant::now(), None));
+        self.host("send", json!({"op": "prompt", "text": text, "to": [s.master]}));
+        self.toast(format!("{} picks up “{}”", s.master, s.description));
+    }
+
     /// NEW takes over from OLD: a handoff file (task, recent messages, changed files), OLD
     /// leaves, NEW gets TEXT with the file's path.
     fn run_replace(&mut self, new: String, old: String, text: String) {
@@ -509,7 +529,7 @@ impl View {
 
     /// Something on screen moves: an agent at work (wave), monitors, the threads row, a toast.
     fn animating(&self) -> bool {
-        !self.thread.busy.is_empty() || self.monitors.active() || self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(4))
+        !self.thread.busy.is_empty() || self.monitors.active() || crate::subagents::Subagents::active(&self.thread.subs) || self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(4))
     }
 
     /// Fire an interrupt armed by a single Esc once DOUBLE_ESC ends. True: state changed.
@@ -645,6 +665,15 @@ impl View {
         if let Some(m) = self.menu.as_mut() {
             let a = m.key(k);
             return self.menu_action(a);
+        }
+        // the open subagents box: its keys (d: stop the selected one)
+        if let Some(act) = self.subagents.key(k, &self.thread.subs) {
+            if let crate::subagents::Act::Stop(id) = act {
+                let what = self.thread.subs.iter().find(|s| s.id == id).map(|s| s.description.clone()).unwrap_or_default();
+                self.host("sub_stop", json!({"op": "sub_stop", "id": id}));
+                self.toast(format!("stopping subagent “{what}”…"));
+            }
+            return false;
         }
         if self.monitors.key(k) {
             if let Some(n) = self.monitors.take_note() {
@@ -1106,7 +1135,8 @@ impl View {
             }
             return;
         }
-        if self.monitors.mouse(m)
+        if self.subagents.mouse(m)
+            || self.monitors.mouse(m)
             || self.mention.mouse(m, &mut self.input, &self.roster)
             || self.command.mouse(m, &mut self.input)
             || self.paths.mouse(m, &mut self.input)
@@ -1184,6 +1214,10 @@ impl View {
                             self.open.insert(k);
                         }
                         self.dirty = true;
+                        return;
+                    }
+                    Some(Hit::PickUp(i)) => {
+                        self.pick_up(i);
                         return;
                     }
                     Some(Hit::Choice(i)) => {
@@ -1294,6 +1328,8 @@ impl View {
             vec![Span::styled("  ● ", Style::default().fg(theme::pal().warn)), Span::styled("waits on you", theme::muted())]
         } else if self.thread.busy.contains(name) {
             vec![Span::styled(format!("  {frame} "), Style::default().fg(color)), Span::styled("working…", theme::muted())]
+        } else if self.thread.working(name) {
+            vec![Span::styled(format!("  {frame} "), Style::default().fg(color)), Span::styled("subagents…", theme::muted())]
         } else if self.monitors.watches.iter().any(|w| w.agent == name) {
             vec![Span::styled(format!("  {frame} "), Style::default().fg(color)), Span::styled("monitoring…", theme::muted())]
         } else {
@@ -1533,7 +1569,10 @@ impl View {
         let title = Rect { y: if head_h > 0 { header.y } else { bubble_top }.saturating_sub(1), height: 1, ..area };
         let mon_h = self.monitors.rows(area.width, area.height / 3);
         let mon = Rect { y: title.y.saturating_sub(mon_h), height: mon_h, ..area };
-        let st = Rect { x: area.x, y: area.y, width: area.width, height: mon.y.saturating_sub(area.y) };
+        // the subagents row (its open box) above the monitors row
+        let sub_h = self.subagents.rows(&self.thread.subs, area.width, area.height / 3);
+        let sub = Rect { y: mon.y.saturating_sub(sub_h), height: sub_h, ..area };
+        let st = Rect { x: area.x, y: area.y, width: area.width, height: sub.y.saturating_sub(area.y) };
         self.stream_rect = st;
         self.view_rect = st;
 
@@ -1580,6 +1619,10 @@ impl View {
         }
         if mon_h > 0 {
             self.monitors.render(f, mon, self.tick());
+        }
+        if sub_h > 0 {
+            let tick = self.tick();
+            self.subagents.render(f, sub, tick, &self.thread.subs);
         }
 
         // the view bar on row 0 (views of the thread, the thread title); the title row above the
@@ -2060,6 +2103,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
             dirty |= v.read();
         }
         dirty |= v.monitors.tick(id);
+        dirty |= v.subagents.tick(&v.thread.subs);
         if roster_at.elapsed() > Duration::from_secs(5) {
             roster_at = Instant::now();
             v.set_roster(crate::agents::load());
@@ -2508,3 +2552,96 @@ mod select_tests {
     }
 }
 
+/// Subagents: the row above the monitors, the box by master, stop, the report message, pick up.
+#[cfg(test)]
+mod subagent_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn screen(v: &mut View) -> Vec<String> {
+        let mut t = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        t.draw(|f| v.draw(f)).unwrap();
+        let b = t.backend().buffer().clone();
+        (0..40).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect()
+    }
+
+    fn ev(agent: &str, ts: u64, kind: store::Kind) -> store::Event {
+        store::Event { ts, agent: Some(agent.into()), kind }
+    }
+
+    fn start(id: &str, parent: Option<&str>, what: &str, background: bool) -> store::Kind {
+        store::Kind::SubStart { id: id.into(), parent: parent.map(String::from), description: what.into(), agent_type: "Explore".into(), background, prompt: format!("do {what}") }
+    }
+
+    fn click(v: &mut View, x: u16, y: u16) {
+        v.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE });
+    }
+
+    #[test]
+    fn running_subagents_show_grouped_by_master_and_stop_with_d() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("subtest-0000", Path::new("/tmp"), "t", tx);
+        v.members = vec!["ada".into(), "bob".into()];
+        let now = crate::engine::now_ms();
+        v.thread.push(&ev("ada", now, start("t1", None, "scan the repo", true)));
+        v.thread.push(&ev("ada", now, start("t2", Some("t1"), "read the docs", false)));
+        v.thread.push(&ev("bob", now, start("t3", None, "run the tests", false)));
+        v.subagents.set_now("t2", "Read docs/a.md");
+        // ada's turn ended: her subagents run, so she still works
+        assert!(v.thread.working("ada") && !v.thread.busy.contains("ada"));
+        assert!(v.animating());
+        let s = screen(&mut v);
+        let row = s.iter().position(|r| r.contains("subagents (3)")).unwrap_or_else(|| panic!("{s:#?}"));
+        assert!(s[row].contains("ada: scan the repo") && s[row].contains("bob: run the tests"), "{}", s[row]);
+        assert!(s.iter().any(|r| r.contains("subagents…")), "the agent card: {s:#?}");
+        click(&mut v, 2, row as u16);
+        let s = screen(&mut v);
+        let at = |x: &str| s.iter().position(|r| r.contains(x)).unwrap_or_else(|| panic!("{x}: {s:#?}"));
+        let (ada, scan, docs, now_row, bob) = (at("ada · 2 subagents"), at("scan the repo · Explore · background"), at("read the docs"), at("↳ Read docs/a.md"), at("bob · 1 subagent"));
+        assert!(ada < scan && scan < docs && docs < now_row && now_row < bob, "{s:#?}");
+        let col = |r: &str, x: &str| r[..r.find(x).unwrap()].chars().count();
+        assert!(col(&s[docs], "read") > col(&s[scan], "scan"), "nested: indented");
+        assert!(s[bob - 1].trim_matches(|c| c == '│' || c == ' ').is_empty(), "a blank row between masters: {s:#?}");
+        // ↓ ↓: bob's; d: stop it
+        v.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let last = v.ops.borrow().last().cloned().unwrap();
+        assert_eq!((last["op"].as_str(), last["id"].as_str()), (Some("sub_stop"), Some("t3")), "{last:?}");
+        assert_eq!(v.input.text(), "", "d went to the box, not the prompt");
+    }
+
+    #[test]
+    fn a_report_is_a_message_of_the_master_folded_and_a_lost_one_can_be_picked_up() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("subtest-0001", Path::new("/tmp"), "t", tx);
+        v.members = vec!["ada".into()];
+        v.thread.push(&ev("ada", 1_000, start("t1", None, "scan the repo", false)));
+        v.thread.push(&ev("ada", 1_000, store::Kind::SubInfo { id: "t1".into(), transcript: "/x/agent-1.jsonl".into(), task: "1".into() }));
+        let report: String = (1..=9).map(|i| format!("line {i}\n")).collect();
+        v.thread.push(&ev("ada", 71_000, store::Kind::SubEnd { id: "t1".into(), state: "done".into(), result: report }));
+        assert!(!v.thread.working("ada"));
+        let s = screen(&mut v);
+        let at = |s: &[String], x: &str| s.iter().position(|r| r.contains(x));
+        assert!(at(&s, "↳ subagent “scan the repo” · done · 1m10s").is_some(), "{s:#?}");
+        assert!(at(&s, "line 6").is_some() && at(&s, "line 7").is_none(), "folded after 6 lines: {s:#?}");
+        let more = at(&s, "3 more lines").unwrap();
+        assert!(!s.iter().any(|r| r.contains("subagents (")), "0 running: 0 row");
+        click(&mut v, 6, more as u16);
+        let s = screen(&mut v);
+        assert!(at(&s, "line 9").is_some(), "opened: {s:#?}");
+        // a lost one: the error and its pick up
+        v.thread.push(&ev("ada", 80_000, start("t2", None, "fix the build", true)));
+        v.thread.push(&ev("ada", 80_000, store::Kind::SubInfo { id: "t2".into(), transcript: "/x/agent-2.jsonl".into(), task: "2".into() }));
+        v.thread.push(&ev("ada", 90_000, store::Kind::SubEnd { id: "t2".into(), state: "lost".into(), result: "the harness process of ada ended".into() }));
+        v.dirty = true;
+        let s = screen(&mut v);
+        assert!(at(&s, "ended without a report: the harness process of ada ended").is_some(), "{s:#?}");
+        let pick = at(&s, "pick up: ada goes on").unwrap();
+        click(&mut v, 6, pick as u16);
+        let last = v.ops.borrow().last().cloned().unwrap();
+        let text = last["text"].as_str().unwrap_or_default();
+        assert_eq!(last["to"], serde_json::json!(["ada"]));
+        assert!(text.contains("“fix the build”") && text.contains("/x/agent-2.jsonl") && text.contains("> do fix the build"), "{text}");
+    }
+}

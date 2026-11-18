@@ -75,6 +75,9 @@ struct Host {
     /// The worktree setup runs: messages wait in QUEUE (agent, text) until it ends.
     setup_running: bool,
     queue: Vec<(String, String)>,
+    /// Subagents of the agents (their start, steps, end into the log).
+    subagents: super::subagents::Tracker,
+    sub_scan: Instant,
 }
 
 /// @names in TEXT that name an active agent, in order, once each.
@@ -183,7 +186,8 @@ impl Host {
         match c["op"].as_str().unwrap_or_default() {
             "ping" => Ok(json!({
                 "live": self.sessions.keys().collect::<Vec<_>>(),
-                "busy": self.sessions.iter().filter(|(_, l)| l.busy).map(|(n, _)| n).collect::<Vec<_>>(),
+                // busy: in a turn, or waiting on running subagents
+                "busy": self.sessions.iter().filter(|(n, l)| l.busy || self.subagents.masters().contains(*n)).map(|(n, _)| n).collect::<Vec<_>>(),
                 "asks": self.asks.len(),
             })),
             "prompt" => {
@@ -252,6 +256,35 @@ impl Host {
                 self.asks.remove(&id);
                 self.log(Some(&agent), Kind::Answer { id, allow, label: s("label") });
                 Ok(json!({}))
+            }
+            // the owner stops subagent ID: a background one of Claude Code through its master
+            // (TaskStop), a foreground one with its master's turn
+            "sub_stop" => {
+                let id = s("id");
+                let r = self.subagents.stop(&id).ok_or_else(|| format!("subagent {id}: 0 running"))?;
+                let master = r.agent.clone();
+                let how = if r.background && !r.task.is_empty() {
+                    let text = format!(
+                        "[codehead] The owner stopped your background subagent “{}” (task id {}). Stop it now with TaskStop (task_id: {}) and go on without its result.",
+                        r.description, r.task, r.task
+                    );
+                    self.deliver(&master, &text)?;
+                    "its master stops it"
+                } else {
+                    // a foreground subagent ends with its master's turn: its other foreground ones too
+                    if let Some(l) = self.sessions.get_mut(&master).filter(|l| l.busy) {
+                        l.session.interrupt()?;
+                        l.interrupted = true;
+                    }
+                    let rest: Vec<String> = self.subagents.running.iter().filter(|(_, x)| x.agent == master && !x.background).map(|(i, _)| i.clone()).collect();
+                    for i in rest {
+                        self.subagents.stop(&i);
+                        self.log(Some(&master), Kind::SubEnd { id: i, state: "stopped".into(), result: "its master's turn was interrupted".into() });
+                    }
+                    "its master's turn interrupted"
+                };
+                self.log(Some(&master), Kind::SubEnd { id, state: "stopped".into(), result: how.into() });
+                Ok(json!({"stopped": how}))
             }
             "interrupt" => {
                 let (mut stopped, mut errs) = (Vec::new(), Vec::new());
@@ -374,7 +407,12 @@ impl Host {
                     }
                     _ => {}
                 }
+                // a task tool call starts a subagent, its result ends it
+                let subs = self.subagents.event(&agent, &kind);
                 self.log(Some(&agent), kind);
+                for (a, k) in subs {
+                    self.log(Some(&a), k);
+                }
             }
             Out::Delta(text) => {
                 self.push(&json!({"op": "delta", "agent": agent, "text": text}));
@@ -405,7 +443,14 @@ impl Host {
                     return;
                 }
                 if req["subtype"] == "can_use_tool" {
-                    self.log(Some(&agent), Kind::Ask { id: id.clone(), tool: req["tool_name"].as_str().unwrap_or_default().into(), input: req["input"].clone() });
+                    // an ask of a subagent: its name and master go with it
+                    let mut input = req["input"].clone();
+                    if let Some((_, r)) = req["agent_id"].as_str().and_then(|t| self.subagents.by_task(t))
+                        && input.is_object()
+                    {
+                        input["_subagent"] = json!(r.description);
+                    }
+                    self.log(Some(&agent), Kind::Ask { id: id.clone(), tool: req["tool_name"].as_str().unwrap_or_default().into(), input });
                     self.asks.insert(id, (agent, req));
                 }
             }
@@ -439,6 +484,9 @@ impl Host {
                             self.log(Some(&agent), session_ended());
                         }
                     }
+                }
+                for (a, k) in self.subagents.exit(&agent, &format!("the harness process of {agent} ended")) {
+                    self.log(Some(&a), k);
                 }
                 self.asks.retain(|_, (a, _)| *a != agent);
             }
@@ -489,6 +537,22 @@ impl Host {
     }
 
     /// Turns a crashed host left open (a `turn_start` with 0 `turn_end`): closed at start.
+    /// Claude Code agents: their subagent files (transcripts, nested ones, ends).
+    fn scan_subs(&mut self) {
+        self.sub_scan = Instant::now();
+        let Ok(t) = self.thread() else { return };
+        let sessions: Vec<(String, String)> = t
+            .sessions
+            .iter()
+            .filter(|(a, _)| roster::get(a).is_some_and(|x| x.harness == "claude"))
+            .map(|(a, s)| (a.clone(), s.clone()))
+            .collect();
+        let root = crate::config::home().join(".claude/projects");
+        for (a, k) in self.subagents.scan(&root, &sessions) {
+            self.log(Some(&a), k);
+        }
+    }
+
     fn close_open_turns(&self) {
         let mut open: Vec<String> = Vec::new();
         for e in store::events(&self.id) {
@@ -601,9 +665,15 @@ pub fn run(id: &str) -> ! {
         }
     });
     let exe = std::env::current_exe().unwrap_or_else(|_| Path::new("codehead").to_path_buf());
-    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new() };
+    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now() };
     catch_signals();
     h.close_open_turns();
+    // subagents the log has open ran in a process that is gone
+    let (subs, lost) = super::subagents::Tracker::from_log(&store::events(&t.id));
+    h.subagents = subs;
+    for (a, k) in lost {
+        h.log(Some(&a), k);
+    }
     if t.setup.as_deref() == Some("pending") {
         h.start_setup(&t, tx.clone());
     }
@@ -629,8 +699,12 @@ pub fn run(id: &str) -> ! {
         if h.stopping || SIGNALED.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
+        if h.subagents.any() && h.sub_scan.elapsed() >= Duration::from_secs(2) {
+            h.scan_subs();
+        }
         let busy = h.sessions.values().any(|l| l.busy);
-        if !busy && !h.setup_running && h.asks.is_empty() && h.last.elapsed() >= IDLE {
+        // running subagents keep the host (and their harness process) alive
+        if !busy && !h.subagents.any() && !h.setup_running && h.asks.is_empty() && h.last.elapsed() >= IDLE {
             break;
         }
         // the thread was deleted: end with it
@@ -661,7 +735,7 @@ mod tests {
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new() };
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now() };
         let (tx, rx) = mpsc::channel();
         h.start_setup(&t, tx);
         assert!(h.setup_running);
@@ -680,6 +754,29 @@ mod tests {
     }
 
     #[test]
+    fn subagents_go_into_the_log_and_end_lost_with_their_process() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t = store::Thread::new("subs", "task", Path::new("/tmp"), vec!["ada".into()]);
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (htx, _hrx) = mpsc::channel();
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now() };
+        h.harness("ada".into(), Out::Event(Kind::Tool { id: "t1".into(), name: "Agent".into(), input: json!({"description": "scan", "run_in_background": true, "prompt": "scan it"}) }));
+        h.harness("ada".into(), Out::Event(Kind::ToolResult { id: "t1".into(), ok: true, output: "Async agent launched\nagentId: a1".into() }));
+        // the master's turn ended: the subagent keeps the host alive, the master counts as busy
+        assert!(h.subagents.any());
+        let ping = h.cmd(&json!({"op": "ping"})).unwrap();
+        assert!(ping["busy"].as_array().unwrap().is_empty(), "0 session: 0 busy entry");
+        h.harness("ada".into(), Out::Exit(String::new()));
+        let kinds: Vec<Kind> = store::events(&t.id).into_iter().map(|e| e.kind).collect();
+        assert!(matches!(&kinds[1], Kind::SubStart { id, background: true, prompt, .. } if id == "t1" && prompt == "scan it"), "{kinds:?}");
+        assert!(kinds.iter().any(|k| matches!(k, Kind::SubInfo { task, .. } if task == "a1")), "{kinds:?}");
+        assert!(matches!(kinds.last(), Some(Kind::SubEnd { state, .. }) if state == "lost"), "{kinds:?}");
+        assert!(!h.subagents.any());
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+    }
+
+    #[test]
     fn subscribers_get_live_text_then_chunks_and_wakes() {
         let (a, b) = UnixStream::pair().unwrap();
         let (tx, rx) = mpsc::channel::<Input>();
@@ -688,7 +785,7 @@ mod tests {
         writeln!(w, "{}", json!({"op": "subscribe"})).unwrap();
         let Ok(Input::Subscribe(s)) = rx.recv() else { panic!("0 subscribe") };
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: "t".into(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new() };
+        let mut h = Host { id: "t".into(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now() };
         h.live.insert("ada".into(), "Hel".into());
         h.subscribe(s);
         h.harness("ada".into(), Out::Delta("lo".into()));

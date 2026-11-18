@@ -242,6 +242,25 @@ pub enum Kind {
     /// The agent got a note of edits in its worktree since its last turn, not its own: SUMMARY
     /// (1 line: who, files, line ranges).
     Edits { summary: String },
+    /// A subagent of the agent (its master) started: ID (the tool call that started it), PARENT
+    /// (the subagent that started it; None: the master itself), what it does.
+    SubStart {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        description: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        agent_type: String,
+        #[serde(default)]
+        background: bool,
+        /// Its task (cut to 2 KB): the master picks up from it when the subagent is lost.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        prompt: String,
+    },
+    /// More about subagent ID: its transcript file (Claude Code), its task id (TaskStop).
+    SubInfo { id: String, transcript: String, task: String },
+    /// Subagent ID ended: STATE `done`, `failed`, `stopped` or `lost`; RESULT its report (or why).
+    SubEnd { id: String, state: String, result: String },
 }
 
 impl Event {

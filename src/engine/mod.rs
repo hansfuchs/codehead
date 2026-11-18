@@ -18,6 +18,7 @@ pub mod host;
 pub mod mcp;
 pub mod roster;
 pub mod store;
+pub mod subagents;
 
 use std::path::PathBuf;
 

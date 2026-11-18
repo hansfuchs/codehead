@@ -35,6 +35,38 @@ pub enum Item {
     /// An answered ask: what AGENT asked (QUESTION), the owner's ANSWER (allow false: declined /
     /// denied). ASKED, TS: the times of the ask and of the answer.
     Settled { agent: String, question: String, answer: String, allow: bool, permission: bool, asked: u64, ts: u64 },
+    /// A subagent of AGENT (its master) ended: its report (done / failed) or why it ended (lost,
+    /// stopped); a message of the master. SUB: its index in `Thread::subs`; KEY: the fold of a
+    /// long report.
+    Sub { agent: String, sub: usize, ts: u64, key: usize },
+}
+
+/// A subagent of an agent on the thread.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sub {
+    pub id: String,
+    /// Its master: the agent on the thread.
+    pub master: String,
+    /// The subagent that started it (None: the master).
+    pub parent: Option<String>,
+    pub description: String,
+    pub agent_type: String,
+    pub background: bool,
+    pub prompt: String,
+    pub start: u64,
+    /// Claude Code: its transcript, its task id.
+    pub transcript: String,
+    pub task: String,
+    /// None: running; else `done`, `failed`, `stopped`, `lost`.
+    pub state: Option<String>,
+    pub result: String,
+    pub end: u64,
+}
+
+impl Sub {
+    pub fn running(&self) -> bool {
+        self.state.is_none()
+    }
 }
 
 /// An open question or permission request.
@@ -105,6 +137,8 @@ pub struct Thread {
     pending: HashMap<String, Vec<String>>,
     /// Fold keys of the messages with thoughts.
     thought_keys: usize,
+    /// The subagents of the agents, in start order.
+    pub subs: Vec<Sub>,
 }
 
 impl Thread {
@@ -209,7 +243,39 @@ impl Thread {
             }
             Kind::Error { message } => self.items.push(Item::Note { agent, text: message.clone(), color: theme::pal().danger }),
             Kind::Edits { summary } => self.items.push(Item::Note { agent, text: format!("got the edits since its last turn · {summary}"), color: theme::pal().muted }),
+            Kind::SubStart { id, parent, description, agent_type, background, prompt } => {
+                if !self.subs.iter().any(|s| &s.id == id) {
+                    self.subs.push(Sub { id: id.clone(), master: agent, parent: parent.clone(), description: description.clone(), agent_type: agent_type.clone(), background: *background, prompt: prompt.clone(), start: e.ts, ..Default::default() });
+                }
+            }
+            Kind::SubInfo { id, transcript, task } => {
+                if let Some(s) = self.subs.iter_mut().find(|s| &s.id == id) {
+                    if !transcript.is_empty() {
+                        s.transcript = transcript.clone();
+                    }
+                    if !task.is_empty() {
+                        s.task = task.clone();
+                    }
+                }
+            }
+            Kind::SubEnd { id, state, result } => {
+                if let Some(i) = self.subs.iter().position(|s| &s.id == id && s.running()) {
+                    let s = &mut self.subs[i];
+                    s.state = Some(state.clone());
+                    s.result = result.clone();
+                    s.end = e.ts;
+                    // the master's message: its own box ends here (the next text opens a new one)
+                    self.open_run.remove(&agent);
+                    self.runs += 1;
+                    self.items.push(Item::Sub { agent, sub: i, ts: e.ts, key: self.runs });
+                }
+            }
         }
+    }
+
+    /// AGENT works: in a turn, or its subagents run.
+    pub fn working(&self, agent: &str) -> bool {
+        self.busy.contains(agent) || self.subs.iter().any(|s| s.running() && s.master == agent)
     }
 
     /// A message of AGENT: the thoughts before it go in.
@@ -253,6 +319,8 @@ impl Thread {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Hit {
     Run(usize),
+    /// Pick up of lost subagent I (index in `Thread::subs`).
+    PickUp(usize),
     /// The thoughts above message KEY.
     Thought(usize),
     /// Choice I of the open ask.
@@ -300,6 +368,58 @@ impl Fold<'_> {
     /// The thoughts above message KEY: open.
     fn thought(&self, key: usize) -> bool {
         self.thoughts == Thoughts::Open || self.all_thoughts || self.open_thoughts.contains(&key)
+    }
+}
+
+/// Rows of the report of subagent SUB (a message of its master), BAR before each: `↳ subagent
+/// “what” · done · 2m10s`, then the report (folded to 6 lines, KEY opens it) or why it ended (lost:
+/// a `pick up` row: the master goes on from the subagent's context).
+fn sub_rows(d: &mut Drawn, s: &Sub, sub: usize, key: usize, fold: &Fold, w: usize, bar: &[Span<'static>]) {
+    let pal = theme::pal();
+    let state = s.state.as_deref().unwrap_or("running");
+    let color = match state {
+        "done" => pal.ok,
+        "stopped" => pal.muted,
+        _ => pal.danger,
+    };
+    let secs = s.end.saturating_sub(s.start) / 1000;
+    let took = if secs >= 60 { format!("{}m{:02}s", secs / 60, secs % 60) } else { format!("{secs}s") };
+    let head = [bar.to_vec(), vec![
+        Span::styled("↳ subagent ", theme::accent()),
+        Span::styled(format!("“{}”", s.description), theme::bold()),
+        Span::styled(" · ", theme::muted()),
+        Span::styled(state.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" · {took}"), theme::muted()),
+    ]]
+    .concat();
+    d.rows.push(Row::plain(Line::from(head)));
+    d.rows.push(Row::plain(Line::from(bar.to_vec())));
+    match state {
+        "lost" | "stopped" => {
+            let why = if state == "stopped" { "stopped by the owner".to_string() } else { format!("ended without a report: {}", s.result) };
+            d.rows.extend(render::plain(&why, w, Style::default().fg(color), bar));
+            if state == "lost" {
+                let at = d.rows.len();
+                let pre = [bar.to_vec(), vec![Span::styled("↻ ", theme::accent())]].concat();
+                d.rows.extend(render::plain(&format!("pick up: {} goes on from this subagent's context (click)", s.master), w, theme::accent(), &pre));
+                for i in at..d.rows.len() {
+                    d.hits.insert(i, Hit::PickUp(sub));
+                }
+            }
+        }
+        _ => {
+            let lines: Vec<&str> = s.result.trim_end().lines().collect();
+            let open = fold.run(key);
+            let long = lines.len() > 6;
+            let text = if long && !open { lines[..6].join("\n") } else { s.result.trim_end().to_string() };
+            d.rows.extend(memo::markdown(&text, w, bar));
+            if long {
+                let at = d.rows.len();
+                let label = if open { "▾ fold the report".to_string() } else { format!("▸ {} more lines (click)", lines.len() - 6) };
+                d.rows.push(Row::plain(Line::from([bar.to_vec(), vec![Span::styled(label, theme::muted())]].concat())));
+                d.hits.insert(at, Hit::Run(key));
+            }
+        }
     }
 }
 
@@ -710,6 +830,15 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                     }
                 }
             }
+            Item::Sub { agent, sub, ts, key } => {
+                let c = color_of(colors, agent);
+                blank(&mut d);
+                d.rows.push(Row::plain(Line::from(badge(agent, c, *ts))));
+                if let Some(s) = t.subs.get(*sub) {
+                    sub_rows(&mut d, s, *sub, *key, fold, w, &[Span::styled("│ ", Style::default().fg(c))]);
+                }
+                last_agent = None;
+            }
             Item::Note { agent, text, color } => {
                 let c = color_of(colors, agent);
                 let pre = [Span::styled("● ", Style::default().fg(*color)), Span::styled(format!("{agent} "), Style::default().fg(c))];
@@ -751,6 +880,10 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
 /// The rows of open ask A (answered questions, the shown one, its rows: clickable, the hint),
 /// BAR before each. ASK: the view's picker of A.
 fn ask_rows(d: &mut Drawn, a: &Ask, w: usize, bar: &[Span<'static>], ask: &Picker) {
+    // an ask of a subagent: whose it is
+    if let Some(sub) = a.input["_subagent"].as_str() {
+        d.rows.extend(render::plain(&format!("from subagent “{sub}” of {}", a.agent), w, theme::accent(), bar));
+    }
     let qs = a.questions();
     let multi = qs.get(ask.q).is_some_and(|q| q.3);
     match qs.get(ask.q) {
@@ -1047,7 +1180,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
     // last item of each agent at work: its box gets the wave, unless a message or an answer came
     // after it (a new turn: 0 output yet, the wave goes into a box of its own at the end)
     let last_of: HashMap<&str, usize> = t.items.iter().enumerate().filter_map(|(i, it)| match it {
-        Item::Text { agent, .. } | Item::Run { agent, .. } => Some((agent.as_str(), i)),
+        Item::Text { agent, .. } | Item::Run { agent, .. } | Item::Sub { agent, .. } => Some((agent.as_str(), i)),
         _ => None,
     }).collect();
     let turn_at = t.items.iter().rposition(|it| matches!(it, Item::Prompt { .. } | Item::Settled { .. }));
@@ -1103,7 +1236,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
             }
             // only thoughts, hidden: 0 rows
             Item::Text { text, thoughts, .. } if text.trim().is_empty() && (thoughts.is_empty() || fold.thoughts == Thoughts::Hidden) => {}
-            Item::Text { agent, ts, .. } | Item::Run { agent, start: ts, .. } => {
+            Item::Text { agent, ts, .. } | Item::Run { agent, start: ts, .. } | Item::Sub { agent, ts, .. } => {
                 let c = color_of(colors, agent);
                 let border = Style::default().fg(theme::desaturate(c, 0.4));
                 let bar = [Span::styled("│ ", border)];
@@ -1114,12 +1247,12 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                     let mut end_ts = *ts;
                     for it in &t.items[idx..] {
                         match it {
-                            Item::Text { agent: a, ts, .. } if a == agent => end_ts = *ts,
+                            Item::Text { agent: a, ts, .. } | Item::Sub { agent: a, ts, .. } if a == agent => end_ts = *ts,
                             Item::Run { agent: a, end, .. } if a == agent => end_ts = *end,
                             _ => break,
                         }
                     }
-                    let busy = t.busy.contains(agent) && last_of.get(agent.as_str()).is_some_and(|&l| l >= idx && t.items[idx..=l].iter().all(|it| matches!(it, Item::Text { agent: a, .. } | Item::Run { agent: a, .. } if a == agent)));
+                    let busy = t.working(agent) && last_of.get(agent.as_str()).is_some_and(|&l| l >= idx && t.items[idx..=l].iter().all(|it| matches!(it, Item::Text { agent: a, .. } | Item::Run { agent: a, .. } | Item::Sub { agent: a, .. } if a == agent)));
                     let name = vec![Span::styled(agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD))];
                     let (top, wave_at) = top_border(w, border, name, busy, &clock(end_ts));
                     if busy {
@@ -1191,6 +1324,11 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                             if think {
                                 run_thought_rows(&mut d, thoughts, calls.len(), inner, &tbar);
                             }
+                        }
+                    }
+                    Item::Sub { sub, key, .. } => {
+                        if let Some(s) = t.subs.get(*sub) {
+                            sub_rows(&mut d, s, *sub, *key, fold, inner, &bar);
                         }
                     }
                     _ => {}

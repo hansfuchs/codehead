@@ -12,7 +12,7 @@ use crate::engine::store::{self, Kind, Thread};
 const TRANSCRIPT_MAX: usize = 80_000;
 
 /// 1 short line of tool call NAME with INPUT: `Edit src/x.rs`, `Bash cargo test`.
-fn tool_line(name: &str, input: &serde_json::Value) -> String {
+pub fn tool_line(name: &str, input: &serde_json::Value) -> String {
     let arg = ["file_path", "path", "command", "pattern", "url", "query", "description"].iter().find_map(|k| input[*k].as_str()).unwrap_or_default();
     let arg: String = arg.lines().next().unwrap_or_default().chars().take(120).collect();
     format!("{name} {arg}").trim().to_string()

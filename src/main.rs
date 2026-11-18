@@ -39,6 +39,7 @@ mod setup;
 mod skills;
 mod sprites;
 mod stream;
+mod subagents;
 mod styles;
 mod textarea;
 mod theme;
