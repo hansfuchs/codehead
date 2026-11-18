@@ -49,34 +49,9 @@ impl Pane {
     const ALL: [Pane; 3] = [Pane::Chat, Pane::Changes, Pane::Files];
 }
 
-/// Thread header open (tab toggles it; kept across the thread switches it makes).
-static NAV_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The thread opened first from the start screen: the header's 1st card (kept across switches).
-static NAV_FIRST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
-
-/// Max. width of a header card (cards fit their titles).
-const NAV_CARD_W: u16 = 32;
 /// The changes view gets the chat left of it from this many columns.
 const SPLIT_MIN: u16 = 200;
-
-/// A thread view from the start screen: header closed, 0 first thread.
-pub fn reset_nav() {
-    NAV_ON.store(false, std::sync::atomic::Ordering::Relaxed);
-    if let Ok(mut f) = NAV_FIRST.lock() {
-        f.clear();
-    }
-}
-
-/// The header's 1st thread (ID: set as the first when 0 is set).
-fn nav_first(id: &str) -> String {
-    let Ok(mut f) = NAV_FIRST.lock() else { return id.to_string() };
-    if f.is_empty() {
-        *f = id.to_string();
-    }
-    f.clone()
-}
-
 /// 2 Esc presses within this time: back to the start screen. A single Esc interrupts once this time ends without a 2nd one.
 const DOUBLE_ESC: Duration = Duration::from_millis(500);
 /// Most rows the prompt grows to; longer text scrolls.
@@ -195,17 +170,6 @@ struct View {
     drafting: Option<Receiver<Result<String, String>>>,
     /// `> handoff`: the document on its way.
     handing: Option<Receiver<Result<String, String>>>,
-    // thread header: cards of the open threads (tab)
-    nav_on: bool,
-    nav_cards: Vec<crate::nav::Card>,
-    /// Cursor in the header order (nav_order).
-    nav_at: usize,
-    /// The 1st column of the card strip in view.
-    nav_offset: u16,
-    nav_first: String,
-    nav_rects: Vec<(Rect, usize)>,
-    nav_read: Option<Receiver<Vec<crate::nav::Card>>>,
-    nav_time: Instant,
     // chrome
     monitors: crate::monitors::Monitors,
     menu: Option<crate::menu::Menu>,
@@ -218,10 +182,8 @@ struct View {
     esc_interrupt: Option<Instant>,
     last_ctrl_c: Option<Instant>,
     exit: Exit,
-    /// The header switched threads: the view ends with EXIT.
-    nav_switch: bool,
-    /// A click on a card switched threads.
-    nav_click: bool,
+    /// A menu click switched threads: the view ends with EXIT.
+    mouse_exit: bool,
     /// Where the drag started (drawn row, col).
     drag_from: Option<(usize, u16)>,
     tx: Sender<Msg>,
@@ -298,14 +260,6 @@ impl View {
             drafting: None,
             handing: None,
             // tests: 0 shared state between parallel views
-            nav_on: !cfg!(test) && NAV_ON.load(std::sync::atomic::Ordering::Relaxed),
-            nav_cards: Vec::new(),
-            nav_at: 0,
-            nav_offset: 0,
-            nav_first: nav_first(id),
-            nav_rects: Vec::new(),
-            nav_read: None,
-            nav_time: Instant::now() - Duration::from_secs(60),
             monitors: crate::monitors::Monitors::new(id),
             menu: None,
             cost: None,
@@ -316,8 +270,7 @@ impl View {
             esc_interrupt: None,
             last_ctrl_c: None,
             exit: Exit::Back,
-            nav_switch: false,
-            nav_click: false,
+            mouse_exit: false,
             drag_from: None,
             tx,
             look: crate::config::messages(),
@@ -529,7 +482,7 @@ impl View {
 
     /// Something on screen moves: an agent at work (wave), monitors, the threads row, a toast.
     fn animating(&self) -> bool {
-        !self.thread.busy.is_empty() || self.monitors.active() || self.nav_on || self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(4))
+        !self.thread.busy.is_empty() || self.monitors.active() || self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(4))
     }
 
     /// Fire an interrupt armed by a single Esc once DOUBLE_ESC ends. True: state changed.
@@ -673,25 +626,13 @@ impl View {
             return false;
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        // thread header open: it owns ←→, enter, esc
-        if self.nav_on && self.nav_key(k) {
-            return self.nav_switch;
-        }
-        // views of the thread: alt+1-3 jump
+        // views of the thread: F1-F3 (alt+1-3 too)
         let alt = k.modifiers.contains(KeyModifiers::ALT);
-        // alt / option + ←→: the previous / next view (macOS terminals send option+←→ as alt+b / alt+f;
-        // word jumps in the prompt: ctrl+←→)
-        if alt && !ctrl {
-            let step = match k.code {
-                KeyCode::Left | KeyCode::Char('b') => Some(Pane::ALL.len() - 1),
-                KeyCode::Right | KeyCode::Char('f') => Some(1),
-                _ => None,
-            };
-            if let Some(s) = step {
-                let i = Pane::ALL.iter().position(|p| *p == self.pane).unwrap_or(0);
-                self.set_pane(Pane::ALL[(i + s) % Pane::ALL.len()]);
-                return false;
+        if let KeyCode::F(n @ 1..=9) = k.code {
+            if let Some(p) = Pane::ALL.get(usize::from(n - 1)) {
+                self.set_pane(*p);
             }
+            return false;
         }
         // alt+\: the chat next to the changes view on / off (wide terminals)
         if alt && !ctrl && k.code == KeyCode::Char('\\') {
@@ -784,9 +725,9 @@ impl View {
                 }
                 return false;
             }
-            // tab: the thread header (prompt text or not; dropdowns took theirs above)
+            // tab: the menu (prompt text or not; dropdowns took theirs above)
             KeyCode::Tab | KeyCode::BackTab if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && !self.mention_open() => {
-                self.set_nav(!self.nav_on);
+                self.open_menu();
                 return false;
             }
             KeyCode::Char('c') if ctrl && self.sel.is_some() => {
@@ -1023,165 +964,6 @@ impl View {
         }
     }
 
-    // ---------- thread header ----------
-
-    fn set_nav(&mut self, on: bool) {
-        self.nav_on = on;
-        NAV_ON.store(on, std::sync::atomic::Ordering::Relaxed);
-        if on {
-            self.load_nav(true);
-            self.nav_at = self.nav_here();
-        }
-    }
-
-    /// Header order: the thread opened first, then the open threads by activity. Before the 1st
-    /// read: this thread alone.
-    fn nav_order(&self) -> Vec<crate::nav::Card> {
-        let order = crate::nav::header_order(&self.nav_cards, &self.nav_first, &self.id);
-        if order.iter().any(|c| c.id == self.id) {
-            return order;
-        }
-        let mut v = vec![crate::nav::Card { id: self.id.clone(), title: self.title.clone(), state: "open".into(), live: 1, dir: Some(self.cwd.clone()), ..Default::default() }];
-        v.extend(order);
-        v
-    }
-
-    /// Index of this thread in the header order.
-    fn nav_here(&self) -> usize {
-        self.nav_order().iter().position(|c| c.id == self.id).unwrap_or(0)
-    }
-
-    /// ← (D -1) / → (D 1): the header cursor moves (wraps); enter switches.
-    fn nav_step(&mut self, d: isize) {
-        let n = self.nav_order().len();
-        if n <= 1 {
-            self.toast("0 other open threads");
-            return;
-        }
-        let from = self.nav_at.min(n - 1);
-        self.nav_at = (from as isize + d).rem_euclid(n as isize) as usize;
-    }
-
-    /// Thread cards, read in the background every 3s (NOW: at once).
-    fn load_nav(&mut self, now: bool) {
-        if let Some(rx) = &self.nav_read
-            && let Ok(cards) = rx.try_recv()
-        {
-            // the cursor stays on its thread when the order changes
-            let at = self.nav_order().get(self.nav_at).map(|c| c.id.clone());
-            self.nav_cards = cards;
-            self.nav_at = at.and_then(|id| self.nav_order().iter().position(|c| c.id == id)).unwrap_or_else(|| self.nav_here());
-            self.nav_read = None;
-        }
-        if self.nav_read.is_none() && (now || self.nav_time.elapsed() > Duration::from_secs(3)) {
-            self.nav_time = Instant::now();
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(crate::nav::load());
-            });
-            self.nav_read = Some(rx);
-        }
-    }
-
-    /// A key on the open header. True: used.
-    fn nav_key(&mut self, k: KeyEvent) -> bool {
-        match k.code {
-            KeyCode::Left => self.nav_step(-1),
-            KeyCode::Right => self.nav_step(1),
-            KeyCode::Enter => {
-                self.nav_open(self.nav_at);
-            }
-            KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => self.set_nav(false),
-            _ => return false,
-        }
-        true
-    }
-
-    /// Switch to card I of the header order (this thread: the header closes). True: the view ends.
-    fn nav_open(&mut self, i: usize) -> bool {
-        let Some(c) = self.nav_order().get(i).cloned() else { return false };
-        if c.id == self.id {
-            self.set_nav(false);
-            return false;
-        }
-        self.nav_switch = true;
-        self.exit = Exit::Open { id: c.id.clone(), dir: c.dir.clone().unwrap_or_else(|| self.cwd.clone()), title: c.title, note: String::new() };
-        true
-    }
-
-    /// Thread header in AREA (CARD_H + 1 rows): cards fit to their titles (max. NAV_CARD_W), side
-    /// by side on a strip that scrolls by columns: a card cut at the edge shows open on that side
-    /// (only with room for part of its title). Below the cards: `n+` / `+n`, the cards out of view.
-    fn draw_nav(&mut self, f: &mut Frame, area: Rect) {
-        self.nav_rects.clear();
-        if area.height < crate::nav::CARD_H || area.width < 8 {
-            return;
-        }
-        let order = self.nav_order();
-        let n = order.len();
-        let here = order.iter().position(|c| c.id == self.id).unwrap_or(0);
-        let sel = self.nav_at.min(n - 1);
-        let row = Rect { height: crate::nav::CARD_H, ..area };
-        // strip positions: x of each card, 1 column between cards
-        let widths: Vec<u16> = order.iter().map(|c| crate::nav::card_width(c, NAV_CARD_W.min(row.width))).collect();
-        let mut xs = Vec::with_capacity(n);
-        let mut x = 0u16;
-        for w in &widths {
-            xs.push(x);
-            x = x.saturating_add(w + 1);
-        }
-        let total = x.saturating_sub(1);
-        // scroll: the picked card fully in view, 3 columns of its neighbor too where possible
-        let (sx, sw) = (xs[sel], widths[sel]);
-        let peek = 3;
-        let mut off = self.nav_offset;
-        if sx < off + peek.min(sx) {
-            off = sx.saturating_sub(peek);
-        }
-        if sx + sw + peek > off + row.width {
-            off = (sx + sw + peek).saturating_sub(row.width);
-        }
-        off = off.min(total.saturating_sub(row.width));
-        self.nav_offset = off;
-        let tick = self.tick();
-        let (mut left, mut right) = (0, 0);
-        for i in 0..n {
-            let (cx, cw) = (xs[i], widths[i]);
-            // visible columns of card i
-            let a = cx.max(off);
-            let b = (cx + cw).min(off + row.width);
-            let cut = a > cx || b < cx + cw;
-            if cut {
-                if cx < off { left += 1 } else { right += 1 }
-            }
-            // a cut card: only with room for its border, a space and 3 title columns
-            if b <= a || (cut && b - a < 6) {
-                continue;
-            }
-            let mut card = ratatui::buffer::Buffer::empty(Rect::new(0, 0, cw, row.height));
-            let ca = card.area;
-            crate::nav::draw_card(&mut card, ca, &order[i], i == sel, i == here, false, tick);
-            let dst = Rect { x: row.x + (a - off), width: b - a, ..row };
-            let buf = f.buffer_mut();
-            for dy in 0..row.height {
-                for dx in 0..dst.width {
-                    buf[(dst.x + dx, dst.y + dy)] = card[(a - cx + dx, dy)].clone();
-                }
-            }
-            self.nav_rects.push((dst, i));
-        }
-        if area.height <= crate::nav::CARD_H {
-            return;
-        }
-        let mid = Rect { y: area.y + crate::nav::CARD_H, height: 1, ..area };
-        if left > 0 {
-            f.render_widget(Paragraph::new(Span::styled(format!("{left}+"), theme::accent())), Rect { width: mid.width / 2, ..mid });
-        }
-        if right > 0 {
-            f.render_widget(Paragraph::new(Span::styled(format!("+{right}"), theme::accent())).right_aligned(), Rect { x: mid.x + mid.width / 2, width: mid.width - mid.width / 2, ..mid });
-        }
-    }
-
     fn scroll(&mut self, delta: isize) {
         let max = self.drawn.rows.len().saturating_sub(usize::from(self.stream_rect.height));
         self.back = (self.back as isize + delta).clamp(0, max as isize) as usize;
@@ -1203,20 +985,20 @@ impl View {
     fn open_menu(&mut self) {
         use crate::menu::Item;
         let items = vec![
-            Item { label: format!("thread header: {}", if self.nav_on { "close" } else { "open" }), key: "tab".into(), id: 0 },
-            Item { label: "tool calls: open / close all".into(), key: "ctrl+o".into(), id: 1 },
-            Item { label: "thoughts: open / close all".into(), key: "ctrl+t".into(), id: 13 },
-            Item { label: "IDE on the worktree".into(), key: "ctrl+i".into(), id: 2 },
-            Item { label: "back to the start screen".into(), key: "esc esc".into(), id: 3 },
-            Item { label: "agents: mention · →: replace an agent".into(), key: "@".into(), id: 4 },
-            Item { label: "commands: files, notes, threads, skills, branch".into(), key: crate::config::command_key().to_string(), id: 5 },
-            Item { label: "paste a clipboard image".into(), key: "ctrl+v".into(), id: 7 },
-            Item { label: "select + copy · double click: word · click code: copy".into(), key: "drag".into(), id: 9 },
-            Item { label: "scroll the stream".into(), key: "wheel · pgup".into(), id: 10 },
-            Item { label: "send · new line".into(), key: "⌘/ctrl+⏎ · ⏎".into(), id: 11 },
-            Item { label: "interrupt the agents".into(), key: "esc".into(), id: 12 },
+            Item { label: "back to the start screen".into(), key: "esc esc".into(), id: 3, section: "thread" },
+            Item { label: "IDE on the worktree".into(), key: "ctrl+i".into(), id: 2, section: "thread" },
+            Item { label: "interrupt the agents".into(), key: "esc".into(), id: 12, section: "thread" },
+            Item { label: "tool calls: open / close all".into(), key: "ctrl+o".into(), id: 1, section: "chat" },
+            Item { label: "thoughts: open / close all".into(), key: "ctrl+t".into(), id: 13, section: "chat" },
+            Item { label: "scroll the stream".into(), key: "wheel · pgup".into(), id: 10, section: "chat" },
+            Item { label: "select + copy · double click: word · click code: copy".into(), key: "drag".into(), id: 9, section: "chat" },
+            Item { label: "send · new line".into(), key: "⌘/ctrl+⏎ · ⏎".into(), id: 11, section: "prompt" },
+            Item { label: "agents: mention · →: replace an agent".into(), key: "@".into(), id: 4, section: "prompt" },
+            Item { label: "commands: files, notes, threads, skills, branch".into(), key: crate::config::command_key().to_string(), id: 5, section: "prompt" },
+            Item { label: "paste a clipboard image".into(), key: "ctrl+v".into(), id: 7, section: "prompt" },
         ];
-        let cards = crate::nav::load();
+        // cards: read in the background by the menu (0 wait on open)
+        let cards = Vec::new();
         self.menu = Some(crate::menu::Menu::new(items, Some(self.id.clone()), self.members.clone(), self.roster.clone(), cards));
     }
 
@@ -1236,10 +1018,6 @@ impl View {
                 }
                 self.exit = Exit::Open { id: c.id.clone(), dir: c.dir.clone().unwrap_or_else(|| self.cwd.clone()), title: c.title, note: String::new() };
                 return true;
-            }
-            Action::Command(0) => {
-                let on = !self.nav_on;
-                self.set_nav(on);
             }
             Action::Command(1) => {
                 self.all_runs = !self.all_runs;
@@ -1288,6 +1066,8 @@ impl View {
             let a = menu.mouse(m);
             if self.menu_action(a) {
                 self.menu = None;
+                // a thread picked: the view ends
+                self.mouse_exit = true;
             }
             return;
         }
@@ -1300,15 +1080,6 @@ impl View {
         }
         let at = Position { x: m.column, y: m.row };
         self.hover = Some(at);
-        // the thread header's cards
-        if self.nav_on && matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
-            && let Some(&(_, i)) = self.nav_rects.iter().find(|(r, _)| r.contains(at))
-        {
-            if self.nav_open(i) {
-                self.nav_click = true;
-            }
-            return;
-        }
         let click = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
         // the worktree's URL (portless): the browser
         if click && let Some((r, url)) = &self.url_rect
@@ -1685,17 +1456,18 @@ impl View {
     fn draw(&mut self, f: &mut Frame) {
         let full = f.area();
         f.render_widget(Paragraph::new("").style(theme::text()), full);
-        if self.nav_on {
-            self.load_nav(false);
-        }
-        // row 0: the view bar (views of the thread, the title); the thread header (tab) below it
+        // row 0: the view bar (views of the thread, the title)
         let top = Rect { height: full.height.min(1), ..full };
         let below = Rect { y: full.y + top.height, height: full.height - top.height, ..full };
-        let nav_h = if self.nav_on { crate::nav::CARD_H + 1 } else { 0 };
-        let area = Rect { y: below.y + nav_h, height: below.height.saturating_sub(nav_h), ..below };
-        if self.nav_on {
-            self.draw_nav(f, Rect { height: nav_h.min(below.height), ..below });
+        // a dotted line below the view bar (as the fold line above the prompt)
+        let sep = (below.height > 8) as u16;
+        if sep > 0 {
+            let buf = f.buffer_mut();
+            for x in below.x..below.right() {
+                buf[(x, below.y)].set_symbol("┄").set_style(theme::line());
+            }
         }
+        let area = Rect { y: below.y + sep, height: below.height - sep, ..below };
         // bottom up: footer, the bubble's hint row, the input bubble (its top border: the header's
         // bottom line), the header (agents + tokens box), the title row, monitors, the stream
         let foot = Rect { y: area.bottom().saturating_sub(1), height: 1, ..area };
@@ -1903,7 +1675,6 @@ impl View {
         // footer: keys or toast right
         let right = match &self.toast {
             Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Span::styled(format!("{m} "), theme::accent()),
-            _ if self.nav_on => Span::styled("←→: pick thread · enter: open · tab / esc: close ", theme::accent()),
             _ if self.committing.is_some() => Span::styled(
                 if self.drafting.is_some() { "drafting… · esc: cancel ".to_string() } else { "commit message · ctrl+g: draft by model · ⌘/ctrl+⏎: commit the staged files · esc: cancel ".to_string() },
                 theme::accent(),
@@ -1911,8 +1682,8 @@ impl View {
             _ if let Some((file, line, _)) = &self.commenting => Span::styled(format!("comment on {file}:{line} · ⌘/ctrl+⏎: add to the batch · esc: cancel "), theme::accent()),
             _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled("j k · space: reviewed · c: comment · C: send · o: IDE · s: layout · i: prompt ", theme::muted()),
             _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · pgup pgdn: scroll · o: IDE · y: yazi · c: copy path · S: share · i: prompt ", theme::muted()),
-            _ if self.pane != Pane::Chat => Span::styled("esc: back to the view · ⌥←→: views ", theme::muted()),
-            _ => Span::styled(format!("tab: threads · ⌥←→: views · esc: interrupt · esc esc: codehead · {}: menu ", crate::config::menu_key().label), theme::muted()),
+            _ if self.pane != Pane::Chat => Span::styled("esc: back to the view · F1-F3: views ", theme::muted()),
+            _ => Span::styled("tab: menu · F1-F3: views · esc: interrupt · esc esc: codehead ", theme::muted()),
         };
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), foot);
 
@@ -1924,7 +1695,8 @@ impl View {
         }
         if let Some(m) = self.menu.as_mut() {
             f.render_widget(Clear, Rect::default());
-            m.render(f, area);
+            // centered on the chat history (the stream), not the whole terminal
+            m.render(f, area, self.view_rect);
         }
     }
 }
@@ -2142,7 +1914,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
                 Event::Key(k) if k.kind != KeyEventKind::Release => v.key(k),
                 Event::Mouse(m) => {
                     v.mouse(m);
-                    v.nav_click
+                    v.mouse_exit
                 }
                 Event::Paste(s) => {
                     v.paste(&s);
@@ -2314,7 +2086,7 @@ mod ask_tests {
         press(&mut v, &[KeyCode::Tab, KeyCode::Char(' ')]);
         assert!(v.ask.rows(v.thread.asks.first().unwrap())[0].picked);
         assert_eq!(v.input.text(), "hi ");
-        assert!(!v.nav_on, "tab with an open ask: 0 thread header");
+        assert!(v.menu.is_none(), "tab with an open ask: 0 menu");
     }
 
     #[test]
@@ -2392,103 +2164,6 @@ mod ask_tests {
     }
 }
 
-/// The thread header: card strip, hidden counts, tab toggle, ←→ pick, enter switch.
-#[cfg(test)]
-mod nav_tests {
-    use super::*;
-    use crate::nav::Card;
-    use ratatui::backend::TestBackend;
-
-    fn card(id: &str, act: u64) -> Card {
-        Card { id: id.into(), title: format!("thread {id}"), state: "open".into(), live: 1, activity: act, ..Default::default() }
-    }
-
-    fn view() -> View {
-        let (tx, _rx) = mpsc::channel();
-        let mut v = View::new("a", Path::new("/tmp"), "thread a", tx);
-        v.nav_first = "a".into();
-        v.nav_cards = vec![card("b", 50), card("c", 40), card("a", 30), card("d", 20), card("e", 10)];
-        v.nav_cards[1].unread = true;
-        v.nav_cards[0].busy = true;
-        // 0 background read: the cards above stay
-        v.nav_time = Instant::now();
-        v
-    }
-
-    fn draw(v: &mut View) -> Vec<String> {
-        let mut t = Terminal::new(TestBackend::new(80, 5)).unwrap();
-        t.draw(|f| v.draw_nav(f, Rect::new(0, 0, 80, 5))).unwrap();
-        let b = t.backend().buffer().clone();
-        (0..5).map(|y| (0..80).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect()
-    }
-
-    #[test]
-    fn header_cards_fit_titles_and_count_the_hidden_ones() {
-        let mut v = view();
-        let order: Vec<String> = v.nav_order().into_iter().map(|c| c.id).collect();
-        assert_eq!(order, ["a", "b", "c", "d", "e"]);
-        let rows = draw(&mut v);
-        let s = rows.join("\n");
-        // cards fit their titles: 16 columns each, the 1st at column 0
-        assert!(rows[0].starts_with("╭ here ────────╮ ╭"), "{s}");
-        // the 5th card cut at the right edge: open there, its count below
-        assert!(rows[1].trim_end().ends_with("thread e") && !rows[0].ends_with('╮') && rows[4].trim_end().ends_with("+1"), "{s}");
-        assert!(s.contains("working…") && s.contains('●'), "{s}");
-        // → × 4: the cursor on e, the strip scrolls: the 1st card cut on the left
-        for _ in 0..4 {
-            v.nav_step(1);
-        }
-        let rows = draw(&mut v);
-        let s = rows.join("\n");
-        assert!(rows[1].contains("thread e") && rows[4].starts_with("1+"), "{s}");
-        assert!(!rows[0].starts_with('╭'), "the left card open: {s}");
-        // → on the last card: wraps to the 1st
-        v.nav_step(1);
-        assert_eq!(v.nav_at, 0);
-    }
-
-    #[test]
-    fn tab_toggles_the_header_with_prompt_text_and_enter_switches() {
-        let mut v = view();
-        v.input.set_text("half a message");
-        v.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(v.nav_on, "tab with prompt text: header open");
-        assert_eq!(v.input.text(), "half a message");
-        v.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(!v.nav_on, "tab again: header closed");
-        // alt+→: the next view, 0 header; alt+← (and option+← as alt+b): back; the prompt text stays
-        v.key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
-        assert!(!v.nav_on && v.pane == Pane::Changes, "alt+→: changes view");
-        v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
-        assert_eq!(v.pane, Pane::Files);
-        v.key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
-        assert_eq!(v.pane, Pane::Chat, "wraps");
-        v.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
-        assert_eq!(v.pane, Pane::Files);
-        v.key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
-        v.key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
-        assert_eq!((v.pane, v.input.text().as_str()), (Pane::Chat, "half a message"));
-        // shift+tab: the thread header, as tab
-        v.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert!(v.nav_on, "shift+tab: header open");
-        v.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(!v.nav_on);
-        v.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(v.nav_on, "tab: header open");
-        // enter on this thread: the header closes, the view stays
-        assert!(!v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert!(!v.nav_on);
-        // → → enter: switch to c
-        v.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        v.nav_cards = vec![card("b", 50), card("c", 40), card("a", 30)];
-        v.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        v.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        assert!(v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert!(matches!(&v.exit, Exit::Open { id, .. } if id == "c"));
-        reset_nav();
-    }
-}
-
 /// Views of a thread: the view bar, keys to the changes view, the prompt's focus.
 #[cfg(test)]
 mod pane_tests {
@@ -2515,8 +2190,9 @@ mod pane_tests {
     fn view_bar_shows_both_views_and_alt_digits_switch() {
         let mut v = view();
         let s = screen(&mut v);
-        assert!(s.contains(" chat   changes   files  │ thread p"), "{s}");
-        assert!(s.contains("⌥←→: views"), "{s}");
+        // the changes label may carry a count (other tests share the thread id)
+        assert!(s.contains(" chat   changes") && s.contains("files  │ thread p"), "{s}");
+        assert!(s.contains("F1-F3: views"), "{s}");
         // the view bar on row 0
         assert!(s.lines().next().unwrap().contains(" chat "), "{s}");
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
@@ -2530,7 +2206,7 @@ mod pane_tests {
     #[test]
     fn changes_view_keeps_letters_from_the_prompt_until_i() {
         let mut v = view();
-        press(&mut v, KeyCode::Right, KeyModifiers::ALT);
+        press(&mut v, KeyCode::F(2), KeyModifiers::NONE);
         press(&mut v, KeyCode::Char('j'), KeyModifiers::NONE);
         assert_eq!(v.input.text(), "", "j: a view key");
         press(&mut v, KeyCode::Char('i'), KeyModifiers::NONE);
@@ -2635,8 +2311,8 @@ mod files_pane_tests {
         // a pick: its path into the prompt, relative to the worktree
         v.yazi_picked(&["/tmp/src/a.rs".to_string()]);
         assert_eq!(v.input.text(), "src/a.rs ");
-        // alt+→ from files: back to chat (wraps)
-        v.key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+        // F1 from files: back to chat
+        v.key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         assert_eq!(v.pane, Pane::Chat);
     }
 }

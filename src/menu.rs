@@ -50,11 +50,12 @@ pub enum Action {
     Add(String),
 }
 
-/// Quick command of the host: label, hotkey hint, id.
+/// Quick command of the host: label, hotkey hint, id, section (a heading row over each section).
 pub struct Item {
     pub label: String,
     pub key: String,
     pub id: usize,
+    pub section: &'static str,
 }
 
 /// Agents tab rows: the edit button, the agents of the thread, the add button.
@@ -101,8 +102,8 @@ pub struct Menu {
 
 fn builtins() -> Vec<Item> {
     vec![
-        Item { label: "new thread: start screen, new tab".into(), key: "n".into(), id: usize::MAX },
-        Item { label: "settings: start screen, settings tab".into(), key: String::new(), id: usize::MAX - 1 },
+        Item { label: "new thread: start screen, new tab".into(), key: "n".into(), id: usize::MAX, section: "codehead" },
+        Item { label: "settings: start screen, settings tab".into(), key: String::new(), id: usize::MAX - 1, section: "codehead" },
     ]
 }
 
@@ -434,12 +435,15 @@ impl Menu {
         self.rows.iter().find(|(r, _)| r.contains(at)).map(|(r, _)| *r).or_else(|| self.tab_rects.iter().find(|(r, _)| r.contains(at)).map(|(r, _)| *r))
     }
 
-    pub fn render(&mut self, f: &mut Frame, area: Rect) {
+    /// The menu in AREA, centered on CENTER (the chat history; AREA keeps it on screen).
+    pub fn render(&mut self, f: &mut Frame, area: Rect, center: Rect) {
         self.poll();
         self.poll_detail();
         let w = area.width.saturating_sub(4).min(76);
-        let h = area.height.saturating_sub(2).min(30).max(8.min(area.height));
-        let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+        let h = area.height.saturating_sub(2).min(32).max(8.min(area.height));
+        let center = if center.width == 0 || center.height == 0 { area } else { center };
+        let mid = |c: u16, len: u16, n: u16, lo: u16, hi: u16| (c + len / 2).saturating_sub(n / 2).max(lo).min(hi.saturating_sub(n));
+        let r = Rect { x: mid(center.x, center.width, w, area.x, area.right()), y: mid(center.y, center.height, h, area.y, area.bottom()), width: w, height: h };
         self.frame = r;
         f.render_widget(Clear, r);
         let block = Block::new()
@@ -509,11 +513,26 @@ impl Menu {
 
     fn draw_quick(&mut self, f: &mut Frame, body: Rect) {
         let kw = self.items.iter().map(|i| i.key.chars().count()).max().unwrap_or(0);
+        // per section: a blank row (after the 1st), its heading, its items
+        let mut y = body.y;
+        let mut last: Option<&str> = None;
         for (i, it) in self.items.iter().enumerate() {
-            let y = body.y + i as u16;
+            if last != Some(it.section) {
+                if last.is_some() {
+                    y += 1;
+                }
+                last = Some(it.section);
+                if y < body.bottom() {
+                    f.render_widget(Paragraph::new(Span::styled(it.section.to_string(), theme::muted().add_modifier(Modifier::BOLD))), Rect { y, height: 1, ..body });
+                }
+                y += 1;
+            }
             if y >= body.bottom() {
                 break;
             }
+            let row_y = y;
+            y += 1;
+            let y = row_y;
             let r = Rect { y, height: 1, ..body };
             let hl = i == self.qcursor;
             let (ks, ls) = Self::row_style(hl);
@@ -664,7 +683,7 @@ mod tests {
     }
 
     fn menu() -> Menu {
-        let items = vec![Item { label: "keys".into(), key: "?".into(), id: 7 }];
+        let items = vec![Item { label: "keys".into(), key: "?".into(), id: 7, section: "help" }];
         Menu::new(items, Some("t1".into()), vec!["amon".into()], vec![agent("amon"), agent("lilith")], vec![card("t1", "first"), card("t2", "deploy fix")])
     }
 
@@ -743,13 +762,13 @@ mod tests {
         let mut m = Menu::new(Vec::new(), cards.first().map(|c| c.id.clone()), vec!["amon".into()], crate::agents::cached(), cards);
         m.key(k(KeyCode::Tab));
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 34)).unwrap();
-        t.draw(|f| m.render(f, f.area())).unwrap();
+        t.draw(|f| m.render(f, f.area(), f.area())).unwrap();
         let b = t.backend().buffer().clone();
         let s: Vec<String> = (0..34).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect()).collect();
         println!("{}", s.join("\n"));
         m.key(k(KeyCode::Tab));
         m.detail = Some(crate::cost::detail(m.thread.as_deref()));
-        t.draw(|f| m.render(f, f.area())).unwrap();
+        t.draw(|f| m.render(f, f.area(), f.area())).unwrap();
         let b = t.backend().buffer().clone();
         let s: Vec<String> = (0..34).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect()).collect();
         println!("{}", s.join("\n"));
@@ -767,7 +786,7 @@ mod render_tests {
 
     fn screen(m: &mut Menu) -> String {
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 34)).unwrap();
-        t.draw(|f| m.render(f, f.area())).unwrap();
+        t.draw(|f| m.render(f, f.area(), f.area())).unwrap();
         let b = t.backend().buffer().clone();
         let s = (0..34).map(|y| (0..90).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n");
         if std::env::var_os("SHOW").is_some() {

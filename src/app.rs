@@ -1777,8 +1777,8 @@ impl App {
     fn open_menu(&mut self) {
         let (cmds, help) = self.commands();
         let mut items: Vec<crate::menu::Item> =
-            cmds.iter().enumerate().map(|(i, c)| crate::menu::Item { label: c.label.to_string(), key: c.key.to_string(), id: i }).collect();
-        items.push(crate::menu::Item { label: "keys of this screen".into(), key: String::new(), id: KEYS_ITEM });
+            cmds.iter().enumerate().map(|(i, c)| crate::menu::Item { label: c.label.to_string(), key: c.key.to_string(), id: i, section: "this screen" }).collect();
+        items.push(crate::menu::Item { label: "keys of this screen".into(), key: String::new(), id: KEYS_ITEM, section: "help" });
         self.menu = Some(crate::menu::Menu::new(items, None, Vec::new(), self.agents.clone(), Vec::new()));
         self.menu_cmds = cmds;
         self.menu_help = help;
@@ -2114,13 +2114,16 @@ impl App {
         if ctrl && matches!(k.code, KeyCode::Char('c')) {
             return self.ctrl_c();
         }
-        // alt+1..4: the main tabs from every field (ctrl / alt+←→: word jumps); tab: the next field
-        if k.modifiers.contains(KeyModifiers::ALT)
-            && !ctrl
-            && !self.cfg.copy_mode
-            && let KeyCode::Char(c @ '1'..='4') = k.code
+        // F1-F4 (alt+1..4 too): the main tabs from every field (ctrl / alt+←→: word jumps); tab: the next field
+        let main_tab = match k.code {
+            KeyCode::F(n @ 1..=4) => Some(usize::from(n - 1)),
+            KeyCode::Char(c @ '1'..='4') if k.modifiers.contains(KeyModifiers::ALT) && !ctrl => Some(usize::from(c as u8 - b'1')),
+            _ => None,
+        };
+        if !self.cfg.copy_mode
+            && let Some(i) = main_tab
         {
-            let to = [Tab::New, Tab::Threads, Tab::Agents, Tab::Settings][usize::from(c as u8 - b'1')];
+            let to = [Tab::New, Tab::Threads, Tab::Agents, Tab::Settings][i];
             self.switch_tab(to);
             // the keys: in the tab's content; settings: on its tabs row (0 path dropdown at entry)
             if to != Tab::Settings {
@@ -3054,7 +3057,7 @@ impl App {
         }
         self.draw_modal(f, area);
         if let Some(m) = self.menu.as_mut() {
-            m.render(f, area);
+            m.render(f, area, area);
         }
         if let Some(r) = self.hover_rect() {
             theme::hover(f.buffer_mut(), r);
@@ -3734,18 +3737,18 @@ impl App {
             Screen::Compose if self.field == Field::Where => &[("←→", "current · new branch · new worktree · main · recent"), ("r", "repo"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.field == Field::Opts => &[("←→", "box"), ("space", "check / uncheck"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.drafts_menu.is_some() => &[("↑↓", "move"), ("enter", "load"), ("d", "delete"), ("esc", "back")],
-            Screen::Compose if self.field == Field::Drafts => &[("enter", "list drafts"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("alt+1-4", "tabs")],
+            Screen::Compose if self.field == Field::Drafts => &[("enter", "list drafts"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("F1-F4", "tabs")],
             Screen::Compose if self.field == Field::Prompt => &[("@", "agents"), (cmd.as_str(), "commands"), ("dir/", "paths"), ("ctrl+v", "image"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("esc esc", "quit")],
             Screen::Compose if self.field == Field::Notes => &[("enter", "pick notes"), ("x", "drop"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
-            Screen::Compose => &[("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("tab", "next field"), ("alt+1-4", "tabs"), ("esc esc", "quit")],
+            Screen::Compose => &[("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("tab", "next field"), ("F1-F4", "tabs"), ("esc esc", "quit")],
             Screen::Pick if self.tfilter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to list")],
             Screen::Pick if self.filter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter", "done"), ("esc", "clear")],
             Screen::Pick if self.tab == Tab::Notes && self.cfg.copy_mode => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "copy"), ("esc", "quit")],
             Screen::Pick if self.tab == Tab::Notes => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "confirm"), ("esc", "new"), ("tab", "back")],
-            Screen::Pick if self.tab == Tab::Threads => &[("↑↓", "move"), ("f", "filter"), ("space", "select"), ("c", "context"), ("enter", "open"), ("alt+1-4", "tabs")],
-            Screen::Pick if self.tab == Tab::Settings => &[("↑↓", "move"), ("enter", "edit / done"), ("ctrl+d", "default"), ("d", "delete alias"), ("ctrl+n", "add alias"), ("tab", "next field"), ("esc", "undo edit"), ("alt+1-4", "tabs")],
+            Screen::Pick if self.tab == Tab::Threads => &[("↑↓", "move"), ("f", "filter"), ("space", "select"), ("c", "context"), ("enter", "open"), ("F1-F4", "tabs")],
+            Screen::Pick if self.tab == Tab::Settings => &[("↑↓", "move"), ("enter", "edit / done"), ("ctrl+d", "default"), ("d", "delete alias"), ("ctrl+n", "add alias"), ("tab", "next field"), ("esc", "undo edit"), ("F1-F4", "tabs")],
             Screen::Pick if self.afilter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to cards")],
-            Screen::Pick => &[("↑↓←→", "move"), ("f", "filter"), ("enter", "edit"), ("alt+1-4", "tabs")],
+            Screen::Pick => &[("↑↓←→", "move"), ("f", "filter"), ("enter", "edit"), ("F1-F4", "tabs")],
         };
         for (k, l) in hints {
             spans.extend(hint(k, l));
@@ -5047,7 +5050,7 @@ mod render_tests {
         println!("--- notes picker\n{}", dump(&mut a, 130, 16));
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
-        key(&mut a, KeyCode::F(2), KeyModifiers::NONE);
+        key(&mut a, KeyCode::F(10), KeyModifiers::NONE);
         println!("--- menu\n{}", dump(&mut a, 100, 22));
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);

@@ -82,7 +82,7 @@ config:  ~/.config/codehead.toml ($CODEHEAD_CONFIG overrides). keys, each overri
            models = \"fable,opus,sonnet,haiku\"  Claude models ($CODEHEAD_MODELS)
            messages = \"bubbles\"  thread view messages: bubbles or lines ($CODEHEAD_MESSAGES)
            thoughts = \"hidden\"  thread view thoughts: hidden, folded or open ($CODEHEAD_THOUGHTS)
-           [keys]   menu = \"F2\" ($CODEHEAD_MENU_KEY), command = \">\" ($CODEHEAD_COMMAND_KEY)
+           [keys]   menu = \"F10\" ($CODEHEAD_MENU_KEY), command = \">\" ($CODEHEAD_COMMAND_KEY)
            [colors] scheme = \"coral\" | \"amber\" ($CODEHEAD_SCHEME); accent, text, … = \"#RRGGBB\"
            [aliases]
            \"project:platform\" = \"~/projects/exampleorg/project/notes/platform/\"
@@ -120,7 +120,7 @@ drafts:  an unsent task goes to ~/.cache/codehead/drafts ($CODEHEAD_DRAFTS) afte
 artifacts: codehead sets CLAUDE_CODE_ARTIFACT=1 for the sessions it starts: Claude Code agents can
          publish web artifacts (off by default in SDK sessions). a value set before codehead stays.
 esc:     1 level back: never applies, never drops edits unasked (agent form, ctrl+r reset: asked).
-tabs:    alt+1-4 switch tabs (word jumps: ctrl / alt+←→). tab / shift+tab: next / previous field.
+tabs:    F1-F4 (alt+1-4) switch tabs (word jumps: ctrl / alt+←→). tab / shift+tab: next / previous field.
 esc esc: quit from the new tab. ctrl+c: quit at once.
 updates: 1 check per day (github.com releases, in the background). a newer release: 1 line after
          codehead quits. codehead --update installs it. $CODEHEAD_NO_UPDATE_CHECK=1: 0 checks.
@@ -169,7 +169,7 @@ engine:  codehead runs the agents itself. 1 host process per thread (codehead ho
          events.jsonl; $CODEHEAD_HOME). agents: ~/.config/codehead/agents/<name>.toml.
          sockets: $XDG_RUNTIME_DIR/codehead. logs: ~/.local/share/codehead/logs.
          codehead ctl <thread> '<json>': 1 command to a thread's host (scripts).
-menu:    F2 everywhere, esc closes. tab / shift+tab, ←→: tabs. quick: new, settings + the commands of
+menu:    tab in the thread view, F10 everywhere, esc closes. tab / shift+tab, ←→: tabs. quick: new, settings + the commands of
          the screen (keys: the keys of the screen). threads: filter (type) + thread cards, enter opens.
          agents: the agents of the thread in view (enter, enter: remove = it leaves the thread), add,
          edit → the agents tab of the start screen.";
@@ -373,7 +373,6 @@ fn open_view(term: &mut Term, tty: &mut Tty, out: &mut Stdout, id: &str, cwd: &P
     let (mut id, mut cwd, mut title) = (id.to_string(), cwd.to_path_buf(), title.to_string());
     // the thread header keeps the thread opened first at index 0
     let first = id.clone();
-    view::reset_nav();
     let mut note = None;
     let _ = terminal::enable_raw_mode();
     let _ = execute!(out, EnableMouseCapture, EnableBracketedPaste);
