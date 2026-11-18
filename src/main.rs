@@ -19,6 +19,7 @@ mod handoff;
 mod home;
 mod editor;
 mod files;
+mod fuzzy;
 mod engine;
 mod dropdown;
 mod mention;

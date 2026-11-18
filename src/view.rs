@@ -673,6 +673,12 @@ impl View {
             }
             return false;
         }
+        // the files view's filter input: every key but ctrl+c (esc: clears it)
+        if self.pane == Pane::Files && !self.prompt_focus && self.files.typing() && !(ctrl && k.code == KeyCode::Char('c')) {
+            let act = self.files.key(k);
+            self.files_act(act);
+            return false;
+        }
         // the changes view with the focus: its keys (esc, tab, ctrl+c and the menu key: as in chat)
         if self.pane != Pane::Chat && !self.prompt_focus {
             let through = matches!(k.code, KeyCode::Esc | KeyCode::Tab) || (ctrl && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('y'))) || crate::config::menu_key().matches(&k);
@@ -2344,6 +2350,21 @@ mod default_to_tests {
 #[cfg(test)]
 mod files_pane_tests {
     use super::*;
+
+    #[test]
+    fn the_files_filter_takes_every_letter_and_esc() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("filesfilter-0000", Path::new("/tmp"), "t", tx);
+        v.key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        assert_eq!(v.pane, Pane::Files);
+        for c in "fix".chars() {
+            v.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        // `i` went to the filter, not to the prompt focus
+        assert!(v.files.typing() && !v.prompt_focus && v.input.text().is_empty());
+        v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!v.files.typing() && v.last_esc.is_none(), "esc: the filter only");
+    }
 
     #[test]
     fn files_is_the_3rd_view_with_its_keys() {
