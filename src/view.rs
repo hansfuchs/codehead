@@ -181,6 +181,8 @@ struct View {
     /// A commit message in the prompt: the draft the prompt had before; a model's draft on its way.
     committing: Option<String>,
     drafting: Option<Receiver<Result<String, String>>>,
+    /// `> handoff`: the document on its way.
+    handing: Option<Receiver<Result<String, String>>>,
     // thread header: cards of the open threads (tab)
     nav_on: bool,
     nav_cards: Vec<crate::nav::Card>,
@@ -273,6 +275,7 @@ impl View {
             commenting: None,
             committing: None,
             drafting: None,
+            handing: None,
             // tests: 0 shared state between parallel views
             nav_on: !cfg!(test) && NAV_ON.load(std::sync::atomic::Ordering::Relaxed),
             nav_cards: Vec::new(),
@@ -564,6 +567,45 @@ impl View {
         }
     }
 
+    /// `> handoff`: the review model writes the handoff document (on a thread); its end opens
+    /// the new thread with the document as its prompt draft.
+    fn handoff(&mut self) {
+        if !self.thread.busy.is_empty() {
+            self.toast("handoff: wait for the turn to end");
+            return;
+        }
+        if self.handing.is_some() {
+            self.toast("handoff: on its way");
+            return;
+        }
+        let Some(model) = crate::config::review_model() else { return self.toast("handoff: the review model is off (setting review)") };
+        let (tx, rx) = mpsc::channel();
+        let id = self.id.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::handoff::write(&id, &model));
+        });
+        self.handing = Some(rx);
+        self.toast("handoff: writing the document…");
+    }
+
+    /// The handoff document came: the new thread opens. True: the view ends.
+    fn handoff_due(&mut self) -> bool {
+        let Some(rx) = &self.handing else { return false };
+        let Ok(r) = rx.try_recv() else { return false };
+        self.handing = None;
+        let started = r.and_then(|doc| store::load(&self.id).ok_or_else(|| "thread gone".to_string()).and_then(|old| crate::handoff::start(&old, &doc)));
+        match started {
+            Ok(t) => {
+                self.exit = Exit::Open { id: t.id.clone(), dir: t.work_dir(), title: t.title.clone(), note: "handoff: edit the document, add the next goal, send".into() };
+                true
+            }
+            Err(e) => {
+                self.toast(format!("handoff: {e}"));
+                false
+            }
+        }
+    }
+
     fn paste(&mut self, text: &str) {
         match self.paster.paste(text) {
             Pasted::Text(t) => self.input.insert(&t),
@@ -655,8 +697,10 @@ impl View {
             return false;
         }
         if self.command.key(k, &mut self.input) {
-            if self.command.action.take() == Some(crate::command::Action::Branch) {
-                return self.branch();
+            match self.command.action.take() {
+                Some(crate::command::Action::Branch) => return self.branch(),
+                Some(crate::command::Action::Handoff) => self.handoff(),
+                None => {}
             }
             return false;
         }
@@ -1854,6 +1898,11 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
     let _sub = subscribe(id, tx.clone());
     let mut v = View::new(id, cwd, title, tx);
+    // a handoff: its document waits as the prompt draft
+    if let Some(d) = crate::handoff::take_draft(id) {
+        v.input.set_text(&d);
+        v.input.move_end();
+    }
     if let Some(n) = note.filter(|n| !n.is_empty()) {
         v.toast(n.to_string());
     }
@@ -1893,6 +1942,10 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
                 crate::nav::mark_seen_now(id);
                 return Ok(std::mem::replace(&mut v.exit, Exit::Back));
             }
+        }
+        if v.handoff_due() {
+            crate::nav::mark_seen_now(id);
+            return Ok(std::mem::replace(&mut v.exit, Exit::Back));
         }
         while let Ok(m) = rx.try_recv() {
             dirty = true;

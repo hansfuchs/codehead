@@ -38,6 +38,7 @@ pub enum Kind {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     Branch,
+    Handoff,
 }
 
 /// A dropdown of the open path.
@@ -52,8 +53,9 @@ enum Level {
 const MENTION: usize = 0;
 const BRANCH: usize = 1;
 const SKILLS: usize = 2;
+const HANDOFF: usize = 3;
 /// 1st level: name, what it does.
-const COMMANDS: [(&str, &str); 3] = [("mention", "path · name · url"), ("branch", "copy of this thread"), ("skills", "of the harnesses")];
+const COMMANDS: [(&str, &str); 4] = [("mention", "path · name · url"), ("branch", "copy of this thread"), ("skills", "of the harnesses"), ("handoff", "new thread from a summary of this one")];
 /// 2nd level of `mention`: kind, name, what goes into the text.
 const KINDS: [(Kind, &str, &str); 4] =
     [(Kind::Files, "files", "relative path"), (Kind::Notes, "notes", "path"), (Kind::Threads, "threads", "name"), (Kind::Artifacts, "artifacts", "url")];
@@ -459,7 +461,7 @@ impl Command {
     /// COMMANDS / KINDS. `branch`: only with a thread.
     fn menu(&self, level: Level, q: &str) -> Vec<usize> {
         let names: Vec<(usize, &str)> = match level {
-            Level::Commands => COMMANDS.iter().enumerate().filter(|(i, _)| *i != BRANCH || self.can_branch).map(|(i, c)| (i, c.0)).collect(),
+            Level::Commands => COMMANDS.iter().enumerate().filter(|(i, _)| !matches!(*i, BRANCH | HANDOFF) || self.can_branch).map(|(i, c)| (i, c.0)).collect(),
             _ => KINDS.iter().enumerate().map(|(i, k)| (i, k.1)).collect(),
         };
         let q = q.to_lowercase();
@@ -593,6 +595,12 @@ impl Command {
                         ta.replace_to_cursor(at, "");
                         self.reset();
                         self.action = Some(Action::Branch);
+                        return;
+                    }
+                    HANDOFF => {
+                        ta.replace_to_cursor(at, "");
+                        self.reset();
+                        self.action = Some(Action::Handoff);
                         return;
                     }
                     SKILLS => {
@@ -773,7 +781,7 @@ impl Command {
                     cur_y = row.y;
                 }
                 let (text, detail, submenu) = match level {
-                    Level::Commands => (COMMANDS[menu[idx]].0.to_string(), COMMANDS[menu[idx]].1.to_string(), menu[idx] != BRANCH),
+                    Level::Commands => (COMMANDS[menu[idx]].0.to_string(), COMMANDS[menu[idx]].1.to_string(), !matches!(menu[idx], BRANCH | HANDOFF)),
                     Level::Kinds => (KINDS[menu[idx]].1.to_string(), KINDS[menu[idx]].2.to_string(), true),
                     Level::Items(_) => {
                         let it = &self.items[self.matched.1[idx]];
@@ -954,7 +962,12 @@ mod tests {
         // 0 thread (task screen): 0 branch
         assert_eq!(c.menu(Level::Commands, ""), [MENTION, SKILLS]);
         c.can_branch = true;
-        assert_eq!(c.menu(Level::Commands, ""), [MENTION, BRANCH, SKILLS]);
+        assert_eq!(c.menu(Level::Commands, ""), [MENTION, BRANCH, SKILLS, HANDOFF]);
+        // `>hand` enter: the handoff action
+        ta.set_text(">hand");
+        ta.move_end();
+        assert!(key(&mut c, &mut ta, KeyCode::Enter));
+        assert_eq!((ta.text().as_str(), c.action.take()), ("", Some(Action::Handoff)));
         // `>br` enter: the text goes, the host gets the action
         ta.set_text("x >br");
         ta.move_end();

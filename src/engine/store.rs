@@ -33,6 +33,9 @@ pub struct Thread {
     /// `failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<String>,
+    /// The thread this one continues (`> handoff`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     /// `open` or `done`.
     #[serde(default = "open")]
     pub state: String,

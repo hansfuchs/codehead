@@ -124,3 +124,13 @@ set -e
 pnpm install --frozen-lockfile
 echo "PORT=$CODEHEAD_PORT" >> .env.local
 ```
+
+## Handoff
+
+The `>` command **handoff** continues a thread in a new one, with a short document instead of
+the full history: the `review` model writes it from the thread's log (goal, decisions with why,
+state of the code, failed approaches, open todos, how to run and test, owner preferences), and
+codehead adds exact facts (branch, directory, ports, uncommitted files, last commits). The new
+thread keeps the worktree, branch, ports and agents, starts fresh sessions (any harness), and
+opens with the document as its prompt draft: edit it, add the next goal, send. `thread.json`
+`parent` names the old thread.

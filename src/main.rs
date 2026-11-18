@@ -15,6 +15,7 @@ mod command;
 mod config;
 mod cost;
 mod drafts;
+mod handoff;
 mod editor;
 mod engine;
 mod dropdown;
