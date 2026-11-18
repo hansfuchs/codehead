@@ -353,7 +353,7 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
             }
             Event::End(TagEnd::CodeBlock) => {
                 if let Some((lang, text)) = code.take() {
-                    out.extend(code_rows(&text, &lang, width, &margin(quote, lists.len()), false, None));
+                    out.extend(code_rows(&text, &lang, width, &margin(quote, lists.len()), true, None));
                 }
             }
             Event::Start(Tag::Emphasis) => styles.push(style.add_modifier(Modifier::ITALIC)),
@@ -473,7 +473,7 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
     }
     flush(&mut block, &mut out);
     if let Some((lang, text)) = code.take() {
-        out.extend(code_rows(&text, &lang, width, prefix, false, None));
+        out.extend(code_rows(&text, &lang, width, prefix, true, None));
     }
     out
 }
@@ -555,7 +555,7 @@ fn lang_w(lang: &str) -> usize {
 }
 
 /// A code block: syntax colors on the panel color (FG: 1 color for every char instead), a head row
-/// with the language + a copy button. Long lines: cut at the row end, or WRAP.
+/// with the language + a copy button. Long lines: cut at the row end, or WRAP (at a word end, `↪ ` rows).
 /// Code blocks up to this many lines get syntax colors (1 pass each, cached).
 const MAX_HIGHLIGHT: usize = 4000;
 
@@ -584,38 +584,71 @@ pub fn code_rows(text: &str, lang: &str, width: usize, margin: &[Span<'static>],
             (None, Some(c)) => c.clone(),
             (None, None) => l.chars().map(|c| (theme::pal().text, c)).collect(),
         };
-        let mut spans = margin.to_vec();
-        spans.push(Span::styled(" ", bg));
-        let mut w = 0;
-        let mut run = String::new();
-        let mut run_color = None;
-        for (color, c) in chars {
-            let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-            if w + cw > room {
-                if !wrap {
-                    break;
+        let segments = if wrap { wrap_code(&chars, room) } else { vec![0..cut_at(&chars, room)] };
+        for (k, seg) in segments.into_iter().enumerate() {
+            let mut spans = margin.to_vec();
+            spans.push(Span::styled(" ", bg));
+            let mut w = 0;
+            // a continuation row: `↪ ` (the line goes on, 0 new line in the source)
+            if k > 0 {
+                spans.push(Span::styled(CONT, bg.fg(theme::pal().muted)));
+                w += CONT.width();
+            }
+            let mut run = String::new();
+            let mut run_color = None;
+            for &(color, c) in &chars[seg] {
+                if run_color != Some(color) && !run.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut run), bg.fg(run_color.unwrap_or(theme::pal().text))));
                 }
-                // the row is full: the rest goes on the next row
-                spans.push(Span::styled(std::mem::take(&mut run), bg.fg(run_color.unwrap_or(theme::pal().text))));
-                spans.push(Span::styled(" ".repeat(room - w + 1), bg));
-                let next = [margin.to_vec(), vec![Span::styled(" ", bg)]].concat();
-                out.push(Row::plain(Line::from(std::mem::replace(&mut spans, next))));
-                w = 0;
+                run_color = Some(color);
+                run.push(c);
+                w += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
             }
-            if run_color != Some(color) && !run.is_empty() {
-                spans.push(Span::styled(std::mem::take(&mut run), bg.fg(run_color.unwrap_or(theme::pal().text))));
+            if !run.is_empty() {
+                spans.push(Span::styled(run, bg.fg(run_color.unwrap_or(theme::pal().text))));
             }
-            run_color = Some(color);
-            run.push(c);
-            w += cw;
+            spans.push(Span::styled(" ".repeat((room + 1).saturating_sub(w)), bg));
+            out.push(Row::plain(Line::from(spans)));
         }
-        if !run.is_empty() {
-            spans.push(Span::styled(run, bg.fg(run_color.unwrap_or(theme::pal().text))));
-        }
-        spans.push(Span::styled(" ".repeat(room - w + 1), bg));
-        out.push(Row::plain(Line::from(spans)));
     }
     out
+}
+
+/// The mark of a wrapped code line's continuation rows.
+const CONT: &str = "↪ ";
+
+fn char_w(c: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
+/// End of the chars of CHARS that fit ROOM columns.
+fn cut_at(chars: &[(Color, char)], room: usize) -> usize {
+    let mut w = 0;
+    chars.iter().position(|&(_, c)| {
+        w += char_w(c);
+        w > room
+    }).unwrap_or(chars.len())
+}
+
+/// Rows of 1 code line CHARS in ROOM columns: the 1st row full width, the next ones after `↪ `.
+/// A row ends after a space or a separator (`,` `;` `)` `/` …) in its 2nd half, else at the room.
+fn wrap_code(chars: &[(Color, char)], room: usize) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut s = 0;
+    loop {
+        let budget = if out.is_empty() { room } else { room.saturating_sub(CONT.width()).max(1) };
+        let e = s + cut_at(&chars[s..], budget);
+        if e >= chars.len() {
+            out.push(s..chars.len());
+            return out;
+        }
+        let half = s + (e - s) / 2;
+        let brk = (half + 1..=e).rev().find(|&k| chars[k - 1].1.is_whitespace() || ",;:)]}/|&=>.-".contains(chars[k - 1].1));
+        // 0 chars fit (a wide char in a 1-column room): take 1 anyway
+        let end = brk.unwrap_or(e).max(s + 1);
+        out.push(s..end);
+        s = end;
+    }
 }
 
 #[cfg(test)]
@@ -624,6 +657,33 @@ mod tests {
 
     fn text(rows: &[Row]) -> Vec<String> {
         rows.iter().map(|r| r.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>().trim_end().to_string()).collect()
+    }
+
+    #[test]
+    fn long_code_lines_wrap_at_word_ends_with_a_mark() {
+        let md = "```md\n# HOME REPO\n- home repo: `~/projects/doinstruct/bonfire`. Its rules (notes, other repos): @~/projects/doinstruct/bonfire/AGENTS.md\n```";
+        let rows = markdown(md, 50, &[]);
+        let t = text(&rows);
+        // head row, the short line, the long line on several rows: 0 chars lost
+        assert!(t.len() > 3, "{t:#?}");
+        assert!(t[2].starts_with(" - home repo:"), "{t:#?}");
+        assert!(t[3..].iter().all(|l| l.starts_with(" ↪ ")), "{t:#?}");
+        let joined: String = t[2..].iter().flat_map(|l| l.trim_start().trim_start_matches("↪ ").chars()).filter(|c| !c.is_whitespace()).collect();
+        assert!(joined.ends_with("@~/projects/doinstruct/bonfire/AGENTS.md"), "{joined}");
+        // breaks after a space or a separator, 0 cut inside `repo:`
+        assert!(t[2].trim_end().ends_with(['.', ' ', '/', ',', ':', ')', '`']) || t[2].trim_end().ends_with("bonfire"), "{t:#?}");
+        // every row as wide as the block
+        let w = rows[0].line.width();
+        assert!(rows.iter().all(|r| r.line.width() == w), "{t:#?}");
+        // the copy button copies the source lines, 0 marks
+        assert_eq!(rows[0].copies[0].2, "# HOME REPO\n- home repo: `~/projects/doinstruct/bonfire`. Its rules (notes, other repos): @~/projects/doinstruct/bonfire/AGENTS.md");
+    }
+
+    #[test]
+    fn wrap_code_breaks_hard_without_a_word_end() {
+        let chars: Vec<(Color, char)> = "abcdefghijklmnopqrstuvwxyz".chars().map(|c| (Color::Reset, c)).collect();
+        let segs = wrap_code(&chars, 10);
+        assert_eq!(segs, [0..10, 10..18, 18..26]);
     }
 
     #[test]
