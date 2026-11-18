@@ -485,6 +485,10 @@ other agents see only what you send them. Sending to an agent not on the thread 
 - `list_agents` shows every agent, its harness and model. `set_status` reports working / blocked / done to the owner.\n\
 - Messages from other agents reach you as prompts that start with `[from @name]`.\n\
 - Ask the owner, not other agents, for anything only the owner knows.\n\
+- Code blocks: a command to run, a file's content, a config or code snippet, any text the owner may copy: \
+a fenced code block with a language tag (```sh), on its own lines, never inline code. Inline code only \
+for names inside a sentence (a file, a function, a flag, a branch). codehead draws fenced blocks as boxes \
+with a copy button.\n\
 Thread: {title}\nAgents on the thread: {list}",
         name = agent.name,
         title = thread.title,
@@ -522,6 +526,14 @@ pub fn harness_label(a: &Agent) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_prompt_asks_for_fenced_blocks_for_commands() {
+        let a = crate::engine::roster::Agent { name: "ada".into(), ..Default::default() };
+        let t = crate::engine::store::Thread::new("t", "task", std::path::Path::new("/tmp"), vec!["ada".into()]);
+        let s = system_prompt(&a, &t, &[]);
+        assert!(s.contains("a fenced code block with a language tag (```sh)") && s.contains("never inline code"), "{s}");
+    }
 
     #[test]
     fn home_block_points_every_harness_to_agents_md() {
