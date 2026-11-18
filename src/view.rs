@@ -299,9 +299,10 @@ impl View {
         self.input.set_text("");
         self.hist_at = None;
         self.back = 0;
-        if let Some((new, old)) = self.replace.take()
-            && text.contains(&format!("@{new}"))
-        {
+        let replacing = self.replace.take().filter(|(new, old)| text.contains(&format!("@{new}{}", crate::mention::replaces_note(old))));
+        // the `(replaces @old)` note: for the owner only
+        let text = crate::mention::strip_replaces(&text);
+        if let Some((new, old)) = replacing {
             // OLD mid-turn: the replace waits for its turn to end (esc interrupts it)
             if self.thread.busy.contains(&old) {
                 self.toast(format!("{new} replaces {old} after {old}'s turn · esc: interrupt {old}"));
@@ -494,7 +495,7 @@ impl View {
             return self.nav_switch || (k.code == KeyCode::Enter && !self.nav_on);
         }
         // dropdowns first: they own ↑↓, tab, enter, esc while open
-        if self.mention.key(k, &mut self.input, &self.names) {
+        if self.mention.key(k, &mut self.input, &self.roster) {
             if let Some((new, Some(old))) = self.mention.picked.take() {
                 self.toast(format!("on send: {new} replaces {old}"));
                 self.replace = Some((new, old));
@@ -661,7 +662,7 @@ impl View {
     }
 
     fn mention_open(&self) -> bool {
-        self.mention.is_open(&self.input, &self.names)
+        self.mention.is_open(&self.input, &self.roster)
     }
 
     fn open_vscode(&mut self) {
@@ -772,7 +773,7 @@ impl View {
             Item { label: "thoughts: open / close all".into(), key: "ctrl+t".into(), id: 13 },
             Item { label: "VS Code on the worktree".into(), key: "ctrl+i".into(), id: 2 },
             Item { label: "back to the start screen".into(), key: "esc esc".into(), id: 3 },
-            Item { label: "agents: mention, add (←→: +), replace (⇄)".into(), key: "@".into(), id: 4 },
+            Item { label: "agents: mention · →: replace an agent".into(), key: "@".into(), id: 4 },
             Item { label: "commands: files, notes, threads, skills, branch".into(), key: crate::config::command_key().to_string(), id: 5 },
             Item { label: "paste a clipboard image".into(), key: "ctrl+v".into(), id: 7 },
             Item { label: "select + copy · double click: word · click code: copy".into(), key: "drag".into(), id: 9 },
@@ -856,7 +857,7 @@ impl View {
             return;
         }
         if self.monitors.mouse(m)
-            || self.mention.mouse(m, &mut self.input, &self.names)
+            || self.mention.mouse(m, &mut self.input, &self.roster)
             || self.command.mouse(m, &mut self.input)
             || self.paths.mouse(m, &mut self.input)
         {
@@ -1069,7 +1070,7 @@ impl View {
     /// Who gets a message now: the @named agents of the input, else the lead.
     fn recipients(&self) -> Vec<String> {
         let text = self.input.text();
-        let named = crate::engine::host::mentions(&text, &self.members);
+        let named = crate::engine::host::mentions(&crate::mention::strip_replaces(&text), &self.members);
         if named.is_empty() { self.members.first().cloned().into_iter().collect() } else { named }
     }
 
@@ -1275,10 +1276,7 @@ impl View {
                 f.render_widget(Paragraph::new(Span::styled(label, theme::accent())), Rect { x: bubble.right() - 3 - lw, y: bubble_bottom, width: lw, height: 1 });
             }
         }
-        if self.input.rows_for(in_w) <= usize::from(n) {
-            f.render_widget(Paragraph::new(Span::styled("›", theme::accent())), Rect { x: area.x + 2, y: in_top, width: 1, height: 1 });
-        }
-        self.input_rect = Rect { x: area.x + 4, y: in_top, width: in_w, height: n };
+        self.input_rect = Rect { x: area.x + 2, y: in_top, width: in_w, height: n };
         let menu_open = self.menu.is_some();
         self.input.render(f, self.input_rect, !menu_open);
 
@@ -1307,7 +1305,7 @@ impl View {
 
         // dropdowns over everything, then the menu
         if !menu_open {
-            self.mention.render(f, &self.input, &self.names, area);
+            self.mention.render(f, &self.input, &self.roster, area);
             self.command.render(f, &self.input, area, self.input_rect);
             self.paths.render(f, &self.input, area, self.input_rect);
         }
@@ -1333,9 +1331,9 @@ fn header_rows(n: usize) -> u16 {
     (3 + n + u16::from(n > 1)).clamp(HEADER_H, MAX_HEADER_H)
 }
 
-/// Width of the input in its bubble: `│ › ` left, ` │` right.
+/// Width of the input in its bubble: `│ ` left, ` │` right.
 fn input_width(cols: u16) -> u16 {
-    cols.saturating_sub(6)
+    cols.saturating_sub(4)
 }
 
 /// WORD with its 1st letter upper case: `claude` → `Claude`.

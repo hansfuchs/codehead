@@ -27,9 +27,10 @@ only.
 
 ## Replacing an agent
 
-Type `@name` in the prompt and press `→` on the name: **⇄ replace** an agent of the thread. On
-send, the old agent leaves and the new one gets your message together with the old agent's
-last messages.
+Type `@` in the prompt: a dropdown of the agent cards, grouped by harness, filtered as you type.
+`→` switches from **add** to **replace** and opens a 2nd dropdown with the agents of the thread;
+`↑↓` pick 1, `enter` inserts `@new (replaces @old)`, `←` goes back to add. On send, the old
+agent leaves and the new one gets your message together with the old agent's last messages.
 
 ## Handoff
 

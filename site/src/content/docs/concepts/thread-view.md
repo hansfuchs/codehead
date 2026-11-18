@@ -48,8 +48,9 @@ The tool calls of an agent between 2 of its messages fold into 1 row:
 
 (`lines`: 1 row, `▸ Bash: run the tests · Read: src/webhook.rs and 3 more · 5 calls · 12.0s`.)
 
-A click opens the row: each call with its input and the tail of its output. `ctrl+o` opens or
-closes all of them.
+A click opens the row: each call with its code and the tail of its output, as code blocks with
+syntax colors and a copy button (a Bash command, the text of a Write, an Edit as a diff).
+`ctrl+o` opens or closes all of them.
 
 ## Thoughts
 
@@ -81,13 +82,14 @@ asks them 1 by 1.
 
 - `esc`: interrupt the running turns (scrolled up: back to live first).
 - `esc esc`: back to the start screen. The thread keeps running.
-- `F2`: the menu. Its **agents** tab adds and removes agents of the thread; **threads**
+- `F2`: the menu. `n` in its **quick** tab: a new thread. Its **agents** tab shows the agents of the
+  thread as cards by harness, adds and removes them; **threads**
   switches to another thread.
 - `>` **branch**: a copy of the thread, see [threads](/docs/concepts/threads/#branching).
 
 ## Notes in the stream
 
 - **Errors** come with what to do next. A usage limit lists the agents on other harnesses
-  that can go on (`@agent` → ⇄ replace).
+  that can go on (`@agent` → `→` replace).
 - **needs harness**: an agent that cannot do a step on its own harness says so; codehead
   lists the agents on the harness it needs.

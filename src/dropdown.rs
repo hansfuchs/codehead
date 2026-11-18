@@ -33,7 +33,12 @@ pub fn fit(offset: usize, cursor: usize, len: usize, shown: usize) -> usize {
 /// ABOVE: the side tried first; the other side when the 1st has less room than the dropdown needs
 /// (and the other has more). At the right edge: shifted left. None: 0 room for 1 row.
 pub fn place(anchor: Rect, w: u16, rows: usize, bounds: Rect, above: bool) -> Option<Rect> {
-    let want = rows.clamp(1, MAX_ROWS) as u16 + 2;
+    place_max(anchor, w, rows, MAX_ROWS, bounds, above)
+}
+
+/// [`place`] with max. MAX rows in view.
+pub fn place_max(anchor: Rect, w: u16, rows: usize, max: usize, bounds: Rect, above: bool) -> Option<Rect> {
+    let want = rows.clamp(1, max) as u16 + 2;
     let up = anchor.y.saturating_sub(bounds.y);
     let down = bounds.bottom().saturating_sub(anchor.bottom());
     let (first, second) = if above { (up, down) } else { (down, up) };

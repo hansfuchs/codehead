@@ -10,7 +10,7 @@ description: Every key, per screen.
 
 | Key | Action |
 | --- | --- |
-| `F2` | menu: quick commands, threads, tokens, agents |
+| `F2` | menu: quick commands (`n`: new thread), threads, tokens, agents |
 | `tab` / `shift+tab` | next / previous tab or field |
 | `esc` | close the current control, 1 level back |
 | `ctrl+z` / `ctrl+shift+z` | undo / redo in any text field (`⌘z` / `⌘⇧z`) |
@@ -22,7 +22,7 @@ description: Every key, per screen.
 | `esc esc` | quit from the new tab |
 | `ctrl+s` | new tab: save the task as a draft for later, start over |
 | `ctrl+c` | quit |
-| `@` / `>` | agents / commands dropdown in the prompt |
+| `@` / `>` | agents (cards by harness) / commands dropdown in the prompt |
 | `←` `→` | the **where** row: branch or worktree |
 | `ctrl+v` | paste a clipboard image |
 | `ctrl+s` / `ctrl+r` | settings: save / reload |

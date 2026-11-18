@@ -4,6 +4,7 @@ mod agents;
 mod ansi;
 mod app;
 mod attach;
+mod cards;
 mod background;
 mod claude;
 mod clip;
@@ -226,10 +227,10 @@ impl Tty {
         // the terminal's palette (agent border colors), before crossterm reads the tty
         theme::query_palette();
         execute!(out, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
-        self.enhanced = matches!(terminal::supports_keyboard_enhancement(), Ok(true));
-        if self.enhanced {
-            execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
-        }
+        // always on, also when the support query got 0 answer in time: without it shift+enter
+        // comes as `ESC[27;2;13~`, which crossterm drops. Terminals without it ignore the request.
+        execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
+        self.enhanced = true;
         Ok(())
     }
 
@@ -279,10 +280,29 @@ pub fn read_ready(wait: Duration) -> Result<Vec<(Event, Instant)>, String> {
     let mut out = Vec::new();
     let mut wait = wait;
     while out.len() < 512 && event::poll(wait).map_err(|e| e.to_string())? {
-        out.push((event::read().map_err(|e| e.to_string())?, Instant::now()));
+        let ev = event::read().map_err(|e| e.to_string())?;
+        key_log(&ev);
+        out.push((ev, Instant::now()));
         wait = Duration::ZERO;
     }
     Ok(out)
+}
+
+/// $CODEHEAD_KEYLOG=1: each key event as 1 line in ~/.cache/codehead/keys.log (what the terminal
+/// sends for a key).
+fn key_log(ev: &Event) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("CODEHEAD_KEYLOG").is_some_and(|v| !v.is_empty() && v != "0")) {
+        return;
+    }
+    let Event::Key(k) = ev else { return };
+    let path = config::home().join(".cache/codehead/keys.log");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{} {:?} {:?} {:?}", engine::now_ms(), k.code, k.modifiers, k.kind);
+    }
 }
 
 // ---------- threads ----------

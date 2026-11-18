@@ -290,7 +290,7 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
             }
             Event::End(TagEnd::CodeBlock) => {
                 if let Some((lang, text)) = code.take() {
-                    out.extend(code_rows(&text, &lang, width, &margin(quote, lists.len())));
+                    out.extend(code_rows(&text, &lang, width, &margin(quote, lists.len()), false, None));
                 }
             }
             Event::Start(Tag::Emphasis) => styles.push(style.add_modifier(Modifier::ITALIC)),
@@ -409,7 +409,7 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
     }
     flush(&mut block, &mut out);
     if let Some((lang, text)) = code.take() {
-        out.extend(code_rows(&text, &lang, width, prefix));
+        out.extend(code_rows(&text, &lang, width, prefix, false, None));
     }
     out
 }
@@ -490,8 +490,9 @@ fn lang_w(lang: &str) -> usize {
     if lang == "text" { 0 } else { lang.width() + 1 }
 }
 
-/// A code block: syntax colors on the panel color, cut (not wrapped) at the row end.
-fn code_rows(text: &str, lang: &str, width: usize, margin: &[Span<'static>]) -> Vec<Row> {
+/// A code block: syntax colors on the panel color (FG: 1 color for every char instead), a head row
+/// with the language + a copy button. Long lines: cut at the row end, or WRAP.
+pub fn code_rows(text: &str, lang: &str, width: usize, margin: &[Span<'static>], wrap: bool, fg: Option<Color>) -> Vec<Row> {
     let lang = if lang.is_empty() { crate::code::language(text, &[]) } else { lang };
     let lines: Vec<&str> = text.trim_end_matches('\n').split('\n').collect();
     let mw: usize = margin.iter().map(|s| s.content.width()).sum();
@@ -515,7 +516,11 @@ fn code_rows(text: &str, lang: &str, width: usize, margin: &[Span<'static>]) -> 
         }
         so_far.push_str(l);
         // colors need the lines before (strings, comments): long blocks get plain rows
-        let chars: Vec<(Color, char)> = if lines.len() <= 400 { crate::code::last_line(&so_far, lang) } else { l.chars().map(|c| (theme::pal().text, c)).collect() };
+        let chars: Vec<(Color, char)> = match fg {
+            Some(fg) => l.chars().filter(|c| !c.is_control()).map(|c| (fg, c)).collect(),
+            None if lines.len() <= 400 => crate::code::last_line(&so_far, lang),
+            None => l.chars().map(|c| (theme::pal().text, c)).collect(),
+        };
         let mut spans = margin.to_vec();
         spans.push(Span::styled(" ", bg));
         let mut w = 0;
@@ -524,7 +529,15 @@ fn code_rows(text: &str, lang: &str, width: usize, margin: &[Span<'static>]) -> 
         for (color, c) in chars {
             let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
             if w + cw > room {
-                break;
+                if !wrap {
+                    break;
+                }
+                // the row is full: the rest goes on the next row
+                spans.push(Span::styled(std::mem::take(&mut run), bg.fg(run_color.unwrap_or(theme::pal().text))));
+                spans.push(Span::styled(" ".repeat(room - w + 1), bg));
+                let next = [margin.to_vec(), vec![Span::styled(" ", bg)]].concat();
+                out.push(Row::plain(Line::from(std::mem::replace(&mut spans, next))));
+                w = 0;
             }
             if run_color != Some(color) && !run.is_empty() {
                 spans.push(Span::styled(std::mem::take(&mut run), bg.fg(run_color.unwrap_or(theme::pal().text))));

@@ -79,6 +79,10 @@ pub struct Menu {
     members: Vec<String>,
     roster: Vec<Agent>,
     acursor: usize,
+    /// Agents tab: 1st virtual row of the card grid in view.
+    aoffset: usize,
+    /// Effort of claude agents (the effort row of the cards).
+    effort: String,
     /// Remove armed for this agent: a 2nd enter removes.
     armed: Option<String>,
     /// Add picker open: its cursor over the roster agents off the thread.
@@ -97,7 +101,7 @@ pub struct Menu {
 
 fn builtins() -> Vec<Item> {
     vec![
-        Item { label: "new: start screen, new tab".into(), key: String::new(), id: usize::MAX },
+        Item { label: "new thread: start screen, new tab".into(), key: "n".into(), id: usize::MAX },
         Item { label: "settings: start screen, settings tab".into(), key: String::new(), id: usize::MAX - 1 },
     ]
 }
@@ -131,6 +135,8 @@ impl Menu {
             members,
             roster,
             acursor: 0,
+            aoffset: 0,
+            effort: crate::agents::effort_name(),
             armed: None,
             adding: None,
             started: Instant::now(),
@@ -179,18 +185,54 @@ impl Menu {
         nav::filter(&self.cards, &self.filter.text())
     }
 
+    /// The agents of the thread (an agent the roster lacks: 0 harness), index = index in `members`.
+    fn member_agents(&self) -> Vec<Agent> {
+        self.members
+            .iter()
+            .map(|n| self.roster.iter().find(|a| a.name == *n).cloned().unwrap_or_else(|| Agent { name: n.clone(), harness: "?".into(), model: None, color: None, mode: String::new(), prompt: None, last_seen: None }))
+            .collect()
+    }
+
+    /// Edit, the agents of the thread (by harness, A→Z, as the grid shows them), add.
     fn agent_rows(&self) -> Vec<Row> {
         let mut v = vec![Row::Edit];
         if self.thread.is_some() {
-            v.extend((0..self.members.len()).map(Row::Member));
+            let groups = crate::cards::groups(&self.member_agents(), |_| true);
+            v.extend(groups.iter().flat_map(|(_, g)| g.iter().map(|&i| Row::Member(i))));
             v.push(Row::Add);
         }
         v
     }
 
-    /// Roster agents off the thread (the add picker).
-    fn addable(&self) -> Vec<&Agent> {
-        self.roster.iter().filter(|a| !self.members.contains(&a.name)).collect()
+    /// Roster agents off the thread (the add picker), by harness, A→Z.
+    fn addable(&self) -> Vec<Agent> {
+        let off: Vec<Agent> = self.roster.iter().filter(|a| !self.members.contains(&a.name)).cloned().collect();
+        let groups = crate::cards::groups(&off, |_| true);
+        groups.iter().flat_map(|(_, g)| g.iter().map(|&i| off[i].clone())).collect()
+    }
+
+    /// Card width of the agents tab: as the agents tab of the start screen (text of every agent).
+    fn card_width(&self) -> u16 {
+        let rows: Vec<String> = self.roster.iter().chain(self.member_agents().iter()).flat_map(|a| [a.name.clone(), crate::cards::tech(a), crate::cards::effort(a, &self.effort)]).collect();
+        crate::cards::card_width(crate::cards::text_width(rows.iter()), true)
+    }
+
+    /// AGENTS (in their order) as a card grid by harness in AREA, CUR: the agent index with the
+    /// cursor; CARD draws 1 (frame, area, agent index, cursor on it). Returns the drawn cards.
+    fn draw_grid(&mut self, f: &mut Frame, area: Rect, agents: &[Agent], cur: Option<usize>, mut card: impl FnMut(&mut Frame, Rect, usize, bool)) -> Vec<(Rect, usize)> {
+        let groups = crate::cards::groups(agents, |_| true);
+        let g = crate::cards::grid(&groups, self.card_width(), crate::cards::CARD_H, area.width);
+        let view = area.height as usize;
+        let top = cur.and_then(|c| g.places.iter().find(|p| p.0 == c)).map_or(0, |p| p.2);
+        self.aoffset = if cur.is_some() { crate::cards::scroll(&g, top, crate::cards::CARD_H, self.aoffset, view) } else { 0 };
+        let off = self.aoffset;
+        let drawn = crate::cards::draw_grid(f, area, &g, crate::cards::CARD_H, off, |f, r, i| card(f, r, i, Some(i) == cur));
+        let below = g.height.saturating_sub(off + view);
+        if off > 0 || below > 0 {
+            let text = format!("{off}↑ · {below}↓");
+            f.render_widget(Paragraph::new(Span::styled(text, theme::muted())).right_aligned(), Rect { height: 1, ..area });
+        }
+        drawn
     }
 
     fn switch(&mut self, d: isize) {
@@ -239,6 +281,7 @@ impl Menu {
         match k.code {
             KeyCode::Up | KeyCode::Char('k') => self.qcursor = (self.qcursor + n - 1) % n,
             KeyCode::Down | KeyCode::Char('j') => self.qcursor = (self.qcursor + 1) % n,
+            KeyCode::Char('n') => return Action::Home(Home::New),
             KeyCode::Enter => return self.run_item(self.qcursor),
             _ => {}
         }
@@ -540,87 +583,66 @@ impl Menu {
                 f.render_widget(Paragraph::new(Span::styled("every agent is on the thread", theme::muted())), Rect { y: body.y + 2, height: 1, ..body });
                 return;
             }
-            let rows: Vec<(Rect, usize)> = list
-                .iter()
-                .enumerate()
-                .take(body.height.saturating_sub(2) as usize)
-                .map(|(i, a)| {
-                    let r = Rect { y: body.y + 2 + i as u16, height: 1, ..body };
-                    let hl = i == c;
-                    let color = crate::agents::color(a.color.as_deref());
-                    let name_st = if hl { Style::default().fg(theme::pal().on_accent).add_modifier(Modifier::BOLD) } else { Style::default().fg(color).add_modifier(Modifier::BOLD) };
-                    let (_, ls) = Self::row_style(hl);
-                    let line = Line::from(vec![Span::styled(format!(" + {}", a.name), name_st), Span::styled(format!("  {}", a.harness_model()), ls)]);
-                    f.render_widget(Paragraph::new(line).style(if hl { theme::pill() } else { Style::default() }), r);
-                    (r, i)
-                })
-                .collect();
-            self.rows = rows;
+            let area = Rect { y: body.y + 2, height: body.height.saturating_sub(2), ..body };
+            let c = c.min(list.len() - 1);
+            let effort = self.effort.clone();
+            self.rows = self.draw_grid(f, area, &list, Some(c), |f, r, i, cur| {
+                let a = &list[i];
+                let title = cur.then(|| Span::styled(" enter: add ", theme::accent()));
+                let look = crate::cards::Look { cur, lit: false, border: Some(crate::cards::border(cur, false, theme::pal().accent)), title, bg: None };
+                crate::cards::draw(f, r, a, &[a.name.clone(), crate::cards::tech(a), crate::cards::effort(a, &effort)], look);
+            });
             return;
         }
         let rows = self.agent_rows();
         self.acursor = self.acursor.min(rows.len() - 1);
-        let card_h = crate::sprites::H as u16 + 2;
-        let mut y = body.y;
-        for (i, row) in rows.iter().enumerate() {
-            let hl = i == self.acursor;
-            let h = if matches!(row, Row::Member(_)) { card_h } else { 1 };
-            if y + h > body.bottom() {
-                break;
-            }
-            let r = Rect { y, height: h, ..body };
-            match row {
-                Row::Edit | Row::Add => {
-                    let label = if *row == Row::Edit { " ✎ edit agents: start screen, agents tab " } else { " + add an agent " };
-                    let st = if hl { Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD) } else { Style::default().bg(theme::pal().panel).fg(theme::pal().text) };
-                    let br = Rect { width: (label.chars().count() as u16).min(r.width), ..r };
-                    f.render_widget(Paragraph::new(label).style(st), br);
-                    self.rows.push((br, i));
-                    if *row == Row::Edit && self.thread.is_none() {
-                        let note = Rect { y: y + 2, height: 1, ..body };
-                        if note.bottom() <= body.bottom() {
-                            f.render_widget(Paragraph::new(Span::styled("0 thread in view: open a thread for its agents", theme::muted())), note);
-                        }
-                    }
-                }
-                Row::Member(m) => {
-                    let name = &self.members[*m];
-                    self.draw_member(f, r, name, hl);
-                    self.rows.push((r, i));
-                }
-            }
-            y += h + 1;
-        }
-    }
-
-    fn draw_member(&self, f: &mut Frame, r: Rect, name: &str, hl: bool) {
-        let a = self.roster.iter().find(|a| a.name == name);
-        let color = crate::agents::color(a.and_then(|a| a.color.as_deref()));
-        let armed = self.armed.as_deref() == Some(name);
-        let border = if hl { theme::accent_bold() } else { theme::line() };
-        let title = if armed {
-            Span::styled(" enter again: remove · ↑↓: keep ", Style::default().fg(theme::pal().danger).add_modifier(Modifier::BOLD))
-        } else if hl {
-            Span::styled(" enter: remove ", theme::muted())
-        } else {
-            Span::raw("")
+        let cur_row = rows[self.acursor];
+        let button = |f: &mut Frame, r: Rect, label: &str, hl: bool| {
+            let st = if hl { Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD) } else { Style::default().bg(theme::pal().panel).fg(theme::pal().text) };
+            let br = Rect { width: (label.chars().count() as u16).min(r.width), height: 1, ..r };
+            f.render_widget(Paragraph::new(label.to_string()).style(st), br);
+            br
         };
-        let block = Block::new().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(border).title(title);
-        let inner = block.inner(r);
-        f.render_widget(block, r);
-        let tech = a.map(|a| {
-            let m = crate::agents::model_of(a);
-            if m.is_empty() { a.harness.clone() } else { format!("{} · {m}", a.harness) }
+        let edit = button(f, body, " ✎ edit agents: start screen, agents tab ", cur_row == Row::Edit);
+        self.rows.push((edit, 0));
+        if self.thread.is_none() {
+            let note = Rect { y: body.y + 2, height: 1, ..body };
+            if note.bottom() <= body.bottom() {
+                f.render_widget(Paragraph::new(Span::styled("0 thread in view: open a thread for its agents", theme::muted())), note);
+            }
+            return;
+        }
+        // the agents of the thread: the grid of the start screen; add below it
+        let members = self.member_agents();
+        let groups = crate::cards::groups(&members, |_| true);
+        let height = crate::cards::grid(&groups, self.card_width(), crate::cards::CARD_H, body.width).height as u16;
+        let area = Rect { y: body.y + 2, height: height.min(body.height.saturating_sub(4)), ..body };
+        let cur = match cur_row {
+            Row::Member(i) => Some(i),
+            _ => None,
+        };
+        let armed = self.armed.clone();
+        let effort = self.effort.clone();
+        let drawn = self.draw_grid(f, area, &members, cur, |f, r, i, hl| {
+            let a = &members[i];
+            let title = if armed.as_deref() == Some(a.name.as_str()) {
+                Some(Span::styled(" enter again: remove · ↑↓: keep ", Style::default().fg(theme::pal().danger).add_modifier(Modifier::BOLD)))
+            } else {
+                hl.then(|| Span::styled(" enter: remove ", theme::muted()))
+            };
+            let look = crate::cards::Look { cur: hl, lit: true, border: Some(crate::cards::border(hl, false, theme::pal().accent)), title, bg: None };
+            crate::cards::draw(f, r, a, &[a.name.clone(), crate::cards::tech(a), crate::cards::effort(a, &effort)], look);
         });
-        let side = vec![
-            vec![Span::styled(format!("  {name}"), Style::default().fg(color).add_modifier(Modifier::BOLD))],
-            vec![Span::styled(format!("  {}", tech.unwrap_or_default()), theme::muted())],
-            vec![],
-            vec![],
-        ];
-        let sprite = a.map(crate::agents::sprite).unwrap_or_else(|| crate::sprites::pool()[0].clone());
-        let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(1), ..inner };
-        f.render_widget(Paragraph::new(crate::sprites::lines(&sprite, color, side)), inner);
+        for (r, i) in drawn {
+            if let Some(at) = rows.iter().position(|row| *row == Row::Member(i)) {
+                self.rows.push((r, at));
+            }
+        }
+        let add = Rect { y: area.bottom() + 1, height: 1, ..body };
+        if add.bottom() <= body.bottom() {
+            let r = button(f, add, " + add an agent ", cur_row == Row::Add);
+            self.rows.push((r, rows.len() - 1));
+        }
     }
 }
 
@@ -731,5 +753,48 @@ mod tests {
         let b = t.backend().buffer().clone();
         let s: Vec<String> = (0..34).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect()).collect();
         println!("{}", s.join("\n"));
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use ratatui::crossterm::event::KeyModifiers;
+
+    fn agent(name: &str, harness: &str) -> Agent {
+        Agent { name: name.into(), harness: harness.into(), model: None, color: None, mode: String::new(), prompt: None, last_seen: None }
+    }
+
+    fn screen(m: &mut Menu) -> String {
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 34)).unwrap();
+        t.draw(|f| m.render(f, f.area())).unwrap();
+        let b = t.backend().buffer().clone();
+        let s = (0..34).map(|y| (0..90).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n");
+        if std::env::var_os("SHOW").is_some() {
+            eprintln!("{s}");
+        }
+        s
+    }
+
+    #[test]
+    fn agents_tab_shows_cards_by_harness_and_n_starts_a_thread() {
+        let roster = vec![agent("amon", "claude"), agent("nova", "codex"), agent("lilith", "claude"), agent("regi", "codex")];
+        let mut m = Menu::new(Vec::new(), Some("t1".into()), vec!["nova".into(), "amon".into(), "lilith".into()], roster, vec![Card { id: "t1".into(), ..Default::default() }]);
+        assert_eq!(m.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)), Action::Home(Home::New));
+        m.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        let s = screen(&mut m);
+        assert!(s.contains("claude · 2") && s.contains("codex · 1") && s.contains("+ add an agent"), "{s}");
+        // ↓: the cards in grid order (claude: amon, lilith; codex: nova)
+        m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        m.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(m.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), Action::Remove("lilith".into()));
+        // add: the agents off the thread as cards
+        m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        m.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let s = screen(&mut m);
+        assert!(s.contains("codex · 1") && s.contains("regi") && s.contains("enter: add"), "{s}");
+        assert_eq!(m.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), Action::Add("regi".into()));
     }
 }

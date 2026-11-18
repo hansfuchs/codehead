@@ -29,7 +29,7 @@ use crate::theme;
 use crate::background::{self, Reads};
 
 /// Agent card rows: the sprite + 2 border rows.
-const CARD_H: u16 = crate::sprites::H as u16 + 2;
+use crate::cards::CARD_H;
 
 /// Below this width the preview goes under the list (1/3 list, 2/3 preview).
 const THIN: u16 = 110;
@@ -408,13 +408,6 @@ struct Regions {
 }
 
 type AgentSnapshot = (Vec<Agent>, String, HashMap<String, Vec<Use>>);
-
-struct AgentGrid {
-    card_width: u16,
-    heads: Vec<(usize, String)>,
-    places: Vec<(usize, u16, usize)>,
-    height: usize,
-}
 
 pub struct App {
     pub cfg: Config,
@@ -1932,14 +1925,13 @@ impl App {
         }
         // @ and > dropdowns of the prompt: their keys first (esc closes them, 0 double esc)
         if self.mention_on() {
-            let names = self.agent_names();
             // skills: of the picked agents' harnesses (0 picked: of every agent's)
             let picked = |a: &&Agent| self.picks.is_empty() || self.picks.contains(&a.name);
             let mut harnesses: Vec<String> = self.agents.iter().filter(picked).map(|a| a.harness.clone()).collect();
             harnesses.sort();
             harnesses.dedup();
             self.command.harnesses = harnesses;
-            if self.mention.key(k, &mut self.prompt, &names) || self.command.key(k, &mut self.prompt) || self.paths.key(k, &mut self.prompt) {
+            if self.mention.key(k, &mut self.prompt, &self.agents) || self.command.key(k, &mut self.prompt) || self.paths.key(k, &mut self.prompt) {
                 self.last_esc = None;
                 return;
             }
@@ -2046,17 +2038,7 @@ impl App {
     /// Agents by harness (groups and agents A→Z). Only the agents tab filters.
     fn avisible(&self) -> Vec<(String, Vec<usize>)> {
         let q = if self.screen == Screen::Compose { "" } else { self.afilter.as_deref().unwrap_or("") }.trim().to_lowercase();
-        let mut groups: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
-        for (i, a) in self.agents.iter().enumerate() {
-            if !q.is_empty() && fuzzy(&q, &format!("{} {} {}", a.name, a.harness, agents::model_of(a))).is_none() {
-                continue;
-            }
-            groups.entry(a.harness.clone()).or_default().push(i);
-        }
-        groups.into_iter().map(|(h, mut g)| {
-            g.sort_by_key(|&i| self.agents[i].name.to_lowercase());
-            (h, g)
-        }).collect()
+        crate::cards::groups(&self.agents, |a| crate::cards::matches(a, &q))
     }
 
     /// Agents tab: the card in direction (DX, DY) of the cursor card. ↑ from the top row: None.
@@ -2726,8 +2708,7 @@ impl App {
                 return self.open_drafts();
             }
             if self.mention_on() {
-                let names = self.agent_names();
-                if down && self.mention.mouse(m, &mut self.prompt, &names) {
+                if down && self.mention.mouse(m, &mut self.prompt, &self.agents) {
                     return;
                 }
                 if self.command.mouse(m, &mut self.prompt) || self.paths.mouse(m, &mut self.prompt) {
@@ -2870,8 +2851,7 @@ impl App {
         self.draw_footer(f, footer);
         // @ dropdown: after the screen, over every row of it (modals go on top)
         if self.mention_on() {
-            let names = self.agent_names();
-            self.mention.render(f, &self.prompt, &names, area);
+            self.mention.render(f, &self.prompt, &self.agents, area);
             let avoid = self.prompt.area();
             self.command.render(f, &self.prompt, area, avoid);
             self.paths.render(f, &self.prompt, area, avoid);
@@ -3331,25 +3311,9 @@ impl App {
     }
 
     /// Shared by the agents tab and task selection.
-    fn agent_grid(&self, width: u16) -> AgentGrid {
-        let groups = self.avisible();
-        let text_w = self.agents.iter().flat_map(|a| self.agent_card_text(a)).map(|t| t.width()).max().unwrap_or(0).clamp(10, 24);
-        let card_w = ((text_w + crate::sprites::W + 6) as u16).min(width.max(1));
-        let per_row = ((width + 1) / (card_w + 1)).max(1) as usize;
-        // virtual layout: per group a heading row, its card rows, 1 blank row
-        let mut heads = Vec::new();
-        let mut places = Vec::new();
-        let mut y = 0usize;
-        for (harness, g) in &groups {
-            heads.push((y, format!("{harness} · {}", g.len())));
-            y += 1;
-            for (slot, &i) in g.iter().enumerate() {
-                let x = (slot % per_row) as u16 * (card_w + 1);
-                places.push((i, x, y + slot / per_row * CARD_H as usize));
-            }
-            y += g.len().div_ceil(per_row) * CARD_H as usize + 1;
-        }
-        AgentGrid { card_width: card_w, heads, places, height: y.saturating_sub(1) }
+    fn agent_grid(&self, width: u16) -> crate::cards::Grid {
+        let text_w = crate::cards::text_width(self.agents.iter().flat_map(|a| self.agent_card_text(a)).collect::<Vec<_>>().iter());
+        crate::cards::grid(&self.avisible(), crate::cards::card_width(text_w, true), CARD_H, width)
     }
 
     /// 1 card grid per harness (A→Z), as many columns as fit.
@@ -3358,42 +3322,24 @@ impl App {
     }
 
     fn draw_agent_grid(&mut self, f: &mut Frame, area: Rect, task: bool) {
-        let AgentGrid { card_width: card_w, heads, places, height } = self.agent_grid(area.width);
+        let g = self.agent_grid(area.width);
         let mut cursor = if task { self.pick_cursor } else { self.acursor };
         let mut offset = if task { self.pick_offset } else { self.aoffset };
-        if !places.iter().any(|&(i, _, _)| i == cursor) {
-            cursor = places.first().map_or(0, |p| p.0);
+        if !g.places.iter().any(|&(i, _, _)| i == cursor) {
+            cursor = g.places.first().map_or(0, |p| p.0);
         }
         if task { self.pick_cursor = cursor; } else { self.acursor = cursor; }
-        let view = area.height as usize;
-        if let Some(&(_, _, top)) = places.iter().find(|&&(i, _, _)| i == cursor) {
-            // the group heading of the 1st card row stays in view with it
-            let top = if heads.iter().any(|&(h, _)| h + 1 == top) { top - 1 } else { top };
-            if top < offset {
-                offset = top;
-            } else if top + CARD_H as usize + 1 > offset + view {
-                offset = (top + CARD_H as usize + 1).saturating_sub(view);
-            }
+        if let Some(&(_, _, top)) = g.places.iter().find(|&&(i, _, _)| i == cursor) {
+            offset = crate::cards::scroll(&g, top, CARD_H, offset, area.height as usize);
         }
-        offset = offset.min(height.saturating_sub(view));
+        offset = offset.min(g.height.saturating_sub(area.height as usize));
         if task { self.pick_offset = offset; } else { self.aoffset = offset; }
-        let mut cards = Vec::new();
-        let shown = |vy: usize, h: usize| vy >= offset && vy + h <= offset + view;
-        for (vy, text) in heads {
-            if shown(vy, 1) {
-                let r = Rect { y: area.y + (vy - offset) as u16, height: 1, ..area };
-                f.render_widget(Paragraph::new(Line::styled(text, theme::bold())), r);
-            }
-        }
-        for &(i, x, vy) in &places {
-            if !shown(vy, CARD_H as usize) { continue; }
-            let r = Rect { x: area.x + x, y: area.y + (vy - offset) as u16, width: card_w.min(area.width.saturating_sub(x)), height: CARD_H };
-            let a = self.agents[i].clone();
-            let focused = !self.tabs_focus && if task { self.field == Field::Agents } else { !self.afilter_editing };
-            if task { self.draw_card(f, r, &a, focused && i == cursor); }
-            else { self.draw_agent_card(f, r, &a, focused && i == cursor); }
-            cards.push((r, i));
-        }
+        let focused = !self.tabs_focus && if task { self.field == Field::Agents } else { !self.afilter_editing };
+        let cards = crate::cards::draw_grid(f, area, &g, CARD_H, offset, |f, r, i| {
+            let a = &self.agents[i];
+            if task { self.draw_card(f, r, a, focused && i == cursor); } else { self.draw_agent_card(f, r, a, focused && i == cursor); }
+        });
+        let places = g.places;
         if places.is_empty() {
             let msg = if self.agents.is_empty() { &format!("0 agents. {} → n: new agent", crate::config::menu_key().label) } else { "0 agents match the filter" };
             f.render_widget(Paragraph::new(Line::styled(msg, theme::muted())), area);
@@ -3418,26 +3364,9 @@ impl App {
 
     /// Agents tab card: like a task card, 0 pick mark; the default agent named in the border.
     fn draw_agent_card(&self, f: &mut Frame, r: Rect, a: &Agent, cur: bool) {
-        let color = agents::color(a.color.as_deref());
-        let mut block = Block::new()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(if cur { theme::accent_bold() } else { theme::line() });
-        if a.name == self.cfg.agent {
-            block = block.title(Span::styled(" default ", theme::accent()));
-        }
-        let inner = block.inner(r);
-        f.render_widget(block, r);
-        let [name, tech, effort, threads] = self.agent_card_text(a);
-        let side = vec![
-            vec![Span::styled(format!("  {name}"), if cur { Style::default().fg(color).add_modifier(Modifier::BOLD) } else { theme::bold() })],
-            vec![Span::styled(format!("  {tech}"), theme::muted())],
-            vec![Span::styled(format!("  {effort}"), theme::muted())],
-            vec![Span::styled(format!("  {threads}"), theme::muted())],
-        ];
-        let sprite = agents::sprite(a);
-        let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(1), ..inner };
-        f.render_widget(Paragraph::new(sprites::lines(&sprite, if cur { color } else { theme::pal().muted }, side)), inner);
+        let title = (a.name == self.cfg.agent).then(|| Span::styled(" default ", theme::accent()));
+        let look = crate::cards::Look { cur, lit: false, border: Some(crate::cards::border(cur, false, theme::pal().accent)), title, bg: None };
+        crate::cards::draw(f, r, a, &self.agent_card_text(a), look);
     }
 
     fn draw_compose(&mut self, f: &mut Frame, area: Rect) {
@@ -3562,10 +3491,8 @@ impl App {
 
     /// Text rows of an agent card: name, harness · model, effort.
     fn card_text(&self, a: &Agent) -> [String; 3] {
-        let model = agents::model_of(a);
-        let tech = if model.is_empty() { a.harness.clone() } else { format!("{} · {model}", a.harness) };
-        // effort: Claude Code's global effortLevel; other harnesses: their own
-        let effort = if a.harness == "claude" { format!("effort {}", self.effort) } else { "effort: harness".into() };
+        let tech = crate::cards::tech(a);
+        let effort = crate::cards::effort(a, &self.effort);
         [a.name.clone(), tech, effort]
     }
 
@@ -3574,34 +3501,14 @@ impl App {
     fn draw_card(&self, f: &mut Frame, r: Rect, a: &Agent, cur: bool) {
         let color = agents::color(a.color.as_deref());
         let order = self.picks.iter().position(|p| *p == a.name);
-        let border = match (cur, order.is_some()) {
-            (true, _) => theme::accent_bold(),
-            (false, true) => Style::default().fg(color),
-            (false, false) => theme::line(),
-        };
         let mark = match order {
             Some(n) if self.picks.len() > 1 => format!(" ◼ {} ", n + 1),
             Some(_) => " ◼ ".to_string(),
             None => " ◻ ".to_string(),
         };
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(border)
-            .title(Span::styled(mark, if order.is_some() { Style::default().fg(color).add_modifier(Modifier::BOLD) } else { theme::muted() }));
-        let inner = block.inner(r);
-        f.render_widget(block, r);
-        let [name, tech, effort] = self.card_text(a);
-        let name_st = if order.is_some() || cur { Style::default().fg(color).add_modifier(Modifier::BOLD) } else { theme::bold() };
-        let side = vec![
-            vec![Span::styled(format!("  {name}"), name_st)],
-            vec![Span::styled(format!("  {tech}"), theme::muted())],
-            vec![Span::styled(format!("  {effort}"), theme::muted())],
-            vec![],
-        ];
-        let sprite = agents::sprite(a);
-        let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(1), ..inner };
-        f.render_widget(Paragraph::new(sprites::lines(&sprite, if order.is_some() || cur { color } else { theme::pal().muted }, side)), inner);
+        let title = Span::styled(mark, if order.is_some() { Style::default().fg(color).add_modifier(Modifier::BOLD) } else { theme::muted() });
+        let look = crate::cards::Look { cur, lit: order.is_some(), border: Some(crate::cards::border(cur, order.is_some(), color)), title: Some(title), bg: None };
+        crate::cards::draw(f, r, a, &self.card_text(a), look);
     }
 
     fn draw_footer(&mut self, f: &mut Frame, area: Rect) {

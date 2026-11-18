@@ -619,21 +619,7 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                         let head = format!("{} {}", tool_label(&call.name), call_summary(&call.name, &call.input));
                         let bar = [Span::styled("│   ", Style::default().fg(c))];
                         d.rows.extend(render::plain(&head, w, theme::text(), &bar));
-                        if call.name == "Bash"
-                            && let Some(cmd) = call.input["command"].as_str()
-                        {
-                            d.rows.extend(render::plain(&format!("$ {cmd}"), w, Style::default().fg(Color::Indexed(110)), &[Span::styled("│     ", Style::default().fg(c))]));
-                        }
-                        if let Some((ok, out)) = &call.output {
-                            let lines: Vec<&str> = out.lines().collect();
-                            let tail = lines.len().saturating_sub(12);
-                            let mut text = lines[tail..].join("\n");
-                            if tail > 0 {
-                                text = format!("… {tail} lines\n{text}");
-                            }
-                            let st = if *ok { theme::muted() } else { Style::default().fg(theme::pal().danger) };
-                            d.rows.extend(render::plain(&text, w, st, &[Span::styled("│     ", Style::default().fg(c))]));
-                        }
+                        d.rows.extend(call_rows(call, w, &[Span::styled("│     ", Style::default().fg(c))]));
                     }
                     if think {
                         run_thought_rows(&mut d, thoughts, calls.len(), w, &tbar);
@@ -721,6 +707,86 @@ fn ask_rows(d: &mut Drawn, a: &Ask, w: usize, bar: &[Span<'static>], ask_at: usi
         }
         d.rows.extend(rows);
     }
+}
+
+/// Most lines of a code block in an open run (the rest: `… n more lines`); of an output: the last ones.
+const CALL_CODE_LINES: usize = 40;
+const CALL_OUTPUT_LINES: usize = 12;
+
+/// Language of FILE for the colors: its extension (`src/app.rs` → `rs`), else from the text.
+fn file_lang(file: &str) -> String {
+    std::path::Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or_default().to_string()
+}
+
+/// Max. CALL_CODE_LINES of TEXT; the rest as a count.
+fn head_lines(text: &str) -> (String, usize) {
+    let lines: Vec<&str> = text.lines().collect();
+    let more = lines.len().saturating_sub(CALL_CODE_LINES);
+    (lines[..lines.len() - more].join("\n"), more)
+}
+
+/// `-` OLD lines, `+` NEW lines: an edit as a diff.
+fn diff(old: &str, new: &str) -> String {
+    let mut out: Vec<String> = old.lines().map(|l| format!("-{l}")).collect();
+    out.extend(new.lines().map(|l| format!("+{l}")));
+    out.join("\n")
+}
+
+/// The open rows of CALL below its head row, MARGIN before each: its code (the command of a Bash
+/// call, the text of a Write, the diff of an Edit) and its output, as code blocks with colors.
+fn call_rows(call: &Call, w: usize, margin: &[Span<'static>]) -> Vec<Row> {
+    let mut out = Vec::new();
+    let note = |n: usize, what: &str| render::plain(&format!("… {n} {what}"), w, theme::muted(), margin);
+    let code = |out: &mut Vec<Row>, text: &str, lang: &str| {
+        let (text, more) = head_lines(text);
+        if !text.trim().is_empty() {
+            out.extend(render::code_rows(&text, lang, w, margin, true, None));
+        }
+        if more > 0 {
+            out.extend(note(more, "more lines"));
+        }
+    };
+    let s = |k: &str| call.input[k].as_str();
+    match call.name.as_str() {
+        "Bash" => {
+            if let Some(cmd) = s("command") {
+                code(&mut out, cmd, "sh");
+            }
+        }
+        "Write" => {
+            if let (Some(file), Some(text)) = (s("file_path"), s("content")) {
+                code(&mut out, text, &file_lang(file));
+            }
+        }
+        "Edit" => {
+            if let (Some(old), Some(new)) = (s("old_string"), s("new_string")) {
+                code(&mut out, &diff(old, new), "diff");
+            }
+        }
+        "MultiEdit" => {
+            let edits = call.input["edits"].as_array().cloned().unwrap_or_default();
+            let all: Vec<String> = edits.iter().map(|e| diff(e["old_string"].as_str().unwrap_or_default(), e["new_string"].as_str().unwrap_or_default())).collect();
+            if !all.is_empty() {
+                code(&mut out, &all.join("\n"), "diff");
+            }
+        }
+        _ => {}
+    }
+    if let Some((ok, text)) = &call.output {
+        let lines: Vec<&str> = text.lines().collect();
+        let tail = lines.len().saturating_sub(CALL_OUTPUT_LINES);
+        let text = lines[tail..].join("\n");
+        if tail > 0 {
+            out.extend(note(tail, "lines"));
+        }
+        if !text.trim().is_empty() {
+            // output: plain text (json: colors); an error in the danger color
+            let lang = if crate::code::language(&text, &[]) == "json" { "json" } else { "text" };
+            let fg = if *ok { None } else { Some(theme::pal().danger) };
+            out.extend(render::code_rows(&text, lang, w, margin, true, fg));
+        }
+    }
+    out
 }
 
 /// Short label of 1 call for a bubble's run row: `run tests`, `read view.rs`, `search foo`.
@@ -995,21 +1061,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                                 }
                                 let head = format!("{} {}", tool_label(&call.name), call_summary(&call.name, &call.input));
                                 d.rows.extend(render::plain(&head, inner, theme::text(), &[bar[0].clone(), Span::raw("  ")]));
-                                if call.name == "Bash"
-                                    && let Some(cmd) = call.input["command"].as_str()
-                                {
-                                    d.rows.extend(render::plain(&format!("$ {cmd}"), inner, Style::default().fg(Color::Indexed(110)), &[bar[0].clone(), Span::raw("    ")]));
-                                }
-                                if let Some((ok, out)) = &call.output {
-                                    let lines: Vec<&str> = out.lines().collect();
-                                    let tail = lines.len().saturating_sub(12);
-                                    let mut text = lines[tail..].join("\n");
-                                    if tail > 0 {
-                                        text = format!("… {tail} lines\n{text}");
-                                    }
-                                    let st = if *ok { theme::muted() } else { Style::default().fg(theme::pal().danger) };
-                                    d.rows.extend(render::plain(&text, inner, st, &[bar[0].clone(), Span::raw("    ")]));
-                                }
+                                d.rows.extend(call_rows(call, inner, &[bar[0].clone(), Span::raw("    ")]));
                             }
                             if think {
                                 run_thought_rows(&mut d, thoughts, calls.len(), inner, &tbar);
@@ -1105,7 +1157,7 @@ mod tests {
         assert!(widest(&d) <= 60);
         let open: HashSet<usize> = [1].into();
         let s = text(&draw(&t, Look::Lines, 60, &Colors::new(), &[], &Fold { runs: &open, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]));
-        assert!(s.contains("$ ls") && s.contains("│     b"), "{s}");
+        assert!(s.contains("│      sh") && s.contains("│      ls") && s.contains("│      b"), "{s}");
         t.push(&ev(Some("ada"), Kind::Answer { id: "q".into(), allow: true, label: "blue".into() }));
         t.push(&ev(Some("ada"), Kind::TurnEnd { cost: 0.1, input: 1, output: 1, cache_read: 0, cache_write: 0, ctx: 0, ms: 1, error: None }));
         assert!(t.asks.is_empty() && t.busy.is_empty());
@@ -1155,6 +1207,32 @@ mod tests {
         let s = text(&draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]));
         let tail: Vec<&str> = s.lines().rev().take(4).collect();
         assert!(tail.iter().any(|r| r.starts_with("│ denied")) && tail[0].starts_with('╰'), "{s}");
+    }
+
+    #[test]
+    fn open_runs_show_code_blocks() {
+        let mut t = Thread::default();
+        t.push(&ev(Some("ada"), Kind::TurnStart));
+        let cmd = "bun -e 'const d = await Bun.file(\"/very/long/path/to/some/report/data/file.json\").json(); console.log(d)'";
+        t.push(&ev(Some("ada"), Kind::Tool { id: "1".into(), name: "Bash".into(), input: json!({"command": cmd, "description": "Show data"}) }));
+        t.push(&ev(Some("ada"), Kind::ToolResult { id: "1".into(), ok: true, output: "{\"a\": 1}".into() }));
+        t.push(&ev(Some("ada"), Kind::Tool { id: "2".into(), name: "Edit".into(), input: json!({"file_path": "src/x.rs", "old_string": "let a = 1;", "new_string": "let a = 2;"}) }));
+        t.push(&ev(Some("ada"), Kind::ToolResult { id: "2".into(), ok: false, output: "no match".into() }));
+        let open: HashSet<usize> = [1].into();
+        for look in [Look::Bubbles, Look::Lines] {
+            let d = draw(&t, look, 60, &Colors::new(), &[], &Fold { runs: &open, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]);
+            let s = text(&d);
+            if std::env::var_os("SHOW").is_some() {
+                eprintln!("{s}");
+            }
+            // the command: a sh block, wrapped (0 chars cut), with a copy button
+            assert!(s.contains(" sh ") && s.contains("copy") && s.contains("Bun.file") && s.contains("data/file.json"), "{s}");
+            assert!(s.contains("-let a = 1;") && s.contains("+let a = 2;") && s.contains(" diff "), "{s}");
+            assert!(s.contains(" json ") && s.contains("no match"), "{s}");
+            assert!(widest(&d) <= 60, "{s}");
+            // the copy button holds the whole command
+            assert!(d.rows.iter().any(|r| r.copies.iter().any(|c| c.2 == cmd)));
+        }
     }
 
     #[test]

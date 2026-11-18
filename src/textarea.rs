@@ -86,8 +86,10 @@ pub fn mention_colors(line: &[char], marks: &[(String, Color)]) -> Vec<Option<Co
         return out;
     }
     let name_char = |c: char| is_word(c) || c == '-';
-    for i in 0..line.len() {
+    let mut i = 0;
+    while i < line.len() {
         if line[i] != '@' || (i > 0 && !(line[i - 1].is_whitespace() || matches!(line[i - 1], '(' | '[' | '"' | '\''))) {
+            i += 1;
             continue;
         }
         let mut j = i + 1;
@@ -97,7 +99,18 @@ pub fn mention_colors(line: &[char], marks: &[(String, Color)]) -> Vec<Option<Co
         let name: String = line[i + 1..j].iter().collect();
         if let Some((_, c)) = marks.iter().find(|(n, _)| *n == name) {
             out[i..j].iter_mut().for_each(|x| *x = Some(*c));
+            // `@new (replaces @old)`: the note in the color of NEW, `@old` in the color of OLD
+            if let Some((end, old, oc)) = marks.iter().find_map(|(old, oc)| {
+                let note: Vec<char> = crate::mention::replaces_note(old).chars().collect();
+                line[j..].starts_with(&note).then_some((j + note.len(), old, oc))
+            }) {
+                out[j + 1..end].iter_mut().for_each(|x| *x = Some(*c));
+                let at = end - 1 - old.chars().count() - 1;
+                out[at..end - 1].iter_mut().for_each(|x| *x = Some(*oc));
+                j = end;
+            }
         }
+        i = j.max(i + 1);
     }
     out
 }
@@ -1353,6 +1366,13 @@ mod tests {
         assert_eq!(colored, "@amon@lilith");
         assert_eq!(c[4], Some(Color::Red));
         assert_eq!(c[12], Some(Color::Blue));
+        // a replace note: in the color of the new agent, @lilith in its own color
+        let l: Vec<char> = "@amon (replaces @lilith) go".chars().collect();
+        let c = mention_colors(&l, &marks);
+        let want = |i: usize| if (16..23).contains(&i) { Color::Blue } else { Color::Red };
+        assert!(c[..24].iter().enumerate().all(|(i, x)| i == 5 || *x == Some(want(i))), "{c:?}");
+        assert_eq!(c[5], None);
+        assert_eq!(c[24..], [None, None, None]);
     }
 
     #[test]
