@@ -28,7 +28,7 @@ const fn spec(key: &'static str, label: &'static str, help: &'static str, env: &
 }
 
 /// The plain fields, then the alias boxes.
-const SPECS: [Spec; 24] = [
+const SPECS: [Spec; 25] = [
     spec("notes", "notes", "directory of Markdown notes, ~ expands to home", "CODEHEAD_NOTES"),
     spec("styles", "styles", "directory of agent output styles", "CODEHEAD_STYLES"),
     spec("home", "home repo", "git repo with AGENTS.md (notes, other repos): every agent reads it", "CODEHEAD_HOME_REPO"),
@@ -39,6 +39,7 @@ const SPECS: [Spec; 24] = [
     spec("thoughts", "thoughts", "hidden, folded (a click opens) or open · ctrl+t in a thread", "CODEHEAD_THOUGHTS"),
     spec("edits", "your edits", "what an agent gets told of edits since its last turn: off, files or diff", "CODEHEAD_EDITS"),
     spec("rank", "review order", "changes view: claude:<model> groups and orders the files, off: path rules", "CODEHEAD_RANK"),
+    spec("review", "reviewer", "changes view V: claude:<model> reviews the diff (read-only tools), off: 0 reviews", "CODEHEAD_REVIEW"),
     spec("editor", "editor", "IDE for ctrl+i and the changes view o: auto, or code, cursor, zed, idea …, or a path", "CODEHEAD_EDITOR"),
     spec("keys.menu", "menu", "opens the menu: F1-F12, ctrl+<letter>, alt+<letter>", "CODEHEAD_MENU_KEY"),
     spec("keys.command", "commands", "opens the command dropdown in a prompt: 1 symbol", "CODEHEAD_COMMAND_KEY"),
@@ -60,8 +61,8 @@ const SECTIONS: [(usize, &str, &str); 5] = [
     (0, "paths", "where codehead reads notes, output styles and the home repo"),
     (3, "new threads", "defaults of the new tab and the agent form"),
     (6, "thread view", "how messages and thoughts look, your edits, the review order, the IDE"),
-    (11, "keys", "keys of every screen"),
-    (13, "colors", "a preset; a set field below overrides 1 of its colors"),
+    (12, "keys", "keys of every screen"),
+    (14, "colors", "a preset; a set field below overrides 1 of its colors"),
 ];
 /// The alias group, after the plain fields.
 const ALIASES: (&str, &str) = ("path aliases", "short names for directories: name/ → target/ · enter: edit / done · d: delete · ctrl+n: add");
@@ -830,13 +831,13 @@ mod tests {
         // a click on ↺ of the scheme field
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 100)).unwrap();
         terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
-        let (r, _) = *form.rows.iter().find(|(_, h)| *h == Hit::Reset(13)).expect("↺ on the set scheme field");
+        let (r, _) = *form.rows.iter().find(|(_, h)| *h == Hit::Reset(14)).expect("↺ on the set scheme field");
         form.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x, row: r.y, modifiers: KeyModifiers::NONE });
         assert_eq!(config::read_file(&file).unwrap().1.scheme, None);
         assert!(!form.rows.iter().any(|(_, h)| *h == Hit::Reset(6)));
         // an invalid value: 0 write, the error shows
-        form.focus = 14;
-        form.fields[14].set_text("red");
+        form.focus = 15;
+        form.fields[15].set_text("red");
         form.commit();
         assert!(form.error && form.status.contains("#RRGGBB"));
         let _ = std::fs::remove_dir_all(dir);
@@ -923,11 +924,11 @@ mod tests {
         key(&mut form, KeyCode::Down);
         form.paste("~/docs/");
         key(&mut form, KeyCode::Enter);
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 100)).unwrap();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 140)).unwrap();
         terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let line = |y: u16| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>();
-        let top = (0..100).find(|&y| line(y).contains("alias 1 · enter: edit · d: delete")).expect("highlighted box");
+        let top = (0..140).find(|&y| line(y).contains("alias 1 · enter: edit · d: delete")).expect("highlighted box");
         assert!(line(top).trim_start().starts_with('╭'));
         assert!(line(top + 1).contains("docs") && line(top + 2).contains("~/docs/"));
         assert!(line(top + 3).trim_start().starts_with('╰'));

@@ -74,11 +74,13 @@ diff changes later, it shows `updated`.
 | `r` | read git again (it also does every 4 s) |
 | `R` | rank again (setting `rank`) |
 | `c` | comment on the line under the cursor: the prompt takes it, `⌘/ctrl+⏎` adds it to the batch, `esc` cancels (the draft comes back) |
-| `x` | delete the comment under the cursor |
+| `x` | delete the comment (or dismiss the finding) under the cursor |
 | `C` | send all comments as 1 message to the lead (`file:line`: text each) |
 | `a` / `u` | stage / unstage the file under the cursor (box head: `●` staged, `◐` a part) |
 | `m` | commit message in the prompt: `ctrl+g` drafts it from the staged diff (setting `rank` model), `⌘/ctrl+⏎` commits, `esc` cancels |
 | `P` | push (`git push -u origin HEAD`) |
 | `U` | fetch + rebase on the base (`origin/<default>`) |
 | `A` / `K` / `X` | a rebase stopped on conflicts: the agent resolves / continue / abort |
+| `V` | the reviewer (setting `review`) reads the diff: findings show under their line (`⚠ severity · title`) |
+| `y` | on a finding: into the comment batch (`C` sends it) |
 | `i` | the prompt gets the keys; `esc` gives them back |

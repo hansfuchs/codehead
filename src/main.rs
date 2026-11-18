@@ -26,6 +26,7 @@ mod notes;
 mod paths;
 mod preview;
 mod rank;
+mod review;
 mod render;
 mod settings;
 mod skills;

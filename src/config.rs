@@ -24,6 +24,8 @@ pub struct File {
     pub edits: Option<String>,
     /// Changes view order: `claude:<model>` (default `claude:haiku`) ranks the files, `off`: path rules.
     pub rank: Option<String>,
+    /// Changes view reviewer: `claude:<model>` (default `claude:sonnet`), `off`.
+    pub review: Option<String>,
     /// The IDE: `auto` (default), a command name (code, cursor, zed, idea …) or a path.
     pub editor: Option<String>,
     /// `[keys] menu`: the menu key (F2).
@@ -130,6 +132,10 @@ fn parse(text: &str) -> Result<File, String> {
                 validate("rank".into(), &s)?;
                 f.rank = Some(s);
             }
+            "review" => {
+                validate("review".into(), &s)?;
+                f.review = Some(s);
+            }
             _ => return Err(format!("unknown key {k}")),
         }
     }
@@ -165,7 +171,7 @@ pub fn validate(key: String, v: &str) -> Result<(), String> {
         "messages" if crate::stream::Look::parse(v).is_none() => Err(format!("messages: bubbles or lines, not {v}")),
         "thoughts" if crate::stream::Thoughts::parse(v).is_none() => Err(format!("thoughts: hidden, folded or open, not {v}")),
         "edits" if crate::engine::edits::Mode::parse(v).is_none() => Err(format!("edits: off, files or diff, not {v}")),
-        "rank" if v != "off" && !v.strip_prefix("claude:").is_some_and(|m| !m.is_empty()) => Err(format!("rank: off or claude:<model>, not {v}")),
+        "rank" | "review" if v != "off" && !v.strip_prefix("claude:").is_some_and(|m| !m.is_empty()) => Err(format!("{key}: off or claude:<model>, not {v}")),
         "keys.menu" => Bind::parse(v).map(|_| ()).ok_or_else(|| format!("keys.menu: F1-F12, ctrl+<letter> or alt+<letter>, not {v}")),
         "keys.command" => command_char(v).map(|_| ()).ok_or_else(|| format!("keys.command: 1 symbol (not a letter, digit, space or @), not {v}")),
         "colors.scheme" if crate::theme::Palette::preset(v).is_none() => {
@@ -267,6 +273,7 @@ fn document(base: &str, file: &File) -> Result<String, String> {
         ("thoughts", &file.thoughts),
         ("edits", &file.edits),
         ("rank", &file.rank),
+        ("review", &file.review),
         ("editor", &file.editor),
     ] {
         if let Some(value) = value {
@@ -395,6 +402,7 @@ impl File {
             "thoughts" => self.thoughts.clone(),
             "edits" => self.edits.clone(),
             "rank" => self.rank.clone(),
+            "review" => self.review.clone(),
             "editor" => self.editor.clone(),
             "keys.menu" => self.menu_key.clone(),
             "keys.command" => self.command_key.clone(),
@@ -415,6 +423,7 @@ impl File {
             "thoughts" => self.thoughts = v,
             "edits" => self.edits = v,
             "rank" => self.rank = v,
+            "review" => self.review = v,
             "editor" => self.editor = v,
             "keys.menu" => self.menu_key = v,
             "keys.command" => self.command_key = v,
@@ -515,6 +524,7 @@ pub fn defaults() -> File {
         thoughts: Some("hidden".into()),
         edits: Some("diff".into()),
         rank: Some("claude:haiku".into()),
+        review: Some("claude:sonnet".into()),
         editor: Some("auto".into()),
         menu_key: Some("F2".into()),
         command_key: Some(">".into()),
@@ -584,6 +594,13 @@ pub fn edits() -> crate::engine::edits::Mode {
         .or_else(|| get().edits.clone())
         .and_then(|m| crate::engine::edits::Mode::parse(&m))
         .unwrap_or_default()
+}
+
+/// The changes view's reviewer model: $CODEHEAD_REVIEW, else `review`, else claude:sonnet.
+/// None: `off`.
+pub fn review_model() -> Option<String> {
+    let v = env("CODEHEAD_REVIEW").or_else(|| get().review.clone()).unwrap_or_else(|| "claude:sonnet".into());
+    v.strip_prefix("claude:").filter(|m| !m.is_empty()).map(str::to_string)
 }
 
 /// The `editor` setting (None: unset; `auto` applies).

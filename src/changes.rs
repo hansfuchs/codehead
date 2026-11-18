@@ -721,6 +721,8 @@ struct Row {
     hunk: bool,
     /// A review comment's row: its index.
     comment: Option<usize>,
+    /// A reviewer finding's row: its index.
+    finding: Option<usize>,
 }
 
 /// A review comment on LINE (new side) of PATH, for the batch to an agent.
@@ -789,6 +791,11 @@ pub struct View {
     rank_model: Option<String>,
     /// Review comments, for 1 batch message (`C`).
     comments: Vec<Comment>,
+    /// The reviewer's findings, a review on its way, why 0, the model (None: `off`).
+    review: Option<crate::review::Review>,
+    reviewing: Option<Receiver<Result<crate::review::Review, String>>>,
+    review_error: Option<String>,
+    review_model: Option<String>,
     /// A git step on its way, and what the last one did (the thread view shows it).
     op: Option<Receiver<Result<String, String>>>,
     note: Option<String>,
@@ -817,6 +824,10 @@ impl View {
             rank_error: None,
             rank_model: if cfg!(test) { None } else { crate::config::rank_model() },
             comments: read_comments(id),
+            review: crate::review::cached(id),
+            reviewing: None,
+            review_error: None,
+            review_model: if cfg!(test) { None } else { crate::config::review_model() },
             op: None,
             note: None,
         }
@@ -905,7 +916,55 @@ impl View {
         if self.op.is_some() {
             s.push_str(" · git…");
         }
+        if self.reviewing.is_some() {
+            s.push_str(" · reviewing…");
+        } else if let Some(e) = &self.review_error {
+            s.push_str(&format!(" · {e}"));
+        } else if let Some(r) = self.review.as_ref().filter(|r| !r.findings.is_empty()) {
+            s.push_str(&format!(" · {} findings ({})", r.findings.len(), r.model));
+        }
         s
+    }
+
+    /// V: the reviewer reads the diff (on a thread; minutes for a big diff).
+    fn start_review(&mut self) -> Act {
+        let Some(model) = self.review_model.clone() else { return Act::Toast("review: off (setting review)".into()) };
+        if self.reviewing.is_some() {
+            return Act::Toast("review: on its way".into());
+        }
+        let (tx, rx) = mpsc::channel();
+        let (id, dir, files) = (self.id.clone(), self.dir.clone(), self.changes.files.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::review::run(&id, &dir, &files, &model));
+        });
+        self.reviewing = Some(rx);
+        self.review_error = None;
+        self.built = None;
+        Act::Toast("review: on its way".into())
+    }
+
+    fn poll_review(&mut self) -> bool {
+        let Some(rx) = &self.reviewing else { return false };
+        let Ok(r) = rx.try_recv() else { return false };
+        self.reviewing = None;
+        match r {
+            Ok(r) => {
+                self.note = Some(format!("review: {} findings", r.findings.len()));
+                self.review = Some(r);
+            }
+            Err(e) => self.review_error = Some(e),
+        }
+        true
+    }
+
+    /// Drop finding I (dismissed or taken into the batch).
+    fn drop_finding(&mut self, i: usize) {
+        if let Some(r) = self.review.as_mut()
+            && i < r.findings.len()
+        {
+            r.findings.remove(i);
+            crate::review::store(&self.id, r);
+        }
     }
 
     /// Run git step OP on a thread; its end re-reads git.
@@ -1012,14 +1071,14 @@ impl View {
             return;
         }
         let w = usize::from(width);
-        let mut rows: Vec<Row> = vec![Row { line: self.summary(), file: 0, at: None, head: false, hunk: false, comment: None }];
+        let mut rows: Vec<Row> = vec![Row { line: self.summary(), file: 0, at: None, head: false, hunk: false, comment: None, finding: None }];
         if let Some(c) = &self.changes.stopped {
             let files = if c.is_empty() { "0 conflicts".to_string() } else { format!("{} conflicts: {}", c.len(), c.join(", ")) };
             let line = Line::from(vec![
                 Span::styled(" rebase stopped ", theme::pill()),
                 Span::styled(crate::nav::fit(&format!(" {files} · A: agent resolves · K: continue · X: abort"), w.saturating_sub(16)), Style::default().fg(theme::pal().warn)),
             ]);
-            rows.push(Row { line, file: 0, at: None, head: false, hunk: false, comment: None });
+            rows.push(Row { line, file: 0, at: None, head: false, hunk: false, comment: None, finding: None });
         }
         // group heads: the model's groups (title, why), else the path-rule categories
         let mut last: Option<(Option<usize>, Cat)> = None;
@@ -1039,8 +1098,8 @@ impl View {
                     ]),
                     None => Line::styled(format!(" {}", f.cat.label()), theme::muted().add_modifier(Modifier::BOLD)),
                 };
-                rows.push(Row { line: Line::raw(""), file: i, at: None, head: false, hunk: false, comment: None });
-                rows.push(Row { line, file: i, at: None, head: false, hunk: false, comment: None });
+                rows.push(Row { line: Line::raw(""), file: i, at: None, head: false, hunk: false, comment: None, finding: None });
+                rows.push(Row { line, file: i, at: None, head: false, hunk: false, comment: None, finding: None });
             }
             last = Some(here);
             self.file_rows(&mut rows, i, f, w, side);
@@ -1092,9 +1151,9 @@ impl View {
         head.push(Span::styled(right, theme::muted()));
         head.push(Span::styled("─╮", border));
         let first = f.first_line();
-        rows.push(Row { line: Line::from(head), file: i, at: Some(first), head: true, hunk: false, comment: None });
+        rows.push(Row { line: Line::from(head), file: i, at: Some(first), head: true, hunk: false, comment: None, finding: None });
         if self.folded(f) {
-            rows.push(Row { line: Line::styled(format!("╰{}╯", "─".repeat(w.saturating_sub(2))), border), file: i, at: Some(first), head: false, hunk: false, comment: None });
+            rows.push(Row { line: Line::styled(format!("╰{}╯", "─".repeat(w.saturating_sub(2))), border), file: i, at: Some(first), head: false, hunk: false, comment: None, finding: None });
             return;
         }
         let inner = w.saturating_sub(4);
@@ -1109,16 +1168,16 @@ impl View {
         // the model's why of the file: the box's 1st row
         if let Some((_, _, why)) = self.ranked(&f.path).filter(|x| !x.2.is_empty()) {
             let st = theme::muted().add_modifier(Modifier::ITALIC);
-            rows.push(Row { line: bar(vec![Span::styled(crate::nav::fit(why, inner), st)]), file: i, at: Some(first), head: false, hunk: false, comment: None });
+            rows.push(Row { line: bar(vec![Span::styled(crate::nav::fit(why, inner), st)]), file: i, at: Some(first), head: false, hunk: false, comment: None, finding: None });
         }
         if f.binary || f.hunks.is_empty() {
             let note = if f.binary { "binary file" } else { "0 line changes (mode or rename)" };
-            rows.push(Row { line: bar(vec![Span::styled(note.to_string(), theme::muted())]), file: i, at: Some(first), head: false, hunk: false, comment: None });
+            rows.push(Row { line: bar(vec![Span::styled(note.to_string(), theme::muted())]), file: i, at: Some(first), head: false, hunk: false, comment: None, finding: None });
         }
         let num_w = f.hunks.iter().flat_map(|h| &h.lines).filter_map(|l| l.new.max(l.old)).max().unwrap_or(1).to_string().len().max(3);
         for h in &f.hunks {
             let label = format!("⋯ {}", if h.ctx.is_empty() { format!("line {}", h.new) } else { h.ctx.clone() });
-            rows.push(Row { line: bar(vec![Span::styled(crate::nav::fit(&label, inner), theme::muted())]), file: i, at: Some(h.new.max(1)), head: false, hunk: true, comment: None });
+            rows.push(Row { line: bar(vec![Span::styled(crate::nav::fit(&label, inner), theme::muted())]), file: i, at: Some(h.new.max(1)), head: false, hunk: true, comment: None, finding: None });
             // a new or deleted file: 1 side only, unified uses the room
             let painted = paint(f, h);
             if side && !matches!(f.status, Status::New | Status::Deleted) {
@@ -1133,31 +1192,62 @@ impl View {
                     let room = inner.saturating_sub(num.len() + 3);
                     let mut spans = vec![Span::styled(num, theme::muted()), sign_span(l.kind)];
                     spans.extend(painted_spans(p, l.kind, room));
-                    rows.push(Row { line: bar(spans), file: i, at: l.new.or(l.old), head: false, hunk: false, comment: None });
+                    rows.push(Row { line: bar(spans), file: i, at: l.new.or(l.old), head: false, hunk: false, comment: None, finding: None });
                 }
             }
         }
-        // review comments: under the 1st diff row of their line, else at the box's end
+        // findings, then review comments: under the 1st diff row of their line, else at the box's end
         let start = rows.iter().rposition(|r| r.head && r.file == i).unwrap_or(0);
+        let mut notes: Vec<(u32, Vec<Row>)> = Vec::new();
+        for (fi, x) in self.review.iter().flat_map(|r| r.findings.iter().enumerate()).filter(|(_, x)| x.file == f.path) {
+            let color = match x.severity.as_str() {
+                "critical" => theme::pal().danger,
+                "major" => theme::pal().warn,
+                _ => theme::pal().muted,
+            };
+            let st = Style::default().fg(color);
+            let head = format!("⚠ {} · ", x.severity);
+            let mut v = vec![Row {
+                line: bar(vec![Span::styled(head.clone(), st.add_modifier(Modifier::BOLD)), Span::styled(crate::nav::fit(&x.title, inner.saturating_sub(head.width())), st.add_modifier(Modifier::BOLD))]),
+                file: i,
+                at: Some(x.line),
+                head: false,
+                hunk: false,
+                comment: None,
+                finding: Some(fi),
+            }];
+            for l in x.body.lines().take(3) {
+                v.push(Row { line: bar(vec![Span::raw("  "), Span::styled(crate::nav::fit(l, inner.saturating_sub(2)), theme::muted())]), file: i, at: Some(x.line), head: false, hunk: false, comment: None, finding: Some(fi) });
+            }
+            notes.push((x.line, v));
+        }
         for (ci, c) in self.comments.iter().enumerate().filter(|(_, c)| c.path == f.path) {
+            let st = Style::default().fg(theme::pal().accent);
+            let v = c
+                .text
+                .lines()
+                .enumerate()
+                .map(|(k, l)| {
+                    let head = if k == 0 { format!("✎ {}: ", c.line) } else { "  ".to_string() };
+                    let room = inner.saturating_sub(head.width());
+                    Row { line: bar(vec![Span::styled(head, st.add_modifier(Modifier::BOLD)), Span::styled(crate::nav::fit(l, room), st)]), file: i, at: Some(c.line), head: false, hunk: false, comment: Some(ci), finding: None }
+                })
+                .collect();
+            notes.push((c.line, v));
+        }
+        let added = |r: &Row| r.comment.is_some() || r.finding.is_some();
+        for (line, new) in notes {
             // the last row of the 1st run on that line (a removed line, then the added one)
-            let hit = |r: &Row| !r.head && !r.hunk && r.comment.is_none() && r.at == Some(c.line);
+            let hit = |r: &Row| !r.head && !r.hunk && !added(r) && r.at == Some(line);
             let at = rows[start..].iter().position(hit).map_or(rows.len(), |p| {
                 let first = start + p;
                 first + 1 + rows[first + 1..].iter().take_while(|r| hit(r)).count()
             });
-            // after the comments already under that row
-            let at = at + rows[at..].iter().take_while(|r| r.comment.is_some()).count();
-            let st = Style::default().fg(theme::pal().accent);
-            let mut new: Vec<Row> = Vec::new();
-            for (k, l) in c.text.lines().enumerate() {
-                let head = if k == 0 { format!("✎ {}: ", c.line) } else { "  ".to_string() };
-                let room = inner.saturating_sub(head.width());
-                new.push(Row { line: bar(vec![Span::styled(head, st.add_modifier(Modifier::BOLD)), Span::styled(crate::nav::fit(l, room), st)]), file: i, at: Some(c.line), head: false, hunk: false, comment: Some(ci) });
-            }
+            // after the notes already under that row
+            let at = at + rows[at..].iter().take_while(|r| added(r)).count();
             rows.splice(at..at, new);
         }
-        rows.push(Row { line: Line::styled(format!("╰{}╯", "─".repeat(w.saturating_sub(2))), border), file: i, at: None, head: false, hunk: false, comment: None });
+        rows.push(Row { line: Line::styled(format!("╰{}╯", "─".repeat(w.saturating_sub(2))), border), file: i, at: None, head: false, hunk: false, comment: None, finding: None });
     }
 
     /// The review comments (for the view bar and the hint row).
@@ -1196,7 +1286,7 @@ impl View {
                 let mut s = cell(Some(k), true);
                 s.push(Span::styled(" │ ", theme::line()));
                 s.extend(cell(Some(k), false));
-                rows.push(Row { line: bar(s), file: i, at: ls[k].new, head: false, hunk: false, comment: None });
+                rows.push(Row { line: bar(s), file: i, at: ls[k].new, head: false, hunk: false, comment: None, finding: None });
                 k += 1;
                 continue;
             }
@@ -1208,7 +1298,7 @@ impl View {
                 s.push(Span::styled(" │ ", theme::line()));
                 s.extend(cell(ak, false));
                 let at = ak.and_then(|x| ls[x].new).or_else(|| (a > 0).then(|| ls[k + d].new).flatten()).or_else(|| dk.and_then(|x| ls[x].old));
-                rows.push(Row { line: bar(s), file: i, at, head: false, hunk: false, comment: None });
+                rows.push(Row { line: bar(s), file: i, at, head: false, hunk: false, comment: None, finding: None });
             }
             k += d + a;
         }
@@ -1216,6 +1306,9 @@ impl View {
 
     pub fn draw(&mut self, f: &mut Frame, area: Rect) {
         self.area = area;
+        if self.poll_review() {
+            self.built = None;
+        }
         if self.poll_op() {
             self.built = None;
         }
@@ -1358,7 +1451,23 @@ impl View {
                     self.rebuild_here();
                     return Act::Toast(format!("comment deleted · {} left", self.comments.len()));
                 }
+                if let Some(fi) = self.rows.get(self.at).and_then(|r| r.finding) {
+                    self.drop_finding(fi);
+                    self.rebuild_here();
+                    return Act::Toast("finding dismissed".into());
+                }
             }
+            // y on a finding: into the comment batch (C sends it)
+            KeyCode::Char('y') => {
+                if let Some(fi) = self.rows.get(self.at).and_then(|r| r.finding)
+                    && let Some(x) = self.review.as_ref().and_then(|r| r.findings.get(fi)).cloned()
+                {
+                    self.drop_finding(fi);
+                    self.add_comment(&x.file, x.line, &crate::review::as_comment(&x));
+                    return Act::Toast(format!("finding → comment batch · {} · C: send", self.comments.len()));
+                }
+            }
+            KeyCode::Char('V') => return self.start_review(),
             KeyCode::Char('C') => {
                 let Some(text) = batch(&self.comments) else { return Act::Toast("0 comments · c: comment on the line".into()) };
                 self.comments.clear();
@@ -1587,6 +1696,33 @@ Binary files a/img.png and b/img.png differ
         }
         assert_eq!(v.comment_count(), 0);
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-comments-0000"));
+    }
+
+    #[test]
+    fn findings_sit_under_their_line_y_takes_x_drops() {
+        use crate::review::{Finding, Review};
+        let mut v = view(parse(DIFF));
+        v.id = "changes-findings-0000".into();
+        v.comments.clear();
+        let f = |line: u32, sev: &str, t: &str| Finding { file: "src/a.rs".into(), line, severity: sev.into(), title: t.into(), body: "what breaks".into() };
+        v.review = Some(Review { model: "sonnet".into(), findings: vec![f(12, "major", "c is never read"), f(10, "minor", "a is shadowed")] });
+        v.build(100);
+        let t = text(&v);
+        let at = t.iter().position(|l| l.contains("+ let c = 4;")).unwrap();
+        assert!(t[at + 1].contains("⚠ major · c is never read") && t[at + 2].contains("what breaks"), "{t:#?}");
+        assert!(t[0].contains("2 findings (sonnet)"), "{t:#?}");
+        // y: the finding becomes a comment
+        v.at = v.rows.iter().position(|r| r.finding == Some(0)).unwrap();
+        v.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(v.comment_count(), 1);
+        assert_eq!(v.comments[0].text, "[major] c is never read: what breaks");
+        assert_eq!(v.review.as_ref().unwrap().findings.len(), 1);
+        // x: dismissed
+        v.at = v.rows.iter().position(|r| r.finding == Some(0)).unwrap();
+        v.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(v.review.as_ref().unwrap().findings.is_empty());
+        assert_eq!(v.comment_count(), 1, "x on a finding: 0 comment deleted");
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-findings-0000"));
     }
 
     #[test]
