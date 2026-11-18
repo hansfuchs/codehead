@@ -1841,7 +1841,7 @@ impl View {
             ),
             _ if let Some((file, line, _)) = &self.commenting => Span::styled(format!("comment on {file}:{line} · ⌘/ctrl+⏎: add to the batch · esc: cancel "), theme::accent()),
             _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled("j k · space: reviewed · c: comment · C: send · o: IDE · s: layout · i: prompt ", theme::muted()),
-            _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · space pgup pgdn: scroll · o: IDE · y: yazi · c: copy path · ctrl+y: yazi on the worktree · i: prompt ", theme::muted()),
+            _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · pgup pgdn: scroll · o: IDE · y: yazi · c: copy path · S: share · i: prompt ", theme::muted()),
             _ if self.pane != Pane::Chat => Span::styled("esc: back to the view · shift+tab: next view ", theme::muted()),
             _ => Span::styled(format!("tab: threads · shift+tab: changes · esc: interrupt · esc esc: codehead · {}: menu ", crate::config::menu_key().label), theme::muted()),
         };

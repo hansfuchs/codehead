@@ -104,4 +104,5 @@ rendered, code in syntax colors).
 | `y` | yazi on the file (full screen; codehead's own yazi config, themed from the palette) |
 | `c` | copy the file's path |
 | `r` | read the list again |
+| `S` | share: commit the thread's home repo files (only those paths, message `notes: <title>`), push when the branch has an upstream |
 | `i` | the prompt gets the keys; `esc` gives them back |

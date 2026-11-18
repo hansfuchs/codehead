@@ -263,6 +263,14 @@ impl View {
                 }
             }
             KeyCode::Char('r') => self.refresh(true),
+            // S: share the thread's home repo files (commit those paths, push if tracked)
+            KeyCode::Char('S') => {
+                let Some(home) = crate::config::home_repo() else { return Act::Toast("0 home repo (setting home)".into()) };
+                let paths: Vec<PathBuf> = self.files.iter().map(|e| e.path.clone()).collect();
+                let title = store::load(&self.id).map(|t| t.title).unwrap_or_default();
+                let r = share(&home, &paths, &title);
+                return Act::Toast(r.unwrap_or_else(|e| format!("share: {e}")));
+            }
             _ => {}
         }
         Act::None
@@ -284,6 +292,40 @@ impl View {
             }
             _ => {}
         }
+    }
+}
+
+/// Share the files of FILES under HOME (the home repo): `git add` + `git commit` of only those
+/// paths (message: notes of TITLE), then a push in the background when the branch has an
+/// upstream. Ok(what happened).
+pub fn share(home: &Path, files: &[PathBuf], title: &str) -> Result<String, String> {
+    let rel: Vec<String> = files.iter().filter_map(|p| p.strip_prefix(home).ok()).map(|p| p.display().to_string()).collect();
+    if rel.is_empty() {
+        return Err("0 home repo files in this thread".into());
+    }
+    let git = |args: &[&str]| -> Result<String, String> {
+        let o = std::process::Command::new("git").arg("-C").arg(home).args(args).stdin(std::process::Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
+        if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).into_owned()) } else { Err(String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("git failed").to_string()) }
+    };
+    let mut add = vec!["add", "--"];
+    add.extend(rel.iter().map(String::as_str));
+    git(&add)?;
+    let mut st = vec!["diff", "--cached", "--name-only", "--"];
+    st.extend(rel.iter().map(String::as_str));
+    let staged = git(&st)?;
+    if staged.trim().is_empty() {
+        return Ok("home repo: 0 changes to share".into());
+    }
+    let msg = format!("notes: {}", title.lines().next().unwrap_or("thread"));
+    let mut commit = vec!["commit", "-q", "-m", &msg, "--"];
+    commit.extend(rel.iter().map(String::as_str));
+    git(&commit)?;
+    let n = staged.lines().count();
+    if git(&["rev-parse", "--abbrev-ref", "@{u}"]).is_ok() {
+        let _ = std::process::Command::new("git").arg("-C").arg(home).args(["push", "-q"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+        Ok(format!("home repo: {n} files committed, pushing"))
+    } else {
+        Ok(format!("home repo: {n} files committed (0 upstream: 0 push)"))
     }
 }
 
@@ -346,6 +388,24 @@ mod tests {
         std::fs::write(d.join("area/plans/b.md"), "thread: other · branch: main\n").unwrap();
         std::fs::write(d.join("area/INDEX.md"), "- plans/a.md\n").unwrap();
         assert_eq!(notes_of(&d, "abc123"), [d.join("area/plans/a.md")]);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn share_commits_only_the_threads_home_files() {
+        let d = std::env::temp_dir().join(format!("codehead-share-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("notes")).unwrap();
+        let sh = |c: &str| assert!(std::process::Command::new("sh").arg("-c").arg(c).current_dir(&d).status().unwrap().success(), "{c}");
+        sh("git init -q && git config user.email t@t && git config user.name t && echo x > other.md && git add -A && git commit -qm init");
+        std::fs::write(d.join("notes/plan.md"), "thread: t1\n").unwrap();
+        std::fs::write(d.join("other.md"), "changed\n").unwrap();
+        let r = share(&d, &[d.join("notes/plan.md"), PathBuf::from("/elsewhere/x.rs")], "fix deploy").unwrap();
+        assert_eq!(r, "home repo: 1 files committed (0 upstream: 0 push)");
+        let log = std::process::Command::new("git").arg("-C").arg(&d).args(["show", "--stat", "--format=%s", "HEAD"]).output().unwrap();
+        let log = String::from_utf8_lossy(&log.stdout);
+        assert!(log.starts_with("notes: fix deploy") && log.contains("notes/plan.md") && !log.contains("other.md"), "{log}");
+        assert_eq!(share(&d, &[d.join("notes/plan.md")], "x").unwrap(), "home repo: 0 changes to share");
         let _ = std::fs::remove_dir_all(d);
     }
 
