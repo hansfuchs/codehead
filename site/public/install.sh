@@ -133,6 +133,19 @@ install_codehead() {
     command -v "$h" >/dev/null 2>&1 && found_harness=1
   done
   [ -n "$found_harness" ] || warn "0 harnesses on PATH (claude, codex, opencode, goose, …): https://codehead.sh/docs/requirements/"
+
+  # yazi: the file browser of the thread view (ctrl+y, files view y)
+  if command -v yazi >/dev/null 2>&1; then
+    good "yazi: $(yazi --version 2>/dev/null | head -1)"
+  elif command -v brew >/dev/null 2>&1; then
+    say "installing yazi (brew) …"
+    if brew install yazi >/dev/null 2>&1; then good "yazi: installed"; else warn "brew install yazi failed: https://yazi-rs.github.io/docs/installation"; fi
+  elif command -v cargo-binstall >/dev/null 2>&1; then
+    say "installing yazi (cargo binstall) …"
+    if cargo binstall -y yazi-build >/dev/null 2>&1; then good "yazi: installed"; else warn "cargo binstall yazi-build failed: https://yazi-rs.github.io/docs/installation"; fi
+  else
+    warn "yazi not found: install it for the file browser (https://yazi-rs.github.io/docs/installation)"
+  fi
   printf '\nNext: run codehead in a git repository.\n'
 }
 

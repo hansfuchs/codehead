@@ -40,5 +40,11 @@ is installed and the command codehead runs.
 
 - **Clipboard** (Linux): `wl-clipboard` on Wayland, `xclip` or `xsel` on X11.
 - **Editor**: `$VISUAL` or `$EDITOR` (default `nvim`, else `vi`), to edit notes.
-- **VS Code**: `code` on `PATH`, to open a thread's worktree with `ctrl+i`.
-- **gh**, logged in: the install script then checks each release's build provenance too.
+- **IDE**: VS Code, VSCodium, Cursor, Zed or a JetBrains IDE (setting `editor`), for `ctrl+i` and
+  the changes view `o`.
+- **yazi**: the file browser (`ctrl+y`, files view `y`); the install script installs it (brew,
+  else `cargo binstall`).
+- **claude** (Claude Code), logged in: the changes view order (`rank`), the reviewer (`review`),
+  commit message drafts and `> handoff`, also when the agents run on other harnesses.
+- **gh**, logged in: pull requests and CI in the changes view (`O`, `F`, `M`); the install
+  script checks each release's build provenance with it too.
