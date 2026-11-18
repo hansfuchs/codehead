@@ -23,6 +23,7 @@ mod fuzzy;
 mod engine;
 mod dropdown;
 mod mention;
+mod models;
 mod monitors;
 mod nav;
 mod menu;

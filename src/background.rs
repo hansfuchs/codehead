@@ -22,6 +22,9 @@ impl<K, V> Default for Reads<K, V> {
 impl<K: Clone + Eq + Hash + Send + 'static, V: Send + 'static> Reads<K, V> {
     pub fn pending(&self) -> usize { self.pending.len() }
 
+    /// A read of KEY is under way.
+    pub fn waiting(&self, key: &K) -> bool { self.pending.contains_key(key) }
+
     pub fn request(&mut self, key: K, read: impl FnOnce() -> V + Send + 'static) {
         if self.pending.contains_key(&key) || self.updated.get(&key).is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
             return;

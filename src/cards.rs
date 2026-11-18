@@ -54,6 +54,17 @@ pub fn card_width(text_w: usize, border: bool) -> u16 {
 
 /// Layout of GROUPS in WIDTH: per group a heading row, its card rows (CARD_H each), 1 blank row.
 pub fn grid(groups: &[(String, Vec<usize>)], card_w: u16, card_h: u16, width: u16) -> Grid {
+    grid_gap(groups, card_w, card_h, width, 1)
+}
+
+/// [`grid`] with 0 blank rows between the groups: bordered cards (task screen, agents tab, F2
+/// menu), the border parts them already.
+pub fn tight_grid(groups: &[(String, Vec<usize>)], card_w: u16, card_h: u16, width: u16) -> Grid {
+    grid_gap(groups, card_w, card_h, width, 0)
+}
+
+/// Layout of GROUPS in WIDTH: per group a heading row, its card rows (CARD_H each), GAP blank rows.
+fn grid_gap(groups: &[(String, Vec<usize>)], card_w: u16, card_h: u16, width: u16, gap: usize) -> Grid {
     let card_w = card_w.min(width.max(1));
     let per_row = ((width + 1) / (card_w + 1)).max(1) as usize;
     let mut heads = Vec::new();
@@ -66,9 +77,9 @@ pub fn grid(groups: &[(String, Vec<usize>)], card_w: u16, card_h: u16, width: u1
             let x = (slot % per_row) as u16 * (card_w + 1);
             places.push((i, x, y + slot / per_row * card_h as usize));
         }
-        y += g.len().div_ceil(per_row) * card_h as usize + 1;
+        y += g.len().div_ceil(per_row) * card_h as usize + gap;
     }
-    Grid { card_width: card_w, heads, places, height: y.saturating_sub(1) }
+    Grid { card_width: card_w, heads, places, height: y.saturating_sub(gap) }
 }
 
 /// 1st virtual row to show so that the card at TOP (CARD_H rows) is in a VIEW of rows, its group
@@ -195,5 +206,10 @@ mod tests {
         assert_eq!(l.heads, vec![(0, "claude · 2".into()), (8, "codex · 1".into())]);
         assert_eq!(l.places, vec![(1, 0, 1), (2, 21, 1), (0, 0, 9)]);
         assert_eq!(l.height, 15);
+        // tight: the next heading right below the cards
+        let l = tight_grid(&groups(&a, |_| true), 20, CARD_H, 41);
+        assert_eq!(l.heads, vec![(0, "claude · 2".into()), (7, "codex · 1".into())]);
+        assert_eq!(l.places, vec![(1, 0, 1), (2, 21, 1), (0, 0, 8)]);
+        assert_eq!(l.height, 14);
     }
 }

@@ -130,6 +130,14 @@ enum Where {
     NewWorktree,
 }
 
+/// The open where dropdown: cursor (a row of [`App::where_rows`]), 1st row in view, typed filter.
+#[derive(Default)]
+struct WhereMenu {
+    cursor: usize,
+    offset: usize,
+    query: String,
+}
+
 /// The where row's choices for a repo: the choices, branches checked out elsewhere, the repo's
 /// branch, the branch and top dir of the current directory.
 #[derive(Default)]
@@ -240,6 +248,20 @@ struct AgentForm {
     areas: [Rect; FORM_FIELDS - 1],
     /// `fingerprint` at open: Esc asks before it drops edits.
     orig: String,
+    /// Harnesses of the harness dropdown: the installed ones (name, label, bin).
+    harnesses: Vec<(String, String, String)>,
+    /// Open dropdown of the harness / model field.
+    pick: Option<FormPick>,
+}
+
+/// The open dropdown of the agent form: harness list, or the model list of HARNESS; cursor,
+/// 1st row in view, typed filter.
+struct FormPick {
+    model: bool,
+    harness: String,
+    cursor: usize,
+    offset: usize,
+    query: String,
 }
 
 const F_NAME: usize = 0;
@@ -316,6 +338,8 @@ impl AgentForm {
             error: None,
             areas: [Rect::default(); FORM_FIELDS - 1],
             orig: String::new(),
+            harnesses: crate::engine::harnesses::installed().into_iter().map(|h| (h.name.to_string(), h.label.to_string(), h.bin.to_string())).collect(),
+            pick: None,
         };
         f.orig = f.fingerprint();
         f
@@ -362,6 +386,49 @@ impl AgentForm {
         let h = self.harness.text();
         let h = h.trim();
         h.is_empty() || h == "claude"
+    }
+
+    /// The harness of the harness field: the part before `/` (empty: claude).
+    fn harness_name(&self) -> String {
+        let t = self.harness.text();
+        let h = t.trim().split('/').next().unwrap_or_default().trim();
+        if h.is_empty() { "claude".into() } else { h.to_string() }
+    }
+
+    /// The model: claude → the model row's, else the part after `/` (0: "default").
+    fn model_id(&self) -> String {
+        if self.is_claude() {
+            return self.models[self.model].clone();
+        }
+        let t = self.harness.text();
+        t.trim().split_once('/').map(|(_, m)| m.trim().to_string()).filter(|m| !m.is_empty()).unwrap_or_else(|| "default".into())
+    }
+
+    /// Harness NAME from the dropdown: the field holds it (same harness: its model stays).
+    fn set_harness(&mut self, name: &str) {
+        if name == self.harness_name() {
+            return;
+        }
+        self.harness.load_text(name);
+        if name == "claude" {
+            self.model = 0;
+        }
+    }
+
+    /// Model ID of the current harness from the dropdown: claude → the model row, else `harness/id`.
+    fn set_model(&mut self, id: &str) {
+        let h = self.harness_name();
+        if h == "claude" {
+            self.harness.load_text("claude");
+            self.model = self.models.iter().position(|m| m == id).unwrap_or_else(|| {
+                self.models.push(id.to_string());
+                self.models.len() - 1
+            });
+        } else if id == "default" {
+            self.harness.load_text(&h);
+        } else {
+            self.harness.load_text(&format!("{h}/{id}"));
+        }
     }
 
     /// `claude`, `claude/opus`, or the harness text as typed (other harnesses).
@@ -460,6 +527,11 @@ struct Regions {
     buttons: Vec<(Rect, bool)>,
     notes_label: Rect,
     where_row: Rect,
+    /// The where chip (anchor of the where dropdown), the rows of the open dropdown (area, choice).
+    where_chip: Rect,
+    where_rows: Vec<(Rect, usize)>,
+    /// Rows of the open harness / model dropdown of the agent form (area, row).
+    form_rows: Vec<(Rect, usize)>,
     task_agents: Rect,
     /// Checkboxes of the opts row: (area, 0 checkout / 1 stash).
     opts: Vec<(Rect, usize)>,
@@ -543,6 +615,14 @@ pub struct App {
     repo_i: usize,
     start_cwd: PathBuf,
     where_i: usize,
+    /// Where dropdown (enter on the where row): open with its cursor, scroll, filter.
+    where_menu: Option<WhereMenu>,
+    /// Model lists by harness (agent form; `<data dir>/models.json`), the reads under way, the
+    /// last read error by harness, the read itself (tests: a fake, 0 harness spawned).
+    models: Option<HashMap<String, crate::models::Entry>>,
+    model_reads: Reads<String, Result<crate::models::Entry, String>>,
+    model_errors: HashMap<String, String>,
+    probe: fn(&str) -> Result<Vec<crate::models::Model>, String>,
     /// Checkouts by branch, and the main checkout's branch (read once: the where row draws often).
     checkouts: HashMap<String, String>,
     repo_branch: String,
@@ -755,6 +835,11 @@ impl App {
             start_cwd,
             wheres,
             where_i,
+            where_menu: None,
+            models: None,
+            model_reads: Reads::default(),
+            model_errors: HashMap::new(),
+            probe: if cfg!(test) { |_| Err("tests: 0 probe".into()) } else { crate::models::read },
             checkouts,
             repo_branch,
             here_branch,
@@ -1134,6 +1219,18 @@ impl App {
             }
             _ => {}
         }
+        for (h, res) in self.model_reads.poll() {
+            dirty = true;
+            match res {
+                Ok(e) => {
+                    self.model_errors.remove(&h);
+                    self.models.get_or_insert_with(HashMap::new).insert(h, e);
+                }
+                Err(e) => {
+                    self.model_errors.insert(h, e);
+                }
+            }
+        }
         if self.toast.as_ref().is_some_and(|t| t.1.elapsed() > Duration::from_secs(3)) {
             self.toast = None;
             dirty = true;
@@ -1312,16 +1409,87 @@ impl App {
         (!r.path.join(".git").exists()).then(|| r.url.clone().map(|u| (u, r.path.clone()))).flatten()
     }
 
-    /// ←→ on the where row. A target from the threads tab gives way to the choices.
-    fn step_where(&mut self, d: isize) {
-        let n = self.wheres.len();
-        if n == 0 {
+    /// Text + detail of where choice W: a row of the where dropdown.
+    fn where_label(&self, w: &Where) -> (String, String) {
+        match w {
+            Where::Current => ("current branch".into(), if self.here_branch.is_empty() { "detached".into() } else { self.here_branch.clone() }),
+            Where::NewBranch => ("+ new branch".into(), "git switch -c · 0 worktrees".into()),
+            Where::NewWorktree => ("+ new branch + worktree".into(), "git worktree add".into()),
+            Where::Branch(b) => (b.clone(), self.checkouts.get(b).map_or_else(|| "branch".into(), |p| format!("worktree {}", tilde(p)))),
+        }
+    }
+
+    /// Rows of the where dropdown, top to bottom (indexes of WHERES): the branches (the 1st choice,
+    /// main or the newest, right above the rest), new branch + worktree, new branch, current
+    /// branch at the bottom. With Q: the matches in that order by score, the best at the bottom.
+    fn where_rows(&self, q: &str) -> Vec<usize> {
+        let mut v: Vec<usize> = (0..self.wheres.len()).filter(|&i| matches!(self.wheres[i], Where::Branch(_))).rev().collect();
+        for w in [Where::NewWorktree, Where::NewBranch, Where::Current] {
+            v.extend(self.wheres.iter().position(|x| *x == w));
+        }
+        let q = q.trim().to_lowercase();
+        if q.is_empty() {
+            return v;
+        }
+        let mut m: Vec<(i64, usize, usize)> = v
+            .into_iter()
+            .enumerate()
+            .filter_map(|(pos, i)| {
+                let (label, detail) = self.where_label(&self.wheres[i]);
+                let text = if self.wheres[i] == Where::Current { format!("{label} {detail}") } else { label };
+                fuzzy(&q, &text).map(|s| (s, pos, i))
+            })
+            .collect();
+        m.sort_by_key(|&(s, pos, _)| (s, pos));
+        m.into_iter().map(|(_, _, i)| i).collect()
+    }
+
+    /// Enter / space / click on the where row: the dropdown, its cursor on the current choice.
+    fn open_where(&mut self) {
+        let rows = self.where_rows("");
+        if rows.is_empty() {
             return;
         }
-        if self.target.take().is_some() {
-            return;
+        let cursor = rows.iter().position(|&i| i == self.where_i).unwrap_or(rows.len() - 1);
+        self.where_menu = Some(WhereMenu { cursor, offset: 0, query: String::new() });
+    }
+
+    /// Choice I (of WHERES) from the dropdown. A target from the threads tab gives way to it.
+    fn pick_where(&mut self, i: usize) {
+        self.where_menu = None;
+        self.target = None;
+        self.where_i = i;
+    }
+
+    /// Keys of the open where dropdown: ↑↓ move, type: filter, enter: pick, esc: close.
+    fn where_key(&mut self, k: KeyEvent) {
+        let Some(q) = self.where_menu.as_ref().map(|m| m.query.clone()) else { return };
+        let rows = self.where_rows(&q);
+        let n = rows.len();
+        let typed = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        let mut query = None;
+        let Some(m) = self.where_menu.as_mut() else { return };
+        match k.code {
+            KeyCode::Esc => self.where_menu = None,
+            KeyCode::Up if n > 0 => m.cursor = (m.cursor + n - 1) % n,
+            KeyCode::Down if n > 0 => m.cursor = (m.cursor + 1) % n,
+            KeyCode::PageUp => m.cursor = m.cursor.saturating_sub(dropdown::MAX_ROWS),
+            KeyCode::PageDown if n > 0 => m.cursor = (m.cursor + dropdown::MAX_ROWS).min(n - 1),
+            KeyCode::Enter => {
+                if let Some(&i) = rows.get(m.cursor) {
+                    self.pick_where(i);
+                }
+            }
+            KeyCode::Backspace if typed => query = Some(q.chars().take(q.chars().count().saturating_sub(1)).collect::<String>()),
+            KeyCode::Char(c) if typed => query = Some(format!("{q}{c}")),
+            _ => {}
         }
-        self.where_i = (self.where_i as isize + d).rem_euclid(n as isize) as usize;
+        // new filter: the cursor on the best match (bottom); 0 filter: on the current choice
+        if let Some(q) = query {
+            let rows = self.where_rows(&q);
+            let cursor = if q.is_empty() { rows.iter().position(|&i| i == self.where_i) } else { None }.unwrap_or(rows.len().saturating_sub(1));
+            self.where_menu = Some(WhereMenu { cursor, offset: 0, query: q });
+        }
     }
 
     /// Checkout box: (checked, enabled). Fixed on for the current branch and for branches that
@@ -1647,6 +1815,214 @@ impl App {
         }
     }
 
+    /// The open where dropdown, above the where chip (its rows grow upwards: current branch at the
+    /// bottom, next to the chip). The current choice: `●`.
+    fn draw_where_menu(&mut self, f: &mut Frame, bounds: Rect) {
+        let Some((q, cur, off)) = self.where_menu.as_ref().map(|m| (m.query.clone(), m.cursor, m.offset)) else { return };
+        let rows = self.where_rows(&q);
+        let n = rows.len();
+        let items: Vec<dropdown::Row> = rows
+            .iter()
+            .map(|&i| {
+                let (text, detail) = self.where_label(&self.wheres[i]);
+                dropdown::Row { text, detail, now: i == self.where_i && self.target.is_none(), marks: Vec::new() }
+            })
+            .collect();
+        let w = items.iter().map(|r| r.text.width() + r.detail.width() + 8).max().unwrap_or(0).clamp(40, 96) as u16;
+        let Some(r) = dropdown::place(self.regions.where_chip, w, n, bounds, true) else { return };
+        let cur = cur.min(n.saturating_sub(1));
+        let label = if q.is_empty() { "where".to_string() } else { format!("where › {q}") };
+        let note = if q.is_empty() { "type: filter".to_string() } else { format!("{n} of {}", self.wheres.len()) };
+        let (off, drawn) = dropdown::list(f, r, &label, &note, &items, cur, off, "0 matches");
+        if let Some(m) = self.where_menu.as_mut() {
+            m.cursor = cur;
+            m.offset = off;
+        }
+        self.regions.where_rows = drawn.into_iter().map(|(row, j)| (row, rows[j])).collect();
+    }
+
+    // ---------- harness + model dropdowns of the agent form ----------
+    /// Rows of the harness dropdown: the installed harnesses (label, bin), the form's harness
+    /// too when it is not installed. (value, row).
+    fn harness_items(form: &AgentForm) -> Vec<(String, dropdown::Row)> {
+        let cur = form.harness_name();
+        let mut v: Vec<(String, dropdown::Row)> =
+            form.harnesses.iter().map(|(name, label, bin)| (name.clone(), dropdown::Row { text: label.clone(), detail: bin.clone(), now: *name == cur, marks: Vec::new() })).collect();
+        if !v.iter().any(|(n, _)| *n == cur) {
+            v.push((cur.clone(), dropdown::Row { text: cur, detail: "not installed".into(), now: true, marks: Vec::new() }));
+        }
+        v
+    }
+
+    /// Rows of the model dropdown of harness H (value, row), and a status: models being read, a
+    /// read error. Claude Code: aliases + exact ids; others: `default` + the cached list.
+    fn model_items(&self, form: &AgentForm, h: &str) -> (Vec<(String, dropdown::Row)>, Option<String>) {
+        let cur = form.model_id();
+        let row = |m: &crate::models::Model| (m.id.clone(), dropdown::Row { text: m.id.clone(), detail: m.name.clone(), now: m.id == cur, marks: Vec::new() });
+        let mut v: Vec<(String, dropdown::Row)> = Vec::new();
+        let mut status = None;
+        if h == "claude" {
+            v.extend(crate::models::claude(&crate::config::models()).iter().map(row));
+        } else {
+            v.push(row(&crate::models::Model { id: "default".into(), name: "harness default".into() }));
+            if let Some(e) = self.models.as_ref().and_then(|m| m.get(h)) {
+                v.extend(e.models.iter().map(row));
+            }
+            if self.model_reads.waiting(&h.to_string()) {
+                status = Some("reading models…".to_string());
+            } else if let Some(e) = self.model_errors.get(h) {
+                status = Some(format!("models: {e}"));
+            }
+        }
+        if !v.iter().any(|(id, _)| *id == cur) {
+            v.push((cur.clone(), dropdown::Row { text: cur, detail: "current".into(), now: true, marks: Vec::new() }));
+        }
+        (v, status)
+    }
+
+    /// The rows of FORM's open dropdown for its filter, best match first.
+    fn pick_items(&self, form: &AgentForm) -> Vec<(String, dropdown::Row)> {
+        let Some(p) = &form.pick else { return Vec::new() };
+        let all = if p.model { self.model_items(form, &p.harness).0 } else { Self::harness_items(form) };
+        // the text (marked), the value and detail too (substring)
+        let ranked = crate::fuzzy::rank(&all, &p.query, |(_, r)| r.text.clone(), |(v, r)| format!("{v} {}", r.detail));
+        let mut slots: Vec<Option<(String, dropdown::Row)>> = all.into_iter().map(Some).collect();
+        ranked
+            .into_iter()
+            .filter_map(|(i, marks)| {
+                let (v, mut r) = slots[i].take()?;
+                r.marks = marks;
+                Some((v, r))
+            })
+            .collect()
+    }
+
+    /// The model list of harness H: from the cache file; 0 list or older than a day (or FORCE,
+    /// `r`): read in the background.
+    fn ensure_models(&mut self, h: &str, force: bool) {
+        if h == "claude" {
+            return;
+        }
+        let fresh = self.models.get_or_insert_with(crate::models::load).get(h).is_some_and(crate::models::fresh);
+        if fresh && !force {
+            return;
+        }
+        let (probe, name) = (self.probe, h.to_string());
+        self.model_errors.remove(h);
+        self.model_reads.request(name.clone(), move || probe(&name).map(|m| crate::models::store(&name, &m)));
+    }
+
+    /// Enter / click on the harness (MODEL: model) field: its dropdown, the cursor on the current value.
+    fn open_form_pick(&mut self, form: &mut AgentForm, model: bool) {
+        let h = form.harness_name();
+        if model {
+            self.ensure_models(&h, false);
+            form.field = F_MODEL;
+        }
+        form.pick = Some(FormPick { model, harness: h, cursor: 0, offset: 0, query: String::new() });
+        let cursor = self.pick_items(form).iter().position(|(_, r)| r.now).unwrap_or(0);
+        if let Some(p) = &mut form.pick {
+            p.cursor = cursor;
+        }
+    }
+
+    /// Value V picked: a harness → the field, then its model list; a model → the form.
+    fn choose_form_pick(&mut self, form: &mut AgentForm, v: &str) {
+        let model = form.pick.as_ref().is_some_and(|p| p.model);
+        form.pick = None;
+        form.error = None;
+        if model {
+            form.set_model(v);
+        } else {
+            form.set_harness(v);
+            self.open_form_pick(form, true);
+        }
+    }
+
+    /// Keys of the open harness / model dropdown: ↑↓ move, type: filter, enter: pick (models: 0
+    /// match → the typed id), r (ctrl+r while typing): read the models again, esc: close.
+    fn form_pick_key(&mut self, form: &mut AgentForm, k: KeyEvent) {
+        let items = self.pick_items(form);
+        let n = items.len();
+        let typed = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(p) = form.pick.as_mut() else { return };
+        let (model, h, q) = (p.model, p.harness.clone(), p.query.clone());
+        match k.code {
+            KeyCode::Esc => form.pick = None,
+            KeyCode::Up if n > 0 => p.cursor = (p.cursor + n - 1) % n,
+            KeyCode::Down if n > 0 => p.cursor = (p.cursor + 1) % n,
+            KeyCode::PageUp => p.cursor = p.cursor.saturating_sub(dropdown::MAX_ROWS),
+            KeyCode::PageDown if n > 0 => p.cursor = (p.cursor + dropdown::MAX_ROWS).min(n - 1),
+            KeyCode::Enter => match items.get(p.cursor) {
+                Some((v, _)) => self.choose_form_pick(form, v),
+                None if model && !q.trim().is_empty() => self.choose_form_pick(form, q.trim()),
+                None => {}
+            },
+            KeyCode::Char('r') if model && (ctrl || q.is_empty()) => self.ensure_models(&h, true),
+            KeyCode::Backspace if typed => {
+                p.query.pop();
+                (p.cursor, p.offset) = (0, 0);
+            }
+            KeyCode::Char(c) if typed => {
+                p.query.push(c);
+                (p.cursor, p.offset) = (0, 0);
+            }
+            _ => {}
+        }
+    }
+
+    /// A click while the dropdown is open: a row picks it, elsewhere closes it.
+    fn form_pick_click(&mut self, form: &mut AgentForm, at: Position) {
+        match self.regions.form_rows.iter().find(|(r, _)| r.contains(at)).map(|&(_, j)| j) {
+            Some(j) => {
+                if let Some((v, _)) = self.pick_items(form).get(j) {
+                    let v = v.clone();
+                    self.choose_form_pick(form, &v);
+                }
+            }
+            None => form.pick = None,
+        }
+    }
+
+    /// The open harness / model dropdown, below its field.
+    fn draw_form_pick(&mut self, f: &mut Frame, bounds: Rect) {
+        self.regions.form_rows.clear();
+        let Some(Modal::Agent(mut form)) = self.modal.take() else { return };
+        if let Some((model, h, q, cur, off)) = form.pick.as_ref().map(|p| (p.model, p.harness.clone(), p.query.clone(), p.cursor, p.offset)) {
+            let items = self.pick_items(&form);
+            let n = items.len();
+            let total = if model { self.model_items(&form, &h).0.len() } else { Self::harness_items(&form).len() };
+            let status = if model { self.model_items(&form, &h).1 } else { None };
+            let row = form.areas[if model { F_MODEL } else { F_HARNESS }];
+            let anchor = Rect { x: row.x + 10, y: row.y, width: 1, height: 1 };
+            let rows: Vec<dropdown::Row> = items.into_iter().map(|(_, r)| r).collect();
+            let w = rows.iter().map(|r| r.text.width() + r.detail.width() + 8).max().unwrap_or(0).clamp(44, 80) as u16;
+            if let Some(r) = dropdown::place(anchor, w, n, bounds, false) {
+                let cur = cur.min(n.saturating_sub(1));
+                let label = match (model, q.is_empty()) {
+                    (true, true) => format!("models · {h}"),
+                    (true, false) => format!("models · {h} › {q}"),
+                    (false, true) => "harnesses · installed".to_string(),
+                    (false, false) => format!("harnesses › {q}"),
+                };
+                let note = match (&status, q.is_empty()) {
+                    (Some(s), _) => s.clone(),
+                    (None, false) => format!("{n} of {total}"),
+                    (None, true) if model && h != "claude" => "type: filter · r: read again".into(),
+                    (None, true) => "type: filter".into(),
+                };
+                let empty = if model && !q.trim().is_empty() { "0 matches · enter: use as typed" } else { "0 matches" };
+                let (off, drawn) = dropdown::list(f, r, &label, &note, &rows, cur, off, empty);
+                if let Some(p) = form.pick.as_mut() {
+                    (p.cursor, p.offset) = (cur, off);
+                }
+                self.regions.form_rows = drawn;
+            }
+        }
+        self.modal = Some(Modal::Agent(form));
+    }
+
     pub fn set_prompt(&mut self, text: &str) {
         self.prompt.set_text(text);
         self.backup();
@@ -1691,8 +2067,8 @@ impl App {
                     ("tab / shift+tab", "next / previous tab"),
                     ("enter", "title: next field · notes: pick · prompt: new line"),
                     ("x on notes", "drop notes + Claude Code context"),
-                    ("←→", "where: current branch · new branch · new worktree · main · recent branches"),
-                    ("←→ space", "below where: checkout · git stash boxes"),
+                    ("enter", "where: dropdown · current branch · new branch · new worktree · recent branches · type: filter"),
+                    ("↑↓ space", "below where: checkout · git stash boxes, 1 per row"),
                     ("@", "prompt: agent names (↑↓ tab / enter, esc)"),
                     ("ctrl+v", "prompt: clipboard image → [Image #n] (dropped path too)"),
                     ("←→ space", "agents: move · pick / unpick"),
@@ -2068,6 +2444,11 @@ impl App {
             self.last_esc = None;
             return self.drafts_key(k);
         }
+        // where dropdown: its keys first (esc closes it, 0 double esc)
+        if self.where_menu.is_some() && self.modal.is_none() {
+            self.last_esc = None;
+            return self.where_key(k);
+        }
         // @ and > dropdowns of the prompt: their keys first (esc closes them, 0 double esc)
         if self.mention_on() {
             // skills: of the picked agents' harnesses (0 picked: of every agent's)
@@ -2160,7 +2541,7 @@ impl App {
     /// for an Esc to close (modal, filter input, thread filter, the notes list of the task).
     fn at_start(&self) -> bool {
         let notes = self.screen == Screen::Pick && self.tab == Tab::Notes;
-        self.modal.is_none() && self.drafts_menu.is_none() && !notes
+        self.modal.is_none() && self.drafts_menu.is_none() && self.where_menu.is_none() && !notes
             && !self.filter_editing && !self.tfilter_editing && !self.afilter_editing
             && !(self.screen == Screen::Pick && self.tab == Tab::Threads && self.tfilter.as_deref().is_some_and(|q| !q.is_empty()))
             && !(self.screen == Screen::Pick && self.tab == Tab::Agents && self.afilter.as_deref().is_some_and(|q| !q.is_empty()))
@@ -2170,6 +2551,7 @@ impl App {
     fn dismiss_controls(&mut self) {
         self.modal = None;
         self.drafts_menu = None;
+        self.where_menu = None;
         self.filter_editing = false;
         self.tfilter_editing = false;
         self.afilter_editing = false;
@@ -2259,6 +2641,7 @@ impl App {
     }
 
     fn switch_tab(&mut self, tab: Tab) {
+        self.where_menu = None;
         // leaving the settings: their last edit applies
         if tab != Tab::Settings && self.screen == Screen::Pick && self.tab == Tab::Settings {
             if let Some(s) = self.settings.as_mut() { s.commit(); }
@@ -2597,6 +2980,10 @@ impl App {
             self.tabs_focus = true;
         } else if let Some(&x) = f.get(at as usize) {
             self.field = x;
+            // the opts boxes from above: the 1st, from below: the last
+            if x == Field::Opts {
+                self.opt_i = if d > 0 { 0 } else { 1 };
+            }
         }
     }
 
@@ -2645,21 +3032,21 @@ impl App {
         }
         if self.field == Field::Where {
             match k.code {
-                KeyCode::Left | KeyCode::Char('h') => self.step_where(-1),
-                KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => self.step_where(1),
+                KeyCode::Enter | KeyCode::Char(' ') => self.open_where(),
                 KeyCode::Char('r') => self.step_repo(1),
                 KeyCode::Char('R') => self.step_repo(-1),
                 KeyCode::Up => self.go_field(-1),
-                KeyCode::Enter | KeyCode::Down => self.go_field(1),
+                KeyCode::Down => self.go_field(1),
                 _ => {}
             }
             return;
         }
+        // opts: 1 box per row, ↑↓ go through them
         if self.field == Field::Opts {
             match k.code {
-                KeyCode::Left | KeyCode::Char('h') => self.opt_i = 0,
-                KeyCode::Right | KeyCode::Char('l') => self.opt_i = 1,
                 KeyCode::Char(' ') => self.toggle_opt(self.opt_i),
+                KeyCode::Up | KeyCode::Char('k') if self.opt_i > 0 => self.opt_i -= 1,
+                KeyCode::Down | KeyCode::Char('j') if self.opt_i == 0 => self.opt_i = 1,
                 KeyCode::Up => self.go_field(-1),
                 KeyCode::Enter | KeyCode::Down => self.go_field(1),
                 _ => {}
@@ -2722,6 +3109,12 @@ impl App {
             Modal::Agent(mut form) => {
                 let next = |f: usize| (f + 1) % FORM_FIELDS;
                 let prev = |f: usize| (f + FORM_FIELDS - 1) % FORM_FIELDS;
+                // harness / model dropdown: its keys first
+                if form.pick.is_some() {
+                    self.form_pick_key(&mut form, k);
+                    self.modal = Some(Modal::Agent(form));
+                    return;
+                }
                 match k.code {
                     // 0 edits: closed; edits: asked first (Esc never drops work unasked)
                     KeyCode::Esc if !form.dirty() => return,
@@ -2750,6 +3143,10 @@ impl App {
                             self.save_agent(form);
                         }
                         return;
+                    }
+                    KeyCode::Enter if matches!(form.field, F_HARNESS | F_MODEL) => {
+                        let model = form.field == F_MODEL;
+                        self.open_form_pick(&mut form, model);
                     }
                     KeyCode::Enter if !form.multiline() => form.field = next(form.field),
                     KeyCode::Left | KeyCode::Right if matches!(form.field, F_MODEL | F_EFFORT | F_COLOR | F_MODE | F_STYLE | F_SET | F_SPRITE | F_BUTTONS) => {
@@ -2845,6 +3242,20 @@ impl App {
         }
         let down = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
         if let Some(Modal::Agent(form)) = &mut self.modal {
+            // harness / model: a click opens the dropdown; an open one takes the click
+            let opens = if down && form.pick.is_none() { [F_HARNESS, F_MODEL].into_iter().find(|&i| form.areas[i].contains(at)) } else { None };
+            if down && (form.pick.is_some() || opens.is_some()) {
+                let Some(Modal::Agent(mut form)) = self.modal.take() else { return };
+                match opens {
+                    Some(i) => {
+                        form.field = i;
+                        self.open_form_pick(&mut form, i == F_MODEL);
+                    }
+                    None => self.form_pick_click(&mut form, at),
+                }
+                self.modal = Some(Modal::Agent(form));
+                return;
+            }
             if down && let Some(i) = form.areas.iter().position(|r| r.contains(at)) {
                 form.field = i;
             }
@@ -2899,6 +3310,16 @@ impl App {
                 }
                 return;
             }
+            // where dropdown: a click on a row picks it, a click next to it closes it
+            if self.where_menu.is_some() {
+                if down {
+                    match self.regions.where_rows.iter().find(|(r, _)| r.contains(at)) {
+                        Some(&(_, i)) => self.pick_where(i),
+                        None => self.where_menu = None,
+                    }
+                }
+                return;
+            }
             if down && self.regions.drafts.contains(at) {
                 self.field = Field::Drafts;
                 return self.open_drafts();
@@ -2921,10 +3342,8 @@ impl App {
                 } else if self.prompt.area().contains(at) {
                     self.field = Field::Prompt;
                 } else if self.regions.where_row.contains(at) {
-                    if self.field == Field::Where {
-                        self.step_where(1);
-                    }
                     self.field = Field::Where;
+                    return self.open_where();
                 } else if self.regions.notes_label.contains(at) {
                     self.field = Field::Notes;
                     return self.open_notes();
@@ -3054,6 +3473,7 @@ impl App {
         }
         if self.screen == Screen::Compose {
             self.draw_drafts(f, area);
+            self.draw_where_menu(f, area);
         }
         self.draw_modal(f, area);
         if let Some(m) = self.menu.as_mut() {
@@ -3072,6 +3492,7 @@ impl App {
         }
         let buttons = self.regions.buttons.iter().map(|(r, _)| *r).find(|r| r.contains(at));
         match &self.modal {
+            Some(Modal::Agent(f)) if f.pick.is_some() => return find_rows(&self.regions.form_rows, at),
             Some(Modal::Confirm { .. } | Modal::Agent(_)) => return buttons,
             Some(_) => return None,
             None => {}
@@ -3085,6 +3506,9 @@ impl App {
         if self.screen == Screen::Compose {
             if self.drafts_menu.is_some() {
                 return find_rows(&self.regions.draft_rows, at);
+            }
+            if self.where_menu.is_some() {
+                return find_rows(&self.regions.where_rows, at);
             }
             if self.mention_on()
                 && let Some(r) = self.mention.row_at(at).or_else(|| self.command.row_at(at)).or_else(|| self.paths.row_at(at))
@@ -3523,7 +3947,7 @@ impl App {
     /// Shared by the agents tab and task selection.
     fn agent_grid(&self, width: u16) -> crate::cards::Grid {
         let text_w = crate::cards::text_width(self.agents.iter().flat_map(|a| self.agent_card_text(a)).collect::<Vec<_>>().iter());
-        crate::cards::grid(&self.avisible(), crate::cards::card_width(text_w, true), CARD_H, width)
+        crate::cards::tight_grid(&self.avisible(), crate::cards::card_width(text_w, true), CARD_H, width)
     }
 
     /// 1 card grid per harness (A→Z), as many columns as fit.
@@ -3584,18 +4008,20 @@ impl App {
         let title_rows = (self.title.rows_for(area.width.saturating_sub(2)) as u16).min(3);
         let n_notes = self.selected.len();
         let note_rows = n_notes.min(5) as u16 + u16::from(n_notes > 5) + self.carry.len().min(5) as u16;
-        let opts_h = u16::from(!self.wheres.is_empty());
+        // the opts boxes below the where row: 1 row each
+        let opts_h = if self.wheres.is_empty() { 0 } else { 2 };
         // "view drafts (n)": only with 1+ drafts, with a blank row below
         let drafts_h = if self.drafts.is_empty() { 0 } else { 2 };
-        let available = area.height.saturating_sub(drafts_h + title_rows + opts_h + note_rows + 12);
+        let available = area.height.saturating_sub(drafts_h + title_rows + opts_h + note_rows + 13);
         let agents_h = if self.agents.is_empty() { 1 } else {
-            self.agent_grid(area.width).height.min(2 * (CARD_H as usize + 2)).min(available.max(CARD_H + 1) as usize) as u16
+            self.agent_grid(area.width).height.min(2 * (CARD_H as usize + 1)).min(available.max(CARD_H + 1) as usize) as u16
         };
         if drafts_h == 0 && self.field == Field::Drafts {
             self.field = Field::Prompt;
         }
-        // prompt first and largest (the rest of the height), then title, where, agents, notes
-        let [r_drafts, l_prompt, i_prompt, _, l_title, i_title, _, info, opts, _, l_agents, r_agents, _, l_notes, notes] = Layout::vertical([
+        // prompt first and largest (the rest of the height), then title, where, agents, notes, a
+        // blank row below the notes (above the footer)
+        let [r_drafts, l_prompt, i_prompt, _, l_title, i_title, _, info, opts, _, l_agents, r_agents, _, l_notes, notes, _] = Layout::vertical([
             Constraint::Length(drafts_h),
             Constraint::Length(1),
             Constraint::Min(3),
@@ -3611,6 +4037,7 @@ impl App {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(note_rows),
+            Constraint::Length(1),
         ])
         .areas(area);
         if drafts_h > 0 {
@@ -3628,7 +4055,7 @@ impl App {
         f.render_widget(Paragraph::new(label(if self.title.is_empty() { "title · optional: the prompt's 1st line" } else { "title" }, self.field == Field::Title)), l_title);
         f.render_widget(Paragraph::new("").style(theme::panel()), i_title);
         self.title.render(f, Rect { x: i_title.x + 1, width: i_title.width.saturating_sub(2), ..i_title }, self.field == Field::Title);
-        // where: ‹ choice › + what it does
+        // where: the choice (enter: dropdown ▾) + what it does
         let on = self.field == Field::Where;
         let mut spans = vec![Span::styled("where ", if on { theme::accent_bold() } else { theme::muted() })];
         // the repo (r cycles): only with more than 1
@@ -3639,19 +4066,25 @@ impl App {
         }
         if !self.wheres.is_empty() {
             let chip = Style::default().fg(theme::pal().text).add_modifier(Modifier::BOLD);
-            spans.push(Span::styled(if on { "‹" } else { " " }, theme::accent()));
-            spans.push(Span::styled(format!(" {} ", self.where_chip()), if on { chip.bg(theme::pal().panel) } else { chip }));
-            spans.push(Span::styled(if on { "›" } else { " " }, theme::accent()));
+            spans.push(Span::raw(" "));
+            let x = info.x + spans.iter().map(|s| s.content.width() as u16).sum::<u16>();
+            let text = format!(" {} ", self.where_chip());
+            self.regions.where_chip = Rect { x: x.min(info.right().saturating_sub(1)), y: info.y, width: text.width() as u16, height: 1 };
+            spans.push(Span::styled(text, if on { chip.bg(theme::pal().panel) } else { chip }));
+            spans.push(Span::styled(if on { "▾" } else { " " }, theme::accent()));
             spans.push(Span::raw("  "));
         }
         spans.push(Span::styled(self.where_text(), theme::muted()));
         f.render_widget(Paragraph::new(Line::from(spans)), info);
         self.regions.where_row = info;
-        // opts: ◼ checkout · ◻ stash, under the where chip
+        // opts: ◼ checkout, ◻ stash below it, under the where chip
         if opts_h > 0 {
             let on = self.field == Field::Opts;
-            let mut x = opts.x + 6;
+            let x = opts.x + 6;
             for (i, (checked, enabled), label) in [(0, self.checkout_box(), "checkout selected branch"), (1, self.stash_box(), "stash conflicting local changes (git stash)")] {
+                if i as u16 >= opts.height {
+                    break;
+                }
                 let text = format!(" {} {label} ", if checked { "◼" } else { "◻" });
                 let w = (text.width() as u16).min((opts.x + opts.width).saturating_sub(x));
                 // the box under the cursor: accent, like the other fields (disabled: dim on accent)
@@ -3662,10 +4095,9 @@ impl App {
                     (true, false) if checked => Style::default().fg(theme::pal().text),
                     (true, false) => theme::muted(),
                 };
-                let r = Rect { x, y: opts.y, width: w, height: 1 };
+                let r = Rect { x, y: opts.y + i as u16, width: w, height: 1 };
                 f.render_widget(Paragraph::new(text).style(style), r);
                 self.regions.opts.push((r, i));
-                x += w + 2;
             }
         }
         let focused = self.field == Field::Agents;
@@ -3734,8 +4166,9 @@ impl App {
         let hints: &[(&str, &str)] = match self.screen {
             _ if self.tabs_focus => &[("←→", "tab"), ("↓ / esc", "back"), ("q", "quit")],
             Screen::Compose if self.field == Field::Agents => &[("↑↓←→", "move"), ("space", "pick"), ("enter", "notes"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
-            Screen::Compose if self.field == Field::Where => &[("←→", "current · new branch · new worktree · main · recent"), ("r", "repo"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
-            Screen::Compose if self.field == Field::Opts => &[("←→", "box"), ("space", "check / uncheck"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
+            Screen::Compose if self.where_menu.is_some() => &[("↑↓", "move"), ("type", "filter"), ("enter", "pick"), ("esc", "close")],
+            Screen::Compose if self.field == Field::Where => &[("enter", "choices"), ("r", "repo"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
+            Screen::Compose if self.field == Field::Opts => &[("space", "check / uncheck"), ("↑↓", "box · field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.drafts_menu.is_some() => &[("↑↓", "move"), ("enter", "load"), ("d", "delete"), ("esc", "back")],
             Screen::Compose if self.field == Field::Drafts => &[("enter", "list drafts"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("F1-F4", "tabs")],
             Screen::Compose if self.field == Field::Prompt => &[("@", "agents"), (cmd.as_str(), "commands"), ("dir/", "paths"), ("ctrl+v", "image"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("esc esc", "quit")],
@@ -3805,7 +4238,10 @@ impl App {
                 }
                 self.regions.buttons = buttons;
             }
-            Modal::Agent(_) => self.draw_agent_form(f, area),
+            Modal::Agent(_) => {
+                self.draw_agent_form(f, area);
+                self.draw_form_pick(f, area);
+            }
             Modal::Info { title, lines, scroll } => {
                 let w = lines.iter().map(|l| l.width()).max().unwrap_or(20) as u16 + 6;
                 let h = lines.len() as u16 + 4;
@@ -3858,7 +4294,10 @@ impl App {
             form.areas[i] = row;
             match i {
                 F_MODEL if !form.is_claude() => {
-                    f.render_widget(Paragraph::new(Line::styled(" set in the harness field: harness/model", theme::muted())), vr);
+                    let m = form.model_id();
+                    let st = if on { theme::bold().bg(theme::pal().panel) } else { theme::bold() };
+                    let line = Line::from(vec![Span::styled(if on { "▾" } else { " " }, theme::accent()), Span::styled(format!(" {m} "), st), Span::styled(format!("  {} models: enter", form.harness_name()), theme::muted())]);
+                    f.render_widget(Paragraph::new(line), vr);
                 }
                 F_NAME | F_HARNESS => {
                     f.render_widget(Paragraph::new("").style(theme::panel()), vr);
@@ -3892,6 +4331,10 @@ impl App {
         let note = rows[7];
         let note_text = if form.field == F_EFFORT {
             "effort: global, ~/.claude/settings.json effortLevel · every Claude agent + Claude Code".to_string()
+        } else if form.field == F_HARNESS {
+            "enter: installed harnesses · or type harness/model".to_string()
+        } else if form.field == F_MODEL {
+            format!("enter: the models of {}{}", form.harness_name(), if form.is_claude() { " · ←→ cycle" } else { "" })
         } else {
             form.style_note(global.as_deref())
         };
@@ -4099,57 +4542,213 @@ mod render_tests {
         assert_eq!(a.checkout_box(), (true, false), "current branch: checked, disabled");
         assert!(!a.stash_box().1);
         a.field = Field::Where;
-        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        // the dropdown, bottom up: main, new worktree, new branch, current (the cursor)
+        let pick_up = |a: &mut App, ups: usize| {
+            key(a, KeyCode::Enter, KeyModifiers::NONE);
+            for _ in 0..ups {
+                key(a, KeyCode::Up, KeyModifiers::NONE);
+            }
+            key(a, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(a.where_menu.is_none());
+        };
+        pick_up(&mut a, 1);
         assert!(matches!(a.target(), Ok(Target::NewBranch(b)) if b == "task/fix-deploy"));
         assert_eq!(a.checkout_box(), (false, false));
-        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        pick_up(&mut a, 1);
         assert!(matches!(a.target(), Ok(Target::Branch(b)) if b == "task/fix-deploy"));
         assert_eq!(a.where_chip(), "+ new branch + worktree");
-        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        pick_up(&mut a, 1);
         assert!(matches!(a.target(), Ok(Target::Checkout { branch, switch: true, stash: false }) if branch == "main"));
         assert!(a.where_text().starts_with("switches ") && a.where_text().ends_with("from feature/x to main"), "{}", a.where_text());
-        // opts row: checkout off → 0 switch; stash only with checkout
+        // opts: 1 box per row, ↓ from where: checkout; ↓ again: stash (only with checkout)
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        assert!(a.field == Field::Opts);
-        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        assert!(a.field == Field::Opts && a.opt_i == 0);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert!(a.field == Field::Opts && a.opt_i == 1);
         key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
         assert!(matches!(a.target(), Ok(Target::Checkout { stash: true, .. })));
-        key(&mut a, KeyCode::Left, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        assert!(a.field == Field::Opts && a.opt_i == 0);
         key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
         assert!(matches!(a.target(), Ok(Target::Checkout { switch: false, stash: false, .. })));
         assert!(a.where_text().contains("0 checkout"), "{}", a.where_text());
         key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
         assert!(a.field == Field::Where);
-        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        // the cursor starts on main (the current choice): 3 rows down to current branch
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        for _ in 0..3 {
+            key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        }
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(a.where_chip(), "current branch · feature/x");
-        // a worktree from the threads tab wins until ←→
+        // a worktree from the threads tab wins until a pick in the dropdown
         a.target = Some(Target::Worktree { path: "/w".into(), branch: "b".into() });
         assert_eq!(a.where_chip(), "worktree b");
-        key(&mut a, KeyCode::Left, KeyModifiers::NONE);
+        pick_up(&mut a, 0);
         assert_eq!(a.where_chip(), "current branch · feature/x");
-        // field order: title → where → opts (also with disabled boxes) → agents
+        // field order: title → where → opts (2 rows, also with disabled boxes) → agents
         a.field = Field::Title;
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Where);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Opts);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert!(a.field == Field::Opts && a.opt_i == 1);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Agents);
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
-        assert!(a.field == Field::Opts);
+        assert!(a.field == Field::Opts && a.opt_i == 1);
         a.screen = Screen::Compose;
         a.agents = vec![
             Agent { name: "amon".into(), harness: "claude".into(), model: Some("opus".into()), color: Some("red".into()), ..Default::default() },
             Agent { name: "nova".into(), harness: "codex".into(), model: Some("gpt-5.5".into()), ..Default::default() },
         ];
         a.picks = vec!["amon".into()];
-        let out = dump(&mut a, 110, 32);
+        let out = dump(&mut a, 110, 34);
         assert!(out.contains("where   current branch · feature/x"), "{out}");
         assert!(out.contains("◼ checkout selected branch"), "{out}");
+        // each box on its own row, below each other
+        let lines: Vec<&str> = out.lines().collect();
+        let row = |s: &str| lines.iter().position(|l| l.contains(s)).unwrap_or_else(|| panic!("{s}\n{out}"));
+        let (co, st) = (row("checkout selected branch"), row("stash conflicting local changes"));
+        assert_eq!((row("where   current"), co), (co - 1, st - 1), "{out}");
+        assert_eq!(lines[co].find("checkout"), lines[st].find("stash"), "{out}");
         assert!(out.contains("claude · Opus 5.5") && out.contains("codex · gpt-5.5"), "{out}");
+        // 0 blank rows between the harness groups: the codex heading right below the claude card
+        let codex = row("codex · 1");
+        assert!(lines[codex - 1].contains('╰'), "{out}");
         println!("--- where row\n{out}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn where_dropdown_orders_filters_picks_and_closes() {
+        let dir = std::env::temp_dir().join(format!("codehead-where-dd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        // main (2020), alpha (2021, own worktree), beta (2022), feature/x (2023, checked out)
+        let sh = "git init -q -b main && git config user.email t@t && git config user.name t \
+            && GIT_COMMITTER_DATE=2020-01-01T00:00:00 git commit -q --allow-empty -m m \
+            && git switch -q -c alpha && GIT_COMMITTER_DATE=2021-01-01T00:00:00 git commit -q --allow-empty -m a \
+            && git switch -q -c beta && GIT_COMMITTER_DATE=2022-01-01T00:00:00 git commit -q --allow-empty -m b \
+            && git switch -q -c feature/x && GIT_COMMITTER_DATE=2023-01-01T00:00:00 git commit -q --allow-empty -m x \
+            && git worktree add -q ../wt-alpha alpha";
+        assert!(std::process::Command::new("sh").arg("-c").arg(sh).current_dir(&repo).status().unwrap().success());
+        let mut a = app();
+        a.cfg.repo = Some(repo.clone());
+        a.cfg.cwd = repo.clone();
+        let c = where_choices(&repo, &repo);
+        (a.wheres, a.checkouts, a.repo_branch, a.here_branch, a.here_dir) = (c.wheres, c.checkouts, c.repo_branch, c.here_branch, c.here_dir);
+        a.where_i = 0;
+        a.title.set_text("fix it");
+        a.field = Field::Where;
+        let names = |a: &App| a.regions.where_rows.iter().map(|(_, i)| a.where_label(&a.wheres[*i]).0).collect::<Vec<_>>();
+        // enter: open; the rows bottom up: current, new branch, new worktree, main, then the newest
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let out = dump(&mut a, 110, 40);
+        assert_eq!(names(&a), ["alpha", "beta", "main", "+ new branch + worktree", "+ new branch", "current branch"], "{out}");
+        assert!(out.contains("● current branch") && out.contains("feature/x"), "{out}");
+        assert!(out.lines().any(|l| l.contains("alpha") && l.contains("worktree …") && l.contains("wt-alpha")), "alpha: its worktree\n{out}");
+        println!("--- where dropdown\n{out}");
+        // above the where row, the cursor on the current choice (bottom row)
+        assert!(a.regions.where_rows.iter().all(|(r, _)| r.y < a.regions.where_row.y), "{out}");
+        assert_eq!(a.where_menu.as_ref().map(|m| m.cursor), Some(5));
+        // ↑↑↑: main; enter picks it and closes
+        for _ in 0..3 {
+            key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        }
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.where_menu.is_none());
+        assert_eq!(a.wheres[a.where_i], Where::Branch("main".into()));
+        // reopened: the cursor on main; type: filter (r types too: 0 repo switch), best at the bottom
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.where_menu.as_ref().map(|m| m.cursor), Some(2));
+        type_text(&mut a, "alp");
+        let out = dump(&mut a, 110, 40);
+        assert_eq!(names(&a), ["alpha"], "{out}");
+        assert!(out.contains("where › alp") && out.contains("1 of 6"), "{out}");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.wheres[a.where_i], Where::Branch("alpha".into()));
+        assert_eq!(a.checkout_box(), (true, false), "alpha: checked out in its worktree");
+        // 0 matches: enter keeps it open; backspaces back to every row, the cursor on alpha
+        key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+        type_text(&mut a, "zzz");
+        let out = dump(&mut a, 110, 40);
+        assert!(out.contains("0 matches"), "{out}");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.where_menu.is_some());
+        for _ in 0..3 {
+            key(&mut a, KeyCode::Backspace, KeyModifiers::NONE);
+        }
+        assert_eq!(a.where_menu.as_ref().map(|m| (m.query.as_str(), m.cursor)), Some(("", 0)));
+        // esc: closed, choice kept, 0 quit (esc of the dropdown: 0 double esc)
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(a.where_menu.is_none() && a.outcome.is_none());
+        assert_eq!(a.wheres[a.where_i], Where::Branch("alpha".into()));
+        // mouse: a click on the where row opens it, on a row picks, next to it closes
+        dump(&mut a, 110, 40);
+        let w = a.regions.where_row;
+        let click = |x: u16, y: u16| MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE };
+        a.mouse(click(w.x + 1, w.y));
+        assert!(a.where_menu.is_some());
+        dump(&mut a, 110, 40);
+        let (r, i) = *a.regions.where_rows.iter().find(|(_, i)| a.wheres[*i] == Where::NewBranch).unwrap();
+        a.mouse(click(r.x + 2, r.y));
+        assert!(a.where_menu.is_none() && a.where_i == i);
+        a.mouse(click(w.x + 1, w.y));
+        a.mouse(click(0, 0));
+        assert!(a.where_menu.is_none() && a.wheres[a.where_i] == Where::NewBranch);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notes_field_has_a_blank_row_below() {
+        let mut a = app();
+        let h = 30;
+        let out = dump(&mut a, 100, h);
+        let lines: Vec<&str> = out.lines().collect();
+        let notes = lines.iter().rposition(|l| l.contains("notes · 0 picked")).unwrap();
+        // notes label, blank row, footer
+        assert_eq!(notes, h as usize - 3, "{out}");
+        assert!(lines[notes + 1].trim().is_empty(), "{out}");
+    }
+
+    #[test]
+    fn prompt_list_items_indent_with_space_and_outdent_with_backspace() {
+        let mut a = app();
+        assert!(a.field == Field::Prompt);
+        // typed: `- ` then space → nested, text goes after the marker
+        type_text(&mut a, "- a");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        type_text(&mut a, " b");
+        assert_eq!(a.prompt.text(), "- a\n  - b");
+        // text already there: cursor right after the marker → space indents, backspace outdents
+        a.prompt.set_text("- a\n- foo");
+        for _ in 0..3 {
+            key(&mut a, KeyCode::Left, KeyModifiers::NONE);
+        }
+        key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(a.prompt.text(), "- a\n  - foo");
+        key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(a.prompt.text(), "- a\n    - foo");
+        key(&mut a, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(a.prompt.text(), "- a\n  - foo");
+        key(&mut a, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(a.prompt.text(), "- a\n- foo");
+        // indent 0: backspace as before
+        key(&mut a, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(a.prompt.text(), "- a\n-foo");
+        // undo: back through the steps
+        key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(a.prompt.text(), "- a\n- foo");
+        key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(a.prompt.text(), "- a\n  - foo");
+        let out = dump(&mut a, 100, 20);
+        assert!(out.contains("  - foo"), "{out}");
     }
 
     fn key(app: &mut App, code: KeyCode, m: KeyModifiers) {
@@ -4680,6 +5279,110 @@ mod render_tests {
         assert_eq!(field(&a), F_PROMPT);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(field(&a), F_BUTTONS, "empty system prompt: 1 row, ↓ leaves");
+    }
+
+    #[test]
+    fn agent_form_harness_and_model_dropdowns() {
+        use crate::models::{Entry, Model};
+        let mut a = app();
+        a.run(Act::NewAgent);
+        fn form(a: &mut App) -> &mut AgentForm {
+            match &mut a.modal {
+                Some(Modal::Agent(f)) => f,
+                _ => panic!("0 agent form"),
+            }
+        }
+        let m = |id: &str, name: &str| Model { id: id.into(), name: name.into() };
+        // fixed installed harnesses; codex: a fresh cached list; reads: a fake, 0 harness spawned
+        form(&mut a).harnesses = [("claude", "Claude Code", "claude"), ("codex", "Codex", "codex"), ("opencode", "OpenCode", "opencode")]
+            .map(|(n, l, b)| (n.to_string(), l.to_string(), b.to_string()))
+            .to_vec();
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        a.models = Some(HashMap::from([("codex".to_string(), Entry { at, models: vec![m("gpt-6.1-sol", "GPT-6.1-Sol"), m("gpt-6.1-terra", "GPT-6.1 Terra")] })]));
+        a.probe = |h| if h == "opencode" { Ok(vec![Model { id: "opencode/big-pickle".into(), name: String::new() }]) } else { Err("probe failed".into()) };
+        type_text(&mut a, "nova");
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(form(&mut a).field, F_HARNESS);
+        // enter: the installed harnesses, the current one marked
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let out = dump(&mut a, 120, 44);
+        assert!(out.contains("harnesses · installed") && out.contains("● Claude Code") && out.contains("Codex") && out.contains("OpenCode"), "{out}");
+        // type: filter; enter picks → the model list of codex (from the cache: 0 read)
+        type_text(&mut a, "codex");
+        let out = dump(&mut a, 120, 44);
+        assert!(out.contains("harnesses › codex") && out.contains("1 of 3") && !out.contains("OpenCode"), "{out}");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let f = form(&mut a);
+        assert_eq!((f.harness.text(), f.field), ("codex".to_string(), F_MODEL));
+        assert!(f.pick.as_ref().is_some_and(|p| p.model && p.harness == "codex"));
+        assert_eq!(a.model_reads.pending(), 0, "fresh cache: 0 read");
+        let out = dump(&mut a, 120, 44);
+        assert!(out.contains("models · codex") && out.contains("● default") && out.contains("gpt-6.1-sol") && out.contains("GPT-6.1 Terra"), "{out}");
+        println!("--- model dropdown\n{out}");
+        // ↓↓ + enter: gpt-6.1-terra → harness/model
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let f = form(&mut a);
+        assert!(f.pick.is_none());
+        assert_eq!(f.harness.text(), "codex/gpt-6.1-terra");
+        assert_eq!(f.spec(&[], None).harness, "codex/gpt-6.1-terra", "the saved value");
+        let out = dump(&mut a, 120, 44);
+        assert!(out.contains(" gpt-6.1-terra   codex models: enter"), "{out}");
+        // enter on the model field: the list again, the cursor on the current model; esc closes
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let out = dump(&mut a, 120, 44);
+        assert!(out.contains("● gpt-6.1-terra"), "{out}");
+        assert_eq!(form(&mut a).pick.as_ref().map(|p| p.cursor), Some(2));
+        // r: read again (the fake fails: the note says so, the cached list stays)
+        key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+        for _ in 0..100 {
+            if a.model_reads.pending() == 0 {
+                break;
+            }
+            a.tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let out = dump(&mut a, 120, 44);
+        assert!(out.contains("models: probe failed") && out.contains("gpt-6.1-sol"), "{out}");
+        // 0 match: enter takes the typed id
+        type_text(&mut a, "gpt-7");
+        let out = dump(&mut a, 120, 44);
+        assert!(out.contains("0 matches · enter: use as typed"), "{out}");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(form(&mut a).harness.text(), "codex/gpt-7");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(form(&mut a).pick.is_none() && a.modal.is_some(), "esc: only the dropdown");
+        assert_eq!(form(&mut a).harness.text(), "codex/gpt-7");
+        // opencode: 0 cache → reading models…, then the read list
+        form(&mut a).field = F_HARNESS;
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        type_text(&mut a, "open");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(form(&mut a).harness.text(), "opencode");
+        let mut t = Terminal::new(TestBackend::new(120, 44)).unwrap();
+        t.draw(|f| a.draw(f)).unwrap();
+        let b = t.backend().buffer().clone();
+        let first = (0..44).map(|y| (0..120).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n");
+        assert!(first.contains("reading models…"), "{first}");
+        let out = dump(&mut a, 120, 44);
+        assert!(out.contains("opencode/big-pickle"), "{out}");
+        // a click on a row picks it
+        let (r, _) = a.regions.form_rows.iter().copied().find(|(_, j)| *j == 1).unwrap();
+        a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
+        assert_eq!(form(&mut a).harness.text(), "opencode/opencode/big-pickle");
+        // claude: aliases with their exact ids; a pick → claude/<alias>
+        form(&mut a).field = F_HARNESS;
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        type_text(&mut a, "claude");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let out = dump(&mut a, 120, 44);
+        assert!(out.contains("models · claude") && out.contains("claude-opus-5-5") && out.contains("● default"), "{out}");
+        type_text(&mut a, "sonnet");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let f = form(&mut a);
+        assert_eq!((f.harness.text(), f.harness_model()), ("claude".to_string(), "claude/sonnet".to_string()));
     }
 
     #[test]

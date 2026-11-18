@@ -125,6 +125,63 @@ pub fn frame(f: &mut Frame, r: Rect, label: &str, note: &str, up: bool, down: bo
     inner
 }
 
+/// A row of [`list`]: its text, a detail at the right (muted), NOW: the current choice (`●`),
+/// MARKS: chars of the text a filter matched (accent).
+#[derive(Clone, Default)]
+pub struct Row {
+    pub text: String,
+    pub detail: String,
+    pub now: bool,
+    pub marks: Vec<usize>,
+}
+
+/// A list dropdown in R (from [`place`]): its frame with LABEL / NOTE, ROWS from OFFSET so that
+/// CUR is in view (a detail gets max. half a row; a long one keeps its end), EMPTY on 0 rows.
+/// Returns the new offset and the drawn rows (area, index in ROWS) for clicks.
+#[allow(clippy::too_many_arguments)]
+pub fn list(f: &mut Frame, r: Rect, label: &str, note: &str, rows: &[Row], cur: usize, offset: usize, empty: &str) -> (usize, Vec<(Rect, usize)>) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::Paragraph;
+    use unicode_width::UnicodeWidthStr;
+    let n = rows.len();
+    let shown = (r.height as usize).saturating_sub(2);
+    let off = fit(offset, cur, n, shown);
+    let inner = frame(f, r, label, note, off > 0, off + shown < n, true);
+    if n == 0 {
+        f.render_widget(Paragraph::new(Line::styled(format!(" {empty}"), theme::muted())), Rect { height: inner.height.min(1), ..inner });
+    }
+    let mut out = Vec::new();
+    for (j, it) in rows.iter().enumerate().skip(off).take(shown) {
+        let row = Rect { y: inner.y + (j - off) as u16, height: 1, ..inner };
+        let hl = j == cur;
+        let st = if hl { theme::pill().add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::pal().text) };
+        let dim = if hl { theme::pill() } else { theme::muted() };
+        let mark = if it.now { "● " } else { "  " };
+        // the detail: max. half the row, a long path keeps its end (`worktree …/end`)
+        let half = (row.width as usize / 2).max(20);
+        let detail: String = if it.detail.width() > half {
+            let (head, path) = it.detail.split_once(' ').filter(|(h, _)| *h == "worktree").map_or(("", it.detail.as_str()), |(h, p)| (h, p));
+            let keep = half.saturating_sub(head.width() + 2);
+            let tail: Vec<char> = path.chars().rev().take(keep).collect();
+            let tail: String = tail.into_iter().rev().collect();
+            if head.is_empty() { format!("…{tail}") } else { format!("{head} …{tail}") }
+        } else {
+            it.detail.clone()
+        };
+        let room = (row.width as usize).saturating_sub(detail.width() + 6);
+        let text: String = if it.text.width() > room { it.text.chars().take(room.saturating_sub(1)).chain(['…']).collect() } else { it.text.clone() };
+        let pad = room.saturating_sub(text.width());
+        let hit = if hl { st.add_modifier(Modifier::UNDERLINED) } else { st.fg(theme::pal().accent) };
+        let mut spans = vec![Span::styled(format!(" {mark}"), st)];
+        spans.extend(crate::fuzzy::spans(&text, &it.marks, st, hit));
+        spans.extend([Span::styled(" ".repeat(pad + 1), st), Span::styled(format!("{detail} "), dim)]);
+        let line = Line::from(spans);
+        f.render_widget(Paragraph::new(line).style(st), row);
+        out.push((row, j));
+    }
+    (off, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

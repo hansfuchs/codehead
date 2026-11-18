@@ -222,7 +222,7 @@ impl Menu {
     /// cursor; CARD draws 1 (frame, area, agent index, cursor on it). Returns the drawn cards.
     fn draw_grid(&mut self, f: &mut Frame, area: Rect, agents: &[Agent], cur: Option<usize>, mut card: impl FnMut(&mut Frame, Rect, usize, bool)) -> Vec<(Rect, usize)> {
         let groups = crate::cards::groups(agents, |_| true);
-        let g = crate::cards::grid(&groups, self.card_width(), crate::cards::CARD_H, area.width);
+        let g = crate::cards::tight_grid(&groups, self.card_width(), crate::cards::CARD_H, area.width);
         let view = area.height as usize;
         let top = cur.and_then(|c| g.places.iter().find(|p| p.0 == c)).map_or(0, |p| p.2);
         self.aoffset = if cur.is_some() { crate::cards::scroll(&g, top, crate::cards::CARD_H, self.aoffset, view) } else { 0 };
@@ -634,7 +634,7 @@ impl Menu {
         // the agents of the thread: the grid of the start screen; add below it
         let members = self.member_agents();
         let groups = crate::cards::groups(&members, |_| true);
-        let height = crate::cards::grid(&groups, self.card_width(), crate::cards::CARD_H, body.width).height as u16;
+        let height = crate::cards::tight_grid(&groups, self.card_width(), crate::cards::CARD_H, body.width).height as u16;
         let area = Rect { y: body.y + 2, height: height.min(body.height.saturating_sub(4)), ..body };
         let cur = match cur_row {
             Row::Member(i) => Some(i),
@@ -803,6 +803,10 @@ mod render_tests {
         m.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         let s = screen(&mut m);
         assert!(s.contains("claude · 2") && s.contains("codex · 1") && s.contains("+ add an agent"), "{s}");
+        // 0 blank rows between the harness groups: the heading right below the cards above
+        let lines: Vec<&str> = s.lines().collect();
+        let codex = lines.iter().position(|l| l.contains("codex · 1")).unwrap();
+        assert!(lines[codex - 1].contains('╰'), "{s}");
         // ↓: the cards in grid order (claude: amon, lilith; codex: nova)
         m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
