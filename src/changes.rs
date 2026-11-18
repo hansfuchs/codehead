@@ -1153,13 +1153,8 @@ Binary files a/img.png and b/img.png differ
         assert_eq!(c.files[1].status, Status::New);
         let _ = std::fs::remove_dir_all(d);
     }
-}
 
-/// Live look: CODEHEAD_CHANGES_DIR=<repo> cargo test changes_live -- --ignored --nocapture
-#[cfg(test)]
-mod live {
-    use super::*;
-
+    /// Live look: CODEHEAD_CHANGES_DIR=<repo> cargo test changes_live -- --ignored --nocapture
     #[test]
     #[ignore]
     fn changes_live() {

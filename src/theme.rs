@@ -291,6 +291,13 @@ pub fn desaturate(c: Color, keep: f32) -> Color {
     Color::Rgb(to(hue(h + 1.0 / 3.0)), to(hue(h)), to(hue(h - 1.0 / 3.0)))
 }
 
+/// C mixed into BASE: A of C (0: BASE, 1: C).
+pub fn tint(c: Color, base: Color, a: f32) -> Color {
+    let ((r, g, b), (r0, g0, b0)) = (rgb(c), rgb(base));
+    let m = |x: u8, y: u8| (f32::from(y) + (f32::from(x) - f32::from(y)) * a).round() as u8;
+    Color::Rgb(m(r, r0), m(g, g0), m(b, b0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,9 +318,3 @@ mod tests {
     }
 }
 
-/// C mixed into BASE: A of C (0: BASE, 1: C).
-pub fn tint(c: Color, base: Color, a: f32) -> Color {
-    let ((r, g, b), (r0, g0, b0)) = (rgb(c), rgb(base));
-    let m = |x: u8, y: u8| (f32::from(y) + (f32::from(x) - f32::from(y)) * a).round() as u8;
-    Color::Rgb(m(r, r0), m(g, g0), m(b, b0))
-}
