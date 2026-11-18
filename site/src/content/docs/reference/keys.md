@@ -58,25 +58,34 @@ description: Every key, per screen.
 
 ## Changes view
 
-The `rank` model (default `claude:haiku`) groups the files that do 1 thing, in reading order, with a title + why per group and a why per file; without it (or while it runs): path rules.
+The classifier agent (setting `classify`; empty: the default agent, with its harness and model;
+Claude Code or Codex) sorts the files into the tabs on top: critical (security, money, important
+business logic), high, medium, low. The same call groups the files that do 1 thing, in reading
+order, with a title + why per group and a why per file. It runs in the background (`classifying…`),
+1 call per set of paths (`threads/<id>/rank.json`); without it (or while it runs): path rules.
 
 The branch's changes against its base (merge-base with `origin/<default>`; on the default
 branch: uncommitted only), 1 box per file, in review order: schema / API, logic, config, UI,
 docs, tests, generated (folded). Side by side from 170 columns. A reviewed box folds; if its
-diff changes later, it shows `updated`.
+diff changes later, it shows `updated`. Under the tabs: the filter (fuzzy, by file name and diff
+content, over every tab, best hit first).
 
 | Key | Action |
 | --- | --- |
-| `j` / `k` | next / previous box |
+| `j` / `k` | 1 line up / down |
+| `{` / `}` | previous / next box |
 | `n` / `p` | next / previous hunk |
 | `↑` `↓`, `pgup` `pgdn`, `g` `G` | move the cursor |
-| `space` | reviewed on / off (the cursor goes to the next box) |
-| `enter` | fold / unfold the box |
+| `space` | select the line on / off, the cursor goes 1 down (lines apart are fine; a mouse drag selects too); `esc` clears |
+| `r` | reviewed on / off (the cursor goes to the next box) |
+| `←` / `→`, `enter` | fold / open, toggle the box |
+| `1` - `4`, click | tab: critical / high / medium / low |
+| `f`, click | the filter: type, `enter` jumps to the 1st hit, `esc` clears |
 | `o` | the IDE at the line under the cursor (VS Code family: the window that has the worktree open) |
 | `s` | side by side / unified |
-| `r` | read git again (it also does every 4 s) |
-| `R` | rank again (setting `rank`) |
-| `c` | comment on the line under the cursor: the prompt takes it, `⌘/ctrl+⏎` adds it to the batch, `esc` cancels (the draft comes back) |
+| `ctrl+r` | read git again (it also does every 4 s) |
+| `R` | classify again (setting `classify`) |
+| `c` | comment on the selected lines (else the line under the cursor): the prompt takes it, `⌘/ctrl+⏎` adds it to the batch, `esc` cancels (the draft comes back) |
 | `x` | delete the comment (or dismiss the finding) under the cursor |
 | `C` | send all comments as 1 message to the lead (`file:line`: text each) |
 | `a` / `u` | stage / unstage: on a box head the file, on a diff row its hunk (box head: `●` staged, `◐` a part) |

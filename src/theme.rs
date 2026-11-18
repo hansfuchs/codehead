@@ -262,7 +262,8 @@ pub fn rgb(c: Color) -> (u8, u8, u8) {
     }
 }
 
-/// C with its HSL saturation times KEEP (0.4: 60% less), same hue and lightness.
+/// C with its HSL saturation times KEEP (0.4: 60% less; 1.4: 40% more, at most full), same hue
+/// and lightness.
 pub fn desaturate(c: Color, keep: f32) -> Color {
     let (r, g, b) = rgb(c);
     let (r, g, b) = (f32::from(r) / 255.0, f32::from(g) / 255.0, f32::from(b) / 255.0);
@@ -279,7 +280,7 @@ pub fn desaturate(c: Color, keep: f32) -> Color {
         (r - g) / d + 4.0
     };
     let h = sector / 6.0;
-    let s = s * keep;
+    let s = (s * keep).min(1.0);
     let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
     let p = 2.0 * l - q;
     let hue = |mut t: f32| {

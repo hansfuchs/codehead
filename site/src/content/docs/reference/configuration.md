@@ -18,6 +18,7 @@ models = "fable,opus,sonnet,haiku"    # $CODEHEAD_MODELS
 messages = "bubbles"                  # $CODEHEAD_MESSAGES
 thoughts = "hidden"                   # $CODEHEAD_THOUGHTS
 edits = "diff"                       # $CODEHEAD_EDITS
+classify = ""                         # $CODEHEAD_CLASSIFY (empty: the default agent)
 rank = "claude:haiku"                # $CODEHEAD_RANK
 review = "claude:sonnet"             # $CODEHEAD_REVIEW
 editor = "auto"                      # $CODEHEAD_EDITOR
@@ -45,7 +46,8 @@ accent = "#FF7565"                    # overrides 1 color of the scheme
 | `messages` | `bubbles` | Thread view messages: `bubbles` (boxes, your messages on the right) or `lines` (name badge, a bar in the agent's color) |
 | `thoughts` | `hidden` | Agent thoughts in the thread view: `hidden`, `folded` (a click opens them) or `open` |
 | `edits` | `diff` | What an agent gets told, before its next turn, of edits in its worktree it did not make: `off`, `files` (files and line ranges) or `diff` (also your diff, max. 150 lines) |
-| `rank` | `claude:haiku` | Changes view order: `claude:<model>` groups the changed files (1 call per set of paths, about 1 cent with haiku; cached in `threads/<id>/rank.json`), `off`: path rules only |
+| `classify` | the default agent | Changes view tabs and order: an agent (its harness and model; Claude Code or Codex) sorts the changed files into critical / high / medium / low and groups them (1 call per set of paths, in the background; cached in `threads/<id>/rank.json`), `off`: path rules only |
+| `rank` | `claude:haiku` | Changes view: the model of that call when 0 agent is found (`classify` empty, 0 default agent); `off` with `classify` empty: path rules only |
 | `review` | `claude:sonnet` | Changes view `V`: `claude:<model>` reviews the branch diff with read-only tools (Read, Grep, Glob) and returns findings (file, line, severity, title, body), kept in `threads/<id>/findings.json`; `off`: 0 reviews |
 | `ports` | `auto` | Dev servers: `auto` (portless when it is on PATH), `portless`, or `block` (only the `$CODEHEAD_PORT` block). With portless, agents run `portless run <command>` and each worktree gets `https://<branch tail>.<app>.localhost` |
 | `editor` | `auto` | The IDE of `ctrl+i` and the changes view `o`: `auto` (VS Code, VSCodium, Cursor, Zed, JetBrains: the 1st found), a command (`code`, `cursor`, `zed`, `idea` …), a path, or `terminal` ($VISUAL / $EDITOR full screen in codehead's terminal, at the line). Trust codehead's worktrees dir once in the IDE: every worktree under it is trusted |

@@ -24,6 +24,8 @@ pub struct File {
     pub edits: Option<String>,
     /// Changes view order: `claude:<model>` (default `claude:haiku`) ranks the files, `off`: path rules.
     pub rank: Option<String>,
+    /// Changes view classifier (tabs + order): an agent's name (empty: the default agent), `off`.
+    pub classify: Option<String>,
     /// Changes view reviewer: `claude:<model>` (default `claude:sonnet`), `off`.
     pub review: Option<String>,
     /// The IDE: `auto` (default), a command name (code, cursor, zed, idea …) or a path.
@@ -138,6 +140,10 @@ fn parse(text: &str) -> Result<File, String> {
                 validate("rank".into(), &s)?;
                 f.rank = Some(s);
             }
+            "classify" => {
+                validate("classify".into(), &s)?;
+                f.classify = Some(s);
+            }
             "review" => {
                 validate("review".into(), &s)?;
                 f.review = Some(s);
@@ -179,6 +185,7 @@ pub fn validate(key: String, v: &str) -> Result<(), String> {
         "edits" if crate::engine::edits::Mode::parse(v).is_none() => Err(format!("edits: off, files or diff, not {v}")),
         "ports" if crate::portless::Mode::parse(v).is_none() => Err(format!("ports: auto, portless or block, not {v}")),
         "rank" | "review" if v != "off" && !v.strip_prefix("claude:").is_some_and(|m| !m.is_empty()) => Err(format!("{key}: off or claude:<model>, not {v}")),
+        "classify" if !v.is_empty() && v != "off" && !crate::engine::roster::valid_name(v) => Err(format!("classify: an agent's name or off, not {v}")),
         "keys.menu" => Bind::parse(v).map(|_| ()).ok_or_else(|| format!("keys.menu: F1-F12, ctrl+<letter> or alt+<letter>, not {v}")),
         "keys.command" => command_char(v).map(|_| ()).ok_or_else(|| format!("keys.command: 1 symbol (not a letter, digit, space or @), not {v}")),
         "colors.scheme" if crate::theme::Palette::preset(v).is_none() => {
@@ -280,6 +287,7 @@ fn document(base: &str, file: &File) -> Result<String, String> {
         ("thoughts", &file.thoughts),
         ("edits", &file.edits),
         ("rank", &file.rank),
+        ("classify", &file.classify),
         ("review", &file.review),
         ("editor", &file.editor),
         ("ports", &file.ports),
@@ -410,6 +418,7 @@ impl File {
             "thoughts" => self.thoughts.clone(),
             "edits" => self.edits.clone(),
             "rank" => self.rank.clone(),
+            "classify" => self.classify.clone(),
             "review" => self.review.clone(),
             "editor" => self.editor.clone(),
             "ports" => self.ports.clone(),
@@ -432,6 +441,7 @@ impl File {
             "thoughts" => self.thoughts = v,
             "edits" => self.edits = v,
             "rank" => self.rank = v,
+            "classify" => self.classify = v,
             "review" => self.review = v,
             "editor" => self.editor = v,
             "ports" => self.ports = v,
@@ -630,6 +640,12 @@ pub fn editor() -> Option<String> {
 pub fn rank_model() -> Option<String> {
     let v = env("CODEHEAD_RANK").or_else(|| get().rank.clone()).unwrap_or_else(|| "claude:haiku".into());
     v.strip_prefix("claude:").filter(|m| !m.is_empty()).map(str::to_string)
+}
+
+/// The changes view's classifier agent: $CODEHEAD_CLASSIFY, else `classify`. None: unset (the
+/// default agent classifies), `off`: path rules.
+pub fn classify() -> Option<String> {
+    env("CODEHEAD_CLASSIFY").or_else(|| get().classify.clone()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// How the thread view draws messages: $CODEHEAD_MESSAGES, else `messages`, else bubbles.

@@ -28,7 +28,7 @@ const fn spec(key: &'static str, label: &'static str, help: &'static str, env: &
 }
 
 /// The plain fields, then the alias boxes.
-const SPECS: [Spec; 26] = [
+const SPECS: [Spec; 27] = [
     spec("notes", "notes", "directory of Markdown notes, ~ expands to home", "CODEHEAD_NOTES"),
     spec("styles", "styles", "directory of agent output styles", "CODEHEAD_STYLES"),
     spec("home", "home repo", "git repo with AGENTS.md (notes, other repos): every agent reads it", "CODEHEAD_HOME_REPO"),
@@ -39,7 +39,8 @@ const SPECS: [Spec; 26] = [
     spec("messages", "messages", "bubbles (boxes, yours on the right) or lines (name, bar)", "CODEHEAD_MESSAGES"),
     spec("thoughts", "thoughts", "hidden, folded (a click opens) or open · ctrl+t in a thread", "CODEHEAD_THOUGHTS"),
     spec("edits", "your edits", "what an agent gets told of edits since its last turn: off, files or diff", "CODEHEAD_EDITS"),
-    spec("rank", "review order", "changes view: claude:<model> groups and orders the files, off: path rules", "CODEHEAD_RANK"),
+    spec("classify", "classifier", "changes view tabs (critical · high · medium · low) + order: an agent, empty: the default agent, off: path rules", "CODEHEAD_CLASSIFY"),
+    spec("rank", "review order", "changes view: claude:<model> when 0 classifier agent is found, off: path rules", "CODEHEAD_RANK"),
     spec("review", "reviewer", "changes view V: claude:<model> reviews the diff (read-only tools), off: 0 reviews", "CODEHEAD_REVIEW"),
     spec("editor", "editor", "IDE for ctrl+i and the changes view o: auto, or code, cursor, zed, idea …, or a path", "CODEHEAD_EDITOR"),
     spec("keys.menu", "menu", "opens the menu: F1-F12, ctrl+<letter>, alt+<letter>", "CODEHEAD_MENU_KEY"),
@@ -62,8 +63,8 @@ const SECTIONS: [(usize, &str, &str); 5] = [
     (0, "paths", "where codehead reads notes, output styles and the home repo"),
     (3, "new threads", "defaults of the new tab and the agent form"),
     (7, "thread view", "how messages and thoughts look, your edits, the review order, the IDE"),
-    (13, "keys", "keys of every screen"),
-    (15, "colors", "a preset; a set field below overrides 1 of its colors"),
+    (14, "keys", "keys of every screen"),
+    (16, "colors", "a preset; a set field below overrides 1 of its colors"),
 ];
 /// The alias group, after the plain fields.
 const ALIASES: (&str, &str) = ("path aliases", "short names for directories: name/ → target/ · enter: edit / done · d: delete · ctrl+n: add");
@@ -208,6 +209,9 @@ impl Settings {
             let scheme = file.scheme.clone().unwrap_or_else(|| theme::PRESETS[0].0.into());
             let p = theme::Palette::preset(&scheme).unwrap_or(theme::PRESETS[0].1);
             return p.get(name).map(|c| format!("{} ({scheme})", theme::hex(c))).unwrap_or_default();
+        }
+        if key == "classify" {
+            return "the default agent".into();
         }
         config::defaults().get(key).unwrap_or_else(|| "amon, else first agent".into())
     }
@@ -832,13 +836,13 @@ mod tests {
         // a click on ↺ of the scheme field
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 100)).unwrap();
         terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
-        let (r, _) = *form.rows.iter().find(|(_, h)| *h == Hit::Reset(15)).expect("↺ on the set scheme field");
+        let (r, _) = *form.rows.iter().find(|(_, h)| *h == Hit::Reset(16)).expect("↺ on the set scheme field");
         form.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x, row: r.y, modifiers: KeyModifiers::NONE });
         assert_eq!(config::read_file(&file).unwrap().1.scheme, None);
         assert!(!form.rows.iter().any(|(_, h)| *h == Hit::Reset(7)));
         // an invalid value: 0 write, the error shows
-        form.focus = 16;
-        form.fields[16].set_text("red");
+        form.focus = 17;
+        form.fields[17].set_text("red");
         form.commit();
         assert!(form.error && form.status.contains("#RRGGBB"));
         let _ = std::fs::remove_dir_all(dir);

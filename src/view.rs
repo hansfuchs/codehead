@@ -163,8 +163,8 @@ struct View {
     urls_read: Option<Receiver<Vec<String>>>,
     urls_at: Option<Instant>,
     url_rect: Option<(Rect, String)>,
-    /// A review comment in the prompt: file, line, the draft the prompt had before.
-    commenting: Option<(String, u32, String)>,
+    /// A review comment in the prompt: the lines it is on, the draft the prompt had before.
+    commenting: Option<(Vec<crate::changes::Spot>, String)>,
     /// A commit message in the prompt: the draft the prompt had before; a model's draft on its way.
     committing: Option<String>,
     drafting: Option<Receiver<Result<String, String>>>,
@@ -381,12 +381,13 @@ impl View {
             return;
         }
         // a review comment: into the batch, the draft back, the keys back to the changes view
-        if let Some((file, line, draft)) = self.commenting.take() {
+        if let Some((spots, draft)) = self.commenting.take() {
             let text = self.input.text();
-            self.changes.add_comment(&file, line, &text);
+            self.changes.add_comment(&spots, &text);
             self.input.set_text(&draft);
             self.prompt_focus = false;
-            self.toast(format!("comment on {file}:{line} · {} in the batch · C: send", self.changes.comment_count()));
+            let on = spots.iter().map(|s| s.label()).collect::<Vec<_>>().join(", ");
+            self.toast(format!("comment on {on} · {} in the batch · C: send", self.changes.comment_count()));
             return;
         }
         let mut text = self.input.text().trim_end().to_string();
@@ -681,9 +682,11 @@ impl View {
         }
         // the changes view with the focus: its keys (esc, tab, ctrl+c and the menu key: as in chat)
         if self.pane != Pane::Chat && !self.prompt_focus {
-            let through = matches!(k.code, KeyCode::Esc | KeyCode::Tab) || (ctrl && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('y'))) || crate::config::menu_key().matches(&k);
+            // the changes view's filter, selection: esc is the view's
+            let esc_here = self.pane == Pane::Changes && k.code == KeyCode::Esc && self.changes.takes_esc();
+            let through = (matches!(k.code, KeyCode::Esc | KeyCode::Tab) && !esc_here) || (ctrl && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('y'))) || crate::config::menu_key().matches(&k);
             if !through {
-                if k.code == KeyCode::Char('i') && !ctrl && !alt {
+                if k.code == KeyCode::Char('i') && !ctrl && !alt && !(self.pane == Pane::Changes && self.changes.typing()) {
                     self.prompt_focus = true;
                     return false;
                 }
@@ -731,7 +734,7 @@ impl View {
             }
             // the prompt in the changes view: esc gives the keys back to the view
             KeyCode::Esc if self.pane != Pane::Chat && self.prompt_focus => {
-                if let Some((_, _, draft)) = self.commenting.take() {
+                if let Some((_, draft)) = self.commenting.take() {
                     self.input.set_text(&draft);
                 }
                 if let Some(draft) = self.committing.take() {
@@ -891,11 +894,11 @@ impl View {
             crate::changes::Act::None => {}
             crate::changes::Act::Toast(t) => self.toast(t),
             crate::changes::Act::Open(file, line) => self.open_at(&file, line),
-            crate::changes::Act::Comment(file, line) => {
+            crate::changes::Act::Comment(spots) => {
                 // the prompt takes the comment; its draft waits
                 let draft = self.input.text();
                 self.input.set_text("");
-                self.commenting = Some((file, line, draft));
+                self.commenting = Some((spots, draft));
                 self.prompt_focus = true;
             }
             crate::changes::Act::CommitMessage => {
@@ -1724,8 +1727,14 @@ impl View {
                 if self.drafting.is_some() { "drafting… · esc: cancel ".to_string() } else { "commit message · ctrl+g: draft by model · ⌘/ctrl+⏎: commit the staged files · esc: cancel ".to_string() },
                 theme::accent(),
             ),
-            _ if let Some((file, line, _)) = &self.commenting => Span::styled(format!("comment on {file}:{line} · ⌘/ctrl+⏎: add to the batch · esc: cancel "), theme::accent()),
-            _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled("j k · space: reviewed · c: comment · C: send · o: IDE · s: layout · i: prompt ", theme::muted()),
+            _ if let Some((spots, _)) = &self.commenting => {
+                let on = spots.iter().map(|s| s.label()).collect::<Vec<_>>().join(", ");
+                Span::styled(format!("comment on {on} · ⌘/ctrl+⏎: add to the batch · esc: cancel "), theme::accent())
+            }
+            _ if self.pane == Pane::Changes && !self.prompt_focus && self.changes.typing() => Span::styled("type to filter · enter: 1st hit · esc: clear ", theme::muted()),
+            _ if self.pane == Pane::Changes && !self.prompt_focus => {
+                Span::styled("j k · space: select · c: comment · r: reviewed · ←→: fold · 1-4: tabs · f: filter · i: prompt ", theme::muted())
+            }
             _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · pgup pgdn: scroll · o: IDE · y: yazi · c: copy path · S: share · i: prompt ", theme::muted()),
             _ if self.pane != Pane::Chat => Span::styled("esc: back to the view · F1-F3: views ", theme::muted()),
             _ => Span::styled("tab: menu · F1-F3: views · esc: interrupt · esc esc: codehead ", theme::muted()),
@@ -2253,7 +2262,7 @@ mod pane_tests {
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
         assert_eq!(v.pane, Pane::Changes);
         let s = screen(&mut v);
-        assert!(s.contains("space: reviewed") && s.contains("i: prompt"), "{s}");
+        assert!(s.contains("space: select") && s.contains("r: reviewed") && s.contains("i: prompt"), "{s}");
         press(&mut v, KeyCode::Char('1'), KeyModifiers::ALT);
         assert_eq!(v.pane, Pane::Chat);
     }
@@ -2273,6 +2282,39 @@ mod pane_tests {
         assert!(!v.prompt_focus && v.input.text() == "h");
         assert!(v.last_esc.is_none(), "0 interrupt / back timer");
     }
+
+    #[test]
+    fn changes_view_selects_lines_comments_on_them_and_filters_with_i_and_esc() {
+        let mut v = view();
+        press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
+        v.changes.set_files(crate::changes::parse("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n x\n-a\n+b\n y\n"));
+        let s = screen(&mut v);
+        assert!(s.contains(" 3 medium 0/1 ") && s.contains("╭─ ☐ src/a.rs"), "{s}");
+        // k k k: head → hunk → ` x` → `- a`; space selects 2 lines (the cursor goes down)
+        for _ in 0..3 {
+            press(&mut v, KeyCode::Char('k'), KeyModifiers::NONE);
+        }
+        press(&mut v, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut v, KeyCode::Char(' '), KeyModifiers::NONE);
+        // c: the prompt takes the comment on both lines
+        press(&mut v, KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(v.prompt_focus);
+        let s = screen(&mut v);
+        assert!(s.contains("comment on src/a.rs:2 · removed 2"), "{s}");
+        press(&mut v, KeyCode::Char('n'), KeyModifiers::NONE);
+        press(&mut v, KeyCode::Enter, KeyModifiers::CONTROL);
+        assert_eq!(v.changes.comment_count(), 1);
+        let s = screen(&mut v);
+        assert!(s.contains("✎ 2 · removed 2: n"), "{s}");
+        // f: the filter takes letters, i too; esc leaves it (0 interrupt timer)
+        press(&mut v, KeyCode::Char('f'), KeyModifiers::NONE);
+        press(&mut v, KeyCode::Char('i'), KeyModifiers::NONE);
+        assert!(!v.prompt_focus && v.input.text().is_empty());
+        assert!(screen(&mut v).contains(" f  i▏"));
+        press(&mut v, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!v.changes.typing() && v.last_esc.is_none());
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("panetest-0000"));
+    }
 }
 
 #[cfg(test)]
@@ -2285,14 +2327,14 @@ mod comment_tests {
         let mut v = View::new("commenttest-0000", Path::new("/tmp"), "t", tx);
         v.set_pane(Pane::Changes);
         v.input.set_text("half a message");
-        v.changes_act(crate::changes::Act::Comment("src/a.rs".into(), 12));
+        v.changes_act(crate::changes::Act::Comment(vec![crate::changes::Spot { path: "src/a.rs".into(), line: 12, lines: String::new() }]));
         assert!(v.prompt_focus && v.input.text().is_empty());
         v.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
         v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
         assert_eq!(v.changes.comment_count(), 1);
         assert!(!v.prompt_focus && v.input.text() == "half a message" && v.commenting.is_none());
         // esc cancels: 0 comment, the draft back
-        v.changes_act(crate::changes::Act::Comment("src/a.rs".into(), 13));
+        v.changes_act(crate::changes::Act::Comment(vec![crate::changes::Spot { path: "src/a.rs".into(), line: 13, lines: String::new() }]));
         v.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
         v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(v.changes.comment_count(), 1);

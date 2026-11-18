@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -602,6 +602,20 @@ struct Painted {
     marks: Vec<bool>,
 }
 
+/// The diff text of F (its lines and hunk contexts): what the filter matches as content.
+fn body_text(f: &FileDiff) -> String {
+    let mut s = String::new();
+    for h in &f.hunks {
+        s.push_str(&h.ctx);
+        s.push('\n');
+        for l in &h.lines {
+            s.push_str(&l.text);
+            s.push('\n');
+        }
+    }
+    s
+}
+
 /// Syntax token of PATH: its extension (`rs`, `ts` …), else `text`.
 fn lang_of(path: &str) -> &str {
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -694,6 +708,9 @@ fn paint(f: &FileDiff, h: &Hunk) -> Vec<Painted> {
         crate::code::highlight(&text.join("\n"), lang)
     };
     let (new_c, old_c) = (side(Kind::Del), side(Kind::Add));
+    // the theme's colors, more saturated (a dozen colors per hunk: memo)
+    let mut memo: HashMap<ratatui::style::Color, ratatui::style::Color> = HashMap::new();
+    let mut vivid = |c: &Vec<(ratatui::style::Color, char)>| -> Vec<(ratatui::style::Color, char)> { c.iter().map(|&(col, ch)| (*memo.entry(col).or_insert_with(|| theme::desaturate(col, SATURATION)), ch)).collect() };
     let (mut io, mut inew) = (0, 0);
     let mut out: Vec<Painted> = h
         .lines
@@ -716,7 +733,7 @@ fn paint(f: &FileDiff, h: &Hunk) -> Vec<Painted> {
             };
             let plain: Vec<char> = l.text.chars().collect();
             let chars = match src {
-                Some(c) if c.len() == plain.len() => c.clone(),
+                Some(c) if c.len() == plain.len() => vivid(c),
                 _ => plain.iter().map(|&c| (theme::pal().text, c)).collect(),
             };
             Painted { marks: vec![false; chars.len()], chars }
@@ -745,36 +762,38 @@ fn paint(f: &FileDiff, h: &Hunk) -> Vec<Painted> {
     out
 }
 
-/// ` + ` / ` - ` / 3 spaces in the color of KIND, on its line tint.
+/// Syntax colors: the theme's saturation times this.
+const SATURATION: f32 = 1.45;
+
+/// ` + ` / ` - ` / 3 spaces: the sign column, on the add / remove color (0 tint on the line).
 fn sign_span(kind: Kind) -> Span<'static> {
     let (bg, _) = tints(kind);
-    let (sign, fg) = match kind {
-        Kind::Add => ("+", theme::pal().ok),
-        Kind::Del => ("-", theme::pal().danger),
-        Kind::Ctx => (" ", theme::pal().text),
+    let sign = match kind {
+        Kind::Add => "+",
+        Kind::Del => "-",
+        Kind::Ctx => " ",
     };
-    let st = Style::default().fg(fg);
+    let st = Style::default().fg(theme::pal().text).add_modifier(Modifier::BOLD);
     Span::styled(format!(" {sign} "), bg.map_or(st, |b| st.bg(b)))
 }
 
-/// Line tint and changed-word tint of KIND (0 for context lines).
+/// Sign column color and changed-word tint of KIND (0 for context lines).
 fn tints(kind: Kind) -> (Option<ratatui::style::Color>, Option<ratatui::style::Color>) {
     let base = theme::pal().panel;
     match kind {
-        Kind::Add => (Some(theme::tint(theme::pal().ok, base, 0.18)), Some(theme::tint(theme::pal().ok, base, 0.42))),
-        Kind::Del => (Some(theme::tint(theme::pal().danger, base, 0.18)), Some(theme::tint(theme::pal().danger, base, 0.42))),
+        Kind::Add => (Some(theme::tint(theme::pal().ok, base, 0.7)), Some(theme::tint(theme::pal().ok, base, 0.32))),
+        Kind::Del => (Some(theme::tint(theme::pal().danger, base, 0.7)), Some(theme::tint(theme::pal().danger, base, 0.32))),
         Kind::Ctx => (None, None),
     }
 }
 
-/// P as spans in ROOM columns (cut with `…`), padded to ROOM with the line tint of KIND.
+/// P as spans in ROOM columns (cut with `…`), padded to ROOM; changed words on their tint.
 fn painted_spans(p: &Painted, kind: Kind, room: usize) -> Vec<Span<'static>> {
-    let (bg, mark) = tints(kind);
+    let (_, mark) = tints(kind);
     let style = |color, marked: bool| {
         let s = Style::default().fg(color);
-        match (marked, mark, bg) {
-            (true, Some(m), _) => s.bg(m),
-            (_, _, Some(b)) => s.bg(b),
+        match (marked, mark) {
+            (true, Some(m)) => s.bg(m),
             _ => s,
         }
     };
@@ -805,8 +824,7 @@ fn painted_spans(p: &Painted, kind: Kind, room: usize) -> Vec<Span<'static>> {
         out.push(Span::styled("…", style(theme::pal().muted, false)));
         w += 1;
     }
-    let pad = Style::default();
-    out.push(Span::styled(" ".repeat(room.saturating_sub(w)), bg.map_or(pad, |b| pad.bg(b))));
+    out.push(Span::raw(" ".repeat(room.saturating_sub(w))));
     out
 }
 
@@ -832,18 +850,60 @@ pub enum Act {
     /// Open FILE (relative to the worktree) at LINE in the IDE.
     Open(String, u32),
     Toast(String),
-    /// Write a comment on LINE of FILE (the prompt takes the text).
-    Comment(String, u32),
+    /// Write a comment on these lines (the selection, else the cursor's line; the prompt takes
+    /// the text).
+    Comment(Vec<Spot>),
     /// Send this text to the thread (the review comments batch).
     Send(String),
     /// Write the commit message of the staged files (the prompt takes it).
     CommitMessage,
 }
 
-/// A drawn row: its line, the file it belongs to, the new-side line it points at.
+/// Lines of 1 file a comment is on: LINE (new side) shows it; LINES (`11-13, 15 · removed 14`)
+/// names a selection ("": LINE alone).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Spot {
+    pub path: String,
+    pub line: u32,
+    pub lines: String,
+}
+
+impl Spot {
+    /// `src/a.rs:11-13, 15`.
+    pub fn label(&self) -> String {
+        format!("{}:{}", self.path, if self.lines.is_empty() { self.line.to_string() } else { self.lines.clone() })
+    }
+}
+
+/// What a row shows; its line is made when it comes into view.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Body {
+    Summary,
+    Conflict,
+    Blank,
+    /// A group head: the model's group, else the category.
+    Group(Option<usize>, Cat),
+    /// The filter's result count.
+    Hits(usize),
+    Head,
+    Foot,
+    Why,
+    Note(&'static str),
+    Hunk(usize),
+    /// Unified: hunk, line.
+    Diff(usize, usize),
+    /// Side by side: hunk, the removed (or context) line, the added (or context) line.
+    Side(usize, Option<usize>, Option<usize>),
+    /// Finding I, its row K (0: the title).
+    Finding(usize, usize),
+    /// Comment I, its text line K.
+    Comment(usize, usize),
+}
+
+/// A row: what it shows, the file it belongs to, the new-side line it points at.
 #[derive(Clone, Debug)]
 struct Row {
-    line: Line<'static>,
+    body: Body,
     file: usize,
     at: Option<u32>,
     /// A box's header row.
@@ -856,12 +916,68 @@ struct Row {
     finding: Option<usize>,
 }
 
-/// A review comment on LINE (new side) of PATH, for the batch to an agent.
+impl Row {
+    fn new(body: Body, file: usize, at: Option<u32>) -> Row {
+        let (comment, finding) = match body {
+            Body::Comment(c, _) => (Some(c), None),
+            Body::Finding(x, _) => (None, Some(x)),
+            _ => (None, None),
+        };
+        Row { body, file, at, head: body == Body::Head, hunk: matches!(body, Body::Hunk(_)), comment, finding }
+    }
+}
+
+/// A diff line of a file, for the selection: (old side, its number); added and context lines:
+/// the new side.
+type LKey = (bool, u32);
+
+fn lkey(l: &DLine) -> Option<LKey> {
+    match l.kind {
+        Kind::Del => l.old.map(|n| (true, n)),
+        _ => l.new.map(|n| (false, n)),
+    }
+}
+
+/// `11-13, 15 · removed 14` of KEYS (sorted).
+fn lines_label(keys: &std::collections::BTreeSet<LKey>) -> String {
+    let runs = |nums: Vec<u32>| -> String {
+        let mut out: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < nums.len() {
+            let mut j = i;
+            while j + 1 < nums.len() && nums[j + 1] == nums[j] + 1 {
+                j += 1;
+            }
+            out.push(if j > i { format!("{}-{}", nums[i], nums[j]) } else { nums[i].to_string() });
+            i = j + 1;
+        }
+        out.join(", ")
+    };
+    let new: Vec<u32> = keys.iter().filter(|k| !k.0).map(|k| k.1).collect();
+    let old: Vec<u32> = keys.iter().filter(|k| k.0).map(|k| k.1).collect();
+    match (new.is_empty(), old.is_empty()) {
+        (_, true) => runs(new),
+        (true, false) => format!("removed {}", runs(old)),
+        (false, false) => format!("{} · removed {}", runs(new), runs(old)),
+    }
+}
+
+/// A review comment on LINE (new side) of PATH (LINES: the selected lines it is on), for the
+/// batch to an agent.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Comment {
     pub path: String,
     pub line: u32,
     pub text: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lines: String,
+}
+
+impl Comment {
+    /// `11` or `11-13, 15`.
+    fn at(&self) -> String {
+        if self.lines.is_empty() { self.line.to_string() } else { self.lines.clone() }
+    }
 }
 
 fn comments_path(id: &str) -> PathBuf {
@@ -886,7 +1002,7 @@ pub fn batch(comments: &[Comment]) -> Option<String> {
     let mut s = String::from("Review comments on the changes (file:line, new side). Address each one:\n");
     for c in comments {
         let mut lines = c.text.lines();
-        s.push_str(&format!("- `{}:{}`: {}\n", c.path, c.line, lines.next().unwrap_or_default()));
+        s.push_str(&format!("- `{}:{}`: {}\n", c.path, c.at(), lines.next().unwrap_or_default()));
         for l in lines {
             s.push_str(&format!("  {l}\n"));
         }
@@ -903,23 +1019,48 @@ pub struct View {
     toggled: HashSet<String>,
     /// Side by side: None: by the room.
     side: Option<bool>,
+    /// The rows of the shown files (cheap: a row's line is made when it comes into view).
     rows: Vec<Row>,
     built: Option<(u16, bool)>,
+    /// Lines of the diff rows, per (file hash, hunk): syntax colors and word marks, made once.
+    paints: std::cell::RefCell<HashMap<(u64, usize), std::rc::Rc<Vec<Painted>>>>,
+    /// Width of the line numbers per file (by index), for the shown files.
+    num_w: HashMap<usize, usize>,
     /// Cursor row, 1st row in view.
     at: usize,
     top: usize,
     loading: Option<Receiver<Result<Changes, String>>>,
     loaded: Option<Instant>,
     pub error: Option<String>,
+    /// The rows' area; the tab bar and the filter row above it (0 height: too little room).
     area: Rect,
-    /// After a re-read: the file the cursor was on.
-    pending_cursor: Option<String>,
-    /// The model's order (groups, whys) of the current set of paths; a call on its way; why 0.
+    tabs_rect: Rect,
+    filter_rect: Rect,
+    /// The tabs' click targets.
+    tab_hits: Vec<(Rect, crate::rank::Level)>,
+    /// After a re-read: the file the cursor was on, its row in the file's rows.
+    pending_cursor: Option<(String, usize)>,
+    /// The agent's order (groups, whys, levels) of the current set of paths; a call on its way;
+    /// why 0; the rank holds for the current paths (set by `build`).
     rank: Option<crate::rank::Rank>,
     ranking: Option<Receiver<Result<crate::rank::Rank, String>>>,
     rank_error: Option<String>,
-    /// The rank model (setting `rank`), None: path rules.
-    rank_model: Option<String>,
+    fresh_rank: bool,
+    /// The classifier (setting `classify`), None: path rules.
+    classifier: Option<crate::rank::Runner>,
+    /// The tab: the files of this level; picked by hand (else the 1st one with files).
+    tab: crate::rank::Level,
+    tab_by_hand: bool,
+    /// Reviewed / all files per level (by `build`).
+    counts: [(usize, usize); 4],
+    /// The filter: its text, it has the keys, its hits (file index, name marks; by `build`).
+    filter: String,
+    filtering: bool,
+    hits: HashMap<usize, Vec<usize>>,
+    /// The selected diff lines per path (space, a mouse drag): a comment goes on them.
+    sel: HashMap<String, std::collections::BTreeSet<LKey>>,
+    /// A mouse drag: its 1st row and the selection before it.
+    drag: Option<(usize, HashMap<String, std::collections::BTreeSet<LKey>>)>,
     /// Review comments, for 1 batch message (`C`).
     comments: Vec<Comment>,
     /// The reviewer's findings, a review on its way, why 0, the model (None: `off`).
@@ -950,17 +1091,31 @@ impl View {
             side: None,
             rows: Vec::new(),
             built: None,
+            paints: Default::default(),
+            num_w: HashMap::new(),
             at: 0,
             top: 0,
             loading: None,
             loaded: None,
             error: None,
             area: Rect::default(),
+            tabs_rect: Rect::default(),
+            filter_rect: Rect::default(),
+            tab_hits: Vec::new(),
             pending_cursor: None,
             rank: crate::rank::cached(id),
             ranking: None,
             rank_error: None,
-            rank_model: if cfg!(test) { None } else { crate::config::rank_model() },
+            fresh_rank: false,
+            classifier: if cfg!(test) { None } else { crate::rank::runner() },
+            tab: crate::rank::Level::Critical,
+            tab_by_hand: false,
+            counts: [(0, 0); 4],
+            filter: String::new(),
+            filtering: false,
+            hits: HashMap::new(),
+            sel: HashMap::new(),
+            drag: None,
             comments: read_comments(id),
             review: crate::review::cached(id),
             reviewing: None,
@@ -980,14 +1135,15 @@ impl View {
     /// a rank of another set of paths: a new call.
     fn apply_rank(&mut self, force: bool) {
         let key = crate::rank::key(&self.changes.files);
-        let fresh = self.rank.as_ref().is_some_and(|r| r.key == key);
+        // a rank of an older codehead (0 levels): a new call too
+        let fresh = self.rank.as_ref().is_some_and(|r| r.key == key && r.groups.iter().flat_map(|g| &g.files).any(|f| !f.level.is_empty()));
         if (force || !fresh) && self.ranking.is_none() && !self.changes.files.is_empty()
-            && let Some(model) = self.rank_model.clone()
+            && let Some(by) = self.classifier.clone()
         {
             let (tx, rx) = mpsc::channel();
             let (id, dir, files) = (self.id.clone(), self.dir.clone(), self.changes.files.clone());
             std::thread::spawn(move || {
-                let _ = tx.send(crate::rank::run(&id, &dir, &files, &model));
+                let _ = tx.send(crate::rank::run(&id, &dir, &files, &by));
             });
             self.ranking = Some(rx);
             self.rank_error = None;
@@ -1000,11 +1156,24 @@ impl View {
         self.built = None;
     }
 
-    /// The model's group of PATH and the why of PATH, if the rank is current.
+    /// The model's group of PATH and the why of PATH, if the rank is current (as of `build`).
     fn ranked(&self, path: &str) -> Option<(usize, &crate::rank::Group, &str)> {
-        let key = crate::rank::key(&self.changes.files);
-        let r = self.rank.as_ref().filter(|r| r.key == key)?;
+        let r = self.rank.as_ref().filter(|_| self.fresh_rank)?;
         r.groups.iter().enumerate().find_map(|(g, gr)| gr.files.iter().find(|f| f.path == path).map(|f| (g, gr, f.why.as_str())))
+    }
+
+    /// Level of each file (by index): the agent's (an older rank too), else path rules.
+    fn levels(&self) -> Vec<crate::rank::Level> {
+        let by: HashMap<&str, crate::rank::Level> =
+            self.rank.iter().flat_map(|r| &r.groups).flat_map(|g| &g.files).filter_map(|f| crate::rank::Level::parse(&f.level).map(|l| (f.path.as_str(), l))).collect();
+        self.changes.files.iter().map(|f| by.get(f.path.as_str()).copied().unwrap_or_else(|| crate::rank::guess(f))).collect()
+    }
+
+    /// The cursor's file and its row in that file's rows (0: the head).
+    fn cursor_spot(&self) -> Option<(String, usize)> {
+        let r = self.rows.get(self.at)?;
+        let head = self.rows[..=self.at].iter().rposition(|x| x.head && x.file == r.file)?;
+        Some((self.changes.files.get(r.file)?.path.clone(), self.at - head))
     }
 
     /// A finished rank call applies. True: the order changed.
@@ -1014,7 +1183,7 @@ impl View {
         self.ranking = None;
         match r {
             Ok(r) => {
-                let cur = self.rows.get(self.at).and_then(|r| self.changes.files.get(r.file)).map(|f| f.path.clone());
+                let cur = self.cursor_spot();
                 self.rank = Some(r);
                 self.apply_rank(false);
                 self.pending_cursor = cur;
@@ -1029,10 +1198,10 @@ impl View {
         let (add, del) = self.changes.files.iter().fold((0, 0), |(a, d), f| (a + f.add, d + f.del));
         let (done, all) = self.progress();
         let order = if self.ranking.is_some() {
-            "ranking…".to_string()
+            "classifying…".to_string()
         } else if let Some(e) = &self.rank_error {
             format!("path order · {e}")
-        } else if let Some(r) = self.rank.as_ref().filter(|r| r.key == crate::rank::key(&self.changes.files)) {
+        } else if let Some(r) = self.rank.as_ref().filter(|_| self.fresh_rank) {
             format!("order: {}", r.model)
         } else {
             "path order".to_string()
@@ -1213,12 +1382,32 @@ impl View {
         self.loaded = Some(Instant::now());
         match r {
             Ok(c) => {
-                let same = c.files.iter().map(|f| f.hash).eq(self.changes.files.iter().map(|f| f.hash)) && self.error.is_none();
-                if same {
-                    return false;
+                // the same diffs (the view's order is the agent's, the read's the path rules'):
+                // 0 new rows; the git state (staged, ahead, a stopped rebase) still applies
+                let hashes = |fs: &[FileDiff]| {
+                    let mut v: Vec<u64> = fs.iter().map(|f| f.hash).collect();
+                    v.sort_unstable();
+                    v
+                };
+                if hashes(&c.files) == hashes(&self.changes.files) && self.error.is_none() {
+                    let git = (&c.base, &c.staged, &c.stopped, c.ahead, c.behind);
+                    let changed = git != (&self.changes.base, &self.changes.staged, &self.changes.stopped, self.changes.ahead, self.changes.behind);
+                    if changed {
+                        self.built = self.built.filter(|_| c.stopped.is_some() == self.changes.stopped.is_some());
+                        let files = std::mem::take(&mut self.changes.files);
+                        self.changes = Changes { files, ..c };
+                    }
+                    return changed;
                 }
-                // the cursor stays on its file
-                let cur = self.rows.get(self.at).and_then(|r| self.changes.files.get(r.file)).map(|f| f.path.clone());
+                // the cursor stays on its row of its file
+                let cur = self.cursor_spot();
+                // a selection holds on files whose diff stayed
+                let kept: HashSet<(&str, u64)> = c.files.iter().map(|f| (f.path.as_str(), f.hash)).collect();
+                let old: HashMap<&str, u64> = self.changes.files.iter().map(|f| (f.path.as_str(), f.hash)).collect();
+                self.sel.retain(|p, _| old.get(p.as_str()).is_some_and(|h| kept.contains(&(p.as_str(), *h))));
+                if self.paints.borrow().len() > 4096 {
+                    self.paints.borrow_mut().clear();
+                }
                 self.changes = c;
                 self.error = None;
                 self.built = None;
@@ -1257,47 +1446,70 @@ impl View {
         if self.built == Some((width, side)) {
             return;
         }
-        let w = usize::from(width);
-        let mut rows: Vec<Row> = vec![Row { line: self.summary(), file: 0, at: None, head: false, hunk: false, comment: None, finding: None }];
-        if let Some(c) = &self.changes.stopped {
-            let files = if c.is_empty() { "0 conflicts".to_string() } else { format!("{} conflicts: {}", c.len(), c.join(", ")) };
-            let line = Line::from(vec![
-                Span::styled(" rebase stopped ", theme::pill()),
-                Span::styled(crate::nav::fit(&format!(" {files} · A: agent resolves · K: continue · X: abort"), w.saturating_sub(16)), Style::default().fg(theme::pal().warn)),
-            ]);
-            rows.push(Row { line, file: 0, at: None, head: false, hunk: false, comment: None, finding: None });
+        self.fresh_rank = self.rank.as_ref().is_some_and(|r| r.key == crate::rank::key(&self.changes.files));
+        // the tabs: reviewed / all per level; an empty tab not picked by hand: the 1st with files
+        let levels = self.levels();
+        let mut counts = [(0, 0); 4];
+        for (f, l) in self.changes.files.iter().zip(&levels) {
+            counts[*l as usize].1 += 1;
+            counts[*l as usize].0 += usize::from(self.is_reviewed(f));
         }
-        // group heads: the model's groups (title, why), else the path-rule categories
+        self.counts = counts;
+        if !self.tab_by_hand && self.counts[self.tab as usize].1 == 0
+            && let Some(l) = crate::rank::Level::ALL.into_iter().find(|l| self.counts[*l as usize].1 > 0)
+        {
+            self.tab = l;
+        }
+        // the shown files: the filter's hits (by relevance, every level), else the tab's
+        let shown: Vec<usize> = if self.filter.trim().is_empty() {
+            self.hits.clear();
+            (0..self.changes.files.len()).filter(|&i| levels[i] == self.tab).collect()
+        } else {
+            let hits = crate::fuzzy::rank(&self.changes.files, &self.filter, |f| f.path.clone(), body_text);
+            self.hits = hits.iter().cloned().collect();
+            hits.into_iter().map(|h| h.0).collect()
+        };
+        let mut rows: Vec<Row> = vec![Row::new(Body::Summary, 0, None)];
+        if self.changes.stopped.is_some() {
+            rows.push(Row::new(Body::Conflict, 0, None));
+        }
+        if !self.filter.trim().is_empty() {
+            rows.push(Row::new(Body::Hits(shown.len()), 0, None));
+        }
+        // group heads: the model's groups (title, why), else the path-rule categories; 0 heads
+        // for filter hits (in relevance order)
         let mut last: Option<(Option<usize>, Cat)> = None;
-        for (i, f) in self.changes.files.iter().enumerate() {
-            let g = self.ranked(&f.path);
-            let here = (g.map(|x| x.0), f.cat);
-            let new_group = match (last, g) {
-                (None, _) => true,
-                (Some((pg, _)), Some((gi, _, _))) => pg != Some(gi),
-                (Some((pg, pc)), None) => pg.is_some() || pc != f.cat,
-            };
-            if new_group {
-                let line = match g {
-                    Some((gi, gr, _)) => Line::from(vec![
-                        Span::styled(format!(" {} · {}", gi + 1, gr.title), theme::accent_bold()),
-                        Span::styled(crate::nav::fit(&format!("  {}", gr.why), w.saturating_sub(gr.title.width() + 8)), theme::muted()),
-                    ]),
-                    None => Line::styled(format!(" {}", f.cat.label()), theme::muted().add_modifier(Modifier::BOLD)),
+        let mut num_w = HashMap::new();
+        for &i in &shown {
+            let f = &self.changes.files[i];
+            if self.filter.trim().is_empty() {
+                let g = self.ranked(&f.path).map(|x| x.0);
+                let new_group = match (last, g) {
+                    (None, _) => true,
+                    (Some((pg, _)), Some(gi)) => pg != Some(gi),
+                    (Some((pg, pc)), None) => pg.is_some() || pc != f.cat,
                 };
-                rows.push(Row { line: Line::raw(""), file: i, at: None, head: false, hunk: false, comment: None, finding: None });
-                rows.push(Row { line, file: i, at: None, head: false, hunk: false, comment: None, finding: None });
+                if new_group {
+                    rows.push(Row::new(Body::Blank, i, None));
+                    rows.push(Row::new(Body::Group(g, f.cat), i, None));
+                }
+                last = Some((g, f.cat));
             }
-            last = Some(here);
-            self.file_rows(&mut rows, i, f, w, side);
+            if !self.folded(f) {
+                num_w.insert(i, f.hunks.iter().flat_map(|h| &h.lines).filter_map(|l| l.new.max(l.old)).max().unwrap_or(1).to_string().len().max(3));
+            }
+            self.file_rows(&mut rows, i, f, side);
         }
+        self.num_w = num_w;
         self.rows = rows;
         self.built = Some((width, side));
-        if let Some(p) = self.pending_cursor.take()
+        // the cursor back on its file: the same row of it (a new diff: up to its last row)
+        if let Some((p, off)) = self.pending_cursor.take()
             && let Some(i) = self.changes.files.iter().position(|f| f.path == p)
             && let Some(r) = self.rows.iter().position(|r| r.head && r.file == i)
         {
-            self.at = r;
+            let n = self.rows[r..].iter().take_while(|x| x.file == i).count();
+            self.at = r + off.min(n.saturating_sub(1));
         }
         self.at = self.at.min(self.rows.len().saturating_sub(1));
         // the summary or a group head under the cursor: the 1st box
@@ -1306,121 +1518,57 @@ impl View {
         }
     }
 
-    fn file_rows(&self, rows: &mut Vec<Row>, i: usize, f: &FileDiff, w: usize, side: bool) {
-        let reviewed = self.is_reviewed(f);
-        let updated = !reviewed && self.marks.contains_key(&f.path);
-        let border = theme::line();
-        let mark = if reviewed { Span::styled("☑ ", Style::default().fg(theme::pal().ok)) } else { Span::styled("☐ ", theme::muted()) };
-        let mut name = f.path.clone();
-        if let Some(o) = &f.old_path {
-            name = format!("{o} → {name}");
-        }
-        let tag = match f.status {
-            Status::New => " new",
-            Status::Deleted => " deleted",
-            _ => "",
-        };
-        let right = if f.binary { "binary".to_string() } else { format!("+{} −{}", f.add, f.del) };
-        let right = format!(" {}{tag} · {right} ", f.cat.label());
-        let room = w.saturating_sub(right.width() + 8 + if updated { 9 } else { 0 });
-        let stage = match self.changes.staged.get(&f.path) {
-            Some(true) => Span::styled("● ", Style::default().fg(theme::pal().ok)),
-            Some(false) => Span::styled("◐ ", Style::default().fg(theme::pal().warn)),
-            None => Span::raw(""),
-        };
-        let mut head = vec![Span::styled("╭─ ", border), mark, stage, Span::styled(crate::nav::fit(&name, room), theme::bold())];
-        if updated {
-            head.push(Span::styled(" updated", Style::default().fg(theme::pal().warn)));
-        }
-        let used: usize = head.iter().map(|s| s.content.width()).sum();
-        let fill = w.saturating_sub(used + right.width() + 3);
-        head.push(Span::styled(format!(" {}", "─".repeat(fill)), border));
-        head.push(Span::styled(right, theme::muted()));
-        head.push(Span::styled("─╮", border));
+    /// The rows of file I (F): its head, then (unfolded) the why, the hunks, findings and
+    /// comments under their lines, the foot.
+    fn file_rows(&self, rows: &mut Vec<Row>, i: usize, f: &FileDiff, side: bool) {
         let first = f.first_line();
-        rows.push(Row { line: Line::from(head), file: i, at: Some(first), head: true, hunk: false, comment: None, finding: None });
+        rows.push(Row::new(Body::Head, i, Some(first)));
         if self.folded(f) {
-            rows.push(Row { line: Line::styled(format!("╰{}╯", "─".repeat(w.saturating_sub(2))), border), file: i, at: Some(first), head: false, hunk: false, comment: None, finding: None });
+            rows.push(Row::new(Body::Foot, i, Some(first)));
             return;
         }
-        let inner = w.saturating_sub(4);
-        let bar = |mut spans: Vec<Span<'static>>| -> Line<'static> {
-            let used: usize = spans.iter().map(|s| s.content.width()).sum();
-            let mut v = vec![Span::styled("│ ", border)];
-            v.append(&mut spans);
-            v.push(Span::raw(" ".repeat(inner.saturating_sub(used))));
-            v.push(Span::styled(" │", border));
-            Line::from(v)
-        };
-        // the model's why of the file: the box's 1st row
-        if let Some((_, _, why)) = self.ranked(&f.path).filter(|x| !x.2.is_empty()) {
-            let st = theme::muted().add_modifier(Modifier::ITALIC);
-            rows.push(Row { line: bar(vec![Span::styled(crate::nav::fit(why, inner), st)]), file: i, at: Some(first), head: false, hunk: false, comment: None, finding: None });
+        if self.ranked(&f.path).is_some_and(|x| !x.2.is_empty()) {
+            rows.push(Row::new(Body::Why, i, Some(first)));
         }
         if f.binary || f.hunks.is_empty() {
-            let note = if f.binary { "binary file" } else { "0 line changes (mode or rename)" };
-            rows.push(Row { line: bar(vec![Span::styled(note.to_string(), theme::muted())]), file: i, at: Some(first), head: false, hunk: false, comment: None, finding: None });
+            rows.push(Row::new(Body::Note(if f.binary { "binary file" } else { "0 line changes (mode or rename)" }), i, Some(first)));
         }
-        let num_w = f.hunks.iter().flat_map(|h| &h.lines).filter_map(|l| l.new.max(l.old)).max().unwrap_or(1).to_string().len().max(3);
-        for h in &f.hunks {
-            let label = format!("⋯ {}", if h.ctx.is_empty() { format!("line {}", h.new) } else { h.ctx.clone() });
-            rows.push(Row { line: bar(vec![Span::styled(crate::nav::fit(&label, inner), theme::muted())]), file: i, at: Some(h.new.max(1)), head: false, hunk: true, comment: None, finding: None });
-            // a new or deleted file: 1 side only, unified uses the room
-            let painted = paint(f, h);
-            if side && !matches!(f.status, Status::New | Status::Deleted) {
-                self.side_rows(rows, i, h, &painted, inner, num_w, &bar);
-            } else {
-                for (l, p) in h.lines.iter().zip(&painted) {
-                    let num = match l.kind {
-                        Kind::Add => format!("{:>num_w$} {:>num_w$}", "", l.new.unwrap_or(0)),
-                        Kind::Del => format!("{:>num_w$} {:>num_w$}", l.old.unwrap_or(0), ""),
-                        Kind::Ctx => format!("{:>num_w$} {:>num_w$}", l.old.unwrap_or(0), l.new.unwrap_or(0)),
-                    };
-                    let room = inner.saturating_sub(num.len() + 3);
-                    let mut spans = vec![Span::styled(num, theme::muted()), sign_span(l.kind)];
-                    spans.extend(painted_spans(p, l.kind, room));
-                    rows.push(Row { line: bar(spans), file: i, at: l.new.or(l.old), head: false, hunk: false, comment: None, finding: None });
+        // a new or deleted file: 1 side only, unified uses the room
+        let side = side && !matches!(f.status, Status::New | Status::Deleted);
+        for (hi, h) in f.hunks.iter().enumerate() {
+            rows.push(Row::new(Body::Hunk(hi), i, Some(h.new.max(1))));
+            let ls = &h.lines;
+            if !side {
+                rows.extend(ls.iter().enumerate().map(|(k, l)| Row::new(Body::Diff(hi, k), i, l.new.or(l.old))));
+                continue;
+            }
+            // side by side: a run of removed lines pairs with the added lines after it
+            let mut k = 0;
+            while k < ls.len() {
+                if ls[k].kind == Kind::Ctx {
+                    rows.push(Row::new(Body::Side(hi, Some(k), Some(k)), i, ls[k].new));
+                    k += 1;
+                    continue;
                 }
+                let d = ls[k..].iter().take_while(|l| l.kind == Kind::Del).count();
+                let a = ls[k + d..].iter().take_while(|l| l.kind == Kind::Add).count();
+                for j in 0..d.max(a) {
+                    let (dk, ak) = ((j < d).then_some(k + j), (j < a).then_some(k + d + j));
+                    let at = ak.and_then(|x| ls[x].new).or_else(|| (a > 0).then(|| ls[k + d].new).flatten()).or_else(|| dk.and_then(|x| ls[x].old));
+                    rows.push(Row::new(Body::Side(hi, dk, ak), i, at));
+                }
+                k += d + a;
             }
         }
         // findings, then review comments: under the 1st diff row of their line, else at the box's end
         let start = rows.iter().rposition(|r| r.head && r.file == i).unwrap_or(0);
         let mut notes: Vec<(u32, Vec<Row>)> = Vec::new();
         for (fi, x) in self.review.iter().flat_map(|r| r.findings.iter().enumerate()).filter(|(_, x)| x.file == f.path) {
-            let color = match x.severity.as_str() {
-                "critical" => theme::pal().danger,
-                "major" => theme::pal().warn,
-                _ => theme::pal().muted,
-            };
-            let st = Style::default().fg(color);
-            let head = format!("⚠ {} · ", x.severity);
-            let mut v = vec![Row {
-                line: bar(vec![Span::styled(head.clone(), st.add_modifier(Modifier::BOLD)), Span::styled(crate::nav::fit(&x.title, inner.saturating_sub(head.width())), st.add_modifier(Modifier::BOLD))]),
-                file: i,
-                at: Some(x.line),
-                head: false,
-                hunk: false,
-                comment: None,
-                finding: Some(fi),
-            }];
-            for l in x.body.lines().take(3) {
-                v.push(Row { line: bar(vec![Span::raw("  "), Span::styled(crate::nav::fit(l, inner.saturating_sub(2)), theme::muted())]), file: i, at: Some(x.line), head: false, hunk: false, comment: None, finding: Some(fi) });
-            }
-            notes.push((x.line, v));
+            let n = 1 + x.body.lines().take(3).count();
+            notes.push((x.line, (0..n).map(|k| Row::new(Body::Finding(fi, k), i, Some(x.line))).collect()));
         }
         for (ci, c) in self.comments.iter().enumerate().filter(|(_, c)| c.path == f.path) {
-            let st = Style::default().fg(theme::pal().accent);
-            let v = c
-                .text
-                .lines()
-                .enumerate()
-                .map(|(k, l)| {
-                    let head = if k == 0 { format!("✎ {}: ", c.line) } else { "  ".to_string() };
-                    let room = inner.saturating_sub(head.width());
-                    Row { line: bar(vec![Span::styled(head, st.add_modifier(Modifier::BOLD)), Span::styled(crate::nav::fit(l, room), st)]), file: i, at: Some(c.line), head: false, hunk: false, comment: Some(ci), finding: None }
-                })
-                .collect();
-            notes.push((c.line, v));
+            notes.push((c.line, (0..c.text.lines().count().max(1)).map(|k| Row::new(Body::Comment(ci, k), i, Some(c.line))).collect()));
         }
         let added = |r: &Row| r.comment.is_some() || r.finding.is_some();
         for (line, new) in notes {
@@ -1434,7 +1582,230 @@ impl View {
             let at = at + rows[at..].iter().take_while(|r| added(r)).count();
             rows.splice(at..at, new);
         }
-        rows.push(Row { line: Line::styled(format!("╰{}╯", "─".repeat(w.saturating_sub(2))), border), file: i, at: None, head: false, hunk: false, comment: None, finding: None });
+        rows.push(Row::new(Body::Foot, i, None));
+    }
+
+    /// The painted lines of hunk H of F (made once per diff of the file).
+    fn painted(&self, f: &FileDiff, h: usize) -> std::rc::Rc<Vec<Painted>> {
+        let key = (f.hash, h);
+        if let Some(p) = self.paints.borrow().get(&key) {
+            return p.clone();
+        }
+        let p = std::rc::Rc::new(f.hunks.get(h).map(|x| paint(f, x)).unwrap_or_default());
+        self.paints.borrow_mut().insert(key, p.clone());
+        p
+    }
+
+    /// The line of row I in the built width.
+    fn line(&self, i: usize) -> Line<'static> {
+        let Some(r) = self.rows.get(i) else { return Line::raw("") };
+        let w = usize::from(self.built.map_or(80, |b| b.0));
+        let inner = w.saturating_sub(4);
+        let border = theme::line();
+        let bar = |mut spans: Vec<Span<'static>>| -> Line<'static> {
+            let used: usize = spans.iter().map(|s| s.content.width()).sum();
+            let mut v = vec![Span::styled("│ ", border)];
+            v.append(&mut spans);
+            v.push(Span::raw(" ".repeat(inner.saturating_sub(used))));
+            v.push(Span::styled(" │", border));
+            Line::from(v)
+        };
+        let Some(f) = self.changes.files.get(r.file) else { return Line::raw("") };
+        match r.body {
+            Body::Summary => self.summary(),
+            Body::Conflict => {
+                let c = self.changes.stopped.clone().unwrap_or_default();
+                let files = if c.is_empty() { "0 conflicts".to_string() } else { format!("{} conflicts: {}", c.len(), c.join(", ")) };
+                Line::from(vec![
+                    Span::styled(" rebase stopped ", theme::pill()),
+                    Span::styled(crate::nav::fit(&format!(" {files} · A: agent resolves · K: continue · X: abort"), w.saturating_sub(16)), Style::default().fg(theme::pal().warn)),
+                ])
+            }
+            Body::Blank => Line::raw(""),
+            Body::Group(g, cat) => match g.and_then(|g| self.rank.as_ref().and_then(|r| r.groups.get(g)).map(|gr| (g, gr))) {
+                Some((gi, gr)) => Line::from(vec![
+                    Span::styled(format!(" {} · {}", gi + 1, gr.title), theme::accent_bold()),
+                    Span::styled(crate::nav::fit(&format!("  {}", gr.why), w.saturating_sub(gr.title.width() + 8)), theme::muted()),
+                ]),
+                None => Line::styled(format!(" {}", cat.label()), theme::muted().add_modifier(Modifier::BOLD)),
+            },
+            Body::Hits(n) => Line::styled(format!(" {n} files match · by name and content, every level · enter: the 1st · esc: clear"), theme::muted()),
+            Body::Head => self.head_line(r.file, f, w),
+            Body::Foot => Line::styled(format!("╰{}╯", "─".repeat(w.saturating_sub(2))), border),
+            Body::Why => {
+                let why = self.ranked(&f.path).map(|x| x.2).unwrap_or_default();
+                bar(vec![Span::styled(crate::nav::fit(why, inner), theme::muted().add_modifier(Modifier::ITALIC))])
+            }
+            Body::Note(n) => bar(vec![Span::styled(n.to_string(), theme::muted())]),
+            Body::Hunk(h) => {
+                let h = &f.hunks[h];
+                let label = format!("⋯ {}", if h.ctx.is_empty() { format!("line {}", h.new) } else { h.ctx.clone() });
+                bar(vec![Span::styled(crate::nav::fit(&label, inner), theme::muted())])
+            }
+            Body::Diff(h, k) => {
+                let (l, p) = (&f.hunks[h].lines[k], self.painted(f, h));
+                let num_w = self.num_w.get(&r.file).copied().unwrap_or(3);
+                let num = match l.kind {
+                    Kind::Add => format!("{:>num_w$} {:>num_w$}", "", l.new.unwrap_or(0)),
+                    Kind::Del => format!("{:>num_w$} {:>num_w$}", l.old.unwrap_or(0), ""),
+                    Kind::Ctx => format!("{:>num_w$} {:>num_w$}", l.old.unwrap_or(0), l.new.unwrap_or(0)),
+                };
+                let room = inner.saturating_sub(num.len() + 3);
+                let mut spans = vec![Span::styled(num, theme::muted()), sign_span(l.kind)];
+                if let Some(pl) = p.get(k) {
+                    spans.extend(painted_spans(pl, l.kind, room));
+                }
+                bar(spans)
+            }
+            Body::Side(h, dk, ak) => {
+                let (ls, p) = (&f.hunks[h].lines, self.painted(f, h));
+                let num_w = self.num_w.get(&r.file).copied().unwrap_or(3);
+                let half = inner.saturating_sub(3) / 2;
+                let cell = |k: Option<usize>, left: bool| -> Vec<Span<'static>> {
+                    let Some(k) = k else { return vec![Span::raw(" ".repeat(half))] };
+                    let l = &ls[k];
+                    let n = if left { l.old } else { l.new }.unwrap_or(0);
+                    let mut v = vec![Span::styled(format!("{n:>num_w$}"), theme::muted()), sign_span(l.kind)];
+                    if let Some(pl) = p.get(k) {
+                        v.extend(painted_spans(pl, l.kind, half.saturating_sub(num_w + 3)));
+                    }
+                    v
+                };
+                let mut s = cell(dk, true);
+                s.push(Span::styled(" │ ", theme::line()));
+                s.extend(cell(ak, false));
+                bar(s)
+            }
+            Body::Finding(fi, k) => {
+                let Some(x) = self.review.as_ref().and_then(|r| r.findings.get(fi)) else { return bar(Vec::new()) };
+                let color = match x.severity.as_str() {
+                    "critical" => theme::pal().danger,
+                    "major" => theme::pal().warn,
+                    _ => theme::pal().muted,
+                };
+                let st = Style::default().fg(color).add_modifier(Modifier::BOLD);
+                if k == 0 {
+                    let head = format!("⚠ {} · ", x.severity);
+                    bar(vec![Span::styled(head.clone(), st), Span::styled(crate::nav::fit(&x.title, inner.saturating_sub(head.width())), st)])
+                } else {
+                    let l = x.body.lines().nth(k - 1).unwrap_or_default();
+                    bar(vec![Span::raw("  "), Span::styled(crate::nav::fit(l, inner.saturating_sub(2)), theme::muted())])
+                }
+            }
+            Body::Comment(ci, k) => {
+                let Some(c) = self.comments.get(ci) else { return bar(Vec::new()) };
+                let st = Style::default().fg(theme::pal().accent);
+                let head = if k == 0 { format!("✎ {}: ", c.at()) } else { "  ".to_string() };
+                let l = c.text.lines().nth(k).unwrap_or_default();
+                let room = inner.saturating_sub(head.width());
+                bar(vec![Span::styled(head, st.add_modifier(Modifier::BOLD)), Span::styled(crate::nav::fit(l, room), st)])
+            }
+        }
+    }
+
+    /// The head row of file I (F): reviewed mark, staged mark, path (filter hits marked), level,
+    /// category, size.
+    fn head_line(&self, i: usize, f: &FileDiff, w: usize) -> Line<'static> {
+        let reviewed = self.is_reviewed(f);
+        let updated = !reviewed && self.marks.contains_key(&f.path);
+        let border = theme::line();
+        let mark = if reviewed { Span::styled("☑ ", Style::default().fg(theme::pal().ok)) } else { Span::styled("☐ ", theme::muted()) };
+        let (name, skip) = match &f.old_path {
+            Some(o) => (format!("{o} → {}", f.path), o.chars().count() + 3),
+            None => (f.path.clone(), 0),
+        };
+        let tag = match f.status {
+            Status::New => " new",
+            Status::Deleted => " deleted",
+            _ => "",
+        };
+        let right = if f.binary { "binary".to_string() } else { format!("+{} −{}", f.add, f.del) };
+        let right = format!(" {}{tag} · {right} ", f.cat.label());
+        let room = w.saturating_sub(right.width() + 8 + if updated { 9 } else { 0 });
+        let stage = match self.changes.staged.get(&f.path) {
+            Some(true) => Span::styled("● ", Style::default().fg(theme::pal().ok)),
+            Some(false) => Span::styled("◐ ", Style::default().fg(theme::pal().warn)),
+            None => Span::raw(""),
+        };
+        let mut head = vec![Span::styled("╭─ ", border), mark, stage];
+        let fitted = crate::nav::fit(&name, room);
+        let marks: Vec<usize> = self.hits.get(&i).map(|m| m.iter().map(|x| x + skip).filter(|&x| x < fitted.chars().count()).collect()).unwrap_or_default();
+        head.extend(crate::fuzzy::spans(&fitted, &marks, theme::bold(), theme::accent_bold().add_modifier(Modifier::UNDERLINED)));
+        if updated {
+            head.push(Span::styled(" updated", Style::default().fg(theme::pal().warn)));
+        }
+        let used: usize = head.iter().map(|s| s.content.width()).sum();
+        let fill = w.saturating_sub(used + right.width() + 3);
+        head.push(Span::styled(format!(" {}", "─".repeat(fill)), border));
+        head.push(Span::styled(right, theme::muted()));
+        head.push(Span::styled("─╮", border));
+        Line::from(head)
+    }
+
+    /// The selection keys of row R: its diff lines.
+    fn keys(&self, r: &Row) -> Vec<LKey> {
+        let Some(f) = self.changes.files.get(r.file) else { return Vec::new() };
+        let line = |h: usize, k: usize| f.hunks.get(h).and_then(|x| x.lines.get(k)).and_then(lkey);
+        match r.body {
+            Body::Diff(h, k) => line(h, k).into_iter().collect(),
+            Body::Side(h, a, b) if a == b => a.and_then(|k| line(h, k)).into_iter().collect(),
+            Body::Side(h, a, b) => a.and_then(|k| line(h, k)).into_iter().chain(b.and_then(|k| line(h, k))).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Row I has a selected line.
+    fn selected(&self, i: usize) -> bool {
+        let Some(r) = self.rows.get(i) else { return false };
+        let Some(set) = self.changes.files.get(r.file).and_then(|f| self.sel.get(&f.path)) else { return false };
+        self.keys(r).iter().any(|k| set.contains(k))
+    }
+
+    /// Select (ON) or unselect the lines of row I.
+    fn select_row(&mut self, i: usize, on: bool) {
+        let Some(r) = self.rows.get(i) else { return };
+        let keys = self.keys(r);
+        let Some(path) = self.changes.files.get(r.file).map(|f| f.path.clone()) else { return };
+        if keys.is_empty() {
+            return;
+        }
+        let set = self.sel.entry(path.clone()).or_default();
+        for k in keys {
+            if on {
+                set.insert(k);
+            } else {
+                set.remove(&k);
+            }
+        }
+        if set.is_empty() {
+            self.sel.remove(&path);
+        }
+    }
+
+    /// The selection as comment spots (1 per file, in row order): each on the last selected
+    /// row's line.
+    fn spots(&self) -> Vec<Spot> {
+        let mut out: Vec<Spot> = Vec::new();
+        for (i, r) in self.rows.iter().enumerate() {
+            if !self.selected(i) {
+                continue;
+            }
+            let Some(f) = self.changes.files.get(r.file) else { continue };
+            let line = r.at.unwrap_or_else(|| f.first_line());
+            match out.iter_mut().find(|s| s.path == f.path) {
+                Some(s) => s.line = line,
+                None => out.push(Spot { path: f.path.clone(), line, lines: self.sel.get(&f.path).map(lines_label).unwrap_or_default() }),
+            }
+        }
+        // a selected file not shown (another tab): its 1st selected line
+        for (p, set) in &self.sel {
+            if !out.iter().any(|s| &s.path == p)
+                && let Some(k) = set.iter().find(|k| !k.0).or(set.iter().next())
+            {
+                out.push(Spot { path: p.clone(), line: k.1, lines: lines_label(set) });
+            }
+        }
+        out
     }
 
     /// The review comments (for the view bar and the hint row).
@@ -1442,56 +1813,131 @@ impl View {
         self.comments.len()
     }
 
-    /// Add a comment TEXT on LINE of PATH; the rows show it at once.
-    pub fn add_comment(&mut self, path: &str, line: u32, text: &str) {
+    /// Add a comment TEXT on SPOTS (1 per file); the selection it was on clears; the rows show
+    /// it at once.
+    pub fn add_comment(&mut self, spots: &[Spot], text: &str) {
         let text = text.trim();
         if text.is_empty() {
             return;
         }
-        self.comments.push(Comment { path: path.to_string(), line, text: text.to_string() });
+        for s in spots {
+            self.comments.push(Comment { path: s.path.clone(), line: s.line, text: text.to_string(), lines: s.lines.clone() });
+        }
         write_comments(&self.id, &self.comments);
+        self.sel.clear();
         self.rebuild_here();
     }
 
-    /// Hunk H side by side: the old side left, the new side right; a run of removed lines pairs
-    /// with the added lines after it.
-    #[allow(clippy::too_many_arguments)]
-    fn side_rows(&self, rows: &mut Vec<Row>, i: usize, h: &Hunk, painted: &[Painted], inner: usize, num_w: usize, bar: &dyn Fn(Vec<Span<'static>>) -> Line<'static>) {
-        let half = inner.saturating_sub(3) / 2;
-        let cell = |k: Option<usize>, left: bool| -> Vec<Span<'static>> {
-            let Some(k) = k else { return vec![Span::raw(" ".repeat(half))] };
-            let l = &h.lines[k];
-            let n = if left { l.old } else { l.new }.unwrap_or(0);
-            let mut v = vec![Span::styled(format!("{n:>num_w$}"), theme::muted()), sign_span(l.kind)];
-            v.extend(painted_spans(&painted[k], l.kind, half.saturating_sub(num_w + 3)));
-            v
-        };
-        let mut k = 0;
-        let ls = &h.lines;
-        while k < ls.len() {
-            if ls[k].kind == Kind::Ctx {
-                let mut s = cell(Some(k), true);
-                s.push(Span::styled(" │ ", theme::line()));
-                s.extend(cell(Some(k), false));
-                rows.push(Row { line: bar(s), file: i, at: ls[k].new, head: false, hunk: false, comment: None, finding: None });
-                k += 1;
-                continue;
+    /// Tests: FILES as the read changes (a git read on its way: dropped).
+    #[cfg(test)]
+    pub fn set_files(&mut self, mut files: Vec<FileDiff>) {
+        order(&mut files);
+        self.changes = Changes { base: "origin/main".into(), files, ..Default::default() };
+        self.marks.clear();
+        self.loading = None;
+        self.loaded = Some(Instant::now());
+        self.built = None;
+    }
+
+    /// The filter has the keys (letters, esc, enter go to it).
+    pub fn typing(&self) -> bool {
+        self.filtering
+    }
+
+    /// Esc is the view's: it leaves the filter, clears it or the selection.
+    pub fn takes_esc(&self) -> bool {
+        self.filtering || !self.filter.is_empty() || !self.sel.is_empty()
+    }
+
+    /// Show the files of level L (the filter clears).
+    fn set_tab(&mut self, l: crate::rank::Level) {
+        self.tab = l;
+        self.tab_by_hand = true;
+        self.filter.clear();
+        self.filtering = false;
+        self.built = None;
+        self.at = 0;
+        self.top = 0;
+    }
+
+    /// A key while the filter has the focus.
+    fn filter_key(&mut self, k: KeyEvent) -> Act {
+        match k.code {
+            KeyCode::Esc => {
+                self.filtering = false;
+                self.filter.clear();
             }
-            let d = ls[k..].iter().take_while(|l| l.kind == Kind::Del).count();
-            let a = ls[k + d..].iter().take_while(|l| l.kind == Kind::Add).count();
-            for j in 0..d.max(a) {
-                let (dk, ak) = ((j < d).then_some(k + j), (j < a).then_some(k + d + j));
-                let mut s = cell(dk, true);
-                s.push(Span::styled(" │ ", theme::line()));
-                s.extend(cell(ak, false));
-                let at = ak.and_then(|x| ls[x].new).or_else(|| (a > 0).then(|| ls[k + d].new).flatten()).or_else(|| dk.and_then(|x| ls[x].old));
-                rows.push(Row { line: bar(s), file: i, at, head: false, hunk: false, comment: None, finding: None });
+            KeyCode::Enter => {
+                self.filtering = false;
+                self.rebuild_here();
+                if let Some(h) = self.rows.iter().position(|r| r.head) {
+                    self.at = h;
+                    self.top = 0;
+                }
+                return Act::None;
             }
-            k += d + a;
+            KeyCode::Backspace => {
+                self.filter.pop();
+            }
+            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => self.filter.clear(),
+            KeyCode::Char(c) if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => self.filter.push(c),
+            _ => return Act::None,
         }
+        self.built = None;
+        self.at = 0;
+        self.top = 0;
+        Act::None
+    }
+
+    /// The tab bar and the filter row.
+    fn draw_bars(&mut self, f: &mut Frame) {
+        self.tab_hits.clear();
+        let filtered = !self.filter.trim().is_empty();
+        let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+        let mut x = self.tabs_rect.x + 1;
+        for (n, l) in crate::rank::Level::ALL.into_iter().enumerate() {
+            let (done, all) = self.counts[l as usize];
+            let label = format!(" {} {} {done}/{all} ", n + 1, l.label());
+            let color = match l {
+                crate::rank::Level::Critical => theme::pal().danger,
+                crate::rank::Level::High => theme::pal().warn,
+                crate::rank::Level::Medium => theme::pal().accent,
+                crate::rank::Level::Low => theme::pal().muted,
+            };
+            let st = if l == self.tab && !filtered { theme::pill() } else if all == 0 { theme::muted() } else { Style::default().fg(color) };
+            let w = label.width() as u16;
+            self.tab_hits.push((Rect { x, y: self.tabs_rect.y, width: w, height: 1 }, l));
+            x += w + 1;
+            spans.push(Span::styled(label, st));
+            spans.push(Span::raw(" "));
+        }
+        let state = if self.ranking.is_some() {
+            Span::styled(format!(" classifying… ({})", self.classifier.as_ref().map_or("path rules", |c| c.label.as_str())), theme::accent())
+        } else if let Some(e) = &self.rank_error {
+            Span::styled(format!(" path rules · {e}"), theme::muted())
+        } else if let Some(r) = &self.rank {
+            Span::styled(format!(" by {}{}", r.model, if self.fresh_rank { "" } else { " · older set of files" }), theme::muted())
+        } else {
+            Span::styled(" by path rules", theme::muted())
+        };
+        spans.push(state);
+        f.render_widget(Paragraph::new(Line::from(spans)), self.tabs_rect);
+        let line = if self.filtering {
+            Line::from(vec![Span::styled(" f ", theme::pill()), Span::styled(format!(" {}", self.filter), theme::text()), Span::styled("▏", theme::accent()), Span::styled("  enter: 1st hit · esc: clear", theme::muted())])
+        } else if filtered {
+            Line::from(vec![Span::styled(" f ", theme::muted()), Span::styled(format!(" {}", self.filter), theme::accent()), Span::styled("  f: edit · esc: clear", theme::muted())])
+        } else {
+            Line::styled(" f  filter by name or content, every level", theme::muted())
+        };
+        f.render_widget(Paragraph::new(line), self.filter_rect);
     }
 
     pub fn draw(&mut self, f: &mut Frame, area: Rect) {
+        // the tab bar and the filter row on top (room permitting), the rows below
+        let bars = area.height >= 6;
+        self.tabs_rect = if bars { Rect { height: 1, ..area } } else { Rect::default() };
+        self.filter_rect = if bars { Rect { y: area.y + 1, height: 1, ..area } } else { Rect::default() };
+        let area = if bars { Rect { y: area.y + 2, height: area.height - 2, ..area } } else { area };
         self.area = area;
         if self.poll_review() {
             self.built = None;
@@ -1520,6 +1966,9 @@ impl View {
         }
         let width = area.width.saturating_sub(1);
         self.build(width);
+        if bars {
+            self.draw_bars(f);
+        }
         let h = usize::from(area.height);
         // the cursor in view; a box header 1 row below the top when it can
         if self.at < self.top + 1 {
@@ -1528,9 +1977,26 @@ impl View {
             self.top = self.at + 1 - h;
         }
         self.top = self.top.min(self.rows.len().saturating_sub(h));
-        for (y, r) in self.rows.iter().enumerate().skip(self.top).take(h) {
+        // only the rows in view get made: O(rows on screen) per frame
+        let sel_bg = theme::tint(theme::pal().accent, theme::pal().panel, 0.28);
+        for y in self.top..(self.top + h).min(self.rows.len()) {
             let rect = Rect { x: area.x, y: area.y + (y - self.top) as u16, width, height: 1 };
-            f.render_widget(Paragraph::new(r.line.clone()), rect);
+            f.render_widget(Paragraph::new(self.line(y)), rect);
+            if self.selected(y) {
+                // a selected line: a bar in the gutter, its text on the selection tint (the sign
+                // column keeps its color)
+                let buf = f.buffer_mut();
+                for x in rect.x + 2..rect.right().saturating_sub(2) {
+                    if let Some(c) = buf.cell_mut((x, rect.y))
+                        && c.bg == ratatui::style::Color::Reset
+                    {
+                        c.set_bg(sel_bg);
+                    }
+                }
+                if let Some(c) = buf.cell_mut((rect.x + 1, rect.y)) {
+                    c.set_symbol("▌").set_fg(theme::pal().accent);
+                }
+            }
             if y == self.at {
                 theme::hover(f.buffer_mut(), Rect { x: area.x, width: 1, ..rect });
                 f.render_widget(Paragraph::new(Span::styled("▌", theme::accent())), Rect { x: area.x + width, width: 1, ..rect });
@@ -1554,27 +2020,63 @@ impl View {
         usize::from(self.area.height.saturating_sub(2)).max(1)
     }
 
+    /// Fold (ON) or open the box under the cursor; the cursor goes to its head.
+    fn fold(&mut self, on: bool) {
+        let Some(f) = self.file_at() else { return };
+        if self.folded(f) != on {
+            let p = f.path.clone();
+            if !self.toggled.remove(&p) {
+                self.toggled.insert(p);
+            }
+        }
+        self.rebuild_on_file();
+    }
+
     pub fn key(&mut self, k: KeyEvent) -> Act {
+        if self.filtering {
+            return self.filter_key(k);
+        }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let last = self.rows.len().saturating_sub(1);
         match k.code {
-            KeyCode::Down if !ctrl => self.at = (self.at + 1).min(last),
-            KeyCode::Up if !ctrl => self.at = self.at.saturating_sub(1),
+            // j up, k down (the owner's pick)
+            KeyCode::Down | KeyCode::Char('k') if !ctrl => self.at = (self.at + 1).min(last),
+            KeyCode::Up | KeyCode::Char('j') if !ctrl => self.at = self.at.saturating_sub(1),
             KeyCode::PageDown => self.at = (self.at + self.page()).min(last),
             KeyCode::PageUp => self.at = self.at.saturating_sub(self.page()),
-            KeyCode::Char('j') => self.jump(true, |r| r.head),
-            KeyCode::Char('k') => self.jump(false, |r| r.head),
+            KeyCode::Char('}') => self.jump(true, |r| r.head),
+            KeyCode::Char('{') => self.jump(false, |r| r.head),
             KeyCode::Char('n') => self.jump(true, |r| r.hunk || r.head),
             KeyCode::Char('p') => self.jump(false, |r| r.hunk || r.head),
             KeyCode::Char('g') | KeyCode::Home => self.at = 0,
             KeyCode::Char('G') | KeyCode::End => self.at = last,
-            KeyCode::Char(' ') => return self.toggle_reviewed(),
+            // space: the line selected / not, the cursor 1 down
+            KeyCode::Char(' ') => {
+                let on = !self.selected(self.at);
+                self.select_row(self.at, on);
+                self.at = (self.at + 1).min(last);
+            }
+            KeyCode::Char('r') if ctrl => {
+                self.refresh(true);
+                return Act::Toast("changes: reading git".into());
+            }
+            KeyCode::Char('r') => return self.toggle_reviewed(),
+            KeyCode::Left => self.fold(true),
+            KeyCode::Right => self.fold(false),
+            KeyCode::Char(c @ '1'..='4') => self.set_tab(crate::rank::Level::ALL[usize::from(c as u8 - b'1')]),
+            KeyCode::Char('f') => self.filtering = true,
+            KeyCode::Esc => {
+                if !self.filter.is_empty() {
+                    self.filter.clear();
+                    self.built = None;
+                } else {
+                    self.sel.clear();
+                }
+            }
             KeyCode::Enter => {
-                if let Some(p) = self.file_at().map(|f| f.path.clone()) {
-                    if !self.toggled.remove(&p) {
-                        self.toggled.insert(p);
-                    }
-                    self.rebuild_on_file();
+                if let Some(f) = self.file_at() {
+                    let on = !self.folded(f);
+                    self.fold(on);
                 }
             }
             KeyCode::Char('s') => {
@@ -1584,16 +2086,12 @@ impl View {
                 return Act::Toast(if now { "unified".into() } else { "side by side".into() });
             }
             KeyCode::Char('R') => {
-                if self.rank_model.is_none() {
-                    return Act::Toast("rank: off (setting rank)".into());
+                if self.classifier.is_none() {
+                    return Act::Toast("classify: off (setting classify)".into());
                 }
                 self.apply_rank(true);
                 self.built = None;
-                return Act::Toast("ranking again…".into());
-            }
-            KeyCode::Char('r') => {
-                self.refresh(true);
-                return Act::Toast("changes: reading git".into());
+                return Act::Toast("classifying again…".into());
             }
             // a / u: on a box head the file, on a diff row its hunk (a new file: the file)
             KeyCode::Char('a') | KeyCode::Char('u') => {
@@ -1634,9 +2132,14 @@ impl View {
                     ));
                 }
             }
+            // c: a comment on the selected lines, else on the cursor's line
             KeyCode::Char('c') => {
+                let spots = self.spots();
+                if !spots.is_empty() {
+                    return Act::Comment(spots);
+                }
                 if let (Some(f), Some(r)) = (self.file_at(), self.rows.get(self.at)) {
-                    return Act::Comment(f.path.clone(), r.at.unwrap_or_else(|| f.first_line()));
+                    return Act::Comment(vec![Spot { path: f.path.clone(), line: r.at.unwrap_or_else(|| f.first_line()), lines: String::new() }]);
                 }
             }
             KeyCode::Char('x') => {
@@ -1658,7 +2161,9 @@ impl View {
                     && let Some(x) = self.review.as_ref().and_then(|r| r.findings.get(fi)).cloned()
                 {
                     self.drop_finding(fi);
-                    self.add_comment(&x.file, x.line, &crate::review::as_comment(&x));
+                    self.comments.push(Comment { path: x.file.clone(), line: x.line, text: crate::review::as_comment(&x), lines: String::new() });
+                    write_comments(&self.id, &self.comments);
+                    self.rebuild_here();
                     return Act::Toast(format!("finding → comment batch · {} · C: send", self.comments.len()));
                 }
             }
@@ -1729,7 +2234,7 @@ impl View {
         }
     }
 
-    /// space: the box under the cursor reviewed / not; reviewed: the cursor goes to the next box.
+    /// r: the box under the cursor reviewed / not; reviewed: the cursor goes to the next box.
     fn toggle_reviewed(&mut self) -> Act {
         let Some(f) = self.file_at().cloned() else { return Act::None };
         let on = !self.is_reviewed(&f);
@@ -1748,12 +2253,49 @@ impl View {
         Act::Toast(format!("{} · {done}/{all} reviewed", if on { "reviewed" } else { "not reviewed" }))
     }
 
+    /// A click on a tab: its files; on the filter row: the filter takes the keys; on a row: the
+    /// cursor there; a drag over diff rows selects their lines (as space does).
     pub fn mouse(&mut self, m: MouseEvent) {
-        let inside = m.column >= self.area.x && m.column < self.area.right() && m.row >= self.area.y && m.row < self.area.bottom();
-        if !inside {
+        let at = ratatui::layout::Position { x: m.column, y: m.row };
+        let click = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
+        if click && let Some(&(_, l)) = self.tab_hits.iter().find(|(r, _)| r.contains(at)) {
+            self.set_tab(l);
+            return;
+        }
+        if click && self.filter_rect.contains(at) {
+            self.filtering = true;
             return;
         }
         let last = self.rows.len().saturating_sub(1);
+        // a drag past the rows' top / bottom: the row there, the view scrolls 1
+        if let (MouseEventKind::Drag(MouseButton::Left), Some((anchor, base))) = (m.kind, self.drag.clone()) {
+            let h = usize::from(self.area.height);
+            let row = if m.row < self.area.y {
+                self.top = self.top.saturating_sub(1);
+                self.top
+            } else if m.row >= self.area.bottom() {
+                self.top = (self.top + 1).min(self.rows.len().saturating_sub(h));
+                self.top + h.saturating_sub(1)
+            } else {
+                self.top + usize::from(m.row - self.area.y)
+            }
+            .min(last);
+            if row != anchor || self.sel != base {
+                self.sel = base;
+                for i in anchor.min(row)..=anchor.max(row) {
+                    self.select_row(i, true);
+                }
+            }
+            self.at = row;
+            return;
+        }
+        if matches!(m.kind, MouseEventKind::Up(_)) {
+            self.drag = None;
+            return;
+        }
+        if !self.area.contains(at) {
+            return;
+        }
         match m.kind {
             MouseEventKind::ScrollDown => {
                 self.top = (self.top + 3).min(self.rows.len().saturating_sub(usize::from(self.area.height)));
@@ -1763,7 +2305,11 @@ impl View {
                 self.top = self.top.saturating_sub(3);
                 self.at = self.at.min(self.top + usize::from(self.area.height).saturating_sub(2));
             }
-            MouseEventKind::Down(_) => self.at = (self.top + usize::from(m.row - self.area.y)).min(last),
+            MouseEventKind::Down(_) => {
+                self.at = (self.top + usize::from(m.row - self.area.y)).min(last);
+                self.filtering = false;
+                self.drag = Some((self.at, self.sel.clone()));
+            }
             _ => {}
         }
     }
@@ -1840,7 +2386,7 @@ Binary files a/img.png and b/img.png differ
     }
 
     fn text(v: &View) -> Vec<String> {
-        v.rows.iter().map(|r| r.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()).collect()
+        (0..v.rows.len()).map(|i| text_of(v, i)).collect()
     }
 
     #[test]
@@ -1861,7 +2407,10 @@ Binary files a/img.png and b/img.png differ
         let row = t.iter().find(|l| l.contains("let b = 2;")).unwrap();
         assert!(row.contains("- let b = 2;") && row.contains("+ let b = 3;"), "pairs on 1 row: {row}");
         assert!(t.iter().any(|l| l.contains("+ let c = 4;") && !l.contains("- ")), "{t:#?}");
-        // a new file stays unified: 0 empty left half
+        // a new file stays unified: 0 empty left half (a test: the low tab)
+        v.set_tab(crate::rank::Level::Low);
+        v.build(SIDE_MIN);
+        let t = text(&v);
         let new = t.iter().find(|l| l.contains("fn t() {}")).unwrap();
         assert!(!new.contains(" │ "), "{new}");
     }
@@ -1871,7 +2420,7 @@ Binary files a/img.png and b/img.png differ
         use crate::rank::{Group, RFile, Rank};
         let mut v = view(parse(DIFF));
         let key = crate::rank::key(&v.changes.files);
-        let f = |p: &str, w: &str| RFile { path: p.into(), why: w.into() };
+        let f = |p: &str, w: &str| RFile { path: p.into(), why: w.into(), level: "high".into() };
         v.rank = Some(Rank { key, model: "haiku".into(), groups: vec![
             Group { title: "Test first".into(), why: "the test drives it".into(), files: vec![f("tests/a_test.rs", "adds the test")] },
             Group { title: "Core".into(), why: "b becomes 3".into(), files: vec![f("src/a.rs", "changes b"), f("new.rs", "")] },
@@ -1885,7 +2434,13 @@ Binary files a/img.png and b/img.png differ
         let g1 = t.iter().position(|l| l.starts_with(" 1 · Test first  the test drives it")).unwrap();
         assert!(t[g1 + 1].contains("☐ tests/a_test.rs") && t[g1 + 2].contains("adds the test"), "{t:#?}");
         assert!(t.iter().any(|l| l.starts_with(" 2 · Core")), "{t:#?}");
-        // img.png: unranked, under its category
+        // the agent's levels: the 3 in the high tab (picked: critical has 0 files)
+        assert_eq!((v.tab, v.counts), (crate::rank::Level::High, [(0, 0), (0, 3), (0, 0), (0, 1)]));
+        assert!(!t.iter().any(|l| l.contains("img.png")), "{t:#?}");
+        // img.png: unranked, path rules: low, under its category
+        v.set_tab(crate::rank::Level::Low);
+        v.build(100);
+        let t = text(&v);
         let img = t.iter().position(|l| l.contains("img.png")).unwrap();
         assert_eq!(t[img - 1], " logic", "{t:#?}");
         // a new set of paths: the rank no longer applies
@@ -1901,8 +2456,9 @@ Binary files a/img.png and b/img.png differ
         v.id = "changes-comments-0000".into();
         v.comments.clear();
         v.build(100);
-        v.add_comment("src/a.rs", 11, "why 3?\nkeep 2");
-        v.add_comment("src/a.rs", 99, "outside any hunk");
+        let spot = |line: u32| vec![Spot { path: "src/a.rs".into(), line, lines: String::new() }];
+        v.add_comment(&spot(11), "why 3?\nkeep 2");
+        v.add_comment(&spot(99), "outside any hunk");
         let t = text(&v);
         let at = t.iter().position(|l| l.contains("+ let b = 3;")).unwrap();
         assert!(t[at + 1].contains("✎ 11: why 3?") && t[at + 2].contains("keep 2"), "{t:#?}");
@@ -1959,36 +2515,41 @@ Binary files a/img.png and b/img.png differ
     }
 
     #[test]
-    fn rows_have_syntax_colors_line_tints_and_word_marks() {
+    fn rows_have_vivid_syntax_colors_a_sign_column_and_word_marks() {
         let mut v = view(parse(DIFF));
         v.build(100);
-        let row = v.rows.iter().find(|r| text_of(r).contains("+ let b = 3;")).unwrap();
-        let add_bg = tints(Kind::Add).0;
-        let mark_bg = tints(Kind::Add).1;
-        // `let`: a keyword color (0 plain text color), on the add tint
-        let kw = row.line.spans.iter().find(|s| s.content.starts_with("let")).unwrap();
+        let i = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("+ let b = 3;")).unwrap();
+        let line = v.line(i);
+        let (sign_bg, mark_bg) = tints(Kind::Add);
+        // the sign column: the add color as its background; the rest: 0 line tint
+        let sign = line.spans.iter().find(|s| s.content == " + ").unwrap();
+        assert_eq!(sign.style.bg, sign_bg);
+        // `let`: a keyword color, more saturated than the theme's
+        let kw = line.spans.iter().find(|s| s.content.starts_with("let")).unwrap();
         assert_ne!(kw.style.fg, Some(theme::pal().text), "syntax color");
-        assert_eq!(kw.style.bg, add_bg);
-        // `3`: the changed word, the strong tint
-        let three = row.line.spans.iter().find(|s| s.content.contains('3')).unwrap();
-        assert_eq!(three.style.bg, mark_bg, "{:?}", row.line.spans);
+        assert_eq!(kw.style.bg, None, "0 tint over the line");
+        let plain = crate::code::highlight("let b = 3;", "rs")[0][0].0;
+        assert_eq!(kw.style.fg, Some(theme::desaturate(plain, SATURATION)));
+        // `3`: the changed word, its tint
+        let three = line.spans.iter().find(|s| s.content.contains('3')).unwrap();
+        assert_eq!(three.style.bg, mark_bg, "{:?}", line.spans);
         // context rows: 0 tint
-        let ctx = v.rows.iter().find(|r| text_of(r).contains("let a = 1;")).unwrap();
-        assert!(ctx.line.spans.iter().filter(|s| s.content.contains("let")).all(|s| s.style.bg.is_none()));
+        let ctx = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("let a = 1;")).unwrap();
+        assert!(v.line(ctx).spans.iter().filter(|s| s.content.contains("let")).all(|s| s.style.bg.is_none()));
     }
 
     #[test]
-    fn space_marks_reviewed_folds_and_a_changed_diff_shows_updated() {
+    fn r_marks_reviewed_folds_and_a_changed_diff_shows_updated() {
         let mut v = view(parse(DIFF));
         v.build(100);
         v.at = v.rows.iter().position(|r| r.head).unwrap();
-        v.toggle_reviewed();
+        v.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
         assert_eq!(v.progress(), (1, 4));
         let t = text(&v);
         let h = t.iter().position(|l| l.contains("☑ src/a.rs")).unwrap();
         assert!(t[h + 1].starts_with('╰'), "folded: {t:#?}");
-        // the cursor went to the next box
-        assert!(v.rows[v.at].head && v.rows[v.at].file == 1);
+        // the cursor went to the next box of the tab (medium: src/a.rs, new.rs)
+        assert!(v.rows[v.at].head && v.changes.files[v.rows[v.at].file].path == "new.rs");
         // the file changes: the mark goes, `updated` shows
         let mut changed = parse(&DIFF.replace("let c = 4;", "let c = 5;"));
         order(&mut changed);
@@ -2006,17 +2567,226 @@ Binary files a/img.png and b/img.png differ
     fn o_opens_the_line_under_the_cursor() {
         let mut v = view(parse(DIFF));
         v.build(100);
-        let i = v.rows.iter().position(|r| text_of(r).contains("let c = 4;")).unwrap();
+        let i = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("let c = 4;")).unwrap();
         v.at = i;
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)), Act::Open("src/a.rs".into(), 12));
-        // j / k: box headers
+        // } / {: box heads
         v.at = v.rows.iter().position(|r| r.head).unwrap();
-        v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert!(v.rows[v.at].head && v.rows[v.at].file == 1);
+        v.key(KeyEvent::new(KeyCode::Char('}'), KeyModifiers::NONE));
+        assert!(v.rows[v.at].head && v.changes.files[v.rows[v.at].file].path == "new.rs");
     }
 
-    fn text_of(r: &Row) -> String {
-        r.line.spans.iter().map(|s| s.content.as_ref()).collect()
+    fn text_of(v: &View, i: usize) -> String {
+        v.line(i).spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// The changes view drawn at W x H: its rows of text.
+    fn screen(v: &mut View, w: u16, h: u16) -> Vec<String> {
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        t.draw(|f| v.draw(f, f.area())).unwrap();
+        let b = t.backend().buffer().clone();
+        (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect()).collect()
+    }
+
+    fn press(v: &mut View, c: KeyCode) -> Act {
+        v.key(KeyEvent::new(c, KeyModifiers::NONE))
+    }
+
+    /// The screen row that holds S.
+    fn row_of(s: &[String], pat: &str) -> usize {
+        s.iter().position(|l| l.contains(pat)).unwrap_or_else(|| panic!("{pat}: {s:#?}"))
+    }
+
+    #[test]
+    fn j_goes_up_k_goes_down_1_line() {
+        let mut v = view(parse(DIFF));
+        let s = screen(&mut v, 100, 30);
+        // the cursor (▌ at the right edge) on the 1st box's head
+        let head = row_of(&s, "☐ src/a.rs");
+        assert!(s[head].ends_with('▌'), "{s:#?}");
+        press(&mut v, KeyCode::Char('k'));
+        let s = screen(&mut v, 100, 30);
+        assert!(s[head + 1].ends_with('▌') && s[head + 1].contains("⋯ fn run() {"), "k: 1 down: {s:#?}");
+        press(&mut v, KeyCode::Char('k'));
+        press(&mut v, KeyCode::Char('j'));
+        let s = screen(&mut v, 100, 30);
+        assert!(s[head + 1].ends_with('▌'), "j: 1 up: {s:#?}");
+    }
+
+    #[test]
+    fn space_selects_lines_apart_and_c_comments_on_them() {
+        let mut v = view(parse(DIFF));
+        v.id = "changes-select-0000".into();
+        v.comments.clear();
+        let s = screen(&mut v, 100, 30);
+        let b2 = row_of(&s, "- let b = 2;");
+        // the cursor to `- let b = 2;`, space: selected, the cursor 1 down
+        while !screen(&mut v, 100, 30)[b2].ends_with('▌') {
+            press(&mut v, KeyCode::Char('k'));
+        }
+        press(&mut v, KeyCode::Char(' '));
+        let s = screen(&mut v, 100, 30);
+        assert!(s[b2 + 1].ends_with('▌'), "1 down: {s:#?}");
+        // skip `+ let b = 3;`, select `+ let c = 4;`: 2 lines apart
+        press(&mut v, KeyCode::Char('k'));
+        press(&mut v, KeyCode::Char(' '));
+        let s = screen(&mut v, 100, 30);
+        let mark = |y: usize| s[y].chars().nth(1) == Some('▌');
+        assert!(mark(b2) && !mark(b2 + 1) && mark(b2 + 2), "gutter marks on the selected lines: {s:#?}");
+        // the selection's tint on its text, 0 on the other lines
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        t.draw(|f| v.draw(f, f.area())).unwrap();
+        let buf = t.backend().buffer().clone();
+        let text_x = s[b2].find("let").map(|x| s[b2][..x].chars().count() as u16).unwrap();
+        assert_ne!(buf[(text_x, b2 as u16)].bg, ratatui::style::Color::Reset);
+        assert_eq!(buf[(text_x, b2 as u16 + 1)].bg, ratatui::style::Color::Reset);
+        // c: 1 comment on both lines
+        let Act::Comment(spots) = press(&mut v, KeyCode::Char('c')) else { panic!() };
+        assert_eq!(spots, [Spot { path: "src/a.rs".into(), line: 12, lines: "12 · removed 11".into() }]);
+        assert_eq!(spots[0].label(), "src/a.rs:12 · removed 11");
+        v.add_comment(&spots, "both wrong");
+        let s = screen(&mut v, 100, 30);
+        let c = row_of(&s, "✎ 12 · removed 11: both wrong");
+        assert!(s[c - 1].contains("+ let c = 4;"), "under the last selected line: {s:#?}");
+        assert!(!s.iter().any(|l| l.chars().nth(1) == Some('▌')), "the selection clears: {s:#?}");
+        let Act::Send(b) = v.key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT)) else { panic!() };
+        assert!(b.ends_with("- `src/a.rs:12 · removed 11`: both wrong"), "{b}");
+        // esc (the view's while a selection is on) clears it
+        v.at = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("+ let b = 3;")).unwrap();
+        press(&mut v, KeyCode::Char(' '));
+        assert!(v.takes_esc());
+        press(&mut v, KeyCode::Esc);
+        assert!(!v.takes_esc() && v.sel.is_empty());
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-select-0000"));
+    }
+
+    #[test]
+    fn left_folds_right_opens_the_box() {
+        let mut v = view(parse(DIFF));
+        let s = screen(&mut v, 100, 30);
+        assert!(s.iter().any(|l| l.contains("let b = 3;")));
+        press(&mut v, KeyCode::Char('k'));
+        press(&mut v, KeyCode::Char('k'));
+        press(&mut v, KeyCode::Left);
+        let s = screen(&mut v, 100, 30);
+        let head = row_of(&s, "☐ src/a.rs");
+        assert!(s[head + 1].starts_with('╰') && !s.iter().any(|l| l.contains("let b = 3;")), "folded: {s:#?}");
+        assert!(s[head].ends_with('▌'), "the cursor on the head: {s:#?}");
+        press(&mut v, KeyCode::Right);
+        let s = screen(&mut v, 100, 30);
+        assert!(s.iter().any(|l| l.contains("let b = 3;")), "open: {s:#?}");
+    }
+
+    #[test]
+    fn tabs_split_by_level_keys_and_clicks_switch_and_classifying_shows() {
+        let mut v = view(parse(DIFF));
+        let s = screen(&mut v, 100, 30);
+        // path rules: src/a.rs + new.rs medium, the test and the binary low; medium picked
+        assert!(s[0].contains(" 1 critical 0/0 ") && s[0].contains(" 2 high 0/0 ") && s[0].contains(" 3 medium 0/2 ") && s[0].contains(" 4 low 0/2 "), "{}", s[0]);
+        assert!(s[0].contains("by path rules"), "{}", s[0]);
+        assert!(s.iter().any(|l| l.contains("src/a.rs")) && !s.iter().any(|l| l.contains("a_test.rs")), "{s:#?}");
+        press(&mut v, KeyCode::Char('4'));
+        let s = screen(&mut v, 100, 30);
+        assert!(s.iter().any(|l| l.contains("tests/a_test.rs")) && !s.iter().any(|l| l.contains("src/a.rs")), "{s:#?}");
+        // a click on the medium tab
+        let x = s[0].find(" 3 medium").map(|b| s[0][..b].chars().count() as u16 + 2).unwrap();
+        v.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: 0, modifiers: KeyModifiers::NONE });
+        let s = screen(&mut v, 100, 30);
+        assert_eq!(v.tab, crate::rank::Level::Medium);
+        assert!(s.iter().any(|l| l.contains("src/a.rs")), "{s:#?}");
+        // a call on its way: classifying…
+        let (_tx, rx) = mpsc::channel();
+        v.ranking = Some(rx);
+        v.classifier = Some(crate::rank::Runner { label: "ada".into(), harness: "claude".into(), model: None });
+        let s = screen(&mut v, 100, 30);
+        assert!(s[0].contains("classifying… (ada)"), "{}", s[0]);
+    }
+
+    #[test]
+    fn f_filters_by_name_and_content_with_marks_esc_clears_enter_jumps() {
+        let mut v = view(parse(DIFF));
+        screen(&mut v, 100, 30);
+        press(&mut v, KeyCode::Char('f'));
+        assert!(v.typing() && v.takes_esc());
+        // `fn t()`: content of the test file (the low tab) only: a hit across the tabs
+        for c in "fn t()".chars() {
+            press(&mut v, KeyCode::Char(c));
+        }
+        let s = screen(&mut v, 100, 30);
+        assert!(s[1].contains("fn t()▏"), "{}", s[1]);
+        assert!(s.iter().any(|l| l.contains("1 files match")), "{s:#?}");
+        assert!(s.iter().any(|l| l.contains("tests/a_test.rs")) && !s.iter().any(|l| l.contains("src/a.rs")), "content hit across tabs: {s:#?}");
+        press(&mut v, KeyCode::Esc);
+        assert!(!v.typing() && v.filter.is_empty());
+        // a name hit: its chars marked
+        press(&mut v, KeyCode::Char('f'));
+        for c in "test".chars() {
+            press(&mut v, KeyCode::Char(c));
+        }
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        t.draw(|f| v.draw(f, f.area())).unwrap();
+        let buf = t.backend().buffer().clone();
+        let s: Vec<String> = (0..30).map(|y| (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect();
+        let y = row_of(&s, "tests/a_test.rs");
+        let x0 = s[y].find("tests/").map(|b| s[y][..b].chars().count() as u16).unwrap();
+        assert_eq!(buf[(x0, y as u16)].fg, theme::pal().accent, "a marked char");
+        assert_ne!(buf[(x0 + 4, y as u16)].fg, theme::pal().accent, "`s` of `tests`: 0 mark");
+        // enter: the cursor on the 1st hit, the keys back to the list; esc clears the filter
+        press(&mut v, KeyCode::Enter);
+        assert!(!v.typing() && v.rows[v.at].head && v.changes.files[v.rows[v.at].file].path == "tests/a_test.rs");
+        assert!(v.takes_esc());
+        press(&mut v, KeyCode::Esc);
+        assert!(v.filter.is_empty());
+    }
+
+    #[test]
+    fn a_re_read_of_the_same_diffs_keeps_the_rows_and_takes_the_git_state() {
+        let mut v = view(parse(DIFF));
+        screen(&mut v, 100, 30);
+        for _ in 0..4 {
+            press(&mut v, KeyCode::Char('k'));
+        }
+        let at = v.at;
+        let read = |v: &mut View, c: Changes| {
+            let (tx, rx) = mpsc::channel();
+            tx.send(Ok(c)).unwrap();
+            v.loading = Some(rx);
+            v.poll()
+        };
+        // the same files in the read's (path) order, 1 staged now
+        let mut files = parse(DIFF);
+        files.reverse();
+        let c = Changes { base: "origin/main".into(), files, staged: HashMap::from([("src/a.rs".to_string(), true)]), ..Default::default() };
+        assert!(read(&mut v, c.clone()), "the staged mark changed");
+        assert!(v.built.is_some() && v.at == at, "0 new rows, the cursor stays");
+        assert!(screen(&mut v, 100, 30).iter().any(|l| l.contains("☐ ● src/a.rs")));
+        assert!(!read(&mut v, c), "0 change: 0 frame");
+        // a changed diff of the cursor's file: the cursor stays on its row of the file
+        let mut files = parse(&DIFF.replace("let d = 5;", "let d = 6;"));
+        order(&mut files);
+        assert!(read(&mut v, Changes { base: "origin/main".into(), files, ..Default::default() }));
+        screen(&mut v, 100, 30);
+        assert_eq!(v.at, at);
+    }
+
+    #[test]
+    fn a_mouse_drag_selects_the_lines_it_passes() {
+        let mut v = view(parse(DIFF));
+        let s = screen(&mut v, 100, 30);
+        let (a, b) = (row_of(&s, "- let b = 2;"), row_of(&s, "+ let c = 4;"));
+        let ev = |kind, row: usize| MouseEvent { kind, column: 20, row: row as u16, modifiers: KeyModifiers::NONE };
+        v.mouse(ev(MouseEventKind::Down(MouseButton::Left), a));
+        v.mouse(ev(MouseEventKind::Drag(MouseButton::Left), a + 1));
+        v.mouse(ev(MouseEventKind::Drag(MouseButton::Left), b));
+        v.mouse(ev(MouseEventKind::Up(MouseButton::Left), b));
+        let s = screen(&mut v, 100, 30);
+        assert!((a..=b).all(|y| s[y].chars().nth(1) == Some('▌')), "{s:#?}");
+        assert!(s[b + 1].chars().nth(1) != Some('▌'), "{s:#?}");
+        assert_eq!(v.sel["src/a.rs"].len(), 3);
+        // a plain click: 0 selection change
+        v.mouse(ev(MouseEventKind::Down(MouseButton::Left), b + 1));
+        v.mouse(ev(MouseEventKind::Up(MouseButton::Left), b + 1));
+        assert_eq!(v.sel["src/a.rs"].len(), 3);
     }
 
     #[test]
@@ -2107,6 +2877,67 @@ Binary files a/img.png and b/img.png differ
         assert_eq!(paths, ["x.rs", "y.md"]);
         assert_eq!(c.files[1].status, Status::New);
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// A diff of N files, each with HUNKS hunks of 10 changed lines (Rust code).
+    fn big_diff(n: usize, hunks: usize) -> String {
+        let mut s = String::new();
+        for i in 0..n {
+            s.push_str(&format!("diff --git a/src/m{i}.rs b/src/m{i}.rs\n--- a/src/m{i}.rs\n+++ b/src/m{i}.rs\n"));
+            for h in 0..hunks {
+                let at = h * 40 + 1;
+                s.push_str(&format!("@@ -{at},8 +{at},10 @@ fn f{h}() {{\n"));
+                s.push_str(" let a = vec![1, 2, 3];\n");
+                for k in 0..4 {
+                    s.push_str(&format!("-    let x{k}_{i} = compute(a.iter().map(|v| v * {k}).sum::<i32>(), \"old {h}\");\n"));
+                }
+                for k in 0..6 {
+                    s.push_str(&format!("+    let x{k}_{i} = compute(a.iter().map(|v| v * {k} + 1).sum::<i32>(), \"new {h}\");\n"));
+                }
+                s.push_str(" // done\n let b = 2;\n");
+            }
+        }
+        s
+    }
+
+    /// Perf: cargo test --release perf_big_diff -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn perf_big_diff() {
+        let files = parse(&big_diff(200, 10));
+        let lines: usize = files.iter().flat_map(|f| &f.hunks).map(|h| h.lines.len()).sum();
+        let mut v = view(files);
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 50)).unwrap();
+        let t0 = Instant::now();
+        t.draw(|f| v.draw(f, f.area())).unwrap();
+        let first = t0.elapsed();
+        let t0 = Instant::now();
+        for _ in 0..200 {
+            v.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            t.draw(|f| v.draw(f, f.area())).unwrap();
+        }
+        let nav = t0.elapsed() / 200;
+        let t0 = Instant::now();
+        for _ in 0..20 {
+            v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            t.draw(|f| v.draw(f, f.area())).unwrap();
+        }
+        let fold = t0.elapsed() / 20;
+        let t0 = Instant::now();
+        for _ in 0..20 {
+            v.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+            t.draw(|f| v.draw(f, f.area())).unwrap();
+        }
+        let reviewed = t0.elapsed() / 20;
+        let t0 = Instant::now();
+        v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        for c in "compute".chars() {
+            v.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            t.draw(|f| v.draw(f, f.area())).unwrap();
+        }
+        let filter = t0.elapsed() / 7;
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-test-0000"));
+        println!("perf: 200 files, {lines} diff lines · first draw {first:?} · 1 row down + draw {nav:?} · fold toggle + draw {fold:?} · r (reviewed) + draw {reviewed:?} · filter key + draw {filter:?}");
     }
 
     /// Live look: CODEHEAD_CHANGES_DIR=<repo> cargo test changes_live -- --ignored --nocapture
