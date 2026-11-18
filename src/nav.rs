@@ -135,6 +135,20 @@ pub fn load() -> Vec<Card> {
     cards
 }
 
+/// Header order: FIRST (the thread opened first) at index 0, the other open threads by activity.
+/// CURRENT stays in, whatever its state.
+pub fn header_order(cards: &[Card], first: &str, current: &str) -> Vec<Card> {
+    let mut out: Vec<Card> = cards.iter().filter(|c| c.id == first).cloned().collect();
+    out.extend(cards.iter().filter(|c| c.id != first && (c.state == "open" || c.id == current)).cloned());
+    out
+}
+
+/// Width of a header card for C: its title (status at least), borders + padding, max. MAX.
+pub fn card_width(c: &Card, max: u16) -> u16 {
+    let title = unicode_width::UnicodeWidthStr::width(c.name().as_str());
+    // `░▒▓ working…` / `◦ ended`: 12 columns
+    (title.max(12) as u16 + 4).min(max)
+}
 
 /// Fuzzy filter (title, branch) of CARDS: best match first; empty Q: all, order kept.
 pub fn filter(cards: &[Card], q: &str) -> Vec<usize> {
@@ -243,5 +257,15 @@ mod tests {
         assert_eq!(filter(&cards, ""), [0, 1]);
         assert_eq!(filter(&cards, "deploy"), [0]);
         assert_eq!(filter(&cards, "menu"), [1]);
+    }
+
+    #[test]
+    fn header_puts_the_first_thread_left_then_open_threads_by_activity() {
+        let cards = vec![card("b", "open", 30), card("c", "done", 20), card("a", "open", 10), card("d", "open", 5)];
+        let ids: Vec<String> = header_order(&cards, "a", "a").into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["a", "b", "d"]);
+        // a settled thread in view stays in the header
+        let ids: Vec<String> = header_order(&cards, "a", "c").into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["a", "b", "c", "d"]);
     }
 }
