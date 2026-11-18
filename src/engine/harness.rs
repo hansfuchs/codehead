@@ -142,6 +142,9 @@ fn harness_command(bin: &str, s: &Spec) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    if let Some(h) = crate::config::home_repo() {
+        c.env("CODEHEAD_HOME_REPO", h);
+    }
     c
 }
 
@@ -487,12 +490,25 @@ Thread: {title}\nAgents on the thread: {list}",
         title = thread.title,
         list = if others.is_empty() { "only you".to_string() } else { others.join(", ") },
     );
+    if let Some(h) = crate::config::home_repo() {
+        s.push_str(&home_block(&h));
+    }
     let profile = crate::agents::session_prompt(agent);
     if !profile.is_empty() {
         s.push_str("\n\n");
         s.push_str(&profile);
     }
     s
+}
+
+/// The home repo block of the system prompt: every harness gets the same steering.
+fn home_block(home: &std::path::Path) -> String {
+    let h = home.display();
+    format!(
+        "\n\n# Home repo\n\
+Home repo: `{h}` ($CODEHEAD_HOME_REPO). Read `{h}/AGENTS.md` before work: its rules apply to you \
+wherever you work (notes, plans, reports, other repos)."
+    )
 }
 
 /// `claude/opus`, `claude`.
@@ -506,6 +522,12 @@ pub fn harness_label(a: &Agent) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_block_points_every_harness_to_agents_md() {
+        let b = home_block(std::path::Path::new("/h/bonfire"));
+        assert!(b.contains("# Home repo") && b.contains("`/h/bonfire/AGENTS.md`") && b.contains("$CODEHEAD_HOME_REPO"), "{b}");
+    }
 
     #[test]
     fn json_lines_skip_a_non_utf8_line_and_go_on() {

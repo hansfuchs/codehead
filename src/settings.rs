@@ -28,9 +28,10 @@ const fn spec(key: &'static str, label: &'static str, help: &'static str, env: &
 }
 
 /// The plain fields, then the alias boxes.
-const SPECS: [Spec; 21] = [
+const SPECS: [Spec; 22] = [
     spec("notes", "notes", "directory of Markdown notes, ~ expands to home", "CODEHEAD_NOTES"),
     spec("styles", "styles", "directory of agent output styles", "CODEHEAD_STYLES"),
+    spec("home", "home repo", "git repo with AGENTS.md (notes, other repos): every agent reads it", "CODEHEAD_HOME_REPO"),
     spec("agent", "agent", "agent picked for a new thread", "CODEHEAD_AGENT"),
     spec("prefix", "prefix", "prefix of new branches and worktrees", "CODEHEAD_PREFIX"),
     spec("models", "models", "Claude models of the agent form, comma-separated", "CODEHEAD_MODELS"),
@@ -54,11 +55,11 @@ const SPECS: [Spec; 21] = [
 pub(crate) const PLAIN: usize = SPECS.len();
 /// Groups: the 1st field, the title, what the group sets.
 const SECTIONS: [(usize, &str, &str); 5] = [
-    (0, "paths", "where codehead reads notes and output styles"),
-    (2, "new threads", "defaults of the new tab and the agent form"),
-    (5, "thread view", "how messages and thoughts look, what agents learn of your edits"),
-    (8, "keys", "keys of every screen"),
-    (10, "colors", "a preset; a set field below overrides 1 of its colors"),
+    (0, "paths", "where codehead reads notes, output styles and the home repo"),
+    (3, "new threads", "defaults of the new tab and the agent form"),
+    (6, "thread view", "how messages and thoughts look, what agents learn of your edits"),
+    (9, "keys", "keys of every screen"),
+    (11, "colors", "a preset; a set field below overrides 1 of its colors"),
 ];
 /// The alias group, after the plain fields.
 const ALIASES: (&str, &str) = ("path aliases", "short names for directories: name/ → target/ · enter: edit / done · d: delete · ctrl+n: add");
@@ -819,21 +820,21 @@ mod tests {
         let file = dir.join("codehead.toml");
         std::fs::write(&file, "messages = 'lines'\n[keys]\nmenu = 'ctrl+p'\n[colors]\nscheme = 'amber'\n").unwrap();
         form.reload().unwrap();
-        form.focus = 5;
+        form.focus = 6;
         form.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert_eq!(form.fields[5].text(), "");
+        assert_eq!(form.fields[6].text(), "");
         let saved = config::read_file(&file).unwrap().1;
         assert_eq!((saved.messages, saved.menu_key.as_deref()), (None, Some("ctrl+p")));
         // a click on ↺ of the scheme field
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 100)).unwrap();
         terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
-        let (r, _) = *form.rows.iter().find(|(_, h)| *h == Hit::Reset(10)).expect("↺ on the set scheme field");
+        let (r, _) = *form.rows.iter().find(|(_, h)| *h == Hit::Reset(11)).expect("↺ on the set scheme field");
         form.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x, row: r.y, modifiers: KeyModifiers::NONE });
         assert_eq!(config::read_file(&file).unwrap().1.scheme, None);
-        assert!(!form.rows.iter().any(|(_, h)| *h == Hit::Reset(5)));
+        assert!(!form.rows.iter().any(|(_, h)| *h == Hit::Reset(6)));
         // an invalid value: 0 write, the error shows
-        form.focus = 11;
-        form.fields[11].set_text("red");
+        form.focus = 12;
+        form.fields[12].set_text("red");
         form.commit();
         assert!(form.error && form.status.contains("#RRGGBB"));
         let _ = std::fs::remove_dir_all(dir);
