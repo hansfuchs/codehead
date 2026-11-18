@@ -1275,6 +1275,13 @@ impl View {
                 let col = at.x - self.stream_rect.x;
                 let r = &self.drawn.rows[row];
                 if let Some(url) = r.links.iter().find(|(a, b, _)| col >= *a && col < *b).map(|l| l.2.clone()) {
+                    // a file of a message: the files view on it
+                    if let Some(f) = url.strip_prefix("file://") {
+                        let path = f.split("#L").next().unwrap_or(f);
+                        self.files.show(Path::new(path));
+                        self.set_pane(Pane::Files);
+                        return;
+                    }
                     open_url(&url);
                     self.toast(format!("open {url}"));
                     return;

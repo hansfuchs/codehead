@@ -230,6 +230,29 @@ struct Block {
     rest: Vec<Span<'static>>,
 }
 
+/// `file://<abs path>#L<line>` for inline code T that names an existing file: absolute, `~/…`,
+/// or relative to the current dir (the thread view runs in the worktree), with an optional
+/// `:line` / `:line:col`. None: 0 file (a word, a command, a dir).
+pub fn file_link(t: &str) -> Option<String> {
+    let t = t.trim();
+    if t.is_empty() || t.contains(char::is_whitespace) || t.contains("://") || t.len() > 300 {
+        return None;
+    }
+    // `path:12` / `path:12:3`
+    let mut parts = t.splitn(3, ':');
+    let path = parts.next()?;
+    let line: Option<u32> = parts.next().and_then(|l| l.parse().ok());
+    if !(path.contains('/') || path.contains('.')) {
+        return None;
+    }
+    let p = match path.strip_prefix("~/") {
+        Some(rest) => crate::config::home().join(rest),
+        None => std::path::PathBuf::from(path),
+    };
+    let abs = if p.is_absolute() { p } else { std::env::current_dir().ok()?.join(p) };
+    abs.is_file().then(|| format!("file://{}{}", abs.display(), line.map_or(String::new(), |l| format!("#L{l}"))))
+}
+
 /// MARKDOWN as rows of WIDTH, PREFIX before every row (the message's margin).
 pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<Row> {
     let mut out: Vec<Row> = Vec::new();
@@ -443,8 +466,13 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
                     let m = margin(quote, lists.len());
                     Block { pieces: Vec::new(), first: m.clone(), rest: m }
                 });
-                // a panel background: inline code never reads as a link (same blue, links underlined)
-                b.pieces.push(Piece { text: t.to_string(), style: Style::default().fg(CODE).bg(theme::pal().panel), link: link.clone(), copy: Some(t.to_string()) });
+                // a panel background: inline code never reads as a link (same blue, links underlined);
+                // a path of an existing file: a file link (a click opens it in the files view)
+                let file = link.is_none().then(|| file_link(&t)).flatten();
+                let style = Style::default().fg(CODE).bg(theme::pal().panel);
+                let style = if file.is_some() { style.add_modifier(Modifier::UNDERLINED) } else { style };
+                let copy = file.is_none().then(|| t.to_string());
+                b.pieces.push(Piece { text: t.to_string(), style, link: file.or_else(|| link.clone()), copy });
             }
             // a line break of the source stays a line break (agents write 1 statement per line)
             Event::SoftBreak | Event::HardBreak => {
@@ -684,6 +712,25 @@ mod tests {
         let chars: Vec<(Color, char)> = "abcdefghijklmnopqrstuvwxyz".chars().map(|c| (Color::Reset, c)).collect();
         let segs = wrap_code(&chars, 10);
         assert_eq!(segs, [0..10, 10..18, 18..26]);
+    }
+
+    #[test]
+    fn inline_code_of_an_existing_file_is_a_file_link() {
+        let d = std::env::temp_dir().join(format!("codehead-filelink-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("plan.md");
+        std::fs::write(&f, "x").unwrap();
+        let abs = f.display().to_string();
+        assert_eq!(file_link(&abs), Some(format!("file://{abs}")));
+        assert_eq!(file_link(&format!("{abs}:12")), Some(format!("file://{abs}#L12")));
+        assert_eq!(file_link("cargo test"), None);
+        assert_eq!(file_link(&d.display().to_string()), None, "a dir: 0 link");
+        assert_eq!(file_link("/no/such/file.rs"), None);
+        let rows = markdown(&format!("see `{abs}:3` and `cargo test`"), 200, &[]);
+        assert_eq!(rows[0].links.len(), 1);
+        assert!(rows[0].links[0].2.ends_with("plan.md#L3"));
+        assert!(rows[0].copies.iter().any(|c| c.2 == "cargo test"), "plain code still copies");
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]

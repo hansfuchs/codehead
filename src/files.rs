@@ -23,6 +23,8 @@ pub enum Source {
     Agent,
     /// A home repo note of this thread.
     Note,
+    /// A file a message named (a click on its link).
+    Named,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,13 +119,15 @@ pub struct View {
     cache: HashMap<(PathBuf, u16, u64), Vec<Line<'static>>>,
     scroll: usize,
     loaded: Option<Instant>,
+    /// Files messages named (clicked links): they stay in the list.
+    named: Vec<PathBuf>,
     list: Rect,
     preview: Rect,
 }
 
 impl View {
     pub fn new(id: &str, dir: &Path) -> View {
-        View { id: id.to_string(), dir: dir.to_path_buf(), files: Vec::new(), at: 0, cache: HashMap::new(), scroll: 0, loaded: None, list: Rect::default(), preview: Rect::default() }
+        View { id: id.to_string(), dir: dir.to_path_buf(), files: Vec::new(), at: 0, cache: HashMap::new(), scroll: 0, loaded: None, named: Vec::new(), list: Rect::default(), preview: Rect::default() }
     }
 
     /// Read the list again (NOW: even if fresh; else every 3 s while open).
@@ -133,8 +137,28 @@ impl View {
         }
         let cur = self.files.get(self.at).map(|e| e.path.clone());
         self.files = load(&self.id, &self.dir);
+        // named files (clicked links) stay, on top
+        for p in self.named.iter().rev() {
+            if !self.files.iter().any(|e| e.path == *p) {
+                self.files.insert(0, Entry { path: p.clone(), source: Source::Named, at: mtime(p) });
+            }
+        }
         self.loaded = Some(Instant::now());
         self.at = cur.and_then(|p| self.files.iter().position(|e| e.path == p)).unwrap_or(0);
+    }
+
+    /// Pick PATH (a file a message named): in the list, else added on top.
+    pub fn show(&mut self, path: &Path) {
+        self.refresh(true);
+        match self.files.iter().position(|e| e.path == path) {
+            Some(i) => self.at = i,
+            None => {
+                self.files.insert(0, Entry { path: path.to_path_buf(), source: Source::Named, at: mtime(path) });
+                self.named.push(path.to_path_buf());
+                self.at = 0;
+            }
+        }
+        self.scroll = 0;
     }
 
     pub fn count(&self) -> usize {
@@ -192,6 +216,7 @@ impl View {
             let tag = match e.source {
                 Source::Agent => Span::styled("✎ ", Style::default().fg(theme::pal().accent)),
                 Source::Note => Span::styled("◆ ", Style::default().fg(theme::pal().ok)),
+                Source::Named => Span::styled("↗ ", theme::muted()),
             };
             let age = crate::notes::ago(SystemTime::UNIX_EPOCH + Duration::from_secs(e.at.min(now)));
             let name = self.shown(&e.path);
