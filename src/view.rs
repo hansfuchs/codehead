@@ -62,6 +62,8 @@ static NAV_FIRST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new()
 
 /// Max. width of a header card (cards fit their titles).
 const NAV_CARD_W: u16 = 32;
+/// The changes view gets the chat left of it from this many columns.
+const SPLIT_MIN: u16 = 200;
 
 /// A thread view from the start screen: header closed, 0 first thread.
 pub fn reset_nav() {
@@ -180,6 +182,9 @@ struct View {
     yazi: Option<PathBuf>,
     prompt_focus: bool,
     bar_rects: Vec<(Rect, Pane)>,
+    /// The changes view with the chat left of it (wide terminals; alt+\ toggles); the view's area.
+    split: bool,
+    view_rect: Rect,
     /// A review comment in the prompt: file, line, the draft the prompt had before.
     commenting: Option<(String, u32, String)>,
     /// A commit message in the prompt: the draft the prompt had before; a model's draft on its way.
@@ -278,6 +283,8 @@ impl View {
             yazi: None,
             prompt_focus: false,
             bar_rects: Vec::new(),
+            split: true,
+            view_rect: Rect::default(),
             commenting: None,
             committing: None,
             drafting: None,
@@ -666,6 +673,13 @@ impl View {
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         if k.code == KeyCode::BackTab && !ctrl && !alt && !self.mention_open() {
             self.set_pane(self.pane.next());
+            return false;
+        }
+        // alt+\: the chat next to the changes view on / off (wide terminals)
+        if alt && !ctrl && k.code == KeyCode::Char('\\') {
+            self.split = !self.split;
+            self.dirty = true;
+            self.toast(if self.split { "changes: the chat on the left (≥ 200 columns)" } else { "changes: full width" });
             return false;
         }
         if alt && !ctrl && let KeyCode::Char(c @ '1'..='9') = k.code {
@@ -1255,9 +1269,13 @@ impl View {
         }
         let in_stream = self.stream_rect.contains(at);
         if self.pane != Pane::Chat {
-            if in_stream {
+            if self.view_rect.contains(at) {
                 self.prompt_focus = self.prompt_focus && !click;
                 if self.pane == Pane::Files { self.files.mouse(m) } else { self.changes.mouse(m) }
+                return;
+            }
+            // the chat of the split: its scroll below; a click there: 0 selection
+            if in_stream && click {
                 return;
             }
             if click && self.input_rect.contains(at) {
@@ -1637,12 +1655,27 @@ impl View {
         let mon = Rect { y: title.y.saturating_sub(mon_h), height: mon_h, ..area };
         let st = Rect { x: area.x, y: area.y, width: area.width, height: mon.y.saturating_sub(area.y) };
         self.stream_rect = st;
+        self.view_rect = st;
 
         if self.pane == Pane::Files {
             self.files.draw(f, st);
         } else if self.pane == Pane::Chat {
             self.draw_stream(f, st);
         } else {
+            // wide: the chat left, the changes right (alt+\ toggles)
+            let st = if self.split && st.width >= SPLIT_MIN {
+                let lw = st.width * 2 / 5;
+                let left = Rect { width: lw, ..st };
+                self.stream_rect = left;
+                self.draw_stream(f, left);
+                for y in st.y..st.bottom() {
+                    f.buffer_mut()[(st.x + lw, y)].set_symbol("│").set_style(theme::line());
+                }
+                Rect { x: st.x + lw + 1, width: st.width - lw - 1, ..st }
+            } else {
+                st
+            };
+            self.view_rect = st;
             self.changes.draw(f, st);
             if let Some(n) = self.changes.take_note() {
                 self.toast(n);
@@ -2495,5 +2528,36 @@ mod files_pane_tests {
         // shift+tab from files: back to chat
         v.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(v.pane, Pane::Chat);
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn screen(v: &mut View, w: u16) -> Vec<String> {
+        let mut t = Terminal::new(TestBackend::new(w, 30)).unwrap();
+        t.draw(|f| v.draw(f)).unwrap();
+        let b = t.backend().buffer().clone();
+        (0..30).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect()
+    }
+
+    #[test]
+    fn wide_changes_view_has_the_chat_left_and_alt_backslash_toggles() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("splittest-0000", Path::new("/tmp"), "t", tx);
+        v.set_pane(Pane::Changes);
+        let s = screen(&mut v, 220);
+        // the divider at 2/5 of the width, the stream's empty note left
+        assert!(s[2].chars().nth(88) == Some('│'), "{}", s[2]);
+        assert!(v.stream_rect.width == 88 && v.view_rect.x == 89, "{:?} {:?}", v.stream_rect, v.view_rect);
+        v.key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::ALT));
+        screen(&mut v, 220);
+        assert_eq!(v.view_rect.x, 0, "full width");
+        // narrow: 0 split
+        v.key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::ALT));
+        screen(&mut v, 150);
+        assert_eq!(v.view_rect.x, 0);
     }
 }

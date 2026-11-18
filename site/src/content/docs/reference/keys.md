@@ -52,6 +52,7 @@ description: Every key, per screen.
 | `tab` | thread header: the open threads (`←→` pick, `enter` open) |
 | `shift+tab` | next view of the thread: chat → changes → files |
 | `alt+1` `alt+2` `alt+3` | chat / changes / files view |
+| `alt+\` | changes view: the chat on its left on / off (from 200 columns; on by default) |
 | `ctrl+y` | yazi (full screen) on the worktree; a picked file goes into the prompt as its path |
 
 ## Changes view
