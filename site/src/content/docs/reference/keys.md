@@ -50,8 +50,8 @@ description: Every key, per screen.
 | `ctrl+t` | open / close all thoughts (hidden: show them) |
 | `ctrl+i` | the IDE (setting `editor`) on the thread's worktree (`⌘i`) |
 | `pgup` `pgdn`, `shift+↑↓`, wheel | scroll the stream |
-| `tab` | thread header: the open threads (`←→` pick, `enter` open) |
-| `shift+tab` | next view of the thread: chat → changes → files |
+| `tab` / `shift+tab` | thread header under the view bar: the open threads (`←→` pick, `enter` open) |
+| `alt+←` `alt+→` (`⌥←` `⌥→`) | previous / next view of the thread: chat, changes, files (the view bar on the top row); word jumps in the prompt: `ctrl+←→` |
 | `alt+1` `alt+2` `alt+3` | chat / changes / files view |
 | `alt+\` | changes view: the chat on its left on / off (from 200 columns; on by default) |
 | `ctrl+y` | yazi (full screen) on the worktree; a picked file goes into the prompt as its path |

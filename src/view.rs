@@ -36,7 +36,7 @@ pub enum Exit {
     Open { id: String, dir: PathBuf, title: String, note: String },
 }
 
-/// Views of a thread: the view bar in the title row (shift+tab: next, alt+1 / alt+2).
+/// Views of a thread: the view bar on row 0 (alt/option+←→: previous / next, alt+1-3).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Pane {
     #[default]
@@ -47,11 +47,6 @@ pub enum Pane {
 
 impl Pane {
     const ALL: [Pane; 3] = [Pane::Chat, Pane::Changes, Pane::Files];
-
-    fn next(self) -> Pane {
-        let i = Pane::ALL.iter().position(|p| *p == self).unwrap_or(0);
-        Pane::ALL[(i + 1) % Pane::ALL.len()]
-    }
 }
 
 /// Thread header open (tab toggles it; kept across the thread switches it makes).
@@ -672,11 +667,21 @@ impl View {
         if self.nav_on && self.nav_key(k) {
             return self.nav_switch;
         }
-        // views of the thread: shift+tab the next one, alt+1 / alt+2 chat / changes
+        // views of the thread: alt+1-3 jump
         let alt = k.modifiers.contains(KeyModifiers::ALT);
-        if k.code == KeyCode::BackTab && !ctrl && !alt && !self.mention_open() {
-            self.set_pane(self.pane.next());
-            return false;
+        // alt / option + ←→: the previous / next view (macOS terminals send option+←→ as alt+b / alt+f;
+        // word jumps in the prompt: ctrl+←→)
+        if alt && !ctrl {
+            let step = match k.code {
+                KeyCode::Left | KeyCode::Char('b') => Some(Pane::ALL.len() - 1),
+                KeyCode::Right | KeyCode::Char('f') => Some(1),
+                _ => None,
+            };
+            if let Some(s) = step {
+                let i = Pane::ALL.iter().position(|p| *p == self.pane).unwrap_or(0);
+                self.set_pane(Pane::ALL[(i + s) % Pane::ALL.len()]);
+                return false;
+            }
         }
         // alt+\: the chat next to the changes view on / off (wide terminals)
         if alt && !ctrl && k.code == KeyCode::Char('\\') {
@@ -770,7 +775,7 @@ impl View {
                 return false;
             }
             // tab: the thread header (prompt text or not; dropdowns took theirs above)
-            KeyCode::Tab if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && !self.mention_open() => {
+            KeyCode::Tab | KeyCode::BackTab if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && !self.mention_open() => {
                 self.set_nav(!self.nav_on);
                 return false;
             }
@@ -1641,10 +1646,13 @@ impl View {
         if self.nav_on {
             self.load_nav(false);
         }
+        // row 0: the view bar (views of the thread, the title); the thread header (tab) below it
+        let top = Rect { height: full.height.min(1), ..full };
+        let below = Rect { y: full.y + top.height, height: full.height - top.height, ..full };
         let nav_h = if self.nav_on { crate::nav::CARD_H + 1 } else { 0 };
-        let area = Rect { y: full.y + nav_h, height: full.height.saturating_sub(nav_h), ..full };
+        let area = Rect { y: below.y + nav_h, height: below.height.saturating_sub(nav_h), ..below };
         if self.nav_on {
-            self.draw_nav(f, Rect { height: nav_h.min(full.height), ..full });
+            self.draw_nav(f, Rect { height: nav_h.min(below.height), ..below });
         }
         // bottom up: footer, the bubble's hint row, the input bubble (its top border: the header's
         // bottom line), the header (agents + tokens box), the title row, monitors, the stream
@@ -1712,11 +1720,12 @@ impl View {
             self.monitors.render(f, mon, self.tick());
         }
 
-        // title row: the view bar (views of the thread), the thread title, the stream's position, the pills
+        // the view bar on row 0 (views of the thread, the thread title); the title row above the
+        // agents box: the stream's position, the pills
         let note = if self.back > 0 && self.pane == Pane::Chat { format!("↑{} · esc: live ", self.back) } else { String::new() };
         let mut spans: Vec<Span<'static>> = Vec::new();
         self.bar_rects.clear();
-        let mut x = title.x + 2;
+        let mut x = top.x + 2;
         for p in Pane::ALL {
             let label = match p {
                 Pane::Chat if !self.thread.asks.is_empty() => format!(" chat ?{} ", self.thread.asks.len()),
@@ -1734,22 +1743,24 @@ impl View {
             };
             let st = if p == self.pane { theme::pill() } else { theme::muted() };
             let w = unicode_width::UnicodeWidthStr::width(label.as_str()) as u16;
-            self.bar_rects.push((Rect { x, y: title.y, width: w, height: 1 }, p));
+            self.bar_rects.push((Rect { x, y: top.y, width: w, height: 1 }, p));
             x += w + 1;
             spans.push(Span::styled(label, st));
             spans.push(Span::raw(" "));
         }
         spans.push(Span::styled("│ ", theme::line()));
         let used: usize = spans.iter().map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref())).sum();
-        let room = usize::from(title.width.saturating_sub(4)).saturating_sub(note.chars().count() + 1 + used);
+        let room = usize::from(top.width.saturating_sub(4)).saturating_sub(used);
         spans.push(Span::styled(format!("{} ", crate::nav::fit(&self.title, room)), theme::accent_bold()));
+        f.render_widget(Paragraph::new(Line::from(spans)), Rect { x: top.x + 2, width: top.width.saturating_sub(2), ..top });
+        let mut low: Vec<Span<'static>> = Vec::new();
         if !note.is_empty() {
-            spans.push(Span::styled(note, theme::muted()));
+            low.push(Span::styled(note, theme::muted()));
         }
         if let Some((new, old)) = &self.replace {
-            spans.push(Span::styled(format!(" on send: {new} replaces {old} "), theme::pill()));
+            low.push(Span::styled(format!(" on send: {new} replaces {old} "), theme::pill()));
         }
-        f.render_widget(Paragraph::new(Line::from(spans)), Rect { x: title.x + 2, width: title.width.saturating_sub(2), ..title });
+        f.render_widget(Paragraph::new(Line::from(low)), Rect { x: title.x + 2, width: title.width.saturating_sub(2), ..title });
 
         // header: agents box + tokens box (the cost pane inside)
         let show_cost = head_h > 0 && area.width >= MIN_COST_WIDTH;
@@ -1842,8 +1853,8 @@ impl View {
             _ if let Some((file, line, _)) = &self.commenting => Span::styled(format!("comment on {file}:{line} · ⌘/ctrl+⏎: add to the batch · esc: cancel "), theme::accent()),
             _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled("j k · space: reviewed · c: comment · C: send · o: IDE · s: layout · i: prompt ", theme::muted()),
             _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · pgup pgdn: scroll · o: IDE · y: yazi · c: copy path · S: share · i: prompt ", theme::muted()),
-            _ if self.pane != Pane::Chat => Span::styled("esc: back to the view · shift+tab: next view ", theme::muted()),
-            _ => Span::styled(format!("tab: threads · shift+tab: changes · esc: interrupt · esc esc: codehead · {}: menu ", crate::config::menu_key().label), theme::muted()),
+            _ if self.pane != Pane::Chat => Span::styled("esc: back to the view · ⌥←→: views ", theme::muted()),
+            _ => Span::styled(format!("tab: threads · ⌥←→: views · esc: interrupt · esc esc: codehead · {}: menu ", crate::config::menu_key().label), theme::muted()),
         };
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), foot);
 
@@ -2384,13 +2395,23 @@ mod nav_tests {
         assert_eq!(v.input.text(), "half a message");
         v.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(!v.nav_on, "tab again: header closed");
-        // shift+tab: the next view of the thread, 0 header
-        v.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert!(!v.nav_on && v.pane == Pane::Changes, "shift+tab: changes view");
-        v.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        // alt+→: the next view, 0 header; alt+← (and option+← as alt+b): back; the prompt text stays
+        v.key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+        assert!(!v.nav_on && v.pane == Pane::Changes, "alt+→: changes view");
+        v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
         assert_eq!(v.pane, Pane::Files);
+        v.key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+        assert_eq!(v.pane, Pane::Chat, "wraps");
+        v.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(v.pane, Pane::Files);
+        v.key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        v.key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!((v.pane, v.input.text().as_str()), (Pane::Chat, "half a message"));
+        // shift+tab: the thread header, as tab
         v.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert_eq!(v.pane, Pane::Chat);
+        assert!(v.nav_on, "shift+tab: header open");
+        v.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(!v.nav_on);
         v.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(v.nav_on, "tab: header open");
         // enter on this thread: the header closes, the view stays
@@ -2434,7 +2455,9 @@ mod pane_tests {
         let mut v = view();
         let s = screen(&mut v);
         assert!(s.contains(" chat   changes   files  │ thread p"), "{s}");
-        assert!(s.contains("shift+tab: changes"), "{s}");
+        assert!(s.contains("⌥←→: views"), "{s}");
+        // the view bar on row 0
+        assert!(s.lines().next().unwrap().contains(" chat "), "{s}");
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
         assert_eq!(v.pane, Pane::Changes);
         let s = screen(&mut v);
@@ -2446,7 +2469,7 @@ mod pane_tests {
     #[test]
     fn changes_view_keeps_letters_from_the_prompt_until_i() {
         let mut v = view();
-        press(&mut v, KeyCode::BackTab, KeyModifiers::SHIFT);
+        press(&mut v, KeyCode::Right, KeyModifiers::ALT);
         press(&mut v, KeyCode::Char('j'), KeyModifiers::NONE);
         assert_eq!(v.input.text(), "", "j: a view key");
         press(&mut v, KeyCode::Char('i'), KeyModifiers::NONE);
@@ -2551,8 +2574,8 @@ mod files_pane_tests {
         // a pick: its path into the prompt, relative to the worktree
         v.yazi_picked(&["/tmp/src/a.rs".to_string()]);
         assert_eq!(v.input.text(), "src/a.rs ");
-        // shift+tab from files: back to chat
-        v.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        // alt+→ from files: back to chat (wraps)
+        v.key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
         assert_eq!(v.pane, Pane::Chat);
     }
 }
