@@ -1,0 +1,87 @@
+---
+import Base from './Base.astro';
+import { nav, flat, href } from '../nav';
+
+interface Props {
+  title: string;
+  description: string;
+  slug: string;
+  file: string;
+}
+const { title, description, slug, file } = Astro.props;
+const i = flat.findIndex((p) => p.slug === slug);
+const prev = i > 0 ? flat[i - 1] : undefined;
+const next = i >= 0 && i < flat.length - 1 ? flat[i + 1] : undefined;
+---
+
+<Base title={`${title} · codehead`} description={description}>
+  <div class="docs">
+    <header class="topbar">
+      <a class="logo" href="/"><span class="mark">ch</span><span>codehead</span></a>
+      <button type="button" aria-controls="side" aria-expanded="false" data-menu>menu</button>
+    </header>
+    <aside class="side" id="side">
+      <a class="logo" href="/"><span class="mark">ch</span><span>codehead</span></a>
+      <nav aria-label="docs">
+        {
+          nav.map((g) => (
+            <div>
+              <h2 class="label">{g.label}</h2>
+              <ul>
+                {g.items.map((p) => (
+                  <li>
+                    <a href={href(p.slug)} aria-current={p.slug === slug ? 'page' : undefined}>
+                      {p.label}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))
+        }
+      </nav>
+      <div class="foot">
+        <a href="https://github.com/hansfuchs/codehead">github</a>
+        <a href="/llms.txt">llms.txt</a>
+        <button type="button" data-theme-toggle>theme</button>
+      </div>
+    </aside>
+    <main class="page">
+      <article class="prose">
+        <h1>{title}</h1>
+        <p class="lead">{description}</p>
+        <slot />
+        <nav class="pager" aria-label="pages">
+          {
+            prev ? (
+              <a class="frame" href={href(prev.slug)}>
+                <span class="label">← previous</span>
+                {prev.label}
+              </a>
+            ) : (
+              <span />
+            )
+          }
+          {
+            next && (
+              <a class="frame" href={href(next.slug)}>
+                <span class="label">next →</span>
+                {next.label}
+              </a>
+            )
+          }
+        </nav>
+        <a class="edit" href={`https://github.com/hansfuchs/codehead/edit/main/site/src/content/docs/${file}`}>edit this page</a>
+      </article>
+    </main>
+  </div>
+  <script is:inline>
+    const b = document.querySelector('[data-menu]');
+    const side = document.getElementById('side');
+    b?.addEventListener('click', () => {
+      const open = side.classList.toggle('open');
+      b.setAttribute('aria-expanded', String(open));
+      b.textContent = open ? 'close' : 'menu';
+    });
+  </script>
+</Base>

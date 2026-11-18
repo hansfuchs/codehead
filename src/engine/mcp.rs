@@ -1,0 +1,108 @@
+//! `codehead mcp`: the MCP server (stdio, JSON-RPC 2.0) every agent session gets. Its tools
+//! message the thread's host. $CODEHEAD_THREAD, $CODEHEAD_AGENT: the thread, the agent.
+
+use std::io::{BufRead, Write};
+
+use serde_json::{Value, json};
+
+use super::{client, roster};
+
+fn tools() -> Value {
+    json!([
+        {
+            "name": "send",
+            "description": "Message other agents on this thread. They see only what you send. An agent not on the thread joins it. The owner sees every message.",
+            "inputSchema": {"type": "object", "properties": {
+                "to": {"description": "Agent name, or names", "anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
+                "message": {"type": "string", "description": "The message: what you need, with file paths and exact actions"}
+            }, "required": ["to", "message"]}
+        },
+        {
+            "name": "set_status",
+            "description": "Report your state to the owner: working, blocked (say on what in note) or done.",
+            "inputSchema": {"type": "object", "properties": {
+                "state": {"type": "string", "enum": ["working", "blocked", "done"]},
+                "note": {"type": "string"}
+            }, "required": ["state"]}
+        },
+        {
+            "name": "list_agents",
+            "description": "Every agent: name, harness/model, mode, whether it is on this thread.",
+            "inputSchema": {"type": "object", "properties": {}}
+        }
+    ])
+}
+
+fn call(thread: &str, agent: &str, name: &str, args: &Value) -> Result<String, String> {
+    match name {
+        "send" => {
+            let r = client::send(thread, &json!({"op": "send", "from": agent, "to": args["to"], "text": args["message"]}))?;
+            Ok(format!("sent to {}", r["to"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")))
+        }
+        "set_status" => {
+            client::send(thread, &json!({"op": "status", "agent": agent, "state": args["state"], "note": args["note"]}))?;
+            Ok("status set".into())
+        }
+        "list_agents" => {
+            let on = super::store::load(thread).map(|t| t.agents).unwrap_or_default();
+            let rows: Vec<Value> = roster::active()
+                .iter()
+                .map(|a| json!({"name": a.name, "harness": super::harness::harness_label(a), "mode": a.mode, "on_thread": on.contains(&a.name), "you": a.name == agent}))
+                .collect();
+            Ok(serde_json::to_string_pretty(&rows).unwrap_or_default())
+        }
+        _ => Err(format!("unknown tool {name}")),
+    }
+}
+
+fn handle(thread: &str, agent: &str, req: &Value) -> Option<Value> {
+    let id = req.get("id")?.clone();
+    let result = match req["method"].as_str().unwrap_or_default() {
+        "initialize" => json!({
+            "protocolVersion": req["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "codehead", "version": crate::update::VERSION},
+        }),
+        "ping" => json!({}),
+        "tools/list" => json!({"tools": tools()}),
+        "tools/call" => {
+            let p = &req["params"];
+            match call(thread, agent, p["name"].as_str().unwrap_or_default(), &p["arguments"]) {
+                Ok(text) => json!({"content": [{"type": "text", "text": text}]}),
+                Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
+            }
+        }
+        m => return Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("method {m} not found")}})),
+    };
+    Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+}
+
+pub fn run() -> ! {
+    let thread = std::env::var("CODEHEAD_THREAD").unwrap_or_default();
+    let agent = std::env::var("CODEHEAD_AGENT").unwrap_or_default();
+    let mut out = std::io::stdout().lock();
+    for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+        let Ok(req) = serde_json::from_str::<Value>(&line) else { continue };
+        // a notification (0 id) gets 0 reply
+        if let Some(r) = handle(&thread, &agent, &req)
+            && writeln!(out, "{r}").and_then(|_| out.flush()).is_err()
+        {
+            break;
+        }
+    }
+    std::process::exit(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initialize_and_list() {
+        let r = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})).unwrap();
+        assert_eq!(r["result"]["protocolVersion"], "2025-03-26");
+        let r = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
+        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 3);
+        assert!(handle("t", "a", &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none());
+    }
+}

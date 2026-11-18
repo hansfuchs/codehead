@@ -1,0 +1,86 @@
+name: release
+
+# A green main is a release. Each push that changes the app runs CI, builds 4 targets and
+# publishes GitHub release v<version>; the install script and `codehead --update` take the
+# newest one. Version: scripts/version.sh.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore: ['site/**', 'docs/**', 'notes/**', '**.md']
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: meta
+        run: echo "version=$(scripts/version.sh)" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    name: binary ${{ matrix.target }}
+    needs: [checks, meta]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          # oldest Ubuntu runners: the binaries need the oldest glibc
+          - { runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          # 1 Intel macOS runner, arm64 cross-compiled on it
+          - { runner: macos-15-intel, target: x86_64-apple-darwin }
+          - { runner: macos-15-intel, target: aarch64-apple-darwin }
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install && rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: scripts/stamp.sh ${{ needs.meta.outputs.version }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - run: scripts/package.sh ${{ needs.meta.outputs.version }} ${{ matrix.target }}
+      # provenance: the install script runs `gh attestation verify` on it when gh is logged in
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: codehead-*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: codehead-*.tar.gz*
+
+  publish:
+    needs: [meta, binaries]
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      V: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - run: |
+          printf '%s\n\n```sh\ncurl -fsSL https://codehead.sh/install | sh    # or: codehead --update\n```\n' "$(git log -1 --format=%B)" > notes.md
+          gh release create "v$V" out/* --title "codehead $V" --notes-file notes.md --target "$GITHUB_SHA" --latest

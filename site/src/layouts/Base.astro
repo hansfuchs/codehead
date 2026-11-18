@@ -1,0 +1,75 @@
+---
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description: string;
+}
+const { title, description } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <script is:inline>
+      // dark by default; a stored choice wins
+      try {
+        const t = localStorage.getItem('theme');
+        if (t === 'light') document.documentElement.dataset.theme = 'light';
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <slot />
+    <script is:inline>
+      // theme switch + copy buttons on code blocks
+      document.querySelectorAll('[data-theme-toggle]').forEach((b) =>
+        b.addEventListener('click', () => {
+          const light = document.documentElement.dataset.theme !== 'light';
+          if (light) document.documentElement.dataset.theme = 'light';
+          else delete document.documentElement.dataset.theme;
+          try {
+            localStorage.setItem('theme', light ? 'light' : 'dark');
+          } catch {}
+        }),
+      );
+      document.querySelectorAll('pre.astro-code').forEach((pre) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'code';
+        pre.replaceWith(wrap);
+        wrap.append(pre);
+        const b = document.createElement('button');
+        b.className = 'copy';
+        b.type = 'button';
+        b.textContent = 'copy';
+        b.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(pre.innerText.replace(/\n$/, ''));
+            b.textContent = 'copied';
+          } catch {
+            b.textContent = 'select + copy';
+          }
+          setTimeout(() => (b.textContent = 'copy'), 1500);
+        });
+        wrap.append(b);
+      });
+      document.querySelectorAll('.prose table').forEach((t) => {
+        const w = document.createElement('div');
+        w.className = 'table-wrap';
+        t.replaceWith(w);
+        w.append(t);
+      });
+    </script>
+  </body>
+</html>

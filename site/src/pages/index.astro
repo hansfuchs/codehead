@@ -1,0 +1,92 @@
+---
+import Base from '../layouts/Base.astro';
+---
+
+<Base title="codehead · agent work in one terminal" description="Write the task with your notes, pick named agents and a branch, then follow and steer the thread in one terminal. codehead runs the agents itself, on Claude Code.">
+  <header class="bar">
+    <a class="cell first frame" href="/"><span class="logo"><span class="mark">ch</span></span></a>
+    <span class="cell grow label">codehead</span>
+    <a class="cell frame label" href="/docs/">docs</a>
+    <a class="cell frame label" href="https://github.com/hansfuchs/codehead">github</a>
+    <button class="cell frame label" type="button" data-theme-toggle aria-label="switch theme">◐</button>
+  </header>
+
+  <main class="content">
+    <section class="hero">
+      <h1>Agent work, in one terminal.</h1>
+      <p>
+        Write the task with your notes. Pick named agents and a branch. Then follow every message, tool run and
+        question of the thread, and steer it, without leaving the terminal. codehead runs the agents itself, on
+        Claude Code, Codex, OpenCode, Goose, Cursor, Pi, Amp and more.
+      </p>
+      <div class="actions">
+        <a class="button frame" href="/docs/quick-start/">quick start →</a>
+        <a class="button outline frame" href="/docs/">read the docs</a>
+      </div>
+    </section>
+
+    <section class="box">
+      <h2 class="box-title">install</h2>
+      <pre class="term"><span class="d">$</span> curl -fsSL https://codehead.sh/install | sh</pre>
+      <p class="muted" style="margin:12px 0 0">Linux and macOS · x86_64 and arm64 · needs git and 1 harness: Claude Code, Codex, OpenCode, Goose, Cursor, Pi, Amp, …</p>
+    </section>
+
+    <section class="box" style="margin-top:48px">
+      <h2 class="box-title">a thread</h2>
+      <pre class="term"><span class="d"> ╭─────╮</span>  <span class="a">ada ★</span>          <span class="d">╭─────╮</span>  <span class="a">bob</span>
+<span class="d"> │⢀⢀⢐⢀⢀│</span>  Opus 5.5       <span class="d">│ ⣀⣀⣀ │</span>  Sonnet 5.5
+<span class="d"> │  ⢐  │</span>  ▒▓▒ working   <span class="d">│ ⠉⠉⠉ │</span>  idle
+<span class="d"> ╰─────╯</span>                 <span class="d">╰─────╯</span>
+
+<span class="r"> you </span> <span class="d">14:02</span>
+<span class="a">▌</span> add retries to the webhook sender, then ask @bob for a review
+
+<span class="r"> ada </span> <span class="d">14:02</span>
+<span class="d">│</span> <span class="a">▸</span> <span class="d">Read: src/webhook.rs · Edit: src/webhook.rs and 2 more · 4 calls · 21.3s</span>
+<span class="d">│</span> Retries are in: 3 tries, backoff 1s / 4s / 16s, only on 5xx and timeouts.
+<span class="d">│</span> <span class="a">▸</span> <span class="d">codehead:send: → bob · 1 call · 0.4s</span>
+
+<span class="r"> bob </span> <span class="d">14:04 → ada</span>
+<span class="d">┆</span> <span class="d">Looks right. One nit: cap the total wait at 30s.</span>
+
+<span class="d">╭──────────────────────────────────────────────────────────╮</span>
+<span class="d">│</span><span class="a">›</span> message the thread · @name: an agent · ⌘/ctrl+⏎ sends    <span class="d">│</span>
+<span class="d">╰──────────────────────────────────── ▒▓▒ working · esc: interrupt ╯</span></pre>
+    </section>
+
+    <section class="grid three">
+      <div class="box">
+        <h2 class="box-title">write the task</h2>
+        <p>A title, the prompt, notes from your notes folder, context from a Claude Code session. <code>@</code> names agents, <code>&gt;</code> mentions files, notes, threads and skills, paths complete as you type.</p>
+      </div>
+      <div class="box">
+        <h2 class="box-title">named agents</h2>
+        <p>Each agent has a name, a model, a mode, an output style and a 7×4 sprite. 1 TOML file per agent. They message each other and bring each other in.</p>
+      </div>
+      <div class="box">
+        <h2 class="box-title">threads that keep going</h2>
+        <p>A thread runs in its own host process: close the terminal, the agents keep working. Open it again from any terminal, branch it, settle it.</p>
+      </div>
+      <div class="box">
+        <h2 class="box-title">questions in the stream</h2>
+        <p>Permission requests and agent questions show up in the thread. Answer with ↑↓ and enter, or 1-9. Autopilot, edits, supervised or plan: per agent.</p>
+      </div>
+      <div class="box">
+        <h2 class="box-title">branches and worktrees</h2>
+        <p>Work on the current branch, switch, start a new branch, or give the thread its own worktree. The threads tab lists them with unpushed commits.</p>
+      </div>
+      <div class="box">
+        <h2 class="box-title">plain files</h2>
+        <p>A thread is a folder: <code>thread.json</code> and an append-only <code>events.jsonl</code>. Read it, grep it, script it with <code>codehead ctl</code>.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <a class="frame" href="https://github.com/hansfuchs/codehead">github</a>
+    <a class="frame" href="/docs/">docs</a>
+    <a class="frame" href="/llms.txt">llms.txt</a>
+    <span class="grow"></span>
+    <span>apache-2.0</span>
+  </footer>
+</Base>

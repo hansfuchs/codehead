@@ -1,0 +1,10 @@
+complete --command codehead --no-files
+complete --command codehead -s h -l help -d "show help"
+complete --command codehead -s a -x -d "agents for the new thread (a,b)" -a "(path basename -E ~/.config/codehead/agents/*.toml 2>/dev/null)"
+complete --command codehead -s b -x -d "branch for the new worktree"
+complete --command codehead -s c -d "copy picked note paths, start nothing"
+complete --command codehead -s n -d "dry run: print what would start"
+complete --command codehead -l view -x -d "thread view of a thread" -a "(path basename ~/.local/share/codehead/threads/* 2>/dev/null)"
+complete --command codehead -l cost -x -d "cost box of a thread"
+complete --command codehead -s V -l version -d "print the version"
+complete --command codehead -l update -d "install the latest release"

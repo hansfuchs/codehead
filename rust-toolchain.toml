@@ -1,0 +1,5 @@
+# CI and local builds use the same Rust: a new release's lints never break main by surprise.
+# Upgrading is a one-line change here.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]

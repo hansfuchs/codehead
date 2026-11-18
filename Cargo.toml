@@ -1,0 +1,40 @@
+[package]
+name = "codehead"
+version = "0.3.0"
+edition = "2024"
+publish = false
+description = "write the task, pick named agents, follow and steer the thread: agent work in 1 terminal"
+license = "Apache-2.0"
+repository = "https://github.com/hansfuchs/codehead"
+homepage = "https://codehead.sh"
+readme = "README.md"
+
+[dependencies]
+libc = "0.2"
+ratatui = "0.30"
+regex = { version = "1.13.1", default-features = false, features = [
+  "std",
+  "perf",
+  "unicode-perl",
+] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1.2.1"
+toml_edit = "0.25.19"
+unicode-width = "0.2"
+pulldown-cmark = { version = "0.13.6", default-features = false }
+unicase = "2.10"
+two-face = { version = "0.5.2", default-features = false, features = [
+  "syntect-default-onig",
+] }
+
+[profile.release]
+strip = true
+
+# Style lints the codebase opts out of: CI runs clippy with -D warnings.
+[lints.clippy]
+if_same_then_else = "allow"
+manual_checked_ops = "allow"
+needless_range_loop = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"

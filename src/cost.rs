@@ -1,0 +1,649 @@
+//! `codehead --cost <thread>`: the cost pane of the thread view (bottom right).
+//! Scoped to 1 thread: per agent tokens, $, ctx, last-hour sparkline, then the plan limits.
+//! Sources: the thread's event log (turn ends), the host's live agents, `limits.json`.
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use ratatui::{DefaultTerminal, Frame};
+
+use crate::{agents, theme};
+
+const POLL: Duration = Duration::from_secs(2);
+const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+#[derive(Default, Clone)]
+struct AgentRow {
+    name: String,
+    color: Option<String>,
+    tokens: u64,
+    usd: f64,
+    /// Context fill of the agent's latest session, percent.
+    ctx: Option<u64>,
+    /// Last hour, (unix time, tokens).
+    samples: Vec<(u64, u64)>,
+    live: bool,
+    /// Saved in the agent prompt, else the stable pool pick (agents::sprite).
+    sprite: Option<crate::sprites::Sprite>,
+}
+
+#[derive(Default)]
+struct Limit {
+    harness: String,
+    window: String,
+    pct: f64,
+    resets: Option<u64>,
+}
+
+#[derive(Default)]
+pub struct Snap {
+    found: bool,
+    status: String,
+    cost: f64,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    turns: u64,
+    agents: Vec<AgentRow>,
+    limits: Vec<Limit>,
+}
+
+
+
+fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Context window of MODEL in tokens.
+fn window_of(model: &str) -> u64 {
+    if model.contains("[1m]") { 1_000_000 } else { 200_000 }
+}
+
+/// Plan limits the hosts saw last: (harness, window, used %, resets at).
+pub fn limits() -> Vec<(String, String, f64, Option<u64>)> {
+    let Ok(text) = std::fs::read(crate::engine::data_dir().join("limits.json")) else { return Vec::new() };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&text) else { return Vec::new() };
+    let mut out = Vec::new();
+    for (h, ws) in v.as_object().into_iter().flatten() {
+        for (w, l) in ws.as_object().into_iter().flatten() {
+            out.push((h.clone(), w.clone(), l["pct"].as_f64().unwrap_or(0.0), l["resets"].as_u64()));
+        }
+    }
+    out
+}
+
+/// Per agent of thread ID, from its turn ends; live agents from its host.
+pub fn uses(id: &str) -> Vec<AgentUse> {
+    let (live, _) = if crate::engine::client::alive(id) { crate::engine::client::state(id) } else { Default::default() };
+    let mut by: Vec<AgentUse> = Vec::new();
+    let mut model: HashMap<String, String> = HashMap::new();
+    for e in crate::engine::store::events(id) {
+        let Some(name) = e.agent.clone() else { continue };
+        let i = match by.iter().position(|a| a.agent == name) {
+            Some(i) => i,
+            None => {
+                by.push(AgentUse { agent: name.clone(), harness: "claude".into(), live: live.contains(&name), ..Default::default() });
+                by.len() - 1
+            }
+        };
+        let a = &mut by[i];
+        match e.kind {
+            crate::engine::store::Kind::Session { model: m, .. } => {
+                a.sessions += 1;
+                model.insert(name, m);
+            }
+            crate::engine::store::Kind::TurnEnd { cost, input, output, cache_read, cache_write, ctx, .. } => {
+                a.input += input;
+                a.output += output;
+                a.cache_read += cache_read;
+                a.cache_write += cache_write;
+                a.turns += 1;
+                a.usd += cost;
+                if ctx > 0 {
+                    a.ctx = Some((ctx, window_of(model.get(&name).map_or("", String::as_str))));
+                }
+                a.samples.push((e.ts / 1000, input + output));
+            }
+            _ => {}
+        }
+    }
+    by.retain(|a| a.turns > 0 || a.live);
+    by.sort_by(|a, b| b.usd.total_cmp(&a.usd));
+    by
+}
+
+type Names = HashMap<String, (String, Option<String>, crate::sprites::Sprite)>;
+
+/// The cost box's numbers of thread ID.
+pub fn snapshot(id: &str) -> Snap {
+    fetch(id, &names())
+}
+
+fn fetch(id: &str, names: &Names) -> Snap {
+    let Some(t) = crate::engine::store::load(id) else { return Snap::default() };
+    let (_, busy) = if crate::engine::client::alive(&t.id) { crate::engine::client::state(&t.id) } else { Default::default() };
+    let status = if busy.is_empty() { t.state.clone() } else { format!("working: {}", busy.join(", ")) };
+    let hour = now().saturating_sub(3600);
+    let mut snap = Snap { found: true, status, ..Default::default() };
+    for u in uses(&t.id) {
+        snap.cost += u.usd;
+        snap.input += u.input;
+        snap.output += u.output;
+        snap.cache_read += u.cache_read;
+        snap.cache_write += u.cache_write;
+        snap.turns += u.turns;
+        let (name, color, sprite) = names.get(&u.agent).cloned().map_or_else(|| (u.agent.clone(), None, None), |(n, c, sp)| (n, c, Some(sp)));
+        snap.agents.push(AgentRow {
+            name,
+            color,
+            sprite,
+            tokens: u.input + u.output,
+            usd: u.usd,
+            ctx: u.ctx.filter(|c| c.1 > 0).map(|(used, size)| used * 100 / size),
+            samples: u.samples.into_iter().filter(|(at, _)| *at > hour).collect(),
+            live: u.live,
+        });
+    }
+    snap.limits = limits().into_iter().map(|(harness, window, pct, resets)| Limit { harness, window, pct, resets }).collect();
+    snap
+}
+
+/// 250 → "250", 98049 → "98.0k", 12812803 → "12.8M".
+pub fn human(v: u64) -> String {
+    match v {
+        0 => "·".into(),
+        1..1_000 => v.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", v as f64 / 1e3),
+        _ => format!("{:.1}M", v as f64 / 1e6),
+    }
+}
+
+/// WIDTH buckets over the last hour; empty bucket = "·".
+fn spark(samples: &[(u64, u64)], width: usize, now: u64) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut b = vec![0u64; width];
+    let start = now.saturating_sub(3600);
+    for &(at, tok) in samples {
+        if at > start {
+            let i = (((at - start) as usize) * width / 3600).min(width - 1);
+            b[i] += tok;
+        }
+    }
+    let max = b.iter().copied().max().unwrap_or(0).max(1);
+    b.iter().map(|&v| if v == 0 { '·' } else { SPARK[((v * 7) / max) as usize] }).collect()
+}
+
+fn window(w: &str) -> &str {
+    match w {
+        "five_hour" => "5h",
+        "week" => "wk",
+        o => o,
+    }
+}
+
+fn until(t: u64, now: u64) -> String {
+    let d = t.saturating_sub(now);
+    match d {
+        0..3600 => format!("{}m", d / 60),
+        3600..86400 => format!("{}h", d / 3600),
+        _ => format!("{}d", d / 86400),
+    }
+}
+
+/// The cost box in AREA.
+pub fn draw_in(f: &mut Frame, area: Rect, s: &Snap, age: Duration) {
+    draw_at(f, area, s, age, now())
+}
+
+fn draw(f: &mut Frame, s: &Snap, age: Duration, now: u64) {
+    draw_at(f, f.area(), s, age, now)
+}
+
+fn draw_at(f: &mut Frame, area: Rect, s: &Snap, age: Duration, now: u64) {
+    f.render_widget(Paragraph::new("").style(theme::text()), area);
+    let inner = Rect { x: area.x + 1, width: area.width.saturating_sub(2), ..area };
+    let w = inner.width as usize;
+    let mut lines = Vec::new();
+    let cost = format!("${:.2} thread", s.cost);
+    // agent sprites side by side (live first), thread cost right of the 1st row. no title: the numbers speak
+    let fit = (w.saturating_sub(cost.len() + 1) + 2) / (crate::sprites::W + 2);
+    let mut by_live: Vec<&AgentRow> = s.agents.iter().filter(|a| a.sprite.is_some()).collect();
+    by_live.sort_by_key(|a| !a.live);
+    // compact (< 12 rows, the thread view's header): 0 sprites, the cost on the column row, 0 footer
+    let compact = area.height < 12;
+    let shown: Vec<&AgentRow> = if compact { Vec::new() } else { by_live.into_iter().take(fit).collect() };
+    let rows = if compact { 0 } else if shown.is_empty() { 1 } else { crate::sprites::H };
+    for r in 0..rows {
+        let mut spans = Vec::new();
+        for (i, a) in shown.iter().enumerate() {
+            let sp = a.sprite.as_ref().expect("filtered above");
+            let dim = if a.live { Style::default() } else { Style::default().add_modifier(ratatui::style::Modifier::DIM) };
+            spans.push(Span::styled(format!("{}{}", if i > 0 { "  " } else { "" }, sp.rows[r]), dim.fg(agents::color(a.color.as_deref()))));
+        }
+        if r == 0 {
+            let used: usize = spans.iter().map(|sp| sp.width()).sum();
+            spans.push(Span::raw(" ".repeat(w.saturating_sub(used + cost.len()))));
+            spans.push(Span::styled(cost.clone(), theme::muted()));
+        }
+        lines.push(Line::from(spans));
+    }
+    if !s.found {
+        if compact {
+            lines.push(Line::styled(format!("{cost:>w$}"), theme::muted()));
+        }
+        lines.push(Line::styled("thread not found (yet)", theme::muted()));
+        f.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
+    let name_w = s.agents.iter().map(|a| a.name.chars().count()).max().unwrap_or(3).max(3) + 1;
+    // name, tok 7, $ 9, ctx 5, spark rest
+    let fixed = name_w + 7 + 9 + 5 + 2;
+    let spark_w = w.saturating_sub(fixed);
+    let head = format!("{:name_w$}{:>7}{:>9}{:>5}  {}", "", "tok", "$", "ctx", if spark_w >= 9 { "last hour" } else { "" });
+    if compact {
+        // the thread cost right of the column names
+        let room = w.saturating_sub(head.trim_end().chars().count());
+        let head = head.trim_end().to_string();
+        let tail = if room > cost.len() { format!("{cost:>room$}") } else { String::new() };
+        lines.push(Line::styled(format!("{head}{tail}"), theme::muted()));
+    } else {
+        lines.push(Line::styled(head, theme::muted()));
+    }
+    for a in &s.agents {
+        // live session: bold name
+        let name = Style::default().fg(agents::color(a.color.as_deref()));
+        let name = if a.live { name.add_modifier(ratatui::style::Modifier::BOLD) } else { name };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:name_w$}", a.name), name),
+            Span::styled(format!("{:>7}", human(a.tokens)), theme::text()),
+            Span::styled(format!("{:>9}", format!("${:.2}", a.usd)), theme::text()),
+            Span::styled(format!("{:>5}", a.ctx.map_or("·".into(), |c| format!("{c}%"))), theme::text()),
+            Span::raw("  "),
+            Span::styled(spark(&a.samples, spark_w, now), theme::accent()),
+        ]));
+    }
+    if s.agents.len() != 1 {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:name_w$}", "all"), theme::muted()),
+            Span::styled(format!("{:>7}", human(s.input + s.output)), theme::text()),
+            Span::styled(format!("{:>9}", format!("${:.2}", s.cost)), theme::text()),
+        ]));
+    }
+    lines.push(Line::styled(format!("{} turns · cache {} read, {} write", s.turns, human(s.cache_read), human(s.cache_write)), theme::muted()));
+    if !s.limits.is_empty() {
+        if !compact {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled("plan limits", theme::muted()));
+        }
+        let hw = s.limits.iter().map(|l| l.harness.chars().count() + 1).max().unwrap_or(0).max(name_w);
+        let mut by: Vec<(String, Vec<Span>)> = Vec::new();
+        for l in &s.limits {
+            if !by.iter().any(|(h, _)| *h == l.harness) {
+                by.push((l.harness.clone(), vec![Span::styled(format!("{:hw$}", l.harness), theme::muted())]));
+            }
+            let spans = &mut by.iter_mut().find(|(h, _)| *h == l.harness).expect("pushed above").1;
+            let col = if l.pct >= 90.0 { theme::DANGER } else if l.pct >= 70.0 { theme::WARN } else { theme::TEXT };
+            spans.push(Span::styled(format!("{} ", window(&l.window)), theme::muted()));
+            match l.resets {
+                // window reset since the last report: "new"
+                Some(r) if r <= now => spans.push(Span::styled("new", theme::muted())),
+                Some(r) => {
+                    spans.push(Span::styled(format!("{:.0}%", l.pct), Style::default().fg(col)));
+                    spans.push(Span::styled(format!(" ({})", until(r, now)), theme::muted()));
+                }
+                None => spans.push(Span::styled(format!("{:.0}%", l.pct), Style::default().fg(col))),
+            }
+            spans.push(Span::raw("  "));
+        }
+        lines.extend(by.into_iter().map(|(_, s)| Line::from(s)));
+    }
+    if !s.status.is_empty() {
+        lines.push(Line::styled(s.status.clone(), theme::muted()));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+    if area.height > 1 && !compact {
+        let foot = Rect { y: area.bottom() - 1, height: 1, ..inner };
+        f.render_widget(Paragraph::new(Line::styled(format!("updated {}s ago · q close", age.as_secs()), theme::line())), foot);
+    }
+}
+
+fn names() -> Names {
+    agents::load()
+        .into_iter()
+        .map(|a| {
+            let sp = agents::sprite(&a);
+            (a.name.clone(), (a.name, a.color, sp))
+        })
+        .collect()
+}
+
+fn run_loop(term: &mut DefaultTerminal, id: &str) -> std::io::Result<()> {
+    let names = names();
+    let log = crate::engine::store::events_path(id);
+    let stamp_of = || std::fs::metadata(&log).ok().map(|m| (m.len(), m.modified().ok()));
+    let mut stamp = stamp_of();
+    let mut snap = fetch(id, &names);
+    let mut at = Instant::now();
+    loop {
+        term.draw(|f| draw(f, &snap, at.elapsed(), now()))?;
+        if event::poll(Duration::from_millis(500))?
+            && let Event::Key(k) = event::read()?
+            && k.kind != KeyEventKind::Release
+        {
+            match k.code {
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+                KeyCode::Char('r') => {
+                    at = Instant::now() - POLL;
+                    stamp = None;
+                }
+                _ => {}
+            }
+        }
+        // a read only after the log changed; every 30s anyway (the last-hour sparkline moves
+        // with the clock, the live agents change)
+        if at.elapsed() >= POLL {
+            let now_stamp = stamp_of();
+            if now_stamp != stamp || at.elapsed() >= Duration::from_secs(30) {
+                snap = fetch(id, &names);
+                stamp = now_stamp;
+                at = Instant::now();
+            }
+        }
+    }
+}
+
+pub fn run(id: &str) -> ! {
+    let mut term = ratatui::init();
+    let r = run_loop(&mut term, id);
+    ratatui::restore();
+    if let Err(e) = r {
+        crate::fail(&format!("cost: {e}"), 1);
+    }
+    std::process::exit(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn humanizes() {
+        assert_eq!(human(0), "·");
+        assert_eq!(human(250), "250");
+        assert_eq!(human(98_049), "98.0k");
+        assert_eq!(human(12_812_803), "12.8M");
+    }
+
+    #[test]
+    fn sparks() {
+        assert_eq!(spark(&[], 4, 3600), "····");
+        assert_eq!(spark(&[(3599, 10), (100, 5)], 4, 3600), "▄··█");
+    }
+
+    /// Live check: CODEHEAD_THREAD=<id> cargo test live_fetch -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_fetch() {
+        let id = std::env::var("CODEHEAD_THREAD").unwrap();
+        let s = fetch(&id, &names());
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 14)).unwrap();
+        t.draw(|f| draw(f, &s, Duration::from_secs(0), now())).unwrap();
+        let b = t.backend().buffer().clone();
+        let text: String = (0..14).map(|y| (0..60).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string() + "\n").collect();
+        println!("{text}");
+        assert!(s.found);
+    }
+
+    #[test]
+    fn renders() {
+        let now = 1_000_000;
+        let s = Snap {
+            found: true,
+            status: "working · turn 3".into(),
+            cost: 28.47,
+            input: 250,
+            output: 98_049,
+            cache_read: 12_812_803,
+            cache_write: 534_032,
+            turns: 9,
+            agents: vec![
+                AgentRow { name: "amon".into(), color: Some("orange".into()), tokens: 98_000, usd: 26.87, ctx: Some(19), samples: vec![(now - 60, 500)], live: true, sprite: Some(crate::sprites::pool()[0].clone()) },
+                AgentRow { name: "lilith".into(), tokens: 92, usd: 1.6, ..Default::default() },
+            ],
+            limits: vec![Limit { harness: "claude".into(), window: "five_hour".into(), pct: 13.0, resets: Some(now + 7200) }],
+        };
+        let (w, h) = (56, 16);
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        t.draw(|f| draw(f, &s, Duration::from_secs(1), now)).unwrap();
+        let b = t.backend().buffer().clone();
+        let text: String = (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string() + "\n").collect();
+        println!("{text}");
+        assert!(text.contains("$28.47 thread"));
+        assert!(text.contains(" ◆─┼─◆"), "sprite row");
+        assert!(text.contains("$26.87"));
+        assert!(text.contains("19%"));
+        assert!(text.contains("5h 13% (2h)"));
+        // compact: the thread view's header (5 rows)
+        let (w, h) = (56, 5);
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        t.draw(|f| draw(f, &s, Duration::from_secs(1), now)).unwrap();
+        let b = t.backend().buffer().clone();
+        let text: String = (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string() + "\n").collect();
+        println!("{text}");
+        let first = text.lines().next().unwrap();
+        assert!(first.contains("tok") && first.ends_with("$28.47 thread"), "{text}");
+        assert!(text.contains("$26.87") && text.contains("9 turns"), "{text}");
+        assert!(!text.contains("q close") && !text.contains("◆"), "{text}");
+    }
+}
+
+// ---------- tokens tab of the F2 menu: the token box in detail ----------
+
+/// Per agent of a thread: sessions, token kinds, turns, $, context, last 24h.
+#[derive(Clone, Debug, Default)]
+pub struct AgentUse {
+    pub agent: String,
+    pub harness: String,
+    pub sessions: u64,
+    pub live: bool,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub turns: u64,
+    pub usd: f64,
+    /// Context of the latest session: (used, size).
+    pub ctx: Option<(u64, u64)>,
+    /// Last 24h: (unix time, tokens).
+    pub samples: Vec<(u64, u64)>,
+}
+
+/// The tokens tab: the thread in view (None: start screen), every thread's cost, plan limits.
+#[derive(Clone, Debug, Default)]
+pub struct Detail {
+    pub agents: Vec<AgentUse>,
+    /// Thread ids by cost: (id, $, tokens, turns). The top 8.
+    pub threads: Vec<(String, f64, u64, u64)>,
+    /// $ and tokens of every thread, and of the last 24h (sessions updated since).
+    pub all_usd: f64,
+    pub all_tokens: u64,
+    pub day_usd: f64,
+    pub limits: Vec<(String, String, f64, Option<u64>)>,
+}
+
+/// Read the detail of thread ID (None: 0 thread part).
+pub fn detail(id: Option<&str>) -> Detail {
+    let mut d = Detail::default();
+    let since = now().saturating_sub(86_400);
+    if let Some(id) = id.filter(|i| !i.is_empty()) {
+        d.agents = uses(id);
+        for a in &mut d.agents {
+            a.samples.retain(|(at, _)| *at > since);
+        }
+    }
+    let mut rows: Vec<(String, f64, u64, u64)> = Vec::new();
+    for t in crate::engine::store::all() {
+        let (mut usd, mut tok, mut turns) = (0.0, 0, 0);
+        for e in crate::engine::store::events(&t.id) {
+            if let crate::engine::store::Kind::TurnEnd { cost, input, output, .. } = e.kind {
+                usd += cost;
+                tok += input + output;
+                turns += 1;
+                if e.ts / 1000 > since {
+                    d.day_usd += cost;
+                }
+            }
+        }
+        if turns > 0 {
+            rows.push((t.id, usd, tok, turns));
+        }
+    }
+    rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+    d.all_usd = rows.iter().map(|r| r.1).sum();
+    d.all_tokens = rows.iter().map(|r| r.2).sum();
+    d.threads = rows.into_iter().take(8).collect();
+    d.limits = limits();
+    d
+}
+
+/// BUCKETS buckets of SPAN seconds up to NOW; empty: `·`.
+fn spark_over(samples: &[(u64, u64)], buckets: usize, span: u64, now: u64) -> String {
+    if buckets == 0 || span == 0 {
+        return String::new();
+    }
+    let mut b = vec![0u64; buckets];
+    let start = now.saturating_sub(span);
+    for &(at, tok) in samples {
+        if at > start {
+            let i = (((at - start) as u128 * buckets as u128 / span as u128) as usize).min(buckets - 1);
+            b[i] += tok;
+        }
+    }
+    let max = b.iter().copied().max().unwrap_or(0).max(1);
+    b.iter().map(|&v| if v == 0 { '·' } else { SPARK[((v * 7) / max) as usize] }).collect()
+}
+
+/// `[████░░░░] 42%` bar of W cells.
+fn bar(pct: f64, w: usize) -> String {
+    let full = ((pct.clamp(0.0, 100.0) / 100.0) * w as f64).round() as usize;
+    format!("{}{}", "█".repeat(full), "░".repeat(w - full.min(w)))
+}
+
+/// Lines of the tokens tab, W columns wide. NAMES: agent → (name, color); TITLES: thread id → title.
+pub fn detail_lines(d: &Detail, here: Option<&str>, names: &HashMap<String, (String, Option<String>)>, titles: &HashMap<String, String>, w: usize) -> Vec<Line<'static>> {
+    let now = now();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let head = |t: &str| Line::styled(t.to_string(), theme::accent_bold());
+    let kv = |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<10}"), theme::muted()), Span::styled(v, theme::text())]);
+    if let Some(id) = here {
+        let title = titles.get(id).cloned().unwrap_or_else(|| "this thread".into());
+        lines.push(head(&crate::nav::fit(&title, w)));
+        let sum = |f: fn(&AgentUse) -> u64| d.agents.iter().map(f).sum::<u64>();
+        let (i, o, cr, cw, turns) = (sum(|a| a.input), sum(|a| a.output), sum(|a| a.cache_read), sum(|a| a.cache_write), sum(|a| a.turns));
+        let usd: f64 = d.agents.iter().map(|a| a.usd).sum();
+        lines.push(kv("cost", format!("${usd:.2} · {} tokens (in {} · out {})", human(i + o), human(i), human(o))));
+        let hit = if i + cr > 0 { cr * 100 / (i + cr) } else { 0 };
+        lines.push(kv("cache", format!("read {} · write {} · hit {hit}%", human(cr), human(cw))));
+        if turns > 0 {
+            lines.push(kv("per turn", format!("{turns} turns · ${:.3} · {} tokens", usd / turns as f64, human((i + o) / turns))));
+        }
+        let all: Vec<(u64, u64)> = d.agents.iter().flat_map(|a| a.samples.iter().copied()).collect();
+        let sw = w.saturating_sub(10).min(48);
+        lines.push(Line::from(vec![Span::styled(format!("{:<10}", "last 24h"), theme::muted()), Span::styled(spark_over(&all, sw, 86_400, now), theme::accent())]));
+        lines.push(Line::from(vec![Span::styled(format!("{:<10}", "last hour"), theme::muted()), Span::styled(spark_over(&all, sw, 3_600, now), theme::accent())]));
+        lines.push(Line::raw(""));
+        lines.push(head("agents"));
+        let nw = d.agents.iter().map(|a| names.get(&a.agent).map_or(8, |n| n.0.chars().count())).max().unwrap_or(5).max(5) + 1;
+        lines.push(Line::styled(format!("{:nw$}{:>7}{:>7}{:>8}{:>8}{:>6}{:>9}{:>6}", "", "in", "out", "cache r", "cache w", "turns", "$", "ctx"), theme::muted()));
+        for a in &d.agents {
+            let (name, color) = names.get(&a.agent).cloned().unwrap_or_else(|| (a.agent.clone(), None));
+            let mut st = Style::default().fg(agents::color(color.as_deref()));
+            if a.live {
+                st = st.add_modifier(ratatui::style::Modifier::BOLD);
+            }
+            let ctx = a.ctx.filter(|c| c.1 > 0).map_or("·".into(), |(u, s)| format!("{}%", u * 100 / s));
+            lines.push(Line::from(vec![
+                Span::styled(format!("{name:nw$}"), st),
+                Span::styled(format!("{:>7}{:>7}{:>8}{:>8}{:>6}{:>9}{:>6}", human(a.input), human(a.output), human(a.cache_read), human(a.cache_write), a.turns, format!("${:.2}", a.usd), ctx), theme::text()),
+            ]));
+            let ctx_line = a.ctx.filter(|c| c.1 > 0).map(|(u, s)| format!(" · ctx {} of {}", human(u), human(s))).unwrap_or_default();
+            let live = if a.live { "live" } else { "ended" };
+            lines.push(Line::styled(format!("{:nw$}{} · {} session(s) · {live}{ctx_line}", "", a.harness, a.sessions), theme::muted()));
+        }
+        if d.agents.is_empty() {
+            lines.push(Line::styled("0 usage yet", theme::muted()));
+        }
+        lines.push(Line::raw(""));
+    } else {
+        lines.push(Line::styled("0 thread in view: every thread below", theme::muted()));
+        lines.push(Line::raw(""));
+    }
+    lines.push(head("all threads"));
+    lines.push(kv("total", format!("${:.2} · {} tokens · last 24h ${:.2}", d.all_usd, human(d.all_tokens), d.day_usd)));
+    for (id, usd, tok, turns) in &d.threads {
+        let title = titles.get(id).cloned().unwrap_or_else(|| id.chars().take(8).collect());
+        let mark = if here == Some(id.as_str()) { "› " } else { "  " };
+        let st = if here == Some(id.as_str()) { theme::accent() } else { theme::text() };
+        let tail = format!("  {} · {turns} turns", human(*tok));
+        let room = w.saturating_sub(10 + tail.chars().count() + 2);
+        lines.push(Line::from(vec![
+            Span::styled(format!("{mark}{:>8}", format!("${usd:.2}")), st),
+            Span::styled(format!("  {}", crate::nav::fit(&title, room)), st),
+            Span::styled(tail, theme::muted()),
+        ]));
+    }
+    if !d.limits.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(head("plan limits"));
+        for (h, win, pct, resets) in &d.limits {
+            let col = if *pct >= 90.0 { theme::DANGER } else if *pct >= 70.0 { theme::WARN } else { theme::OK };
+            let reset = match resets {
+                Some(r) if *r <= now => " · new window".to_string(),
+                Some(r) => format!(" · resets in {}", until(*r, now)),
+                None => String::new(),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<10}", format!("{h} {}", window(win))), theme::muted()),
+                Span::styled(bar(*pct, 20), Style::default().fg(col)),
+                Span::styled(format!(" {pct:.0}%"), Style::default().fg(col)),
+                Span::styled(reset, theme::muted()),
+            ]));
+        }
+    }
+    lines
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+
+    #[test]
+    fn detail_lines_show_thread_agents_threads_and_limits() {
+        let d = Detail {
+            agents: vec![AgentUse { agent: "pk".into(), harness: "claude".into(), sessions: 2, live: true, input: 1000, output: 500, cache_read: 9000, turns: 3, usd: 1.5, ctx: Some((50, 200)), ..Default::default() }],
+            threads: vec![("t1".into(), 1.5, 1500, 3), ("t2".into(), 0.5, 100, 1)],
+            all_usd: 2.0,
+            all_tokens: 1600,
+            day_usd: 1.0,
+            limits: vec![("claude".into(), "five_hour".into(), 42.0, None)],
+        };
+        let names = HashMap::from([("pk".to_string(), ("amon".to_string(), None))]);
+        let titles = HashMap::from([("t1".to_string(), "codehead v2".to_string())]);
+        let text: Vec<String> = detail_lines(&d, Some("t1"), &names, &titles, 70).iter().map(|l| l.to_string()).collect();
+        let all = text.join("\n");
+        for want in ["codehead v2", "$1.50 · 1.5k tokens", "hit 90%", "3 turns", "amon", "25%", "2 session(s) · live", "all threads", "› ", "claude 5h", "42%"] {
+            assert!(all.contains(want), "{want}: {all}");
+        }
+        let none: String = detail_lines(&d, None, &names, &titles, 70).iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        assert!(none.contains("0 thread in view") && !none.contains("agents"));
+    }
+}
