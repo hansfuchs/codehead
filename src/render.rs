@@ -443,7 +443,8 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
                     let m = margin(quote, lists.len());
                     Block { pieces: Vec::new(), first: m.clone(), rest: m }
                 });
-                b.pieces.push(Piece { text: t.to_string(), style: Style::default().fg(CODE), link: link.clone(), copy: Some(t.to_string()) });
+                // a panel background: inline code never reads as a link (same blue, links underlined)
+                b.pieces.push(Piece { text: t.to_string(), style: Style::default().fg(CODE).bg(theme::pal().panel), link: link.clone(), copy: Some(t.to_string()) });
             }
             // a line break of the source stays a line break (agents write 1 statement per line)
             Event::SoftBreak | Event::HardBreak => {
@@ -623,6 +624,20 @@ mod tests {
 
     fn text(rows: &[Row]) -> Vec<String> {
         rows.iter().map(|r| r.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>().trim_end().to_string()).collect()
+    }
+
+    #[test]
+    fn inline_code_has_a_background_links_do_not() {
+        let rows = markdown("run `bun run link-branch` or see [docs](https://x.dev) now", 80, &[]);
+        // per cell: (char, bg)
+        let cells: Vec<(char, Option<Color>)> = rows[0].line.spans.iter().flat_map(|s| s.content.chars().map(move |c| (c, s.style.bg))).collect();
+        let text: String = cells.iter().map(|c| c.0).collect();
+        let at = text.find("bun run link-branch").unwrap();
+        let code = &cells[at..at + "bun run link-branch".len()];
+        assert!(code.iter().all(|c| c.1 == Some(theme::pal().panel)), "every cell, spaces too: {code:?}");
+        assert_eq!(cells[at - 1].1, None, "0 bg before the code");
+        let link = text.find("docs").unwrap();
+        assert_eq!(cells[link].1, None, "a link: 0 bg");
     }
 
     #[test]
