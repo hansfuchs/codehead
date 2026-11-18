@@ -77,7 +77,7 @@ diff changes later, it shows `updated`.
 | `c` | comment on the line under the cursor: the prompt takes it, `⌘/ctrl+⏎` adds it to the batch, `esc` cancels (the draft comes back) |
 | `x` | delete the comment (or dismiss the finding) under the cursor |
 | `C` | send all comments as 1 message to the lead (`file:line`: text each) |
-| `a` / `u` | stage / unstage the file under the cursor (box head: `●` staged, `◐` a part) |
+| `a` / `u` | stage / unstage: on a box head the file, on a diff row its hunk (box head: `●` staged, `◐` a part) |
 | `m` | commit message in the prompt: `ctrl+g` drafts it from the staged diff (setting `rank` model), `⌘/ctrl+⏎` commits, `esc` cancels |
 | `P` | push (`git push -u origin HEAD`) |
 | `U` | fetch + rebase on the base (`origin/<default>`) |

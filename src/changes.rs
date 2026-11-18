@@ -422,6 +422,42 @@ pub fn ci_fix_message(dir: &Path) -> Result<String, String> {
     ))
 }
 
+/// The patch of the hunk of PATH that holds new-side LINE: from the worktree-vs-index diff
+/// (CACHED: the index-vs-HEAD diff, to unstage), -U0. Err: 0 such hunk.
+pub fn hunk_patch(dir: &Path, path: &str, line: u32, cached: bool) -> Result<String, String> {
+    let mut args = vec!["diff", "--no-color", "--no-ext-diff", "-U0"];
+    if cached {
+        args.push("--cached");
+    }
+    args.extend(["--", path]);
+    let diff = git(dir, &args)?;
+    pick_hunk(&diff, line).ok_or_else(|| format!("0 {} hunk at {path}:{line}", if cached { "staged" } else { "unstaged" }))
+}
+
+/// Header + the hunk of unified diff DIFF (1 file, -U0) whose new side holds LINE (a removal:
+/// the line after it).
+fn pick_hunk(diff: &str, line: u32) -> Option<String> {
+    let mut head = String::new();
+    let mut hunks: Vec<(u32, u32, String)> = Vec::new();
+    for l in diff.lines() {
+        if let Some(h) = l.strip_prefix("@@ ") {
+            let new = h.split(' ').find(|w| w.starts_with('+'))?;
+            let mut it = new[1..].split(',');
+            let c: u32 = it.next()?.parse().ok()?;
+            let d: u32 = it.next().and_then(|x| x.parse().ok()).unwrap_or(1);
+            hunks.push((c, d, format!("{l}\n")));
+        } else if let Some(h) = hunks.last_mut() {
+            h.2.push_str(l);
+            h.2.push('\n');
+        } else {
+            head.push_str(l);
+            head.push('\n');
+        }
+    }
+    let hit = hunks.into_iter().find(|(c, d, _)| if *d == 0 { line == *c || line == *c + 1 } else { line >= *c && line < c + d })?;
+    Some(head + &hit.2)
+}
+
 /// A git step of the changes view (run on a thread; hooks, signing, ssh as the git CLI does).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
@@ -433,6 +469,9 @@ pub enum Op {
     Update(String),
     Continue,
     Abort,
+    /// Stage / unstage the hunk of PATH that holds new-side LINE.
+    StageHunk(String, u32),
+    UnstageHunk(String, u32),
     /// Push, then `gh pr create --fill`.
     OpenPr,
     /// `gh pr merge --squash --auto` (merges when the checks pass).
@@ -449,6 +488,8 @@ impl Op {
             Op::Update(b) => format!("rebased on {b}"),
             Op::Continue => "rebase continued".into(),
             Op::Abort => "rebase aborted".into(),
+            Op::StageHunk(p, l) => format!("staged the hunk at {p}:{l}"),
+            Op::UnstageHunk(p, l) => format!("unstaged the hunk at {p}:{l}"),
             Op::OpenPr => "pull request opened".into(),
             Op::Merge => "merge on green set".into(),
         }
@@ -485,6 +526,22 @@ pub fn run_op(dir: &Path, op: &Op) -> Result<String, String> {
         }
         Op::Continue => git(dir, &["-c", "core.editor=true", "rebase", "--continue"]),
         Op::Abort => git(dir, &["rebase", "--abort"]),
+        Op::StageHunk(p, l) | Op::UnstageHunk(p, l) => {
+            use std::io::Write;
+            let unstage = matches!(op, Op::UnstageHunk(..));
+            let patch = hunk_patch(dir, p, *l, unstage)?;
+            let mut args = vec!["apply", "--cached", "--unidiff-zero"];
+            if unstage {
+                args.push("-R");
+            }
+            args.push("-");
+            let mut c = Command::new("git").arg("-C").arg(dir).args(&args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| format!("git: {e}"))?;
+            if let Some(mut i) = c.stdin.take() {
+                let _ = i.write_all(patch.as_bytes());
+            }
+            let out = c.wait_with_output().map_err(|e| format!("git: {e}"))?;
+            if out.status.success() { Ok(String::new()) } else { Err(String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("git apply failed").to_string()) }
+        }
         Op::OpenPr | Op::Merge => {
             if *op == Op::OpenPr {
                 git(dir, &["push", "-u", "origin", "HEAD"])?;
@@ -1538,14 +1595,19 @@ impl View {
                 self.refresh(true);
                 return Act::Toast("changes: reading git".into());
             }
-            KeyCode::Char('a') => {
-                if let Some(p) = self.file_at().map(|f| f.path.clone()) {
-                    return self.start_op(Op::Stage(p));
-                }
-            }
-            KeyCode::Char('u') => {
-                if let Some(p) = self.file_at().map(|f| f.path.clone()) {
-                    return self.start_op(Op::Unstage(p));
+            // a / u: on a box head the file, on a diff row its hunk (a new file: the file)
+            KeyCode::Char('a') | KeyCode::Char('u') => {
+                let stage = k.code == KeyCode::Char('a');
+                if let (Some(f), Some(r)) = (self.file_at(), self.rows.get(self.at)) {
+                    let (p, new) = (f.path.clone(), f.status == Status::New);
+                    let hunk = (!r.head && !new).then_some(r.at).flatten();
+                    let op = match (stage, hunk) {
+                        (true, Some(l)) => Op::StageHunk(p, l),
+                        (false, Some(l)) => Op::UnstageHunk(p, l),
+                        (true, None) => Op::Stage(p),
+                        (false, None) => Op::Unstage(p),
+                    };
+                    return self.start_op(op);
                 }
             }
             KeyCode::Char('m') => {
@@ -1955,6 +2017,30 @@ Binary files a/img.png and b/img.png differ
 
     fn text_of(r: &Row) -> String {
         r.line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn a_hunk_stages_and_unstages_alone() {
+        let d = std::env::temp_dir().join(format!("codehead-hunks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let sh = |c: &str| assert!(Command::new("sh").arg("-c").arg(c).current_dir(&d).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "{c}");
+        sh("git init -q && git config user.email t@t && git config user.name t && seq 1 20 > x.txt && git add -A && git commit -qm init");
+        // 2 hunks: line 3 changed, line 18 removed
+        sh("seq 1 20 | sed 's/^3$/three/' | sed '/^18$/d' > x.txt");
+        run_op(&d, &Op::StageHunk("x.txt".into(), 3)).unwrap();
+        let cached = git(&d, &["diff", "--cached", "-U0"]).unwrap();
+        assert!(cached.contains("+three") && !cached.contains("-18"), "{cached}");
+        let unstaged = git(&d, &["diff", "-U0"]).unwrap();
+        assert!(unstaged.contains("-18") && !unstaged.contains("+three"), "{unstaged}");
+        // the removal: its line is the one after it (18 in the new file is 19)
+        run_op(&d, &Op::StageHunk("x.txt".into(), 18)).unwrap();
+        assert!(git(&d, &["diff", "-U0"]).unwrap().is_empty());
+        run_op(&d, &Op::UnstageHunk("x.txt".into(), 3)).unwrap();
+        let cached = git(&d, &["diff", "--cached", "-U0"]).unwrap();
+        assert!(!cached.contains("+three") && cached.contains("-18"), "{cached}");
+        assert!(run_op(&d, &Op::StageHunk("x.txt".into(), 10)).is_err(), "0 hunk at line 10");
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
