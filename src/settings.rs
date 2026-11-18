@@ -14,21 +14,65 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use crate::textarea::TextArea;
 use crate::{config, theme};
 
-const KEYS: [&str; 5] = ["notes", "styles", "agent", "prefix", "models"];
-const HELP: [&str; 5] = [
-    "directory of Markdown notes, ~ expands to home",
-    "directory of agent output styles",
-    "default agent name",
-    "prefix for new branches and worktrees",
-    "Claude models, comma-separated",
+/// A plain field: its config key, label, hint, env var that overrides it ("": none).
+struct Spec {
+    key: &'static str,
+    label: &'static str,
+    help: &'static str,
+    env: &'static str,
+}
+
+const fn spec(key: &'static str, label: &'static str, help: &'static str, env: &'static str) -> Spec {
+    Spec { key, label, help, env }
+}
+
+/// The plain fields, then the alias boxes.
+const SPECS: [Spec; 20] = [
+    spec("notes", "notes", "directory of Markdown notes, ~ expands to home", "CODEHEAD_NOTES"),
+    spec("styles", "styles", "directory of agent output styles", "CODEHEAD_STYLES"),
+    spec("agent", "agent", "agent picked for a new thread", "CODEHEAD_AGENT"),
+    spec("prefix", "prefix", "prefix of new branches and worktrees", "CODEHEAD_PREFIX"),
+    spec("models", "models", "Claude models of the agent form, comma-separated", "CODEHEAD_MODELS"),
+    spec("messages", "messages", "bubbles (boxes, yours on the right) or lines (name, bar)", "CODEHEAD_MESSAGES"),
+    spec("thoughts", "thoughts", "hidden, folded (a click opens) or open · ctrl+t in a thread", "CODEHEAD_THOUGHTS"),
+    spec("keys.menu", "menu", "opens the menu: F1-F12, ctrl+<letter>, alt+<letter>", "CODEHEAD_MENU_KEY"),
+    spec("keys.command", "commands", "opens the command dropdown in a prompt: 1 symbol", "CODEHEAD_COMMAND_KEY"),
+    spec("colors.scheme", "scheme", "preset: coral or amber", "CODEHEAD_SCHEME"),
+    spec("colors.accent", "accent", "the 1 accent: titles, pills, the cursor row", ""),
+    spec("colors.on_accent", "on_accent", "text on an accent pill", ""),
+    spec("colors.panel", "panel", "inputs, unfocused tabs and rows", ""),
+    spec("colors.hover", "hover", "the row under the mouse, the input bubble's border", ""),
+    spec("colors.text", "text", "normal text", ""),
+    spec("colors.muted", "muted", "hints, labels, times", ""),
+    spec("colors.line", "line", "borders, dividers", ""),
+    spec("colors.ok", "ok", "done, allowed", ""),
+    spec("colors.danger", "danger", "errors", ""),
+    spec("colors.warn", "warn", "blocked, questions", ""),
 ];
-const ENVS: [&str; 5] = [
-    "CODEHEAD_NOTES",
-    "CODEHEAD_STYLES",
-    "CODEHEAD_AGENT",
-    "CODEHEAD_PREFIX",
-    "CODEHEAD_MODELS",
+const PLAIN: usize = SPECS.len();
+/// Groups: the 1st field, the title, what the group sets.
+const SECTIONS: [(usize, &str, &str); 5] = [
+    (0, "paths", "where codehead reads notes and output styles"),
+    (2, "new threads", "defaults of the new tab and the agent form"),
+    (5, "thread view", "how messages and thoughts look"),
+    (7, "keys", "keys of every screen"),
+    (9, "colors", "a preset; a set field below overrides 1 of its colors"),
 ];
+/// The alias group, after the plain fields.
+const ALIASES: (&str, &str) = ("path aliases", "short names for directories: name/ → target/ · enter: edit / done · d: delete · ctrl+n: add");
+/// Fields and boxes: this many columns right of the group's heading.
+const INDENT: u16 = 2;
+
+/// Group heading on ROWS (2 rows): `TITLE ────` (accent), what it sets (muted).
+fn group_head(f: &mut Frame, row: Option<Rect>, desc_row: Option<Rect>, title: &str, desc: &str) {
+    if let Some(r) = row {
+        let rule = usize::from(r.width).saturating_sub(title.chars().count() + 1);
+        f.render_widget(Paragraph::new(Line::from(vec![Span::styled(title.to_string(), theme::accent_bold()), Span::styled(format!(" {}", "─".repeat(rule)), theme::line())])), r);
+    }
+    if let Some(r) = desc_row {
+        f.render_widget(Paragraph::new(Line::styled(desc.to_string(), theme::muted())), r);
+    }
+}
 
 pub enum Action {
     None,
@@ -40,8 +84,10 @@ pub enum Action {
 /// A click target of the last draw.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Hit {
-    /// A plain field (0..5) or a field of an alias box (5..).
+    /// A plain field (0..PLAIN) or a field of an alias box (PLAIN..).
     Field(usize),
+    /// The ↺ of plain field I: back to its default.
+    Reset(usize),
     /// The "+ add path alias" row.
     Add,
 }
@@ -50,9 +96,9 @@ pub struct Settings {
     path: PathBuf,
     base: Option<String>,
     saved: config::File,
-    /// 5 plain fields, then 2 per alias (name, target).
+    /// 6 plain fields, then 2 per alias (name, target).
     fields: Vec<TextArea>,
-    /// Navigation item: 0..5 plain fields, 5..5+n alias boxes, 5+n the add row.
+    /// Navigation item: 0..6 plain fields, 6..6+n alias boxes, 6+n the add row.
     focus: usize,
     /// The field of the open (unlocked) alias box.
     editing: Option<usize>,
@@ -84,7 +130,7 @@ impl Settings {
             applied: None,
         };
         if form.reload().is_none() {
-            form.fields = (0..5).map(|_| Self::input("", "use default")).collect();
+            form.fields = (0..PLAIN).map(|_| Self::input("", "use default")).collect();
         }
         form
     }
@@ -97,53 +143,33 @@ impl Settings {
     }
 
     fn aliases(&self) -> usize {
-        self.fields.len().saturating_sub(5) / 2
+        self.fields.len().saturating_sub(PLAIN) / 2
+    }
+
+    /// 1st navigation item of each section: general, the SECTIONS, the aliases.
+    fn starts(&self) -> Vec<usize> {
+        SECTIONS.iter().map(|s| s.0).chain([PLAIN]).collect()
     }
 
     /// The add row: the last navigation item.
     fn add_item(&self) -> usize {
-        5 + self.aliases()
+        PLAIN + self.aliases()
     }
 
     /// The text field keys go to: a plain field, or a field of the open alias box.
     fn field(&self) -> Option<usize> {
-        if self.focus < 5 { Some(self.focus) } else { self.editing }
+        if self.focus < PLAIN { Some(self.focus) } else { self.editing }
     }
 
-    /// The alias box of field I (≥ 5).
+    /// The alias box of field I (≥ 6).
     fn alias_of(i: usize) -> usize {
-        (i - 5) / 2
+        (i - PLAIN) / 2
     }
 
     fn reload(&mut self) -> Option<config::File> {
         match config::read_file(&self.path) {
             Ok((text, file)) => {
-                let defaults = config::defaults();
-                self.fields = [
-                    &file.notes,
-                    &file.styles,
-                    &file.agent,
-                    &file.prefix,
-                    &file.models,
-                ]
-                .into_iter()
-                .zip([
-                    defaults.notes,
-                    defaults.styles,
-                    defaults.agent,
-                    defaults.prefix,
-                    defaults.models,
-                ])
-                .map(|(value, default)| {
-                    Self::input(
-                        value.as_deref().unwrap_or_default(),
-                        &format!(
-                            "default: {}",
-                            default.unwrap_or_else(|| "amon, else first agent".into())
-                        ),
-                    )
-                })
-                .collect();
+                self.fields = SPECS.iter().map(|sp| Self::input(&file.get(sp.key).unwrap_or_default(), &format!("default: {}", Self::default_of(&file, sp.key)))).collect();
                 for (name, path) in &file.aliases {
                     self.push_alias(name, path);
                 }
@@ -153,7 +179,7 @@ impl Settings {
                 self.paths.reset_input();
                 self.saved = file.clone();
                 self.focus = self.focus.min(self.add_item());
-                self.status = "changes apply on leaving a field · blank field: use default · environment overrides file values".into();
+                self.status = "changes apply on leaving a field · ctrl+d / ↺: default · environment overrides file values".into();
                 self.error = false;
                 Some(file)
             }
@@ -165,13 +191,35 @@ impl Settings {
         }
     }
 
+    /// The default of setting KEY, as the field's placeholder shows it. Colors: the scheme's.
+    fn default_of(file: &config::File, key: &str) -> String {
+        if let Some(name) = key.strip_prefix("colors.").filter(|n| *n != "scheme") {
+            let scheme = file.scheme.clone().unwrap_or_else(|| theme::PRESETS[0].0.into());
+            let p = theme::Palette::preset(&scheme).unwrap_or(theme::PRESETS[0].1);
+            return p.get(name).map(|c| format!("{} ({scheme})", theme::hex(c))).unwrap_or_default();
+        }
+        config::defaults().get(key).unwrap_or_else(|| "amon, else first agent".into())
+    }
+
+    /// Plain field I back to its default: blank, applied.
+    fn reset(&mut self, i: usize) {
+        if i >= PLAIN || self.fields[i].text().is_empty() {
+            return;
+        }
+        self.fields[i].set_text("");
+        self.commit();
+        if !self.error {
+            self.status = format!("{}: default", SPECS[i].key);
+        }
+    }
+
     fn push_alias(&mut self, name: &str, target: &str) {
         self.fields.push(Self::input(name, "project:platform"));
         self.fields.push(Self::input(target, "~/projects/exampleorg/project/notes/platform/"));
     }
 
     fn values(&self) -> Result<config::File, String> {
-        if self.fields.len() < 5 {
+        if self.fields.len() < PLAIN {
             return Err("reload config before save".into());
         }
         let value = |i: usize| {
@@ -179,7 +227,7 @@ impl Settings {
             (!text.is_empty()).then_some(text)
         };
         let mut aliases = BTreeMap::new();
-        for pair in self.fields[5..].as_chunks::<2>().0 {
+        for pair in self.fields[PLAIN..].as_chunks::<2>().0 {
             let name = pair[0].text().trim().to_string();
             let target = pair[1].text().trim().to_string();
             // a new box, 0 text yet: not an alias
@@ -191,14 +239,15 @@ impl Settings {
                 return Err(format!("duplicate alias: {name}"));
             }
         }
-        Ok(config::File {
-            notes: value(0),
-            styles: value(1),
-            agent: value(2),
-            prefix: value(3),
-            models: value(4),
-            aliases,
-        })
+        let mut file = config::File { aliases, ..config::File::default() };
+        for (i, sp) in SPECS.iter().enumerate() {
+            let v = value(i);
+            if let Some(v) = &v {
+                config::validate(sp.key.to_string(), v)?;
+            }
+            file.set(sp.key, v);
+        }
+        Ok(file)
     }
 
     fn dirty(&self) -> bool {
@@ -244,7 +293,7 @@ impl Settings {
     }
 
     fn delete_alias(&mut self, k: usize) {
-        let at = 5 + k * 2;
+        let at = PLAIN + k * 2;
         if at + 2 > self.fields.len() {
             return;
         }
@@ -292,8 +341,12 @@ impl Settings {
                     self.add_alias();
                     return Action::None;
                 }
-                KeyCode::Char('d' | 'D') if (5..self.add_item()).contains(&self.focus) => {
-                    self.delete_alias(self.focus - 5);
+                KeyCode::Char('d' | 'D') if self.focus < PLAIN => {
+                    self.reset(self.focus);
+                    return Action::None;
+                }
+                KeyCode::Char('d' | 'D') if (PLAIN..self.add_item()).contains(&self.focus) => {
+                    self.delete_alias(self.focus - PLAIN);
                     return Action::None;
                 }
                 _ => {}
@@ -306,8 +359,8 @@ impl Settings {
                     self.editing = None;
                     self.commit();
                 }
-                KeyCode::Up if key.modifiers.is_empty() && (i - 5) % 2 == 1 => self.editing = Some(i - 1),
-                KeyCode::Down if key.modifiers.is_empty() && (i - 5) % 2 == 0 => self.editing = Some(i + 1),
+                KeyCode::Up if key.modifiers.is_empty() && !(i - PLAIN).is_multiple_of(2) => self.editing = Some(i - 1),
+                KeyCode::Down if key.modifiers.is_empty() && (i - PLAIN).is_multiple_of(2) => self.editing = Some(i + 1),
                 KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {}
                 KeyCode::Tab | KeyCode::BackTab => {
                     self.editing = None;
@@ -343,20 +396,20 @@ impl Settings {
             }
             KeyCode::PageUp => {
                 self.commit();
-                self.focus = self.focus.saturating_sub(5);
+                self.focus = self.starts().into_iter().rev().find(|&s| s < self.focus).unwrap_or(0);
             }
             KeyCode::PageDown => {
                 self.commit();
-                self.focus = (self.focus + 5).min(self.add_item());
+                self.focus = self.starts().into_iter().find(|&s| s > self.focus).unwrap_or(self.add_item());
             }
             KeyCode::Enter if self.focus == self.add_item() => self.add_alias(),
-            KeyCode::Enter if self.focus >= 5 => self.editing = Some(5 + (self.focus - 5) * 2),
+            KeyCode::Enter if self.focus >= PLAIN => self.editing = Some(PLAIN + (self.focus - PLAIN) * 2),
             KeyCode::Enter => {
                 self.commit();
                 self.focus = (self.focus + 1).min(self.add_item());
             }
-            KeyCode::Char('d') if key.modifiers.is_empty() && (5..self.add_item()).contains(&self.focus) => {
-                self.delete_alias(self.focus - 5);
+            KeyCode::Char('d') if key.modifiers.is_empty() && (PLAIN..self.add_item()).contains(&self.focus) => {
+                self.delete_alias(self.focus - PLAIN);
             }
             _ => {
                 if let Some(i) = self.field() {
@@ -383,7 +436,7 @@ impl Settings {
     }
 
     fn sync_paths(&mut self) {
-        let focus = self.field().filter(|&i| i < 2 || (i >= 6 && i.is_multiple_of(2)));
+        let focus = self.field().filter(|&i| i < 2 || (i >= PLAIN && !(i - PLAIN).is_multiple_of(2)));
         if focus != self.path_focus {
             self.paths.reset_input();
             self.path_focus = focus;
@@ -428,7 +481,13 @@ impl Settings {
                     self.add_alias();
                     return Action::None;
                 }
-                Hit::Field(i) if i < 5 => {
+                Hit::Reset(i) => {
+                    self.focus = i;
+                    self.editing = None;
+                    self.reset(i);
+                    return Action::None;
+                }
+                Hit::Field(i) if i < PLAIN => {
                     if self.focus != i { self.commit(); }
                     self.editing = None;
                     self.focus = i;
@@ -436,7 +495,7 @@ impl Settings {
                 Hit::Field(i) => {
                     let k = Self::alias_of(i);
                     if self.editing.is_none_or(|e| Self::alias_of(e) != k) { self.commit(); }
-                    self.focus = 5 + k;
+                    self.focus = PLAIN + k;
                     self.editing = Some(i);
                 }
             }
@@ -469,12 +528,20 @@ impl Settings {
             Paragraph::new(Line::styled(self.path.display().to_string(), theme::muted())),
             Rect { y: area.y + 1, height: 1, ..area },
         );
-        let body = Rect { y: area.y + 3, height: area.height - 4, ..area };
-        // virtual rows: 3 per plain field, the alias heading (3), 4 per alias box, the add row
+        let all = Rect { y: area.y + 3, height: area.height - 4, ..area };
+        // fields and boxes: indented under their group's heading
+        let body = Rect { x: all.x + INDENT, width: all.width.saturating_sub(INDENT), ..all };
+        // virtual rows: per group its heading (2) + 1 blank, 3 per plain field, the alias heading
+        // (2) + 1 blank, 4 per alias box, the add row
         let n = self.aliases();
         let mut items = Vec::new();
         let mut y = 0usize;
-        for _ in 0..5 {
+        let mut heads = Vec::new();
+        for i in 0..PLAIN {
+            if let Some((_, title, desc)) = SECTIONS.iter().find(|s| s.0 == i) {
+                heads.push((y, *title, *desc));
+                y += 3;
+            }
             items.push((y, 2));
             y += 3;
         }
@@ -501,40 +568,54 @@ impl Settings {
             (off + height <= view).then_some(Rect { y: body.y + off as u16, height: height as u16, ..body })
         };
         let label_width = 12.min(body.width / 3);
-        for i in 0..5 {
+        let full = |r: Rect| Rect { x: all.x, width: all.width, ..r };
+        for (hy, title, desc) in heads {
+            group_head(f, at(hy, 1).map(full), at(hy + 1, 1).map(full), title, desc);
+        }
+        let pal = theme::pal();
+        for i in 0..PLAIN {
             let Some(row) = at(items[i].0, 1) else { continue };
             let focused = active && self.focus == i;
             f.render_widget(
-                Paragraph::new(Line::styled(KEYS[i], if focused { theme::accent_bold() } else { theme::muted() })),
+                Paragraph::new(Line::styled(SPECS[i].label, if focused { theme::accent_bold() } else { theme::muted() })),
                 Rect { width: label_width, ..row },
             );
-            let input = Rect { x: row.x + label_width, width: row.width - label_width, ..row };
+            // right of the input: a color's swatch, ↺ (back to the default) while the field is set
+            let swatch = SPECS[i].key.strip_prefix("colors.").and_then(|n| pal.get(n));
+            let tail = 3 + if swatch.is_some() { 3 } else { 0 };
+            let input = Rect { x: row.x + label_width, width: row.width.saturating_sub(label_width + tail), ..row };
             f.render_widget(Paragraph::new("").style(theme::panel()), input);
             self.fields[i].render(f, input, focused);
+            let mut x = input.right() + 1;
+            if let Some(c) = swatch {
+                f.render_widget(Paragraph::new(Span::styled("██", ratatui::style::Style::default().fg(c))), Rect { x, width: 2, ..row });
+                x += 3;
+            }
+            if !self.fields[i].text().is_empty() {
+                let r = Rect { x, width: 1, ..row };
+                f.render_widget(Paragraph::new(Span::styled("↺", if focused { theme::accent() } else { theme::muted() })), r);
+                self.rows.push((r, Hit::Reset(i)));
+            }
             self.rows.push((row, Hit::Field(i)));
             if let Some(hint_row) = at(items[i].0 + 1, 1) {
-                let hint = std::env::var(ENVS[i])
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| format!("{} override: {s}", ENVS[i]))
-                    .unwrap_or_else(|| HELP[i].into());
+                let env = SPECS[i].env;
+                let hint = (!env.is_empty())
+                    .then(|| std::env::var(env).ok().filter(|s| !s.is_empty()))
+                    .flatten()
+                    .map(|s| format!("{env} override: {s}"))
+                    .unwrap_or_else(|| {
+                        let reset = if focused && !self.fields[i].text().is_empty() { " · ctrl+d / ↺: default" } else { "" };
+                        format!("{}{reset}", SPECS[i].help)
+                    });
                 f.render_widget(
                     Paragraph::new(Line::styled(hint, theme::muted())),
                     Rect { x: hint_row.x + label_width, width: hint_row.width - label_width, ..hint_row },
                 );
             }
         }
-        if let Some(row) = at(heading, 1) {
-            f.render_widget(Paragraph::new(Line::styled("path aliases", theme::bold())), row);
-        }
-        if let Some(row) = at(heading + 1, 1) {
-            f.render_widget(
-                Paragraph::new(Line::styled("name/ → target/ · enter: edit / done · d: delete · ctrl+n: add", theme::muted())),
-                row,
-            );
-        }
+        group_head(f, at(heading, 1).map(full), at(heading + 1, 1).map(full), ALIASES.0, ALIASES.1);
         for k in 0..n {
-            let item = 5 + k;
+            let item = PLAIN + k;
             let Some(r) = at(items[item].0, 4) else { continue };
             let on = active && self.focus == item;
             let open = on && self.editing.is_some();
@@ -556,7 +637,7 @@ impl Settings {
                 f.render_widget(Paragraph::new("").style(theme::panel()), inner);
             }
             for (j, label) in ["name", "target"].into_iter().enumerate() {
-                let i = 5 + k * 2 + j;
+                let i = PLAIN + k * 2 + j;
                 let row = Rect { y: inner.y + j as u16, height: 1, x: inner.x + 1, width: inner.width.saturating_sub(2) };
                 let focused = open && self.editing == Some(i);
                 let lw = 8.min(row.width / 3);
@@ -583,7 +664,7 @@ impl Settings {
         f.render_widget(
             Paragraph::new(Line::styled(
                 self.status.clone(),
-                if self.error { theme::text().fg(theme::DANGER) } else { theme::muted() },
+                if self.error { theme::text().fg(theme::pal().danger) } else { theme::muted() },
             )),
             Rect { y: area.bottom() - 1, height: 1, ..area },
         );
@@ -618,7 +699,7 @@ mod tests {
     #[test]
     fn keyboard_entry_starts_before_existing_field_text() {
         let (dir, mut form) = fixture("cursor-start");
-        std::fs::write(dir.join("codehead.toml"), "notes = '~/notes/'\nstyles = '~/styles/'\nagent = 'amon'\nprefix = 'task'\nmodels = 'opus'\n[aliases]\ndocs = '~/docs/'\n").unwrap();
+        std::fs::write(dir.join("codehead.toml"), "notes = '~/notes/'\nstyles = '~/styles/'\nagent = 'amon'\nprefix = 'task'\nmodels = 'opus'\nmessages = 'lines'\n[aliases]\ndocs = '~/docs/'\n").unwrap();
         form.reload().unwrap();
 
         let at_start = |form: &mut Settings, i: usize| {
@@ -632,25 +713,77 @@ mod tests {
             form.fields[i].move_start();
         };
         at_start(&mut form, 0);
-        for i in 1..5 {
+        for i in 1..PLAIN {
             form.fields[i].move_end();
             key(&mut form, KeyCode::Down);
-            at_start(&mut form, i);
+            if form.fields[i].text().is_empty() {
+                assert_eq!(form.field(), Some(i));
+            } else {
+                at_start(&mut form, i);
+            }
         }
         key(&mut form, KeyCode::Down);
-        for i in 5..7 { form.fields[i].move_end(); }
+        for i in PLAIN..PLAIN + 2 { form.fields[i].move_end(); }
         key(&mut form, KeyCode::Enter);
-        at_start(&mut form, 5);
+        at_start(&mut form, PLAIN);
         key(&mut form, KeyCode::Down);
-        at_start(&mut form, 6);
+        at_start(&mut form, PLAIN + 1);
         key(&mut form, KeyCode::Up);
-        at_start(&mut form, 5);
+        at_start(&mut form, PLAIN);
         key(&mut form, KeyCode::Enter);
-        key(&mut form, KeyCode::PageUp);
+        // pgup: the start of the section before (colors, keys, general)
+        for _ in 0..SECTIONS.len() {
+            key(&mut form, KeyCode::PageUp);
+        }
         at_start(&mut form, 0);
         form.fields[0].move_end();
         form.focus_input();
         at_start(&mut form, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fields_sit_in_groups_under_a_heading() {
+        let (dir, mut form) = fixture("groups");
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 120)).unwrap();
+        terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let lines: Vec<String> = (0..120).map(|y| (0..90).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect();
+        let at = |s: &str| lines.iter().position(|l| l.trim_start().starts_with(s)).unwrap_or_else(|| panic!("{s}:\n{}", lines.join("\n")));
+        // headings in order, each with a rule; its fields below it, indented
+        let heads: Vec<usize> = ["paths ─", "new threads ─", "thread view ─", "keys ─", "colors ─", "path aliases ─"].iter().map(|h| at(h)).collect();
+        assert!(heads.windows(2).all(|w| w[0] < w[1]), "{heads:?}");
+        for (field, group) in [("notes", 0), ("agent", 1), ("thoughts", 2), ("menu", 3), ("scheme", 4)] {
+            let y = at(field);
+            assert!(heads[group] < y && y < heads[group + 1], "{field}");
+            assert!(lines[y].starts_with(&format!("{}{field}", " ".repeat(INDENT as usize))), "{field}: {:?}", lines[y]);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ctrl_d_and_the_reset_mark_set_a_field_back_to_its_default() {
+        let (dir, mut form) = fixture("reset");
+        let file = dir.join("codehead.toml");
+        std::fs::write(&file, "messages = 'lines'\n[keys]\nmenu = 'ctrl+p'\n[colors]\nscheme = 'amber'\n").unwrap();
+        form.reload().unwrap();
+        form.focus = 5;
+        form.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(form.fields[5].text(), "");
+        let saved = config::read_file(&file).unwrap().1;
+        assert_eq!((saved.messages, saved.menu_key.as_deref()), (None, Some("ctrl+p")));
+        // a click on ↺ of the scheme field
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 100)).unwrap();
+        terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
+        let (r, _) = *form.rows.iter().find(|(_, h)| *h == Hit::Reset(9)).expect("↺ on the set scheme field");
+        form.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x, row: r.y, modifiers: KeyModifiers::NONE });
+        assert_eq!(config::read_file(&file).unwrap().1.scheme, None);
+        assert!(!form.rows.iter().any(|(_, h)| *h == Hit::Reset(5)));
+        // an invalid value: 0 write, the error shows
+        form.focus = 10;
+        form.fields[10].set_text("red");
+        form.commit();
+        assert!(form.error && form.status.contains("#RRGGBB"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -660,7 +793,7 @@ mod tests {
         assert!(!form.dirty());
         // ctrl+n: a new box, open on its name
         form.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        assert_eq!((form.focus, form.editing), (5, Some(5)));
+        assert_eq!((form.focus, form.editing), (PLAIN, Some(PLAIN)));
         form.paste("project:platform");
         // enter locks the box: 0 target → not applied, the error shows
         key(&mut form, KeyCode::Enter);
@@ -669,10 +802,10 @@ mod tests {
         assert_eq!(file_aliases(&dir), 0);
         // a locked box: ↑↓ pass it, typing does not reach its fields
         key(&mut form, KeyCode::Char('x'));
-        assert_eq!(form.fields[5].text(), "project:platform");
+        assert_eq!(form.fields[PLAIN].text(), "project:platform");
         key(&mut form, KeyCode::Enter);
         key(&mut form, KeyCode::Down);
-        assert_eq!(form.editing, Some(6));
+        assert_eq!(form.editing, Some(PLAIN + 1));
         form.paste("~/projects/exampleorg/project/notes/platform/");
         key(&mut form, KeyCode::Enter);
         let file = form.take_applied().expect("applied on lock");
@@ -716,7 +849,7 @@ mod tests {
         std::fs::write(dir.join("codehead.toml"), "notes = 4\n").unwrap();
         assert!(form.reload().is_none());
         assert!(form.error);
-        assert_eq!(form.fields.len(), 25);
+        assert_eq!(form.fields.len(), PLAIN + 20);
         let mut invalid = Settings::new(dir.join("codehead.toml"));
         terminal.draw(|f| invalid.draw(f, f.area(), true)).unwrap();
         assert!(invalid.error);
@@ -735,11 +868,11 @@ mod tests {
         key(&mut form, KeyCode::Down);
         form.paste("~/docs/");
         key(&mut form, KeyCode::Enter);
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 40)).unwrap();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 100)).unwrap();
         terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let line = |y: u16| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>();
-        let top = (0..40).find(|&y| line(y).contains("alias 1 · enter: edit · d: delete")).expect("highlighted box");
+        let top = (0..100).find(|&y| line(y).contains("alias 1 · enter: edit · d: delete")).expect("highlighted box");
         assert!(line(top).trim_start().starts_with('╭'));
         assert!(line(top + 1).contains("docs") && line(top + 2).contains("~/docs/"));
         assert!(line(top + 3).trim_start().starts_with('╰'));
@@ -748,7 +881,7 @@ mod tests {
         terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let x = (0..80).find(|&x| buffer[(x, top)].symbol() == "╭").unwrap();
-        assert_eq!(buffer[(x, top)].fg, theme::LINE);
+        assert_eq!(buffer[(x, top)].fg, theme::pal().line);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -762,18 +895,18 @@ mod tests {
         form.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         form.paste(&format!("{}/browse/", dir.display()));
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 36)).unwrap();
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 100)).unwrap();
         terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
         let buffer = terminal.backend().buffer();
         let line = |y| (0..90).map(|x| buffer[(x, y)].symbol()).collect::<String>();
-        assert!((0..36).any(|y| line(y).contains("guide.md")));
-        let target = form.fields[6].text();
+        assert!((0..100).any(|y| line(y).contains("guide.md")));
+        let target = form.fields[PLAIN + 1].text();
         assert!(matches!(
             form.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Action::None
         ));
-        assert_eq!(form.fields[6].text(), target);
-        assert_eq!((form.focus, form.editing), (5, Some(6)));
+        assert_eq!(form.fields[PLAIN + 1].text(), target);
+        assert_eq!((form.focus, form.editing), (PLAIN, Some(PLAIN + 1)));
         assert!(matches!(
             form.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Action::NextTab
@@ -781,29 +914,29 @@ mod tests {
         // back into the box: a new field resets the dropdown's Escape state
         form.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         form.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        form.fields[6].move_end();
+        form.fields[PLAIN + 1].move_end();
         assert!(matches!(
             form.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Action::None
         ));
         assert_eq!(
-            form.fields[6].text(),
+            form.fields[PLAIN + 1].text(),
             format!("{}/browse/child/", dir.display())
         );
-        form.fields[6].set_text(&target);
-        form.fields[6].move_end();
+        form.fields[PLAIN + 1].set_text(&target);
+        form.fields[PLAIN + 1].move_end();
         // ↑↓ + Enter chooses a file, just like the prompt.
         form.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         form.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
-            form.fields[6].text(),
+            form.fields[PLAIN + 1].text(),
             format!("{}/browse/guide.md ", dir.display())
         );
-        form.fields[6].set_text(&target);
-        form.fields[6].move_end();
+        form.fields[PLAIN + 1].set_text(&target);
+        form.fields[PLAIN + 1].move_end();
         terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
         let buffer = terminal.backend().buffer();
-        let (x, y) = (0..36)
+        let (x, y) = (0..100)
             .find_map(|y| {
                 let line = (0..90).map(|x| buffer[(x, y)].symbol()).collect::<String>();
                 // a byte offset: box chars (`│`) take 3 bytes, 1 column
@@ -820,7 +953,7 @@ mod tests {
             Action::None
         ));
         assert_eq!(
-            form.fields[6].text(),
+            form.fields[PLAIN + 1].text(),
             format!("{}/browse/guide.md ", dir.display())
         );
         let _ = std::fs::remove_dir_all(dir);

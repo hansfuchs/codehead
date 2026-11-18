@@ -1,5 +1,6 @@
-//! Thread view: the thread's agents on top, the stream (every message, tool run and open
-//! question of the thread, from its event log), the prompt below, the cost box beside it.
+//! Thread view (hell's layout): the stream on top (every message, tool run and open question of
+//! the thread, from its event log), the title row, the header (agents box + tokens box in 1
+//! frame), the input bubble (its top border the header's bottom line), the hint row, the footer.
 //! Messages go to the thread's host (`engine::client`); the host starts on the first one.
 
 use std::collections::{HashMap, HashSet};
@@ -47,9 +48,17 @@ pub fn reset_nav() {
 const DOUBLE_ESC: Duration = Duration::from_millis(500);
 /// Most rows the prompt grows to; longer text scrolls.
 const INPUT_ROWS: u16 = 8;
-/// The cost box: shown when the screen is this wide.
-const COST_MIN_SCREEN: u16 = 100;
-const COST_W: u16 = 44;
+/// Below this width: 0 tokens box (the agents box takes the header row).
+const MIN_COST_WIDTH: u16 = 70;
+/// Narrowest / widest tokens box (borders incl.); squeezed: a thin screen with 1 card.
+const MIN_COST_BOX: u16 = 48;
+const MAX_COST_BOX: u16 = 66;
+const SQUEEZED_COST_BOX: u16 = 30;
+/// Header: the sprite rows + its top border at least, max. this many rows.
+const HEADER_H: u16 = crate::sprites::H as u16 + 1;
+const MAX_HEADER_H: u16 = 10;
+/// Below this height: 0 header.
+const MIN_HEADER_SCREEN: u16 = 24;
 /// Handoff to a replacing agent: the replaced agent's last messages, max. this many chars.
 const HANDOFF_CHARS: usize = 12_000;
 const WAVE: [&str; 4] = ["░▒▓", "▒▓▒", "▓▒░", "▒░▒"];
@@ -80,6 +89,10 @@ struct View {
     back: usize,
     open: HashSet<usize>,
     all_runs: bool,
+    /// Thoughts: how they show (setting), the open folds, ctrl+t: all open.
+    thoughts: stream::Thoughts,
+    open_thoughts: HashSet<usize>,
+    all_thoughts: bool,
     stream_rect: Rect,
     /// Drag selection in the stream: (row, col) of its start and end, in drawn rows.
     sel: Option<((usize, u16), (usize, u16))>,
@@ -134,12 +147,14 @@ struct View {
     /// Where the drag started (drawn row, col).
     drag_from: Option<(usize, u16)>,
     tx: Sender<Msg>,
+    /// How the stream draws messages (setting `messages`).
+    look: stream::Look,
 }
 
 impl View {
     fn new(id: &str, cwd: &Path, title: &str, tx: Sender<Msg>) -> View {
         let roster = crate::agents::load();
-        let mut input = TextArea::new(false, "message the thread · @name: an agent · ⌘/ctrl+⏎ sends");
+        let mut input = TextArea::new(false, "message the thread · @name for someone else");
         input.style = Some(theme::text());
         let mut command = crate::command::Command::new(cwd);
         command.can_branch = true;
@@ -161,6 +176,9 @@ impl View {
             back: 0,
             open: HashSet::new(),
             all_runs: false,
+            thoughts: crate::config::thoughts(),
+            open_thoughts: HashSet::new(),
+            all_thoughts: false,
             stream_rect: Rect::default(),
             sel: None,
             dragging: false,
@@ -201,6 +219,7 @@ impl View {
             nav_click: false,
             drag_from: None,
             tx,
+            look: crate::config::messages(),
         };
         v.set_roster(roster);
         v.read();
@@ -494,7 +513,7 @@ impl View {
         let empty = self.input.is_empty();
         let asking = !self.thread.asks.is_empty();
         match k.code {
-            KeyCode::F(2) => {
+            _ if crate::config::menu_key().matches(&k) => {
                 self.open_menu();
                 return false;
             }
@@ -534,6 +553,10 @@ impl View {
                 }
                 self.last_ctrl_c = Some(Instant::now());
                 self.toast("ctrl+c again: quit");
+                return false;
+            }
+            KeyCode::Char('t') if ctrl => {
+                self.toggle_thoughts();
                 return false;
             }
             KeyCode::Char('o') if ctrl => {
@@ -728,15 +751,29 @@ impl View {
         self.back = (self.back as isize + delta).clamp(0, max as isize) as usize;
     }
 
+    /// ctrl+t: every thought open / folded. Hidden (setting): shown folded first.
+    fn toggle_thoughts(&mut self) {
+        if self.thoughts == stream::Thoughts::Hidden {
+            self.thoughts = stream::Thoughts::Folded;
+            self.all_thoughts = true;
+            self.toast("thoughts shown · setting: thoughts");
+        } else {
+            self.all_thoughts = !self.all_thoughts;
+        }
+        self.open_thoughts.clear();
+        self.dirty = true;
+    }
+
     fn open_menu(&mut self) {
         use crate::menu::Item;
         let items = vec![
             Item { label: format!("thread header: {}", if self.nav_on { "close" } else { "open" }), key: "tab".into(), id: 0 },
             Item { label: "tool calls: open / close all".into(), key: "ctrl+o".into(), id: 1 },
+            Item { label: "thoughts: open / close all".into(), key: "ctrl+t".into(), id: 13 },
             Item { label: "VS Code on the worktree".into(), key: "ctrl+i".into(), id: 2 },
             Item { label: "back to the start screen".into(), key: "esc esc".into(), id: 3 },
             Item { label: "agents: mention, add (←→: +), replace (⇄)".into(), key: "@".into(), id: 4 },
-            Item { label: "commands: files, notes, threads, skills, branch".into(), key: ">".into(), id: 5 },
+            Item { label: "commands: files, notes, threads, skills, branch".into(), key: crate::config::command_key().to_string(), id: 5 },
             Item { label: "paste a clipboard image".into(), key: "ctrl+v".into(), id: 7 },
             Item { label: "select + copy · double click: word · click code: copy".into(), key: "drag".into(), id: 9 },
             Item { label: "scroll the stream".into(), key: "wheel · pgup".into(), id: 10 },
@@ -772,6 +809,7 @@ impl View {
                 self.all_runs = !self.all_runs;
                 self.dirty = true;
             }
+            Action::Command(13) => self.toggle_thoughts(),
             Action::Command(2) => {
                 self.menu = None;
                 return self.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
@@ -785,7 +823,7 @@ impl View {
                 self.input.move_end();
                 let text = self.input.text();
                 let gap = if text.is_empty() || text.ends_with(char::is_whitespace) { "" } else { " " };
-                self.input.insert(&format!("{gap}{}", if id == 4 { "@" } else { ">" }));
+                self.input.insert(&format!("{gap}{}", if id == 4 { "@".to_string() } else { crate::config::command_key().to_string() }));
                 return false;
             }
             Action::Command(7) => {
@@ -856,6 +894,13 @@ impl View {
                     return;
                 }
                 match self.drawn.hits.get(&row).cloned() {
+                    Some(Hit::Thought(k)) => {
+                        if !self.open_thoughts.remove(&k) {
+                            self.open_thoughts.insert(k);
+                        }
+                        self.dirty = true;
+                        return;
+                    }
                     Some(Hit::Run(k)) => {
                         if !self.open.remove(&k) {
                             self.open.insert(k);
@@ -951,54 +996,81 @@ impl View {
         (self.started.elapsed().as_millis() / 150) as usize
     }
 
-    fn header(&self, width: u16) -> Vec<Line<'static>> {
+    /// Header card of agent NAME (hell's): sprite, color, the lines right of the sprite (name,
+    /// `Claude · Opus 5.5`, effort + status), width incl. 4 columns gap to the next card.
+    fn card(&self, name: &str) -> Card {
         let tick = self.tick();
-        let mut cards: Vec<Vec<Line<'static>>> = Vec::new();
-        for name in &self.members {
-            let a = self.roster.iter().find(|a| &a.name == name);
-            let color = self.colors.get(name).copied().unwrap_or(theme::ACCENT);
-            let sprite = a.map(crate::agents::sprite).unwrap_or_else(|| crate::sprites::default_for(name));
-            let mut model = self.thread.models.get(name).filter(|m| !m.is_empty()).map(|m| crate::agents::model_name(m)).or_else(|| a.map(crate::agents::model_of)).unwrap_or_default();
-            let effort = crate::engine::roster::get(name).and_then(|r| r.effort).or_else(|| a.filter(|a| a.harness == "claude").map(|_| crate::agents::effort_name()));
-            if let Some(e) = effort.filter(|e| e != "default") {
-                model = if model.is_empty() { e } else { format!("{model} · {e}") };
-            }
-            let state = if self.thread.asks.iter().any(|q| &q.agent == name) {
-                Span::styled("waits on you", Style::default().fg(theme::WARN))
-            } else if self.thread.busy.contains(name) {
-                Span::styled(format!("{} working", WAVE[tick % WAVE.len()]), Style::default().fg(color))
-            } else {
-                match self.thread.status.get(name) {
-                    Some((s, _)) if s == "blocked" => Span::styled("blocked", Style::default().fg(theme::WARN)),
-                    Some((s, _)) if s == "done" => Span::styled("done", Style::default().fg(theme::OK)),
-                    _ => Span::styled("idle", theme::muted()),
-                }
-            };
-            let lead = if self.members.first() == Some(name) { " ★" } else { "" };
-            let side = vec![
-                vec![Span::raw(" "), Span::styled(format!("{name}{lead}"), Style::default().fg(color).add_modifier(Modifier::BOLD))],
-                vec![Span::raw(" "), Span::styled(model, theme::muted())],
-                vec![Span::raw(" "), state],
-                vec![],
-            ];
-            cards.push(crate::sprites::lines(&sprite, color, side));
+        let a = self.roster.iter().find(|a| a.name == name);
+        let color = self.colors.get(name).copied().unwrap_or(theme::pal().accent);
+        let sprite = a.map(crate::agents::sprite).unwrap_or_else(|| crate::sprites::default_for(name));
+        let model = self.thread.models.get(name).filter(|m| !m.is_empty()).map(|m| crate::agents::model_name(m)).or_else(|| a.map(crate::agents::model_of)).unwrap_or_default();
+        let harness = a.map(|a| title_case(&a.harness)).unwrap_or_default();
+        let tech = [harness, model].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+        let effort = crate::engine::roster::get(name).and_then(|r| r.effort).or_else(|| a.filter(|a| a.harness == "claude").map(|_| crate::agents::effort_name())).filter(|e| e != "default").map(|e| effort_label(&e)).unwrap_or_default();
+        let frame = WAVE[tick % WAVE.len()];
+        let status = if self.thread.asks.iter().any(|q| q.agent == name) {
+            vec![Span::styled("  ● ", Style::default().fg(theme::pal().warn)), Span::styled("waits on you", theme::muted())]
+        } else if self.thread.busy.contains(name) {
+            vec![Span::styled(format!("  {frame} "), Style::default().fg(color)), Span::styled("working…", theme::muted())]
+        } else if self.monitors.watches.iter().any(|w| w.agent == name) {
+            vec![Span::styled(format!("  {frame} "), Style::default().fg(color)), Span::styled("monitoring…", theme::muted())]
+        } else {
+            Vec::new()
+        };
+        // the status right of the effort: `  ░▒▓ monitoring…`, 17 columns
+        let status_w = if status.is_empty() { 0 } else { 17 };
+        let text_w = [name.chars().count(), tech.chars().count(), effort.chars().count() + status_w].into_iter().max().unwrap_or(0);
+        let mut last = vec![Span::styled(format!("  {effort}"), theme::muted())];
+        last.extend(status);
+        let side = vec![
+            vec![],
+            vec![Span::styled(format!("  {name}"), Style::default().fg(color).add_modifier(Modifier::BOLD))],
+            vec![Span::styled(format!("  {tech}"), theme::muted())],
+            last,
+        ];
+        (sprite, color, side, (crate::sprites::W + 2 + text_w + 4) as u16)
+    }
+
+    /// Header (hell's): 1 rounded frame over the agents box (the cards) and the tokens box (COST:
+    /// the pane's area, 0 width: 0 tokens box), straight lines between them.
+    fn draw_header(&self, f: &mut Frame, area: Rect, cost: Rect) {
+        if area.height == 0 {
+            return;
         }
-        // cards side by side, as many as fit
-        let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new(); crate::sprites::H];
-        let mut used = 0usize;
-        for c in cards {
-            let w = c.iter().map(|l| l.width()).max().unwrap_or(0) + 3;
-            if used + w > usize::from(width) && used > 0 {
+        let cards: Vec<Card> = self.members.iter().map(|n| self.card(n)).collect();
+        let token_left = cost.x.saturating_sub(2);
+        let fit = if cost.width > 0 { token_left + 1 } else { area.right() }.saturating_sub(area.x);
+        let outer = if cost.width == 0 { area } else { Rect { width: cards_w(&cards).min(fit), ..area } };
+        let block = Block::new().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(theme::line());
+        f.render_widget(block, area);
+        if cost.width > 0 {
+            let buf = f.buffer_mut();
+            for x in [outer.right().saturating_sub(1), token_left] {
+                if x <= area.x || x + 1 >= area.right() {
+                    continue;
+                }
+                for y in area.y..area.bottom() {
+                    let sym = if y == area.y { "┬" } else if y + 1 == area.bottom() { "┴" } else { "│" };
+                    buf[(x, y)].set_symbol(sym).set_style(theme::line());
+                }
+            }
+        }
+        let rows = Rect { y: area.y + 1, height: area.height.saturating_sub(2), ..area };
+        let mut x = area.x + 2;
+        for (sprite, color, side, w) in cards {
+            if x + w - 1 > outer.right() {
                 break;
             }
-            for (r, l) in rows.iter_mut().zip(c) {
-                let lw = l.width();
-                r.extend(l.spans);
-                r.push(Span::raw(" ".repeat(w - lw)));
-            }
-            used += w;
+            f.render_widget(Paragraph::new(crate::sprites::lines(&sprite, color, side)), Rect { x, width: w - 4, ..rows });
+            x += w;
         }
-        rows.into_iter().map(Line::from).collect()
+    }
+
+    /// Who gets a message now: the @named agents of the input, else the lead.
+    fn recipients(&self) -> Vec<String> {
+        let text = self.input.text();
+        let named = crate::engine::host::mentions(&text, &self.members);
+        if named.is_empty() { self.members.first().cloned().into_iter().collect() } else { named }
     }
 
     fn draw(&mut self, f: &mut Frame) {
@@ -1012,54 +1084,47 @@ impl View {
         if self.nav_on {
             self.draw_nav(f, Rect { height: crate::nav::CARD_H, ..full });
         }
-        let head_h = if self.members.is_empty() { 0 } else { crate::sprites::H as u16 };
-        let show_cost = area.width >= COST_MIN_SCREEN;
-        let in_w = area.width.saturating_sub(if show_cost { COST_W + 1 } else { 0 }).saturating_sub(4).max(10);
-        let in_h = (self.input.rows_for(in_w) as u16).clamp(1, INPUT_ROWS) + 2;
-        let bottom_h = if show_cost { in_h.max(6) } else { in_h };
-        let mon_h = self.monitors.rows(area.width, area.height / 3);
-        // title row, header, stream, monitors, prompt, footer
-        let title = Rect { height: 1, ..area };
-        let head = Rect { y: area.y + 1, height: head_h, ..area };
+        // bottom up: footer, the bubble's hint row, the input bubble (its top border: the header's
+        // bottom line), the header (agents + tokens box), the title row, monitors, the stream
         let foot = Rect { y: area.bottom().saturating_sub(1), height: 1, ..area };
-        let bottom = Rect { y: foot.y.saturating_sub(bottom_h), height: bottom_h, ..area };
-        let mon = Rect { y: bottom.y.saturating_sub(mon_h), height: mon_h, ..area };
-        let st = Rect { x: area.x + 1, y: head.bottom() + u16::from(head_h > 0), width: area.width.saturating_sub(2), height: mon.y.saturating_sub(head.bottom() + u16::from(head_h > 0)) };
+        let hint = Rect { y: foot.y.saturating_sub(1), ..foot };
+        let in_w = input_width(area.width).max(1);
+        let n = (self.input.rows_for(in_w) as u16).clamp(1, INPUT_ROWS);
+        let bubble_bottom = hint.y.saturating_sub(1);
+        let in_top = bubble_bottom.saturating_sub(n);
+        let head_rows = header_rows(self.members.len());
+        let head_h = if area.height >= MIN_HEADER_SCREEN && !self.members.is_empty() { head_rows + 1 } else { 0 };
+        // the bubble's top border: the header's bottom line (shared), else a row of its own
+        let bubble_top = in_top.saturating_sub(1);
+        let header = Rect { y: (bubble_top + 1).saturating_sub(head_h), height: head_h, ..area };
+        let title = Rect { y: if head_h > 0 { header.y } else { bubble_top }.saturating_sub(1), height: 1, ..area };
+        let mon_h = self.monitors.rows(area.width, area.height / 3);
+        let mon = Rect { y: title.y.saturating_sub(mon_h), height: mon_h, ..area };
+        let st = Rect { x: area.x, y: area.y, width: area.width, height: mon.y.saturating_sub(area.y) };
         self.stream_rect = st;
-
-        // title: thread name, where, position
-        let mut spans = vec![Span::styled(format!(" {} ", crate::nav::fit(&self.title, usize::from(area.width / 2))), theme::accent_bold())];
-        spans.push(Span::styled(format!(" {}", self.id.chars().take(12).collect::<String>()), theme::line()));
-        if self.back > 0 {
-            spans.push(Span::styled(format!("  ↑{} · esc: live", self.back), theme::pill()));
-        }
-        if let Some((new, old)) = &self.replace {
-            spans.push(Span::styled(format!("  on send: {new} replaces {old} "), theme::pill()));
-        }
-        f.render_widget(Paragraph::new(Line::from(spans)), title);
-        if head_h > 0 {
-            f.render_widget(Paragraph::new(self.header(area.width)), Rect { x: area.x + 1, width: area.width.saturating_sub(1), ..head });
-        }
 
         // stream
         if self.dirty || self.width != st.width {
             self.width = st.width;
-            self.drawn = stream::draw(&self.thread, st.width, &self.colors, &self.harness_of, &self.open, self.all_runs, self.ask_at, &self.picks, &self.answers.iter().map(|a| a.0.clone()).collect::<Vec<_>>());
+            let fold = stream::Fold { runs: &self.open, all_runs: self.all_runs, thoughts: self.thoughts, open_thoughts: &self.open_thoughts, all_thoughts: self.all_thoughts };
+            self.drawn = stream::draw(&self.thread, self.look, st.width, &self.colors, &self.harness_of, &fold, self.ask_at, &self.picks, &self.answers.iter().map(|a| a.0.clone()).collect::<Vec<_>>());
             self.dirty = false;
         }
         // sends the log does not show yet, a queued replace: below the stream
         let mut extra: Vec<Line<'static>> = Vec::new();
+        let right = self.look == stream::Look::Bubbles;
         for (text, at, err) in &self.pending {
             extra.push(Line::raw(""));
             for l in text.lines().take(6) {
-                extra.push(Line::from(vec![Span::styled("▌ ", theme::muted()), Span::styled(l.to_string(), theme::muted())]));
+                let l = if right { Line::styled(format!("{l} ▐"), theme::muted()).right_aligned() } else { Line::from(vec![Span::styled("▌ ", theme::muted()), Span::styled(l.to_string(), theme::muted())]) };
+                extra.push(l);
             }
             let status = match err {
-                Some(e) => Span::styled(format!("  send failed: {e}"), Style::default().fg(theme::DANGER)),
-                None if at.elapsed() > Duration::from_secs(90) => Span::styled("  unconfirmed · check the host log before a retry", theme::muted()),
-                None => Span::styled(format!("  sending… {}s", at.elapsed().as_secs()), theme::muted()),
+                Some(e) => Line::styled(format!("send failed: {e}  "), Style::default().fg(theme::pal().danger)),
+                None if at.elapsed() > Duration::from_secs(90) => Line::styled("unconfirmed · check the host log before a retry  ", theme::muted()),
+                None => Line::styled(format!("sending… {}s  ", at.elapsed().as_secs()), theme::muted()),
             };
-            extra.push(Line::from(status));
+            extra.push(if right { status.right_aligned() } else { status });
         }
         if let Some((new, old, _)) = &self.queued {
             extra.push(Line::raw(""));
@@ -1071,15 +1136,27 @@ impl View {
         let end = total - self.back;
         let start = end.saturating_sub(h);
         let mut lines: Vec<Line> = self.drawn.rows[start..end].iter().map(|r| r.line.clone()).collect();
+        let mut cut = 0;
         if self.back == 0 && !extra.is_empty() {
             lines.extend(extra);
-            let cut = lines.len().saturating_sub(h);
+            cut = lines.len().saturating_sub(h);
             lines.drain(..cut);
         }
-        // bottom-aligned: a short thread sits on the prompt
+        // bottom-aligned: a short thread sits on the title row
         let pad = h.saturating_sub(lines.len()) as u16;
         let shown = Rect { y: st.y + pad, height: st.height - pad, ..st };
         f.render_widget(Paragraph::new(lines), shown);
+        // the working wave of the boxes in view
+        let tick = self.tick();
+        for (row, col, color) in &self.drawn.waves {
+            if *row < start + cut || *row >= end {
+                continue;
+            }
+            let y = shown.y + (row - start - cut) as u16;
+            if y < shown.bottom() && st.x + col + 3 <= st.right() {
+                f.render_widget(Paragraph::new(Span::styled(WAVE[tick % WAVE.len()], Style::default().fg(*color))), Rect { x: st.x + col, y, width: 3, height: 1 });
+            }
+        }
         // selection: reverse video; hover: the clickable row under the mouse
         let buf = f.buffer_mut();
         if let Some(((r0, c0), (r1, c1))) = self.sel {
@@ -1092,7 +1169,7 @@ impl View {
                 let (a, b) = (if r == r0 { c0 } else { 0 }, if r == r1 { c1 } else { st.width.saturating_sub(1) });
                 for x in a..=b.min(st.width.saturating_sub(1)) {
                     let cell = &mut buf[(st.x + x, y)];
-                    cell.set_style(Style::default().bg(theme::ACCENT).fg(theme::ON_ACCENT));
+                    cell.set_style(Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent));
                 }
             }
         }
@@ -1106,35 +1183,53 @@ impl View {
             if let Some((a, b)) = span {
                 theme::hover(buf, Rect { x: st.x + a, y: at.y, width: b - a, height: 1 });
             } else if hit {
-                theme::hover(buf, Rect { x: st.x, y: at.y, width: st.width, height: 1 });
+                // bubbles: the hover stays inside the box's borders
+                let (x0, x1) = if self.look == stream::Look::Bubbles { (st.x + 2, st.right().saturating_sub(2)) } else { (st.x, st.right()) };
+                theme::hover(buf, Rect { x: x0, y: at.y, width: x1.saturating_sub(x0), height: 1 });
+            }
+        }
+        // scrolled back: the stream's last row a fold line
+        if self.back > 0 && st.height > 1 {
+            let y = st.bottom() - 1;
+            for x in st.x..st.right() {
+                buf[(x, y)].reset();
+                buf[(x, y)].set_symbol("┄").set_style(theme::line());
             }
         }
         if total == 0 {
             let note = if self.members.is_empty() { "0 agents on this thread · @name brings one in" } else { "waiting for the first event…" };
-            f.render_widget(Paragraph::new(Line::styled(note, theme::muted())), Rect { y: st.bottom().saturating_sub(1), height: 1, ..st });
+            f.render_widget(Paragraph::new(Line::styled(format!("  {note}"), theme::muted())), Rect { y: st.bottom().saturating_sub(1), height: 1, ..st });
         }
 
         if mon_h > 0 {
             self.monitors.render(f, mon, self.tick());
         }
 
-        // prompt box (+ cost box right of it)
-        let pw = if show_cost { area.width - COST_W - 1 } else { area.width };
-        let pbox = Rect { y: bottom.bottom() - in_h, height: in_h, width: pw, ..bottom };
-        let busy = !self.thread.busy.is_empty();
-        let label = if !self.thread.asks.is_empty() && self.input.is_empty() {
-            " ↑↓ · 1-9: pick · enter: answer ".to_string()
-        } else if busy {
-            format!(" {} working · esc: interrupt ", WAVE[self.tick() % WAVE.len()])
+        // title row: the thread title, the stream's position, the pills
+        let note = if self.back > 0 { format!("↑{} · esc: live ", self.back) } else { String::new() };
+        let room = usize::from(title.width.saturating_sub(4)).saturating_sub(note.chars().count() + 1);
+        let mut spans = vec![Span::styled(format!("{} ", crate::nav::fit(&self.title, room)), theme::accent_bold())];
+        if !note.is_empty() {
+            spans.push(Span::styled(note, theme::muted()));
+        }
+        if let Some((new, old)) = &self.replace {
+            spans.push(Span::styled(format!(" on send: {new} replaces {old} "), theme::pill()));
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), Rect { x: title.x + 2, width: title.width.saturating_sub(2), ..title });
+
+        // header: agents box + tokens box (the cost pane inside)
+        let show_cost = head_h > 0 && area.width >= MIN_COST_WIDTH;
+        let cost = if show_cost {
+            let cards: Vec<Card> = self.members.iter().map(|n| self.card(n)).collect();
+            let (all, first) = (cards_w(&cards), cards_w(&cards[..cards.len().min(1)]));
+            let room = (header.width + 1).saturating_sub(all);
+            let min = MIN_COST_BOX.min((header.width + 1).saturating_sub(first)).max(SQUEEZED_COST_BOX);
+            let w = room.clamp(min, MAX_COST_BOX).min(header.width);
+            Rect { x: header.right() - w + 2, y: header.y + 1, width: w.saturating_sub(4), height: head_h.saturating_sub(2) }
         } else {
-            String::new()
+            Rect { width: 0, ..header }
         };
-        let block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(theme::line()).title_bottom(Line::styled(label, theme::accent()).right_aligned());
-        f.render_widget(block, pbox);
-        f.render_widget(Paragraph::new(Span::styled("›", theme::accent())), Rect { x: pbox.x + 1, y: pbox.y + 1, width: 1, height: 1 });
-        self.input_rect = Rect { x: pbox.x + 2, y: pbox.y + 1, width: pbox.width.saturating_sub(4), height: in_h - 2 };
-        let menu_open = self.menu.is_some();
-        self.input.render(f, self.input_rect, !menu_open);
+        self.draw_header(f, header, cost);
         if show_cost {
             if self.cost_at.elapsed() > Duration::from_secs(3) {
                 self.cost_at = Instant::now();
@@ -1143,16 +1238,70 @@ impl View {
                     let _ = tx.send(Msg::Cost(Box::new(crate::cost::snapshot(&id))));
                 });
             }
-            let cbox = Rect { x: area.right() - COST_W, width: COST_W, ..bottom };
             if let Some(s) = &self.cost {
-                crate::cost::draw_in(f, cbox, s, self.cost_at.elapsed());
+                crate::cost::draw_in(f, cost, s, self.cost_at.elapsed());
             }
         }
 
-        // footer
+        // the input bubble: rounded, its top border the header's bottom line (├ ┴ ┤)
+        let bubble = Rect { y: bubble_top, height: bubble_bottom + 1 - bubble_top, ..area };
+        let edge = Style::default().fg(theme::pal().hover);
+        {
+            let buf = f.buffer_mut();
+            let (left, right) = (bubble.x, bubble.right().saturating_sub(1));
+            for x in left..=right {
+                let top = buf[(x, bubble_top)].symbol().to_string();
+                let sym = match top.as_str() {
+                    _ if x == left => if head_h > 0 { "├" } else { "╭" },
+                    _ if x == right => if head_h > 0 { "┤" } else { "╮" },
+                    "╰" | "╯" | "┴" if head_h > 0 => "┴",
+                    _ => "─",
+                };
+                buf[(x, bubble_top)].reset();
+                buf[(x, bubble_top)].set_symbol(sym).set_style(edge);
+                buf[(x, bubble_bottom)].reset();
+                buf[(x, bubble_bottom)].set_symbol(if x == left { "╰" } else if x == right { "╯" } else { "─" }).set_style(edge);
+            }
+            for y in in_top..bubble_bottom {
+                buf[(left, y)].set_symbol("│").set_style(edge);
+                buf[(right, y)].set_symbol("│").set_style(edge);
+            }
+        }
+        // asks: what the keys do now, in the bubble's bottom border
+        if !self.thread.asks.is_empty() && self.input.is_empty() {
+            let label = " ↑↓ · 1-9: pick · enter: answer ";
+            let lw = label.chars().count() as u16;
+            if bubble.width > lw + 6 {
+                f.render_widget(Paragraph::new(Span::styled(label, theme::accent())), Rect { x: bubble.right() - 3 - lw, y: bubble_bottom, width: lw, height: 1 });
+            }
+        }
+        if self.input.rows_for(in_w) <= usize::from(n) {
+            f.render_widget(Paragraph::new(Span::styled("›", theme::accent())), Rect { x: area.x + 2, y: in_top, width: 1, height: 1 });
+        }
+        self.input_rect = Rect { x: area.x + 4, y: in_top, width: in_w, height: n };
+        let menu_open = self.menu.is_some();
+        self.input.render(f, self.input_rect, !menu_open);
+
+        // hint row: who gets the message, the send keys
+        let mut to = vec![Span::styled("  → ", theme::muted())];
+        for (i, name) in self.recipients().into_iter().enumerate() {
+            if i > 0 {
+                to.push(Span::styled(", ", theme::muted()));
+            }
+            let c = self.colors.get(&name).copied().unwrap_or(theme::pal().accent);
+            to.push(Span::styled(name.to_lowercase(), Style::default().fg(c)));
+        }
+        if self.members.is_empty() {
+            to.clear();
+        }
+        f.render_widget(Paragraph::new(Line::from(to)), hint);
+        f.render_widget(Paragraph::new(Line::styled("⌘/ctrl+⏎ send · ↑↓ history ", theme::muted())).right_aligned(), Rect { x: hint.x + hint.width / 2, width: hint.width - hint.width / 2, ..hint });
+
+        // footer: keys or toast right
         let right = match &self.toast {
             Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Span::styled(format!("{m} "), theme::accent()),
-            _ => Span::styled("esc: interrupt · esc esc: back · ctrl+o: tool calls · F2: menu ", theme::muted()),
+            _ if self.nav_on => Span::styled("←→: pick thread · enter: open · tab / esc: close ", theme::accent()),
+            _ => Span::styled(format!("tab: threads · esc: interrupt · esc esc: codehead · {}: menu ", crate::config::menu_key().label), theme::muted()),
         };
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), foot);
 
@@ -1167,6 +1316,37 @@ impl View {
             m.render(f, area);
         }
     }
+}
+
+/// Header card: sprite, color, the lines right of the sprite, width.
+type Card = (crate::sprites::Sprite, Color, Vec<Vec<Span<'static>>>, u16);
+
+/// Agents box of CARDS: left border + 1 space, the cards, 2 spaces + right border (the last card's
+/// 4 gap columns hold 3 of those). 0 cards: 0.
+fn cards_w(cards: &[Card]) -> u16 {
+    if cards.is_empty() { 0 } else { cards.iter().map(|c| c.3).sum::<u16>() + 1 }
+}
+
+/// Header rows (inside its frame + its top border) for N agents.
+fn header_rows(n: usize) -> u16 {
+    let n = n.max(1) as u16;
+    (3 + n + u16::from(n > 1)).clamp(HEADER_H, MAX_HEADER_H)
+}
+
+/// Width of the input in its bubble: `│ › ` left, ` │` right.
+fn input_width(cols: u16) -> u16 {
+    cols.saturating_sub(6)
+}
+
+/// WORD with its 1st letter upper case: `claude` → `Claude`.
+fn title_case(word: &str) -> String {
+    let mut c = word.chars();
+    c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
+}
+
+/// Effort level as the header shows it: `medium` → `Medium`, `xhigh` → `XHigh`.
+fn effort_label(level: &str) -> String {
+    if level == "xhigh" { "XHigh".into() } else { title_case(level) }
 }
 
 /// The VS Code CLI: $CODEHEAD_VSCODE, else code / codium / code-insiders on PATH, else the

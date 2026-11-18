@@ -98,7 +98,7 @@ pub fn last_line(text: &str, language: &str) -> Vec<(Color, char)> {
                     else if !c.is_control() { out.push((Color::Rgb(fg.r, fg.g, fg.b), c)); }
                 }
             },
-            Err(_) => out.extend(line.chars().filter(|c| !c.is_control()).map(|c| (crate::theme::TEXT, c))),
+            Err(_) => out.extend(line.chars().filter(|c| !c.is_control()).map(|c| (crate::theme::pal().text, c))),
         }
     }
     out

@@ -96,7 +96,7 @@ pub fn frame(f: &mut Frame, r: Rect, label: &str, note: &str, up: bool, down: bo
         .border_type(BorderType::Rounded)
         .border_style(border)
         .title(Span::styled(format!(" {label} "), if active { theme::accent_bold() } else { theme::muted() }))
-        .style(Style::default().bg(theme::ON_ACCENT).fg(theme::TEXT));
+        .style(Style::default().bg(theme::pal().on_accent).fg(theme::pal().text));
     if !note.is_empty() {
         block = block.title_bottom(Line::styled(format!(" {note} "), theme::muted()).right_aligned());
     }
@@ -104,7 +104,7 @@ pub fn frame(f: &mut Frame, r: Rect, label: &str, note: &str, up: bool, down: bo
     f.render_widget(block, r);
     if inner.height > 0 && r.width > 0 {
         let x = r.right() - 1;
-        let st = theme::accent_bold().bg(theme::ON_ACCENT);
+        let st = theme::accent_bold().bg(theme::pal().on_accent);
         let buf = f.buffer_mut();
         if up && down && inner.height == 1 {
             buf[(x, inner.y)].set_symbol("↕").set_style(st);

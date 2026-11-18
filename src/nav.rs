@@ -223,7 +223,7 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
     Paragraph::new(lines).render(body, buf);
     if c.unread {
         let dot = ratatui::layout::Rect { x: r.right().saturating_sub(3), y: r.y, width: 1, height: 1 };
-        Paragraph::new(Span::styled("●", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))).render(dot, buf);
+        Paragraph::new(Span::styled("●", Style::default().fg(theme::pal().accent).add_modifier(Modifier::BOLD))).render(dot, buf);
     }
 }
 

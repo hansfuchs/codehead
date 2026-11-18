@@ -286,6 +286,13 @@ impl Parser {
                                 out.push(Out::Event(Kind::Text { text: t.into() }));
                             }
                         }
+                        // a thought with a summary (most thinking blocks: empty + a signature)
+                        Some("thinking") => {
+                            let t = b["thinking"].as_str().unwrap_or_default().trim();
+                            if !t.is_empty() {
+                                out.push(Out::Event(Kind::Thought { text: t.into() }));
+                            }
+                        }
                         Some("tool_use") => out.push(Out::Event(Kind::Tool {
                             id: b["id"].as_str().unwrap_or_default().into(),
                             name: b["name"].as_str().unwrap_or_default().into(),
@@ -408,6 +415,10 @@ mod tests {
         let k = ev(p.line(&a));
         assert_eq!(k.len(), 2);
         assert_eq!(k[0], Kind::Text { text: "hi".into() });
+        // a thinking block with a summary: 1 thought, trimmed
+        let a = json!({"type": "assistant", "parent_tool_use_id": null, "message": {"content": [
+            {"type": "thinking", "thinking": "  ", "signature": "x"}, {"type": "thinking", "thinking": "CI=true missing, fixing it.\n\n", "signature": "y"}]}});
+        assert_eq!(ev(p.line(&a)), vec![Kind::Thought { text: "CI=true missing, fixing it.".into() }]);
         let sub = json!({"type": "assistant", "parent_tool_use_id": "t9", "message": {"content": [{"type": "text", "text": "sub agent"}]}});
         assert!(ev(p.line(&sub)).is_empty());
         let r = json!({"type": "user", "parent_tool_use_id": null, "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "a\nb"}]}]}});

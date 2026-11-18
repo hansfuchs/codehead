@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::engine::store::{Event, Kind};
 use crate::render::{self, Row};
 use crate::theme;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Debug)]
 pub struct Call {
@@ -25,9 +26,14 @@ pub struct Call {
 pub enum Item {
     /// FROM `owner` or an agent, to agents.
     Prompt { from: String, to: Vec<String>, text: String, ts: u64 },
-    Text { agent: String, text: String, ts: u64 },
-    Run { agent: String, key: usize, calls: Vec<Call>, start: u64, end: u64 },
+    /// Agent text; THOUGHTS: the agent's thoughts right before it (KEY: their fold, 0: none).
+    Text { agent: String, text: String, ts: u64, thoughts: Vec<String>, key: usize },
+    /// Tool calls of an agent between 2 of its messages; THOUGHTS: (calls before it, text).
+    Run { agent: String, key: usize, calls: Vec<Call>, start: u64, end: u64, thoughts: Vec<(usize, String)> },
     Note { agent: String, text: String, color: Color },
+    /// An answered ask: what AGENT asked (QUESTION), the owner's ANSWER (allow false: declined /
+    /// denied). ASKED, TS: the times of the ask and of the answer.
+    Settled { agent: String, question: String, answer: String, allow: bool, permission: bool, asked: u64, ts: u64 },
 }
 
 /// An open question or permission request.
@@ -37,6 +43,8 @@ pub struct Ask {
     pub agent: String,
     pub tool: String,
     pub input: Value,
+    /// When it came.
+    pub ts: u64,
 }
 
 impl Ask {
@@ -92,6 +100,10 @@ pub struct Thread {
     /// Open run index per agent (in items).
     open_run: HashMap<String, usize>,
     runs: usize,
+    /// Per agent: thoughts not placed yet (the next tool call or message takes them).
+    pending: HashMap<String, Vec<String>>,
+    /// Fold keys of the messages with thoughts.
+    thought_keys: usize,
 }
 
 impl Thread {
@@ -104,22 +116,25 @@ impl Thread {
             }
             Kind::Text { text } => {
                 self.open_run.remove(&agent);
-                self.items.push(Item::Text { agent, text: text.clone(), ts: e.ts });
+                self.text(agent, text.clone(), e.ts);
             }
+            Kind::Thought { text } => self.pending.entry(agent).or_default().push(text.clone()),
             Kind::Tool { id, name, input } => {
                 let call = Call { id: id.clone(), name: name.clone(), input: input.clone(), output: None };
-                match self.open_run.get(&agent).copied() {
-                    Some(i) => {
-                        if let Some(Item::Run { calls, end, .. }) = self.items.get_mut(i) {
-                            calls.push(call);
-                            *end = e.ts;
-                        }
-                    }
+                let before = self.pending.remove(&agent).unwrap_or_default();
+                let i = match self.open_run.get(&agent).copied() {
+                    Some(i) => i,
                     None => {
                         self.runs += 1;
                         self.open_run.insert(agent.clone(), self.items.len());
-                        self.items.push(Item::Run { agent, key: self.runs, calls: vec![call], start: e.ts, end: e.ts });
+                        self.items.push(Item::Run { agent, key: self.runs, calls: Vec::new(), start: e.ts, end: e.ts, thoughts: Vec::new() });
+                        self.items.len() - 1
                     }
+                };
+                if let Some(Item::Run { calls, end, thoughts, .. }) = self.items.get_mut(i) {
+                    thoughts.extend(before.into_iter().map(|t| (calls.len(), t)));
+                    calls.push(call);
+                    *end = e.ts;
                 }
             }
             Kind::ToolResult { id, ok, output } => {
@@ -131,28 +146,43 @@ impl Thread {
                     *end = e.ts;
                 }
             }
-            Kind::Ask { id, tool, input } => self.asks.push(Ask { id: id.clone(), agent, tool: tool.clone(), input: input.clone() }),
+            Kind::Ask { id, tool, input } => self.asks.push(Ask { id: id.clone(), agent, tool: tool.clone(), input: input.clone(), ts: e.ts }),
             Kind::Answer { id, allow, label } => {
                 if let Some(i) = self.asks.iter().position(|a| &a.id == id) {
                     let a = self.asks.remove(i);
-                    let text = match (a.questions().first(), allow) {
-                        (Some((q, ..)), _) => format!("asked: {q} · answered: {label}"),
-                        (None, true) => format!("{} · allowed", a.summary()),
-                        (None, false) => format!("{} · denied", a.summary()),
+                    let qs = a.questions();
+                    let question = if qs.is_empty() {
+                        let mut q = a.summary();
+                        if let Some(cmd) = a.input["command"].as_str() {
+                            q.push_str(&format!("\n$ {cmd}"));
+                        }
+                        q
+                    } else {
+                        qs.iter().map(|(q, ..)| q.as_str()).collect::<Vec<_>>().join("\n\n")
                     };
-                    self.items.push(Item::Note { agent, text, color: if *allow { theme::OK } else { theme::WARN } });
+                    self.items.push(Item::Settled { agent, question, answer: label.clone(), allow: *allow, permission: qs.is_empty(), asked: a.ts, ts: e.ts });
                 }
             }
             Kind::TurnStart => {
                 self.busy.insert(agent);
             }
             Kind::TurnEnd { error, .. } => {
+                // thoughts at the turn's end: into its open run, else a message of their own
+                if let Some(rest) = self.pending.remove(&agent) {
+                    match self.open_run.get(&agent).and_then(|&i| self.items.get_mut(i)) {
+                        Some(Item::Run { calls, thoughts, .. }) => thoughts.extend(rest.into_iter().map(|t| (calls.len(), t))),
+                        _ => {
+                            self.pending.insert(agent.clone(), rest);
+                            self.text(agent.clone(), String::new(), e.ts);
+                        }
+                    }
+                }
                 self.open_run.remove(&agent);
                 self.busy.remove(&agent);
                 // a turn ends: its open asks are moot
                 self.asks.retain(|a| a.agent != agent);
                 if let Some(err) = error.as_deref().filter(|e| *e != "session ended") {
-                    self.items.push(Item::Note { agent, text: err.to_string(), color: theme::DANGER });
+                    self.items.push(Item::Note { agent, text: err.to_string(), color: theme::pal().danger });
                 }
             }
             Kind::Session { model, .. } => {
@@ -162,19 +192,31 @@ impl Thread {
                 self.status.insert(agent.clone(), (state.clone(), note.clone()));
                 let text = if note.is_empty() { state.clone() } else { format!("{state} · {note}") };
                 let color = match state.as_str() {
-                    "blocked" => theme::WARN,
-                    "done" => theme::OK,
-                    _ => theme::MUTED,
+                    "blocked" => theme::pal().warn,
+                    "done" => theme::pal().ok,
+                    _ => theme::pal().muted,
                 };
                 self.items.push(Item::Note { agent, text, color });
             }
-            Kind::Join => self.items.push(Item::Note { agent, text: "joined the thread".into(), color: theme::MUTED }),
+            Kind::Join => self.items.push(Item::Note { agent, text: "joined the thread".into(), color: theme::pal().muted }),
             Kind::Leave => {
                 self.busy.remove(&agent);
-                self.items.push(Item::Note { agent, text: "left the thread".into(), color: theme::MUTED });
+                self.items.push(Item::Note { agent, text: "left the thread".into(), color: theme::pal().muted });
             }
-            Kind::Error { message } => self.items.push(Item::Note { agent, text: message.clone(), color: theme::DANGER }),
+            Kind::Error { message } => self.items.push(Item::Note { agent, text: message.clone(), color: theme::pal().danger }),
         }
+    }
+
+    /// A message of AGENT: the thoughts before it go in.
+    fn text(&mut self, agent: String, text: String, ts: u64) {
+        let thoughts = self.pending.remove(&agent).unwrap_or_default();
+        let key = if thoughts.is_empty() {
+            0
+        } else {
+            self.thought_keys += 1;
+            self.thought_keys
+        };
+        self.items.push(Item::Text { agent, text, ts, thoughts, key });
     }
 
     /// The owner's messages, oldest first (compose history).
@@ -206,8 +248,101 @@ impl Thread {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Hit {
     Run(usize),
+    /// The thoughts above message KEY.
+    Thought(usize),
     /// Choice I of the open ask.
     Choice(usize),
+}
+
+/// How the stream shows the agents' thoughts (setting `thoughts`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Thoughts {
+    /// 0 rows.
+    #[default]
+    Hidden,
+    /// A folded row each (a click / ctrl+t opens it); in a run: a count, open with the run.
+    Folded,
+    /// Their full text, always.
+    Open,
+}
+
+impl Thoughts {
+    pub fn parse(s: &str) -> Option<Thoughts> {
+        match s.trim() {
+            "hidden" => Some(Thoughts::Hidden),
+            "folded" => Some(Thoughts::Folded),
+            "open" => Some(Thoughts::Open),
+            _ => None,
+        }
+    }
+}
+
+/// What is open in the stream: runs (ALL_RUNS: every run), thoughts (ALL_THOUGHTS: every one).
+#[derive(Clone, Copy)]
+pub struct Fold<'a> {
+    pub runs: &'a HashSet<usize>,
+    pub all_runs: bool,
+    pub thoughts: Thoughts,
+    pub open_thoughts: &'a HashSet<usize>,
+    pub all_thoughts: bool,
+}
+
+impl Fold<'_> {
+    fn run(&self, key: usize) -> bool {
+        self.all_runs || self.runs.contains(&key)
+    }
+
+    /// The thoughts above message KEY: open.
+    fn thought(&self, key: usize) -> bool {
+        self.thoughts == Thoughts::Open || self.all_thoughts || self.open_thoughts.contains(&key)
+    }
+}
+
+/// Rows of the thoughts above a message (fold KEY), BAR before each: `▸ ∴ 1st line…` folded,
+/// `▾ ∴ text` open (each thought wrapped). Clickable.
+fn thought_rows(d: &mut Drawn, thoughts: &[String], key: usize, fold: &Fold, w: usize, bar: &[Span<'static>]) {
+    if thoughts.is_empty() || fold.thoughts == Thoughts::Hidden {
+        return;
+    }
+    let st = theme::muted().add_modifier(Modifier::ITALIC);
+    let open = fold.thought(key);
+    let at = d.rows.len();
+    if open {
+        for (i, t) in thoughts.iter().enumerate() {
+            let mark = if i == 0 && fold.thoughts != Thoughts::Open { "▾ ∴ " } else { "  ∴ " };
+            let first = [bar.to_vec(), vec![Span::styled(mark, theme::muted())]].concat();
+            let mut rows = render::plain(t, w, st, &first);
+            for r in rows.iter_mut().skip(1) {
+                r.line.spans[bar.len()] = Span::raw("    ");
+            }
+            d.rows.extend(rows);
+        }
+    } else {
+        let first = thoughts[0].lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
+        let more = if thoughts.len() > 1 { format!(" · {} thoughts", thoughts.len()) } else { String::new() };
+        let room = w.saturating_sub(bar.iter().map(|s| s.content.width()).sum::<usize>() + 4 + more.width());
+        let cut: String = if first.width() > room { first.chars().take(room.saturating_sub(1)).collect::<String>() + "…" } else { first.to_string() };
+        d.rows.push(Row::plain(Line::from([bar.to_vec(), vec![Span::styled("▸ ∴ ", theme::muted()), Span::styled(cut, st), Span::styled(more, theme::muted())]].concat())));
+    }
+    if fold.thoughts != Thoughts::Open {
+        for i in at..d.rows.len() {
+            d.hits.insert(i, Hit::Thought(key));
+        }
+    }
+}
+
+/// The thoughts of a run (open: interleaved with its calls; Open setting: also under a folded run).
+fn run_thought_rows(d: &mut Drawn, thoughts: &[(usize, String)], before: usize, w: usize, bar: &[Span<'static>]) {
+    let st = theme::muted().add_modifier(Modifier::ITALIC);
+    for (_, t) in thoughts.iter().filter(|(n, _)| *n == before) {
+        let first = [bar.to_vec(), vec![Span::styled("∴ ", theme::muted())]].concat();
+        let rest = [bar.to_vec(), vec![Span::raw("  ")]].concat();
+        let mut rows = render::plain(t, w, st, &first);
+        for r in rows.iter_mut().skip(1) {
+            r.line.spans.splice(..bar.len() + 1, rest.clone());
+        }
+        d.rows.extend(rows);
+    }
 }
 
 /// The drawn stream: rows, the clickable ones.
@@ -215,13 +350,37 @@ pub enum Hit {
 pub struct Drawn {
     pub rows: Vec<Row>,
     pub hits: HashMap<usize, Hit>,
+    /// Where the view draws the working wave (3 cols): row, col, color (bubbles: the box of an
+    /// agent at work).
+    pub waves: Vec<(usize, u16, Color)>,
+}
+
+/// How the stream draws messages (setting `messages`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Look {
+    /// hell's: an agent's turn in a rounded box (name, time in its top border), the owner's
+    /// messages in a bubble on the right.
+    #[default]
+    Bubbles,
+    /// A name badge, then the text behind a bar in the agent's color.
+    Lines,
+}
+
+impl Look {
+    pub fn parse(s: &str) -> Option<Look> {
+        match s.trim() {
+            "bubbles" => Some(Look::Bubbles),
+            "lines" => Some(Look::Lines),
+            _ => None,
+        }
+    }
 }
 
 /// Colors of the agents (name → color).
 pub type Colors = HashMap<String, Color>;
 
 fn color_of(colors: &Colors, name: &str) -> Color {
-    colors.get(name).copied().unwrap_or(theme::ACCENT)
+    colors.get(name).copied().unwrap_or(theme::pal().accent)
 }
 
 pub fn clock(ts: u64) -> String {
@@ -234,7 +393,7 @@ pub fn clock(ts: u64) -> String {
 
 fn badge(name: &str, color: Color, ts: u64) -> Vec<Span<'static>> {
     vec![
-        Span::styled(format!(" {name} "), Style::default().bg(color).fg(theme::ON_ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {name} "), Style::default().bg(color).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {}", clock(ts)), theme::muted()),
     ]
 }
@@ -328,7 +487,26 @@ fn error_hint(agent: &str, text: &str, roster: &[(String, String)]) -> Vec<Strin
     vec![if offline(text) { "Once the connection is back, send a message to continue.".into() } else { "Send a message to continue.".into() }]
 }
 
-pub fn draw(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)], open: &HashSet<usize>, all: bool, ask_at: usize, picks: &HashSet<usize>, answered: &[String]) -> Drawn {
+/// Draw T at WIDTH in LOOK. FOLD: what is open (runs, thoughts). ASK_AT: the choice under the
+/// cursor of the 1st open ask; PICKS: its picked choices (multi).
+pub fn draw(t: &Thread, look: Look, width: u16, colors: &Colors, roster: &[(String, String)], fold: &Fold, ask_at: usize, picks: &HashSet<usize>, answered: &[String]) -> Drawn {
+    match look {
+        Look::Lines => draw_lines(t, width, colors, roster, fold, ask_at, picks, answered),
+        Look::Bubbles => draw_bubbles(t, width, colors, roster, fold, ask_at, picks, answered),
+    }
+}
+
+/// ` · 2 thoughts` for a run's stats (0 while thoughts are hidden).
+fn thought_count(thoughts: &[(usize, String)], fold: &Fold) -> String {
+    match thoughts.len() {
+        _ if fold.thoughts == Thoughts::Hidden => String::new(),
+        0 => String::new(),
+        1 => " · 1 thought".into(),
+        n => format!(" · {n} thoughts"),
+    }
+}
+
+fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)], fold: &Fold, ask_at: usize, picks: &HashSet<usize>, answered: &[String]) -> Drawn {
     let w = usize::from(width.max(10));
     let mut d = Drawn::default();
     let blank = |d: &mut Drawn| d.rows.push(Row::plain(Line::raw("")));
@@ -341,9 +519,9 @@ pub fn draw(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)]
                 let to_note = if to.len() > 1 || last_agent.as_deref() != to.first().map(String::as_str) { format!(" → {}", to.join(", ")) } else { String::new() };
                 let (body, files) = split_attachments(text);
                 let bw = (w * 3 / 4).max(20).min(w);
-                let bg = Style::default().bg(theme::HOVER);
-                let mut rows = render::plain(body.trim_end(), bw.saturating_sub(4), theme::text().bg(theme::HOVER), &[]);
-                rows.extend(files.iter().map(|f| Row::plain(Line::styled(format!("📎 {f}"), theme::muted().bg(theme::HOVER)))));
+                let bg = Style::default().bg(theme::pal().hover);
+                let mut rows = render::plain(body.trim_end(), bw.saturating_sub(4), theme::text().bg(theme::pal().hover), &[]);
+                rows.extend(files.iter().map(|f| Row::plain(Line::styled(format!("📎 {f}"), theme::muted().bg(theme::pal().hover)))));
                 let inner = rows.iter().map(|r| r.line.width()).max().unwrap_or(0);
                 let box_w = inner + 4;
                 let left = w.saturating_sub(box_w);
@@ -378,7 +556,9 @@ pub fn draw(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)]
                 d.rows.extend(render::plain(text.trim_end(), w, theme::muted(), &bar));
                 last_agent = None;
             }
-            Item::Text { agent, text, ts } => {
+            // only thoughts, hidden: 0 rows
+            Item::Text { text, thoughts, .. } if text.trim().is_empty() && (thoughts.is_empty() || fold.thoughts == Thoughts::Hidden) => {}
+            Item::Text { agent, text, ts, thoughts, key } => {
                 let c = color_of(colors, agent);
                 if last_agent.as_deref() != Some(agent) {
                     blank(&mut d);
@@ -387,33 +567,37 @@ pub fn draw(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)]
                     blank(&mut d);
                 }
                 let bar = [Span::styled("│ ", Style::default().fg(c))];
+                thought_rows(&mut d, thoughts, *key, fold, w, &bar);
                 d.rows.extend(render::markdown(text, w, &bar));
                 if let Some((h, what)) = needs_harness(text) {
                     let label = crate::engine::harnesses::get(&h).map_or(h.as_str(), |x| x.label);
                     let what = if what.is_empty() { String::new() } else { format!(" for {what}") };
                     let cap = agents_on(roster, &h, true, agent);
-                    let pre = [Span::styled("● ", Style::default().fg(theme::WARN))];
-                    d.rows.extend(render::plain(&format!("{agent} needs a {label} agent{what}."), w, Style::default().fg(theme::WARN), &pre));
+                    let pre = [Span::styled("● ", Style::default().fg(theme::pal().warn))];
+                    d.rows.extend(render::plain(&format!("{agent} needs a {label} agent{what}."), w, Style::default().fg(theme::pal().warn), &pre));
                     let list = if cap.is_empty() { "none".to_string() } else { cap.iter().map(|(n, _)| format!("@{n}")).collect::<Vec<_>>().join(", ") + " · @agent → + adds it" };
                     d.rows.extend(render::plain(&format!("Agents on {label}: {list}"), w, theme::muted(), &[Span::raw("  ")]));
                 }
                 last_agent = Some(agent.clone());
             }
-            Item::Run { agent, key, calls, start, end } => {
+            Item::Run { agent, key, calls, start, end, thoughts } => {
                 let c = color_of(colors, agent);
                 if last_agent.as_deref() != Some(agent) {
                     blank(&mut d);
                     d.rows.push(Row::plain(Line::from(badge(agent, c, *start))));
                     last_agent = Some(agent.clone());
                 }
-                let shown = all || open.contains(key);
+                let shown = fold.run(*key);
                 let running = calls.iter().any(|c| c.output.is_none()) && t.busy.contains(agent);
                 let mark = if shown { "▾ " } else if running { "◦ " } else { "▸ " };
                 let failed = calls.iter().filter(|c| matches!(c.output, Some((false, _)))).count();
                 let mut summary = run_summary(calls, end.saturating_sub(*start) as f64 / 1000.0);
+                summary.push_str(&thought_count(thoughts, fold));
                 if failed > 0 {
                     summary.push_str(&format!(" · {failed} failed"));
                 }
+                let think = fold.thoughts != Thoughts::Hidden && (shown || fold.thoughts == Thoughts::Open);
+                let tbar = [Span::styled("│   ", Style::default().fg(c))];
                 let row_at = d.rows.len();
                 let pre = [Span::styled("│ ", Style::default().fg(c)), Span::styled(mark, theme::accent())];
                 let rest = [Span::styled("│   ", Style::default().fg(c))];
@@ -422,8 +606,16 @@ pub fn draw(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)]
                     d.hits.insert(row_at + i, Hit::Run(*key));
                     d.rows.push(r);
                 }
+                if think && !shown {
+                    for n in 0..=calls.len() {
+                        run_thought_rows(&mut d, thoughts, n, w, &tbar);
+                    }
+                }
                 if shown {
-                    for call in calls {
+                    for (n, call) in calls.iter().enumerate() {
+                        if think {
+                            run_thought_rows(&mut d, thoughts, n, w, &tbar);
+                        }
                         let head = format!("{} {}", tool_label(&call.name), call_summary(&call.name, &call.input));
                         let bar = [Span::styled("│   ", Style::default().fg(c))];
                         d.rows.extend(render::plain(&head, w, theme::text(), &bar));
@@ -439,9 +631,12 @@ pub fn draw(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)]
                             if tail > 0 {
                                 text = format!("… {tail} lines\n{text}");
                             }
-                            let st = if *ok { theme::muted() } else { Style::default().fg(theme::DANGER) };
+                            let st = if *ok { theme::muted() } else { Style::default().fg(theme::pal().danger) };
                             d.rows.extend(render::plain(&text, w, st, &[Span::styled("│     ", Style::default().fg(c))]));
                         }
+                    }
+                    if think {
+                        run_thought_rows(&mut d, thoughts, calls.len(), w, &tbar);
                     }
                 }
             }
@@ -449,11 +644,23 @@ pub fn draw(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)]
                 let c = color_of(colors, agent);
                 let pre = [Span::styled("● ", Style::default().fg(*color)), Span::styled(format!("{agent} "), Style::default().fg(c))];
                 d.rows.extend(render::plain(text, w, Style::default().fg(*color), &pre));
-                if *color == theme::DANGER {
+                if *color == theme::pal().danger {
                     for h in error_hint(agent, text, roster) {
                         d.rows.extend(render::plain(&h, w, theme::muted(), &[Span::raw("  ")]));
                     }
                 }
+                last_agent = None;
+            }
+            Item::Settled { agent, question, answer, allow, permission, .. } => {
+                let text = match (permission, allow) {
+                    (false, _) => format!("asked: {} · answered: {answer}", question.lines().next().unwrap_or_default()),
+                    (true, true) => format!("{} · allowed", question.lines().next().unwrap_or_default()),
+                    (true, false) => format!("{} · denied", question.lines().next().unwrap_or_default()),
+                };
+                let color = if *allow { theme::pal().ok } else { theme::pal().warn };
+                let c = color_of(colors, agent);
+                let pre = [Span::styled("● ", Style::default().fg(color)), Span::styled(format!("{agent} "), Style::default().fg(c))];
+                d.rows.extend(render::plain(&text, w, Style::default().fg(color), &pre));
                 last_agent = None;
             }
         }
@@ -462,52 +669,386 @@ pub fn draw(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)]
     if let Some(a) = t.asks.first() {
         let c = color_of(colors, &a.agent);
         blank(&mut d);
-        let qs = a.questions();
-        let edge = Style::default().fg(theme::WARN);
-        let bar = [Span::styled("┃ ", edge)];
+        let edge = Style::default().fg(theme::pal().warn);
         let more = if t.asks.len() > 1 { format!(" · {} more waiting", t.asks.len() - 1) } else { String::new() };
-        let what = if qs.is_empty() { "asks to run" } else { "asks" };
+        let what = if a.questions().is_empty() { "asks to run" } else { "asks" };
         d.rows.push(Row::plain(Line::from(vec![Span::styled("┃ ", edge), Span::styled(a.agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD)), Span::styled(format!(" {what}{more}"), edge)])));
-        let choices: Vec<(String, String)> = match qs.get(answered.len()) {
-            Some((q, header, opts, multi)) => {
-                if !header.is_empty() {
-                    d.rows.extend(render::plain(header, w, theme::muted(), &bar));
-                }
-                d.rows.extend(render::plain(q, w, theme::bold(), &bar));
-                if *multi {
-                    d.rows.extend(render::plain("space: pick · enter: answer", w, theme::muted(), &bar));
-                }
-                opts.clone()
+        ask_rows(&mut d, a, w, &[Span::styled("┃ ", edge)], ask_at, picks, answered);
+    }
+    d
+}
+
+/// The rows of open ask A (the question, its choices: clickable), BAR before each.
+fn ask_rows(d: &mut Drawn, a: &Ask, w: usize, bar: &[Span<'static>], ask_at: usize, picks: &HashSet<usize>, answered: &[String]) {
+    let qs = a.questions();
+    let choices: Vec<(String, String)> = match qs.get(answered.len()) {
+        Some((q, header, opts, multi)) => {
+            if !header.is_empty() {
+                d.rows.extend(render::plain(header, w, theme::muted(), bar));
             }
-            None => {
-                d.rows.extend(render::plain(&a.summary(), w, theme::bold(), &bar));
-                if let Some(cmd) = a.input["command"].as_str() {
-                    d.rows.extend(render::plain(&format!("$ {cmd}"), w, Style::default().fg(Color::Indexed(110)), &bar));
-                }
-                if let Some(plan) = a.input["plan"].as_str() {
-                    d.rows.extend(render::markdown(plan, w, &bar));
-                }
-                let own = a.options();
-                if own.is_empty() { vec![("allow".into(), String::new()), ("deny".into(), String::new())] } else { own.into_iter().map(|(_, n, _)| (n, String::new())).collect() }
+            d.rows.extend(render::plain(q, w, theme::bold(), bar));
+            if *multi {
+                d.rows.extend(render::plain("space: pick · enter: answer", w, theme::muted(), bar));
             }
-        };
-        for (i, (label, desc)) in choices.iter().enumerate() {
-            let cur = i == ask_at;
-            let picked = picks.contains(&i);
-            let mark = if picked { "◉ " } else if cur { "› " } else { "  " };
-            let st = if cur { theme::accent_bold() } else { theme::text() };
-            let line = format!("{}. {label}", i + 1);
-            let at = d.rows.len();
-            let pre = [bar[0].clone(), Span::styled(mark, theme::accent())];
-            let mut rows = render::plain(&line, w, st, &pre);
-            if !desc.is_empty() {
-                rows.extend(render::plain(&format!("     {desc}"), w, theme::muted(), &bar));
-            }
-            for k in 0..rows.len() {
-                d.hits.insert(at + k, Hit::Choice(i));
-            }
-            d.rows.extend(rows);
+            opts.clone()
         }
+        None => {
+            d.rows.extend(render::plain(&a.summary(), w, theme::bold(), bar));
+            if let Some(cmd) = a.input["command"].as_str() {
+                d.rows.extend(render::plain(&format!("$ {cmd}"), w, Style::default().fg(Color::Indexed(110)), bar));
+            }
+            if let Some(plan) = a.input["plan"].as_str() {
+                d.rows.extend(render::markdown(plan, w, bar));
+            }
+            let own = a.options();
+            if own.is_empty() { vec![("allow".into(), String::new()), ("deny".into(), String::new())] } else { own.into_iter().map(|(_, n, _)| (n, String::new())).collect() }
+        }
+    };
+    for (i, (label, desc)) in choices.iter().enumerate() {
+        let cur = i == ask_at;
+        let picked = picks.contains(&i);
+        let mark = if picked { "◉ " } else if cur { "› " } else { "  " };
+        let st = if cur { theme::accent_bold() } else { theme::text() };
+        let line = format!("{}. {label}", i + 1);
+        let at = d.rows.len();
+        let pre = [bar.to_vec(), vec![Span::styled(mark, theme::accent())]].concat();
+        let mut rows = render::plain(&line, w, st, &pre);
+        if !desc.is_empty() {
+            rows.extend(render::plain(&format!("     {desc}"), w, theme::muted(), bar));
+        }
+        for k in 0..rows.len() {
+            d.hits.insert(at + k, Hit::Choice(i));
+        }
+        d.rows.extend(rows);
+    }
+}
+
+/// Short label of 1 call for a bubble's run row: `run tests`, `read view.rs`, `search foo`.
+fn call_label(c: &Call) -> String {
+    let s = |k: &str| c.input[k].as_str().map(String::from);
+    let base = |p: String| p.rsplit('/').next().unwrap_or_default().to_string();
+    let lower = |t: String| {
+        let mut ch = t.chars();
+        ch.next().map_or_else(String::new, |f| f.to_lowercase().chain(ch).collect())
+    };
+    let v = match c.name.as_str() {
+        "Bash" => s("description").map(lower).or_else(|| s("command").map(|c| format!("run {c}"))),
+        "Read" => s("file_path").map(|p| format!("read {}", base(p))),
+        "Write" => s("file_path").map(|p| format!("write {}", base(p))),
+        "Edit" | "MultiEdit" => s("file_path").map(|p| format!("edit {}", base(p))),
+        "NotebookEdit" => s("notebook_path").map(|p| format!("edit {}", base(p))),
+        "Grep" | "Glob" => s("pattern").map(|p| format!("search {p}")),
+        "WebFetch" => s("url").map(|u| format!("fetch {u}")),
+        "WebSearch" => s("query").map(|q| format!("search the web for {q}")),
+        "Task" | "Agent" => s("description").map(lower),
+        "TodoWrite" => Some("update todos".into()),
+        "ToolSearch" => s("query").map(|q| format!("load {}", q.trim_start_matches("select:").split(',').map(|t| t.rsplit("__").next().unwrap_or(t)).collect::<Vec<_>>().join(", "))),
+        n if n.starts_with("mcp__") => {
+            let mut parts = n.trim_start_matches("mcp__").splitn(2, "__");
+            let (server, tool) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+            Some(format!("{} ({server})", tool.replace('_', " ")))
+        }
+        _ => None,
+    };
+    let v = v.unwrap_or_else(|| tool_label(&c.name));
+    v.lines().next().unwrap_or_default().chars().take(80).collect()
+}
+
+/// The bubble's run rows: `Load skills_list, run tests, read x.rs and 5 more`, `8 calls · 20.7s`.
+fn run_lines(calls: &[Call], secs: f64) -> (String, String) {
+    let labels: Vec<String> = calls.iter().take(3).map(call_label).collect();
+    let mut t = labels.join(", ");
+    if calls.len() > 3 {
+        t.push_str(&format!(" and {} more", calls.len() - 3));
+    }
+    let mut ch = t.chars();
+    let t = ch.next().map_or_else(String::new, |f| f.to_uppercase().chain(ch).collect());
+    let n = calls.len();
+    (t, format!("{n} call{} · {secs:.1}s", if n == 1 { "" } else { "s" }))
+}
+
+/// The owner's message TEXT as a bubble on the right of a W wide stream: content-sized (max. 3/4),
+/// the time (+ TO_NOTE) in its top border, attached files below it.
+fn owner_bubble(d: &mut Drawn, w: usize, text: &str, to_note: &str, ts: u64) {
+    let (body, files) = split_attachments(text);
+    let body = body.trim_end();
+    let cap = (w * 3 / 4 + 1).min(w);
+    let stamp = clock(ts);
+    let want = body.lines().map(|l| l.replace('\t', "    ").width()).max().unwrap_or(0) + 4;
+    let bw = want.max(stamp.width() + 6).max(if to_note.is_empty() { 0 } else { to_note.width() + stamp.width() + 9 }).min(cap).max(8);
+    let left = w - bw;
+    let border = Style::default().fg(theme::pal().hover);
+    let pad = Span::raw(" ".repeat(left));
+    let lead = if to_note.is_empty() { Vec::new() } else { vec![Span::styled(to_note.to_string(), theme::muted())] };
+    let (top, _) = top_border(bw, border, lead, false, &stamp);
+    d.rows.push(Row { line: Line::from([vec![pad.clone()], top.line.spans].concat()), ..Default::default() });
+    let bar = [pad.clone(), Span::styled("│ ", border)];
+    let mut rows = vec![Row::plain(Line::from(bar.to_vec()))];
+    rows.extend(render::plain(body, left + bw - 2, theme::text(), &bar));
+    for mut r in rows {
+        let rw = r.line.width();
+        r.line.spans.push(Span::raw(" ".repeat((left + bw - 1).saturating_sub(rw))));
+        r.line.spans.push(Span::styled("│", border));
+        d.rows.push(r);
+    }
+    d.rows.push(Row::plain(Line::from(vec![pad, Span::styled(format!("╰{}╯", "─".repeat(bw - 2)), border)])));
+    for f in files {
+        let name = f.rsplit('/').next().unwrap_or(f);
+        let label = format!("📎 {name}");
+        let lw = label.width();
+        d.rows.push(Row::plain(Line::from(vec![Span::raw(" ".repeat(w.saturating_sub(lw))), Span::styled(label, theme::muted())])));
+    }
+}
+
+/// A box under construction: its 1st row, the style of its border.
+struct Open {
+    start: usize,
+    border: Style,
+    agent: Option<String>,
+}
+
+/// Rounded top border of width W: `╭─ ` LEFT ` ─────── ` RIGHT ` ─╮`. Returns the row and the
+/// column after LEFT (where a wave goes).
+fn top_border(w: usize, border: Style, left: Vec<Span<'static>>, wave: bool, right: &str) -> (Row, u16) {
+    let mut spans = vec![Span::styled("╭─", border)];
+    let lw: usize = left.iter().map(|s| s.content.width()).sum();
+    let mut used = 2;
+    if lw > 0 {
+        spans.push(Span::styled(" ", border));
+        spans.extend(left);
+        used += 1 + lw;
+    }
+    let wave_at = used + 1;
+    if wave {
+        spans.push(Span::raw("    "));
+        used += 4;
+    }
+    let rw = if right.is_empty() { 0 } else { right.width() + 2 };
+    if lw > 0 && used < w {
+        spans.push(Span::styled(" ", border));
+        used += 1;
+    }
+    let fill = w.saturating_sub(used + rw + 2);
+    spans.push(Span::styled("─".repeat(fill), border));
+    if rw > 0 {
+        spans.push(Span::styled(format!(" {right} "), theme::muted()));
+    }
+    spans.push(Span::styled("─╮", border));
+    (Row::plain(Line::from(spans)), wave_at as u16)
+}
+
+fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)], fold: &Fold, ask_at: usize, picks: &HashSet<usize>, answered: &[String]) -> Drawn {
+    let w = usize::from(width.max(12));
+    // content width inside `│ ` … ` │`
+    let inner = w - 2;
+    let mut d = Drawn::default();
+    let mut cur: Option<Open> = None;
+    let close = |d: &mut Drawn, cur: &mut Option<Open>| {
+        let Some(o) = cur.take() else { return };
+        for r in &mut d.rows[o.start + 1..] {
+            let rw = r.line.width();
+            r.line.spans.push(Span::raw(" ".repeat((w - 1).saturating_sub(rw))));
+            r.line.spans.push(Span::styled("│", o.border));
+        }
+        d.rows.push(Row::plain(Line::from(vec![Span::styled(format!("╰{}╯", "─".repeat(w - 2)), o.border)])));
+    };
+    let gap = |d: &mut Drawn| {
+        if !d.rows.is_empty() {
+            d.rows.push(Row::plain(Line::raw("")));
+        }
+    };
+    // last item of each agent at work: its box gets the wave
+    let last_of: HashMap<&str, usize> = t.items.iter().enumerate().filter_map(|(i, it)| match it {
+        Item::Text { agent, .. } | Item::Run { agent, .. } => Some((agent.as_str(), i)),
+        _ => None,
+    }).collect();
+    for (idx, item) in t.items.iter().enumerate() {
+        match item {
+            Item::Prompt { from, to, text, ts } if from == "owner" => {
+                close(&mut d, &mut cur);
+                gap(&mut d);
+                let to_note = if to.len() > 1 { format!("→ {}", to.join(", ")) } else { String::new() };
+                owner_bubble(&mut d, w, text, &to_note, *ts);
+            }
+            Item::Settled { agent, question, answer, allow, permission, asked, ts } => {
+                // the question as the agent's message, the answer as the owner's
+                close(&mut d, &mut cur);
+                gap(&mut d);
+                let c = color_of(colors, agent);
+                let border = Style::default().fg(theme::desaturate(c, 0.4));
+                let what = if *permission { " asked to run" } else { " asked" };
+                let name = vec![Span::styled(agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD)), Span::styled(what, theme::muted())];
+                let (top, _) = top_border(w, border, name, false, &clock(*asked));
+                cur = Some(Open { start: d.rows.len(), border, agent: None });
+                d.rows.push(top);
+                let bar = [Span::styled("│ ", border)];
+                d.rows.push(Row::plain(Line::from(bar.to_vec())));
+                d.rows.extend(render::plain(question, inner, theme::bold(), &bar));
+                if !allow {
+                    let st = if *permission { "denied" } else { "declined" };
+                    d.rows.push(Row::plain(Line::from(bar.to_vec())));
+                    d.rows.extend(render::plain(st, inner, Style::default().fg(theme::pal().warn), &bar));
+                }
+                close(&mut d, &mut cur);
+                if *allow {
+                    let answer = if *permission && answer.is_empty() { "allow" } else { answer.as_str() };
+                    gap(&mut d);
+                    owner_bubble(&mut d, w, answer, "", *ts);
+                }
+            }
+            Item::Prompt { from, to, text, ts } => {
+                close(&mut d, &mut cur);
+                gap(&mut d);
+                let c = color_of(colors, from);
+                let border = Style::default().fg(theme::desaturate(c, 0.4));
+                let name = vec![Span::styled(from.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD)), Span::styled(format!(" → {}", to.join(", ")), theme::muted())];
+                let (top, _) = top_border(w, border, name, false, &clock(*ts));
+                cur = Some(Open { start: d.rows.len(), border, agent: None });
+                d.rows.push(top);
+                let bar = [Span::styled("│ ", border)];
+                d.rows.push(Row::plain(Line::from(bar.to_vec())));
+                d.rows.extend(render::plain(text.trim_end(), inner, theme::muted(), &bar));
+                close(&mut d, &mut cur);
+            }
+            // only thoughts, hidden: 0 rows
+            Item::Text { text, thoughts, .. } if text.trim().is_empty() && (thoughts.is_empty() || fold.thoughts == Thoughts::Hidden) => {}
+            Item::Text { agent, ts, .. } | Item::Run { agent, start: ts, .. } => {
+                let c = color_of(colors, agent);
+                let border = Style::default().fg(theme::desaturate(c, 0.4));
+                let bar = [Span::styled("│ ", border)];
+                if cur.as_ref().and_then(|o| o.agent.as_deref()) != Some(agent.as_str()) {
+                    close(&mut d, &mut cur);
+                    gap(&mut d);
+                    // the box's time: its last item's
+                    let mut end_ts = *ts;
+                    for it in &t.items[idx..] {
+                        match it {
+                            Item::Text { agent: a, ts, .. } if a == agent => end_ts = *ts,
+                            Item::Run { agent: a, end, .. } if a == agent => end_ts = *end,
+                            _ => break,
+                        }
+                    }
+                    let busy = t.busy.contains(agent) && last_of.get(agent.as_str()).is_some_and(|&l| l >= idx && t.items[idx..=l].iter().all(|it| matches!(it, Item::Text { agent: a, .. } | Item::Run { agent: a, .. } if a == agent)));
+                    let name = vec![Span::styled(agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD))];
+                    let (top, wave_at) = top_border(w, border, name, busy, &clock(end_ts));
+                    if busy {
+                        d.waves.push((d.rows.len(), wave_at, c));
+                    }
+                    cur = Some(Open { start: d.rows.len(), border, agent: Some(agent.clone()) });
+                    d.rows.push(top);
+                }
+                d.rows.push(Row::plain(Line::from(bar.to_vec())));
+                match item {
+                    Item::Text { text, thoughts, key, .. } => {
+                        // the thoughts before the message: a folded line on its top
+                        thought_rows(&mut d, thoughts, *key, fold, inner, &bar);
+                        if !text.trim().is_empty() {
+                            d.rows.extend(render::markdown(text, inner, &bar));
+                        }
+                        if let Some((h, what)) = needs_harness(text) {
+                            let label = crate::engine::harnesses::get(&h).map_or(h.as_str(), |x| x.label);
+                            let what = if what.is_empty() { String::new() } else { format!(" for {what}") };
+                            let cap = agents_on(roster, &h, true, agent);
+                            d.rows.push(Row::plain(Line::from(bar.to_vec())));
+                            let pre = [bar[0].clone(), Span::styled("● ", Style::default().fg(theme::pal().warn))];
+                            d.rows.extend(render::plain(&format!("{agent} needs a {label} agent{what}."), inner, Style::default().fg(theme::pal().warn), &pre));
+                            let list = if cap.is_empty() { "none".to_string() } else { cap.iter().map(|(n, _)| format!("@{n}")).collect::<Vec<_>>().join(", ") + " · @agent → + adds it" };
+                            d.rows.extend(render::plain(&format!("Agents on {label}: {list}"), inner, theme::muted(), &[bar[0].clone(), Span::raw("  ")]));
+                        }
+                    }
+                    Item::Run { key, calls, start, end, thoughts, .. } => {
+                        let shown = fold.run(*key);
+                        let running = calls.iter().any(|c| c.output.is_none()) && t.busy.contains(agent);
+                        let mark = if shown { "▾ " } else if running { "◦ " } else { "▸ " };
+                        let failed = calls.iter().filter(|c| matches!(c.output, Some((false, _)))).count();
+                        let (head, mut stats) = run_lines(calls, end.saturating_sub(*start) as f64 / 1000.0);
+                        let think = fold.thoughts != Thoughts::Hidden && (shown || fold.thoughts == Thoughts::Open);
+                        let tbar = [bar[0].clone(), Span::raw("  ")];
+                        // `5 calls · 2 thoughts · 12.0s`
+                        if let Some(at) = stats.rfind(" · ") {
+                            stats.insert_str(at, &thought_count(thoughts, fold));
+                        }
+                        if failed > 0 {
+                            stats.push_str(&format!(" · {failed} failed"));
+                        }
+                        let row_at = d.rows.len();
+                        let pre = [bar[0].clone(), Span::styled(mark, theme::accent())];
+                        let rest = [bar[0].clone(), Span::raw("  ")];
+                        let mut rows = render::plain(&head, inner, theme::text(), &pre);
+                        for r in rows.iter_mut().skip(1) {
+                            r.line.spans[1] = Span::raw("  ");
+                        }
+                        rows.extend(render::plain(&stats, inner, theme::muted(), &rest));
+                        for i in 0..rows.len() {
+                            d.hits.insert(row_at + i, Hit::Run(*key));
+                        }
+                        d.rows.extend(rows);
+                        if think && !shown {
+                            for n in 0..=calls.len() {
+                                run_thought_rows(&mut d, thoughts, n, inner, &tbar);
+                            }
+                        }
+                        if shown {
+                            for (n, call) in calls.iter().enumerate() {
+                                if think {
+                                    run_thought_rows(&mut d, thoughts, n, inner, &tbar);
+                                }
+                                let head = format!("{} {}", tool_label(&call.name), call_summary(&call.name, &call.input));
+                                d.rows.extend(render::plain(&head, inner, theme::text(), &[bar[0].clone(), Span::raw("  ")]));
+                                if call.name == "Bash"
+                                    && let Some(cmd) = call.input["command"].as_str()
+                                {
+                                    d.rows.extend(render::plain(&format!("$ {cmd}"), inner, Style::default().fg(Color::Indexed(110)), &[bar[0].clone(), Span::raw("    ")]));
+                                }
+                                if let Some((ok, out)) = &call.output {
+                                    let lines: Vec<&str> = out.lines().collect();
+                                    let tail = lines.len().saturating_sub(12);
+                                    let mut text = lines[tail..].join("\n");
+                                    if tail > 0 {
+                                        text = format!("… {tail} lines\n{text}");
+                                    }
+                                    let st = if *ok { theme::muted() } else { Style::default().fg(theme::pal().danger) };
+                                    d.rows.extend(render::plain(&text, inner, st, &[bar[0].clone(), Span::raw("    ")]));
+                                }
+                            }
+                            if think {
+                                run_thought_rows(&mut d, thoughts, calls.len(), inner, &tbar);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Item::Note { agent, text, color } => {
+                close(&mut d, &mut cur);
+                gap(&mut d);
+                let c = color_of(colors, agent);
+                let pre = [Span::styled("● ", Style::default().fg(*color)), Span::styled(format!("{agent} "), Style::default().fg(c))];
+                d.rows.extend(render::plain(text, w, Style::default().fg(*color), &pre));
+                if *color == theme::pal().danger {
+                    for h in error_hint(agent, text, roster) {
+                        d.rows.extend(render::plain(&h, w, theme::muted(), &[Span::raw("  ")]));
+                    }
+                }
+            }
+        }
+    }
+    close(&mut d, &mut cur);
+    // the 1st open ask: a yellow box below everything, its choices clickable
+    if let Some(a) = t.asks.first() {
+        gap(&mut d);
+        let c = color_of(colors, &a.agent);
+        let border = Style::default().fg(theme::pal().warn);
+        let more = if t.asks.len() > 1 { format!(" · {} more waiting", t.asks.len() - 1) } else { String::new() };
+        let what = if a.questions().is_empty() { "asks to run" } else { "asks" };
+        let name = vec![Span::styled(a.agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD)), Span::styled(format!(" {what}{more}"), border)];
+        let (top, _) = top_border(w, border, name, false, "");
+        cur = Some(Open { start: d.rows.len(), border, agent: None });
+        d.rows.push(top);
+        let bar = [Span::styled("│ ", border)];
+        d.rows.push(Row::plain(Line::from(bar.to_vec())));
+        ask_rows(&mut d, a, inner, &bar, ask_at, picks, answered);
+        close(&mut d, &mut cur);
     }
     d
 }
@@ -553,7 +1094,7 @@ mod tests {
         t.push(&ev(Some("ada"), Kind::Ask { id: "q".into(), tool: "AskUserQuestion".into(), input: json!({"questions": [{"question": "color?", "header": "Color", "options": [{"label": "red", "description": ""}, {"label": "blue", "description": ""}], "multiSelect": false}]}) }));
         assert_eq!(t.items.len(), 3);
         assert!(t.busy.contains("ada"));
-        let d = draw(&t, 60, &Colors::new(), &[], &HashSet::new(), false, 1, &HashSet::new(), &[]);
+        let d = draw(&t, Look::Lines, 60, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 1, &HashSet::new(), &[]);
         let s = text(&d);
         assert!(s.contains("  fix it"), "{s}");
         assert!(s.contains("📎 /tmp/a.png"), "{s}");
@@ -563,12 +1104,98 @@ mod tests {
         assert!(d.hits.values().any(|h| *h == Hit::Run(1)));
         assert!(widest(&d) <= 60);
         let open: HashSet<usize> = [1].into();
-        let s = text(&draw(&t, 60, &Colors::new(), &[], &open, false, 0, &HashSet::new(), &[]));
+        let s = text(&draw(&t, Look::Lines, 60, &Colors::new(), &[], &Fold { runs: &open, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]));
         assert!(s.contains("$ ls") && s.contains("│     b"), "{s}");
         t.push(&ev(Some("ada"), Kind::Answer { id: "q".into(), allow: true, label: "blue".into() }));
         t.push(&ev(Some("ada"), Kind::TurnEnd { cost: 0.1, input: 1, output: 1, cache_read: 0, cache_write: 0, ctx: 0, ms: 1, error: None }));
         assert!(t.asks.is_empty() && t.busy.is_empty());
-        assert!(text(&draw(&t, 60, &Colors::new(), &[], &HashSet::new(), false, 0, &HashSet::new(), &[])).contains("answered: blue"));
+        assert!(text(&draw(&t, Look::Lines, 60, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[])).contains("answered: blue"));
         assert_eq!(t.sent().len(), 1);
+    }
+
+    #[test]
+    fn bubbles_box_turns_and_put_owner_messages_right() {
+        let mut t = Thread::default();
+        t.push(&ev(None, Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text: "fix it\n\nAttachments (read these files):\n- /tmp/a.png".into() }));
+        t.push(&ev(Some("ada"), Kind::TurnStart));
+        t.push(&ev(Some("ada"), Kind::Tool { id: "1".into(), name: "Bash".into(), input: json!({"command": "ls", "description": "List files"}) }));
+        t.push(&ev(Some("ada"), Kind::ToolResult { id: "1".into(), ok: true, output: "a".into() }));
+        t.push(&ev(Some("ada"), Kind::Text { text: "※ SUMMARY\nDONE. it works.".into() }));
+        let d = draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]);
+        let s = text(&d);
+        let rows: Vec<&str> = s.lines().collect();
+        // the owner's bubble: right, the time in its top border, the file name below it
+        let top = rows.iter().position(|r| r.trim_start().starts_with("╭") && r.contains("─╮")).unwrap();
+        assert!(rows[top].starts_with(' ') && rows[top].ends_with("─╮") && rows[top].contains(&clock(1_000_000)), "{s}");
+        assert!(rows.iter().any(|r| r.ends_with("│ fix it   │") || (r.contains("│ fix it") && r.ends_with('│'))), "{s}");
+        assert!(rows.iter().any(|r| r.ends_with("📎 a.png")), "{s}");
+        // the agent's turn: 1 box, its name in the top border, the run on 2 rows, the text inside
+        let b = rows.iter().position(|r| r.starts_with("╭─ ada")).unwrap();
+        assert_eq!(rows[b].chars().count(), 50, "{s}");
+        assert!(rows.iter().any(|r| r.starts_with("│ ▸ List files") && r.ends_with('│')), "{s}");
+        assert!(rows.iter().any(|r| r.starts_with("│   1 call · 0.0s")), "{s}");
+        assert!(rows.iter().any(|r| r.starts_with("│ ※ SUMMARY")) && rows.iter().any(|r| r.starts_with("│ DONE. it works.")), "{s}");
+        assert!(rows.last().unwrap().starts_with("╰") && rows.last().unwrap().ends_with('╯'), "{s}");
+        assert!(widest(&d) <= 50);
+        // at work: 1 wave in its top border
+        assert_eq!(d.waves.len(), 1);
+        assert_eq!(d.waves[0].0, b);
+        assert!(d.hits.values().any(|h| *h == Hit::Run(1)));
+        // an answered question: the agent's question in its box, the answer as the owner's bubble
+        t.push(&ev(Some("ada"), Kind::Ask { id: "q".into(), tool: "AskUserQuestion".into(), input: json!({"questions": [{"question": "color?", "header": "Color", "options": [{"label": "red", "description": ""}], "multiSelect": false}]}) }));
+        t.push(&ev(Some("ada"), Kind::Answer { id: "q".into(), allow: true, label: "red".into() }));
+        let s = text(&draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]));
+        let rows: Vec<&str> = s.lines().collect();
+        let q = rows.iter().position(|r| r.starts_with("╭─ ada asked")).expect(&s);
+        assert!(rows[q + 2].starts_with("│ color?"), "{s}");
+        assert!(rows[q + 4..].iter().any(|r| r.trim_end().ends_with("│ red    │") || (r.contains("│ red") && r.ends_with('│') && r.starts_with(' '))), "{s}");
+        // declined: 0 answer bubble
+        t.push(&ev(Some("ada"), Kind::Ask { id: "p".into(), tool: "Bash".into(), input: json!({"command": "rm x"}) }));
+        t.push(&ev(Some("ada"), Kind::Answer { id: "p".into(), allow: false, label: "deny".into() }));
+        let s = text(&draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]));
+        let tail: Vec<&str> = s.lines().rev().take(4).collect();
+        assert!(tail.iter().any(|r| r.starts_with("│ denied")) && tail[0].starts_with('╰'), "{s}");
+    }
+
+    #[test]
+    fn thoughts_fold_into_runs_and_messages() {
+        let mut t = Thread::default();
+        t.push(&ev(Some("ada"), Kind::TurnStart));
+        t.push(&ev(Some("ada"), Kind::Thought { text: "Look at the logs first.".into() }));
+        t.push(&ev(Some("ada"), Kind::Tool { id: "1".into(), name: "Bash".into(), input: json!({"command": "ls", "description": "List files"}) }));
+        t.push(&ev(Some("ada"), Kind::Thought { text: "Cause found: CI=true missing, so I am fixing it now.".into() }));
+        t.push(&ev(Some("ada"), Kind::Text { text: "Fixed.".into() }));
+        // the 1st thought: in the run before its call; the 2nd: on the message
+        let Item::Run { thoughts, .. } = &t.items[0] else { panic!() };
+        assert_eq!(thoughts, &vec![(0, "Look at the logs first.".to_string())]);
+        let Item::Text { thoughts, key, .. } = &t.items[1] else { panic!() };
+        assert_eq!((thoughts.len(), *key), (1, 1));
+        let none = HashSet::new();
+        let fold = |t: &Thread, mode: Thoughts, open: &HashSet<usize>| -> String {
+            let f = Fold { runs: &none, all_runs: false, thoughts: mode, open_thoughts: open, all_thoughts: false };
+            text(&draw(t, Look::Bubbles, 50, &Colors::new(), &[], &f, 0, &HashSet::new(), &[]))
+        };
+        // hidden: 0 thought rows, 0 count
+        let s = fold(&t, Thoughts::Hidden, &none);
+        assert!(!s.contains('∴') && !s.contains("thought"), "{s}");
+        // folded: a count on the run, 1 folded line on the message (cut to the box)
+        let s = fold(&t, Thoughts::Folded, &none);
+        assert!(s.contains("1 call · 1 thought · "), "{s}");
+        let line = s.lines().find(|r| r.contains("▸ ∴")).expect(&s);
+        assert!(line.starts_with("│ ▸ ∴ Cause found") && line.contains('…') && line.ends_with('│'), "{s}");
+        assert!(s.lines().position(|r| r.contains("▸ ∴")) < s.lines().position(|r| r.contains("Fixed.")), "{s}");
+        // a click opens it: the full text, wrapped
+        let open: HashSet<usize> = [1].into();
+        let s = fold(&t, Thoughts::Folded, &open);
+        assert!(s.contains("▾ ∴ Cause found") && s.contains("now."), "{s}");
+        // open: every thought, the run's too (under its folded row)
+        let s = fold(&t, Thoughts::Open, &none);
+        assert!(s.contains("∴ Look at the logs first.") && s.contains("now."), "{s}");
+        // a turn that ends on a thought, 0 text: a message of its own; hidden: 0 rows
+        t.push(&ev(Some("ada"), Kind::Thought { text: "Nothing left.".into() }));
+        t.push(&ev(Some("ada"), Kind::TurnEnd { cost: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0, ctx: 0, ms: 1, error: None }));
+        assert!(matches!(&t.items[2], Item::Text { text, .. } if text.is_empty()));
+        assert!(!fold(&t, Thoughts::Hidden, &none).contains("Nothing left"));
+        assert!(fold(&t, Thoughts::Folded, &none).contains("▸ ∴ Nothing left."));
     }
 }

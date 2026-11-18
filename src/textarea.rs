@@ -304,7 +304,8 @@ impl TextArea {
     /// `>query` right before the cursor (0 spaces in the query): the `>` position + the query.
     /// For the command dropdown.
     pub fn command(&self) -> Option<(Pos, String)> {
-        self.trigger('>', |c| !c.is_whitespace() && c != '>')
+        let k = crate::config::command_key();
+        self.trigger(k, |c| !c.is_whitespace() && c != k)
     }
 
     /// A path being typed: the word that ends at the cursor (0 spaces, quotes, brackets in it; the
@@ -324,7 +325,7 @@ impl TextArea {
             c -= 1;
         }
         let word: String = line[c..self.cur.col].iter().collect();
-        if !word.contains('/') || word.starts_with('@') || (c > 0 && line[c - 1] == '>') {
+        if !word.contains('/') || word.starts_with('@') || (c > 0 && line[c - 1] == crate::config::command_key()) {
             return None;
         }
         Some((Pos { row: self.cur.row, col: c }, word))
@@ -762,6 +763,25 @@ impl TextArea {
         self.want_x = None;
     }
 
+    /// Space on an empty Markdown list item, cursor after its marker: 1 layer in (2 spaces of
+    /// indent), the counterpart of backspace. false: not such an item, the space goes in as text.
+    fn indent_empty_item(&mut self) -> bool {
+        if self.single || self.range().is_some() {
+            return false;
+        }
+        let row = self.cur.row;
+        let Some((indent, w, _)) = list_item(&self.lines[row]) else { return false };
+        if self.lines[row].len() != indent + w || self.cur.col != indent + w {
+            return false;
+        }
+        self.snapshot(Op::Other);
+        self.anchor = None;
+        self.lines[row].splice(0..0, [' ', ' ']);
+        self.cur.col += 2;
+        self.follow = true;
+        true
+    }
+
     /// Empty list item of the cursor row (INDENT, marker width W): 2 spaces of indent go, at
     /// indent 0 the marker goes.
     fn outdent(&mut self, indent: usize, w: usize) {
@@ -881,6 +901,7 @@ impl TextArea {
             KeyCode::Char('d') if alt => self.delete(true),
             KeyCode::Char('B') if alt => self.move_to(self.word_left(self.cur), true),
             KeyCode::Char('F') if alt => self.move_to(self.word_right(self.cur), true),
+            KeyCode::Char(' ') if !alt && self.indent_empty_item() => {}
             KeyCode::Char(c) if !alt => self.insert(&c.to_string()),
             KeyCode::Enter if !self.single && !ctrl && !alt => self.newline(),
             // ⌘⌫ with the kitty protocol: super+backspace
@@ -1020,10 +1041,10 @@ impl TextArea {
         let base = self.style.unwrap_or_else(theme::panel);
         f.render_widget(Paragraph::new("").style(base), area);
         if self.is_empty() && !self.placeholder.is_empty() {
-            f.render_widget(Paragraph::new(self.placeholder.as_str()).style(base.fg(theme::MUTED)), area);
+            f.render_widget(Paragraph::new(self.placeholder.as_str()).style(base.fg(theme::pal().muted)), area);
         } else {
             let sel = self.range();
-            let sel_style = Style::default().bg(theme::ACCENT).fg(theme::ON_ACCENT);
+            let sel_style = Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent);
             let mut lines = Vec::new();
             for s in self.vis.iter().skip(self.scroll).take(h) {
                 let line = &self.lines[s.row];
@@ -1268,6 +1289,41 @@ mod tests {
         t.key(k(KeyCode::Backspace));
         t.key(k(KeyCode::Char('x')));
         assert_eq!(t.text(), "- a\nx");
+    }
+
+    #[test]
+    fn space_on_empty_list_item_indents() {
+        let k = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+        let mut t = ta("- a");
+        t.move_end();
+        t.key(k(KeyCode::Enter));
+        // space on the empty item: 1 layer in, backspace: 1 layer out again
+        t.key(k(KeyCode::Char(' ')));
+        assert_eq!(t.text(), "- a\n  - ");
+        t.key(k(KeyCode::Char(' ')));
+        assert_eq!(t.text(), "- a\n    - ");
+        t.key(k(KeyCode::Backspace));
+        assert_eq!(t.text(), "- a\n  - ");
+        // the next key goes after the marker
+        t.key(k(KeyCode::Char('b')));
+        assert_eq!(t.text(), "- a\n  - b");
+        // undo: the char, then the indent
+        t.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert_eq!(t.text(), "- a\n  - ");
+        // numbers + check boxes too
+        let mut t = ta("1. ");
+        t.move_end();
+        t.key(k(KeyCode::Char(' ')));
+        assert_eq!(t.text(), "  1. ");
+        // an item with text, a cursor inside the marker: plain space
+        let mut t = ta("- a");
+        t.move_end();
+        t.key(k(KeyCode::Char(' ')));
+        assert_eq!(t.text(), "- a ");
+        let mut t = ta("- ");
+        t.move_start();
+        t.key(k(KeyCode::Char(' ')));
+        assert_eq!(t.text(), " - ");
     }
 
     #[test]

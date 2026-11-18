@@ -157,8 +157,8 @@ impl Mention {
         for (i, (name, color)) in m.iter().enumerate().skip(off).take(shown) {
             let row = Rect { y: inner.y + (i - off) as u16, height: 1, ..inner };
             let hl = i == self.cursor;
-            let st = if hl { theme::pill().add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::TEXT) };
-            let dot = if hl { Style::default().fg(theme::ON_ACCENT) } else { Style::default().fg(*color) };
+            let st = if hl { theme::pill().add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::pal().text) };
+            let dot = if hl { Style::default().fg(theme::pal().on_accent) } else { Style::default().fg(*color) };
             let mut spans = vec![Span::styled(" ● ", dot), Span::styled(name.clone(), st)];
             if hl && !self.replaceable.is_empty() {
                 let many = !self.targets(name).is_empty();

@@ -290,7 +290,7 @@ fn draw_at(f: &mut Frame, area: Rect, s: &Snap, age: Duration, now: u64) {
                 by.push((l.harness.clone(), vec![Span::styled(format!("{:hw$}", l.harness), theme::muted())]));
             }
             let spans = &mut by.iter_mut().find(|(h, _)| *h == l.harness).expect("pushed above").1;
-            let col = if l.pct >= 90.0 { theme::DANGER } else if l.pct >= 70.0 { theme::WARN } else { theme::TEXT };
+            let col = if l.pct >= 90.0 { theme::pal().danger } else if l.pct >= 70.0 { theme::pal().warn } else { theme::pal().text };
             spans.push(Span::styled(format!("{} ", window(&l.window)), theme::muted()));
             match l.resets {
                 // window reset since the last report: "new"
@@ -605,7 +605,7 @@ pub fn detail_lines(d: &Detail, here: Option<&str>, names: &HashMap<String, (Str
         lines.push(Line::raw(""));
         lines.push(head("plan limits"));
         for (h, win, pct, resets) in &d.limits {
-            let col = if *pct >= 90.0 { theme::DANGER } else if *pct >= 70.0 { theme::WARN } else { theme::OK };
+            let col = if *pct >= 90.0 { theme::pal().danger } else if *pct >= 70.0 { theme::pal().warn } else { theme::pal().ok };
             let reset = match resets {
                 Some(r) if *r <= now => " · new window".to_string(),
                 Some(r) => format!(" · resets in {}", until(*r, now)),

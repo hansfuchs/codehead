@@ -204,7 +204,7 @@ impl Menu {
         self.poll();
         match k.code {
             KeyCode::Esc => return Action::Close,
-            KeyCode::F(2) => return Action::Close,
+            _ if crate::config::menu_key().matches(&k) => return Action::Close,
             // ←/→ too: tabs only (0 run, 0 cursor in the threads filter)
             KeyCode::Tab | KeyCode::Right => {
                 self.switch(1);
@@ -417,7 +417,7 @@ impl Menu {
         for (t, label) in TABS {
             let text = format!(" {label} ");
             let wd = text.chars().count() as u16;
-            let st = if t == self.tab { Style::default().bg(theme::ACCENT).fg(theme::ON_ACCENT).add_modifier(Modifier::BOLD) } else { theme::muted() };
+            let st = if t == self.tab { Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD) } else { theme::muted() };
             let rr = Rect { x, y: inner.y, width: wd.min(inner.right().saturating_sub(x)), height: 1 };
             f.render_widget(Paragraph::new(Span::styled(text, st)), rr);
             self.tab_rects.push((rr, t));
@@ -458,7 +458,7 @@ impl Menu {
 
     fn row_style(hl: bool) -> (Style, Style) {
         if hl {
-            (Style::default().fg(theme::ON_ACCENT).add_modifier(Modifier::BOLD), Style::default().fg(theme::ON_ACCENT))
+            (Style::default().fg(theme::pal().on_accent).add_modifier(Modifier::BOLD), Style::default().fg(theme::pal().on_accent))
         } else {
             (theme::accent(), theme::text())
         }
@@ -548,7 +548,7 @@ impl Menu {
                     let r = Rect { y: body.y + 2 + i as u16, height: 1, ..body };
                     let hl = i == c;
                     let color = crate::agents::color(a.color.as_deref());
-                    let name_st = if hl { Style::default().fg(theme::ON_ACCENT).add_modifier(Modifier::BOLD) } else { Style::default().fg(color).add_modifier(Modifier::BOLD) };
+                    let name_st = if hl { Style::default().fg(theme::pal().on_accent).add_modifier(Modifier::BOLD) } else { Style::default().fg(color).add_modifier(Modifier::BOLD) };
                     let (_, ls) = Self::row_style(hl);
                     let line = Line::from(vec![Span::styled(format!(" + {}", a.name), name_st), Span::styled(format!("  {}", a.harness_model()), ls)]);
                     f.render_widget(Paragraph::new(line).style(if hl { theme::pill() } else { Style::default() }), r);
@@ -572,7 +572,7 @@ impl Menu {
             match row {
                 Row::Edit | Row::Add => {
                     let label = if *row == Row::Edit { " ✎ edit agents: start screen, agents tab " } else { " + add an agent " };
-                    let st = if hl { Style::default().bg(theme::ACCENT).fg(theme::ON_ACCENT).add_modifier(Modifier::BOLD) } else { Style::default().bg(theme::PANEL).fg(theme::TEXT) };
+                    let st = if hl { Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD) } else { Style::default().bg(theme::pal().panel).fg(theme::pal().text) };
                     let br = Rect { width: (label.chars().count() as u16).min(r.width), ..r };
                     f.render_widget(Paragraph::new(label).style(st), br);
                     self.rows.push((br, i));
@@ -599,7 +599,7 @@ impl Menu {
         let armed = self.armed.as_deref() == Some(name);
         let border = if hl { theme::accent_bold() } else { theme::line() };
         let title = if armed {
-            Span::styled(" enter again: remove · ↑↓: keep ", Style::default().fg(theme::DANGER).add_modifier(Modifier::BOLD))
+            Span::styled(" enter again: remove · ↑↓: keep ", Style::default().fg(theme::pal().danger).add_modifier(Modifier::BOLD))
         } else if hl {
             Span::styled(" enter: remove ", theme::muted())
         } else {

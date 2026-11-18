@@ -1,73 +1,190 @@
-//! codehead's palette (ancient amber: 1 accent, muted text) with pills, panels, 0 cursor glyph.
+//! codehead's palette (a preset: coral or amber, + overrides; 1 accent, muted text) with pills,
+//! panels, 0 cursor glyph.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-/// codehead's palette: ancient amber, like codehead.sh. Warm paper, bone ink, 1 amber accent.
-/// The single accent: amber #EC8F1A.
-pub const ACCENT: Color = Color::Rgb(236, 143, 26);
-/// Text on an accent pill: paper #150700.
-pub const ON_ACCENT: Color = Color::Rgb(21, 7, 0);
-/// Inputs, unfocused active tab, unfocused selection row.
-pub const PANEL: Color = Color::Rgb(42, 22, 12);
-/// Bg of a clickable row / item under the mouse.
-pub const HOVER: Color = Color::Rgb(61, 36, 22);
-/// Normal text: ink #E3D2BE.
-pub const TEXT: Color = Color::Rgb(227, 210, 190);
-/// Hints, labels, timestamps.
-pub const MUTED: Color = Color::Rgb(168, 146, 124);
-/// Borders, dividers.
-pub const LINE: Color = Color::Rgb(92, 67, 52);
-pub const OK: Color = Color::Rgb(143, 175, 96);
-pub const DANGER: Color = Color::Rgb(214, 84, 60);
-pub const WARN: Color = Color::Rgb(224, 170, 60);
+/// The colors of a scheme. A preset (coral, amber), then the `[colors]` overrides.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Palette {
+    /// The single accent.
+    pub accent: Color,
+    /// Text on an accent pill.
+    pub on_accent: Color,
+    /// Inputs, unfocused active tab, unfocused selection row.
+    pub panel: Color,
+    /// Bg of a clickable row / item under the mouse; the input bubble's border.
+    pub hover: Color,
+    /// Normal text.
+    pub text: Color,
+    /// Hints, labels, timestamps.
+    pub muted: Color,
+    /// Borders, dividers.
+    pub line: Color,
+    pub ok: Color,
+    pub danger: Color,
+    pub warn: Color,
+}
 
-/// Hover: solid HOVER bg on the cells of R (accent cells, like the selection pill, kept).
+/// hell's palette (axel's): coral #FF7565, cool grays. The default.
+pub const CORAL: Palette = Palette {
+    accent: Color::Rgb(255, 117, 101),
+    on_accent: Color::Rgb(24, 22, 26),
+    panel: Color::Rgb(46, 44, 52),
+    hover: Color::Rgb(66, 63, 74),
+    text: Color::Rgb(232, 230, 236),
+    muted: Color::Rgb(146, 142, 156),
+    line: Color::Rgb(84, 80, 94),
+    ok: Color::Indexed(108),
+    danger: Color::Indexed(167),
+    warn: Color::Indexed(179),
+};
+
+/// Ancient amber, like codehead.sh: warm paper, bone ink, amber #EC8F1A.
+pub const AMBER: Palette = Palette {
+    accent: Color::Rgb(236, 143, 26),
+    on_accent: Color::Rgb(21, 7, 0),
+    panel: Color::Rgb(42, 22, 12),
+    hover: Color::Rgb(61, 36, 22),
+    text: Color::Rgb(227, 210, 190),
+    muted: Color::Rgb(168, 146, 124),
+    line: Color::Rgb(92, 67, 52),
+    ok: Color::Rgb(143, 175, 96),
+    danger: Color::Rgb(214, 84, 60),
+    warn: Color::Rgb(224, 170, 60),
+};
+
+/// Presets: name, palette. The 1st one: the default.
+pub const PRESETS: [(&str, Palette); 2] = [("coral", CORAL), ("amber", AMBER)];
+
+/// The color names a `[colors]` override can set.
+pub const NAMES: [&str; 10] = ["accent", "on_accent", "panel", "hover", "text", "muted", "line", "ok", "danger", "warn"];
+
+impl Palette {
+    pub fn preset(name: &str) -> Option<Palette> {
+        PRESETS.iter().find(|(n, _)| *n == name.trim()).map(|(_, p)| *p)
+    }
+
+    pub fn get(&self, name: &str) -> Option<Color> {
+        Some(match name {
+            "accent" => self.accent,
+            "on_accent" => self.on_accent,
+            "panel" => self.panel,
+            "hover" => self.hover,
+            "text" => self.text,
+            "muted" => self.muted,
+            "line" => self.line,
+            "ok" => self.ok,
+            "danger" => self.danger,
+            "warn" => self.warn,
+            _ => return None,
+        })
+    }
+
+    fn slot(&mut self, name: &str) -> Option<&mut Color> {
+        Some(match name {
+            "accent" => &mut self.accent,
+            "on_accent" => &mut self.on_accent,
+            "panel" => &mut self.panel,
+            "hover" => &mut self.hover,
+            "text" => &mut self.text,
+            "muted" => &mut self.muted,
+            "line" => &mut self.line,
+            "ok" => &mut self.ok,
+            "danger" => &mut self.danger,
+            "warn" => &mut self.warn,
+            _ => return None,
+        })
+    }
+
+    /// Preset SCHEME (unknown / None: the default) with OVERRIDES (name → `#RRGGBB`).
+    pub fn build<'a>(scheme: Option<&str>, overrides: impl IntoIterator<Item = (&'a str, &'a str)>) -> Palette {
+        let mut p = scheme.and_then(Palette::preset).unwrap_or(PRESETS[0].1);
+        for (name, hex) in overrides {
+            if let (Some(slot), Some(c)) = (p.slot(name), parse_hex(hex)) {
+                *slot = c;
+            }
+        }
+        p
+    }
+}
+
+/// `#RRGGBB` (or `RRGGBB`) → the color.
+pub fn parse_hex(s: &str) -> Option<Color> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let v = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+    Some(Color::Rgb(v(0)?, v(2)?, v(4)?))
+}
+
+/// C as `#RRGGBB`.
+pub fn hex(c: Color) -> String {
+    let (r, g, b) = rgb(c);
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
+static PAL: std::sync::RwLock<Palette> = std::sync::RwLock::new(CORAL);
+
+/// The palette in use.
+pub fn pal() -> Palette {
+    PAL.read().map(|p| *p).unwrap_or(CORAL)
+}
+
+/// Use P from now on (start, settings).
+pub fn set_palette(p: Palette) {
+    if let Ok(mut cur) = PAL.write() {
+        *cur = p;
+    }
+}
+
+/// Hover: solid pal().hover bg on the cells of R (accent cells, like the selection pill, kept).
 pub fn hover(buf: &mut Buffer, r: Rect) {
     let r = r.intersection(buf.area);
     for y in r.top()..r.bottom() {
         for x in r.left()..r.right() {
             if let Some(c) = buf.cell_mut((x, y))
-                && c.bg != ACCENT
+                && c.bg != pal().accent
             {
-                c.set_bg(HOVER);
+                c.set_bg(pal().hover);
             }
         }
     }
 }
 
 pub fn text() -> Style {
-    Style::default().fg(TEXT)
+    Style::default().fg(pal().text)
 }
 pub fn muted() -> Style {
-    Style::default().fg(MUTED)
+    Style::default().fg(pal().muted)
 }
 pub fn line() -> Style {
-    Style::default().fg(LINE)
+    Style::default().fg(pal().line)
 }
 pub fn accent() -> Style {
-    Style::default().fg(ACCENT)
+    Style::default().fg(pal().accent)
 }
 pub fn bold() -> Style {
-    Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
+    Style::default().fg(pal().text).add_modifier(Modifier::BOLD)
 }
 pub fn accent_bold() -> Style {
     accent().add_modifier(Modifier::BOLD)
 }
 /// Selection pill: full row, accent bg, dark text.
 pub fn pill() -> Style {
-    Style::default().bg(ACCENT).fg(ON_ACCENT)
+    Style::default().bg(pal().accent).fg(pal().on_accent)
 }
 pub fn panel() -> Style {
-    Style::default().bg(PANEL).fg(TEXT)
+    Style::default().bg(pal().panel).fg(pal().text)
 }
 /// Count badge: readable on the normal row and on the pill row.
 pub fn badge(on_pill: bool) -> Style {
     if on_pill {
-        Style::default().bg(ON_ACCENT).fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::default().bg(pal().on_accent).fg(pal().accent).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().bg(ACCENT).fg(ON_ACCENT).add_modifier(Modifier::BOLD)
+        Style::default().bg(pal().accent).fg(pal().on_accent).add_modifier(Modifier::BOLD)
     }
 }
 
@@ -127,6 +244,53 @@ fn parse_osc4(text: &str) -> Vec<(usize, (u8, u8, u8))> {
 
 
 
+/// RGB of C: palette entries from the terminal (or xterm), the 256-color cube, grays.
+pub fn rgb(c: Color) -> (u8, u8, u8) {
+    let term = PALETTE.get().unwrap_or(&XTERM);
+    let named = [Color::Black, Color::Red, Color::Green, Color::Yellow, Color::Blue, Color::Magenta, Color::Cyan, Color::Gray,
+        Color::DarkGray, Color::LightRed, Color::LightGreen, Color::LightYellow, Color::LightBlue, Color::LightMagenta, Color::LightCyan, Color::White];
+    match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(i) if i < 16 => term[usize::from(i)],
+        Color::Indexed(i) if i < 232 => {
+            let v = |n: u8| if n == 0 { 0 } else { 55 + n * 40 };
+            let i = i - 16;
+            (v(i / 36), v(i / 6 % 6), v(i % 6))
+        }
+        Color::Indexed(i) => { let g = 8 + (i - 232) * 10; (g, g, g) }
+        c => named.iter().position(|n| *n == c).map_or(rgb(pal().accent), |i| term[i]),
+    }
+}
+
+/// C with its HSL saturation times KEEP (0.4: 60% less), same hue and lightness.
+pub fn desaturate(c: Color, keep: f32) -> Color {
+    let (r, g, b) = rgb(c);
+    let (r, g, b) = (f32::from(r) / 255.0, f32::from(g) / 255.0, f32::from(b) / 255.0);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let l = (max + min) / 2.0;
+    if max == min { return Color::Rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8); }
+    let d = max - min;
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let sector = if max == r {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    let h = sector / 6.0;
+    let s = s * keep;
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let hue = |mut t: f32| {
+        if t < 0.0 { t += 1.0 }
+        if t > 1.0 { t -= 1.0 }
+        if t < 1.0 / 6.0 { p + (q - p) * 6.0 * t } else if t < 0.5 { q } else if t < 2.0 / 3.0 { p + (q - p) * (2.0 / 3.0 - t) * 6.0 } else { p }
+    };
+    let to = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color::Rgb(to(hue(h + 1.0 / 3.0)), to(hue(h)), to(hue(h - 1.0 / 3.0)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +300,13 @@ mod tests {
         let replies = "\x1b]4;1;rgb:cdcd/3131/3131\x1b\\\x1b]4;4;rgb:24/72/c8\x07\x1b[?62;22c";
         assert_eq!(parse_osc4(replies), vec![(1, (205, 49, 49)), (4, (36, 114, 200))]);
         assert!(da1_seen(replies.as_bytes()));
+    }
+
+    #[test]
+    fn desaturation_keeps_hue() {
+        // gray stays gray; red keeps its hue, 40% of its saturation
+        assert_eq!(desaturate(Color::Rgb(128, 128, 128), 0.4), Color::Rgb(128, 128, 128));
+        let Color::Rgb(r, g, b) = desaturate(Color::Rgb(255, 0, 0), 0.4) else { panic!() };
+        assert_eq!((r, g, b), (179, 77, 77));
     }
 }

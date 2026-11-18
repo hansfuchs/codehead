@@ -159,7 +159,7 @@ pub fn color(name: Option<&str>) -> Color {
         Some("blue") => Color::Blue,
         Some("gray") => Color::Gray,
         Some("orange") => Color::Indexed(208),
-        _ => theme::ACCENT,
+        _ => theme::pal().accent,
     }
 }
 
@@ -356,7 +356,7 @@ pub fn restart(agent: &Agent, same_harness: bool, uses: &[Use], _logs: &Path) ->
 /// Archive AGENT. It leaves its threads; a thread left with 0 agents gets FALLBACK as lead.
 pub fn delete(agent: &Agent, fallback: &Agent, uses: &[Use], _logs: &Path) -> Vec<Line<'static>> {
     let mut out = vec![Line::from(vec![Span::styled(agent.name.clone(), Style::default().fg(color(agent.color.as_deref()))), Span::styled(format!("  {} threads", uses.len()), theme::muted())])];
-    let danger = Style::default().fg(theme::DANGER);
+    let danger = Style::default().fg(theme::pal().danger);
     for u in uses {
         let short: String = u.thread_id.chars().take(12).collect();
         let mut line = vec![Span::styled(format!("  {short} "), theme::muted()), Span::raw(u.title.clone())];
@@ -370,7 +370,7 @@ pub fn delete(agent: &Agent, fallback: &Agent, uses: &[Use], _logs: &Path) -> Ve
         }
         if store::load(&u.thread_id).is_some_and(|t| t.agents.is_empty()) {
             match store::update(&u.thread_id, |t| t.agents.push(fallback.name.clone())) {
-                Ok(_) => line.push(Span::styled(format!(" · {} leads now", fallback.name), Style::default().fg(theme::OK))),
+                Ok(_) => line.push(Span::styled(format!(" · {} leads now", fallback.name), Style::default().fg(theme::pal().ok))),
                 Err(e) => line.push(Span::styled(format!(" · {e}"), danger)),
             }
         }
@@ -381,7 +381,7 @@ pub fn delete(agent: &Agent, fallback: &Agent, uses: &[Use], _logs: &Path) -> Ve
         roster::save(&r)
     });
     match archived {
-        Ok(_) => out.push(Line::styled(format!("{} deleted (archived: file + history kept)", agent.name), Style::default().fg(theme::OK))),
+        Ok(_) => out.push(Line::styled(format!("{} deleted (archived: file + history kept)", agent.name), Style::default().fg(theme::pal().ok))),
         Err(e) => out.push(Line::styled(format!("archive failed: {e}"), danger)),
     }
     out

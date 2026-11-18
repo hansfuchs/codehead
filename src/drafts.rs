@@ -1,12 +1,13 @@
 //! Drafts of the task screen: 1 JSON file per unsent task in ~/.cache/codehead/drafts ($CODEHEAD_DRAFTS),
 //! written after every key that changed it. A started task (or an emptied one) drops its file.
-//! The task screen lists the other drafts ("view drafts (n)"): load 1, or delete it.
+//! The task screen lists the other drafts ("view drafts (n)"): load 1, or delete it. ctrl+s keeps a
+//! draft on purpose (`kept`): it stays past KEEP_DAYS, the form starts over empty.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-/// Drafts older than this go at start.
+/// Drafts older than this go at start (kept ones stay).
 const KEEP_DAYS: u64 = 30;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -30,6 +31,8 @@ pub struct Draft {
     pub files: Vec<(String, String)>,
     /// Context: thread id (None: a Claude Code session), transcript path, title.
     pub carry: Vec<(Option<String>, String, String)>,
+    /// Saved on purpose (ctrl+s): 0 cleanup by age.
+    pub kept: bool,
 }
 
 pub fn dir() -> PathBuf {
@@ -72,6 +75,7 @@ impl Draft {
             "stash": self.stash,
             "files": self.files.iter().map(|(m, p)| json!([m, p])).collect::<Vec<_>>(),
             "carry": self.carry.iter().map(|(t, p, title)| json!({"thread": t, "path": p, "title": title})).collect::<Vec<_>>(),
+            "kept": self.kept,
         })
         .to_string()
     }
@@ -96,6 +100,7 @@ impl Draft {
                 .as_array()
                 .map(|a| a.iter().map(|c| (c["thread"].as_str().map(String::from), c["path"].as_str().unwrap_or_default().to_string(), c["title"].as_str().unwrap_or_default().to_string())).collect())
                 .unwrap_or_default(),
+            kept: v["kept"].as_bool().unwrap_or(false),
         })
     }
 }
@@ -133,7 +138,7 @@ pub fn load(dir: &Path, skip: &str) -> Vec<Draft> {
         }
         let Some(id) = p.file_stem().map(|s| s.to_string_lossy().into_owned()) else { continue };
         let Some(d) = std::fs::read_to_string(&p).ok().and_then(|t| Draft::parse(&id, &t)) else { continue };
-        if d.saved > 0 && now.saturating_sub(d.saved) > KEEP_DAYS * 86400 {
+        if !d.kept && d.saved > 0 && now.saturating_sub(d.saved) > KEEP_DAYS * 86400 {
             let _ = std::fs::remove_file(&p);
             continue;
         }

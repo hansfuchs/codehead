@@ -269,7 +269,7 @@ impl Paths {
         for (i, (name, dir)) in o.entries.iter().enumerate().skip(off).take(shown) {
             let row = Rect { y: inner.y + (i - off) as u16, height: 1, ..inner };
             let hl = i == self.cursor;
-            let st = if hl { theme::pill().add_modifier(Modifier::BOLD) } else if *dir { Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::TEXT) };
+            let st = if hl { theme::pill().add_modifier(Modifier::BOLD) } else if *dir { Style::default().fg(theme::pal().text).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::pal().text) };
             let dim = if hl { theme::pill() } else { theme::muted() };
             let room = (row.width as usize).saturating_sub(3);
             let text: String = if name.width() > room { name.chars().take(room.saturating_sub(1)).chain(['…']).collect() } else { name.clone() };

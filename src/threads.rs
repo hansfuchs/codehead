@@ -238,7 +238,7 @@ pub fn preview(w: &Worktree) -> Vec<Line<'static>> {
     }
     let (_, st, _) = git(p, &["status", "--porcelain"]);
     let st: Vec<&str> = st.lines().collect();
-    let col = |bad: bool| Style::default().fg(if bad { theme::DANGER } else { theme::OK });
+    let col = |bad: bool| Style::default().fg(if bad { theme::pal().danger } else { theme::pal().ok });
     out.push(Line::styled(format!("uncommitted: {} files", st.len()), col(!st.is_empty())));
     out.extend(st.iter().take(15).map(|l| Line::raw(format!("  {l}"))));
     let r = if !w.linked || w.branch == "(detached)" { "HEAD".to_string() } else { w.branch.clone() };
@@ -264,8 +264,8 @@ pub fn delete_thread(id: &str) -> bool {
 /// Delete thread, remove worktree (uncommitted files → git stash), delete branch with 0 unpushed commits.
 pub fn remove(repo: &Path, items: &[Worktree], logs: &Path) -> Vec<Line<'static>> {
     let mut out = Vec::new();
-    let danger = Style::default().fg(theme::DANGER);
-    let warn = Style::default().fg(theme::WARN);
+    let danger = Style::default().fg(theme::pal().danger);
+    let warn = Style::default().fg(theme::pal().warn);
     for w in items {
         let p = Path::new(&w.path);
         out.push(Line::from(vec![Span::styled(w.label(), theme::bold()), Span::styled(format!("  {}", w.path), theme::muted())]));

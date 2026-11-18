@@ -183,6 +183,8 @@ pub enum Kind {
     Prompt { from: String, to: Vec<String>, text: String },
     /// Agent text, 1 block (markdown).
     Text { text: String },
+    /// An agent thought (a reasoning summary), 1 block. Empty thinking: 0 events.
+    Thought { text: String },
     /// A tool call of the agent.
     Tool { id: String, name: String, input: Value },
     /// The result of tool call ID (OUTPUT cut to 4 KB).

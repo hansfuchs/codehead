@@ -4,6 +4,7 @@ description: Every key, per screen.
 ---
 
 `codehead --help` prints the full list. ⌘ keys need a terminal with the kitty keyboard protocol.
+`F2` and `>` are the defaults of the settings `[keys] menu` and `[keys] command`.
 
 ## Everywhere
 
@@ -19,12 +20,14 @@ description: Every key, per screen.
 | Key | Action |
 | --- | --- |
 | `esc esc` | quit from the new tab |
+| `ctrl+s` | new tab: save the task as a draft for later, start over |
 | `ctrl+c` | quit |
 | `@` / `>` | agents / commands dropdown in the prompt |
 | `←` `→` | the **where** row: branch or worktree |
 | `ctrl+v` | paste a clipboard image |
 | `ctrl+s` / `ctrl+r` | settings: save / reload |
 | `ctrl+n` / `ctrl+d` | settings: add / remove an alias |
+| `ctrl+d`, click `↺` | settings: the field back to its default |
 
 ## Thread view
 
@@ -38,5 +41,6 @@ description: Every key, per screen.
 | `esc esc` | back to the start screen |
 | `ctrl+c` | clear the prompt; twice on an empty prompt: quit |
 | `ctrl+o` | open / close all tool runs |
+| `ctrl+t` | open / close all thoughts (hidden: show them) |
 | `ctrl+i` | VS Code on the thread's worktree (`⌘i`) |
 | `pgup` `pgdn`, `shift+↑↓`, wheel | scroll the stream |

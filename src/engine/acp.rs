@@ -52,6 +52,8 @@ struct State {
     preamble: Option<String>,
     /// Agent text of the running turn, not yet an event.
     text: String,
+    /// Agent thought of the running turn (`agent_thought_chunk`s), not yet an event.
+    thought: String,
     /// Open permission requests: our id → the agent's JSON-RPC id, the options.
     asks: HashMap<String, (Value, Vec<Value>)>,
     setup: Setup,
@@ -85,10 +87,19 @@ impl State {
         let _ = self.tx.send((self.name.clone(), o));
     }
 
+    /// The buffered thought, then the buffered text, as events (empty ones: 0 events).
     fn flush_text(&mut self) {
+        self.flush_thought();
         let t = std::mem::take(&mut self.text);
         if !t.trim().is_empty() {
             self.out(Out::Event(Kind::Text { text: t }));
+        }
+    }
+
+    fn flush_thought(&mut self) {
+        let t = std::mem::take(&mut self.thought);
+        if !t.trim().is_empty() {
+            self.out(Out::Event(Kind::Thought { text: t.trim().to_string() }));
         }
     }
 
@@ -190,7 +201,18 @@ impl State {
         match u["sessionUpdate"].as_str().unwrap_or_default() {
             "agent_message_chunk" => {
                 if let Some(t) = u["content"]["text"].as_str() {
+                    // a thought before it: its own event, before the text
+                    self.flush_thought();
                     self.text.push_str(t);
+                }
+            }
+            "agent_thought_chunk" => {
+                if let Some(t) = u["content"]["text"].as_str().filter(|t| !t.is_empty()) {
+                    if !self.text.trim().is_empty() {
+                        let text = std::mem::take(&mut self.text);
+                        self.out(Out::Event(Kind::Text { text }));
+                    }
+                    self.thought.push_str(t);
                 }
             }
             "tool_call" => {
@@ -316,6 +338,7 @@ pub fn start(stdin: ChildStdin, stdout: std::process::ChildStdout, stderr: Arc<M
         queue: VecDeque::new(),
         preamble,
         text: String::new(),
+        thought: String::new(),
         asks: HashMap::new(),
         setup,
         tx,
@@ -394,5 +417,47 @@ mod tests {
         assert_eq!(i["description"], "Run tests");
         let (n, _) = tool_of(&json!({"kind": "other", "title": "codehead_send"}));
         assert_eq!(n, "codehead_send");
+    }
+
+    #[test]
+    fn thought_chunks_become_1_thought_before_the_next_text_or_tool() {
+        let mut child = std::process::Command::new("cat").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let setup = Setup { cwd: "/".into(), resume: None, model: None, mcp: (String::new(), Vec::new(), Vec::new()), preamble: String::new() };
+        let mut s = State {
+            stdin: child.stdin.take().unwrap(),
+            next: 0,
+            pending: HashMap::new(),
+            session: None,
+            loading: false,
+            can_load: false,
+            busy: true,
+            queue: VecDeque::new(),
+            preamble: None,
+            text: String::new(),
+            thought: String::new(),
+            asks: HashMap::new(),
+            setup,
+            tx,
+            name: "ada".into(),
+        };
+        let chunk = |kind: &str, t: &str| json!({"sessionUpdate": kind, "content": {"type": "text", "text": t}});
+        // empty chunks: 0 events
+        s.update(&chunk("agent_thought_chunk", ""));
+        for t in ["Cause", " found,", " fixing."] {
+            s.update(&chunk("agent_thought_chunk", t));
+        }
+        s.update(&json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "kind": "execute", "title": "Run", "rawInput": {"command": "ls"}}));
+        s.update(&chunk("agent_thought_chunk", "Then the text."));
+        s.update(&chunk("agent_message_chunk", "Done."));
+        s.flush_text();
+        let kinds: Vec<Kind> = rx.try_iter().filter_map(|(_, o)| if let Out::Event(k) = o { Some(k) } else { None }).collect();
+        assert_eq!(kinds[0], Kind::Thought { text: "Cause found, fixing.".into() });
+        assert!(matches!(kinds[1], Kind::Tool { .. }));
+        assert_eq!(kinds[2], Kind::Thought { text: "Then the text.".into() });
+        assert_eq!(kinds[3], Kind::Text { text: "Done.".into() });
+        assert_eq!(kinds.len(), 4);
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

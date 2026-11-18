@@ -274,7 +274,7 @@ impl Host {
                             t.sessions.insert(a, s);
                         });
                     }
-                    Kind::Text { .. } | Kind::Tool { .. } => {
+                    Kind::Text { .. } | Kind::Thought { .. } | Kind::Tool { .. } => {
                         // a queued message runs as its own turn: it starts with output
                         if let Some(l) = self.sessions.get_mut(&agent)
                             && !l.busy

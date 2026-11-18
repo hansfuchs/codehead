@@ -617,7 +617,7 @@ impl Command {
         }
         self.seen = None;
         if !q.is_empty() {
-            ta.replace_to_cursor(at, ">");
+            ta.replace_to_cursor(at, &crate::config::command_key().to_string());
         }
     }
 
@@ -631,7 +631,7 @@ impl Command {
         // the parent keeps its row; `seen` holds the empty filter the parent comes back with
         self.seen = Some((self.depth(), String::new()));
         if !q.is_empty() {
-            ta.replace_to_cursor(at, ">");
+            ta.replace_to_cursor(at, &crate::config::command_key().to_string());
         }
     }
 
@@ -693,7 +693,7 @@ impl Command {
                     self.cursor[level] = row;
                     self.seen = Some((level, String::new()));
                     if !q.is_empty() {
-                        ta.replace_to_cursor(at, ">");
+                        ta.replace_to_cursor(at, &crate::config::command_key().to_string());
                     }
                     self.activate(ta, at, "");
                 } else {
@@ -782,10 +782,10 @@ impl Command {
                 };
                 let st = match (hl, active) {
                     (true, true) => theme::pill().add_modifier(Modifier::BOLD),
-                    (true, false) => Style::default().bg(theme::PANEL).fg(theme::ACCENT).add_modifier(Modifier::BOLD),
-                    _ => Style::default().fg(theme::TEXT),
+                    (true, false) => Style::default().bg(theme::pal().panel).fg(theme::pal().accent).add_modifier(Modifier::BOLD),
+                    _ => Style::default().fg(theme::pal().text),
                 };
-                let dim = if hl && active { st.remove_modifier(Modifier::BOLD) } else { st.fg(theme::MUTED).remove_modifier(Modifier::BOLD) };
+                let dim = if hl && active { st.remove_modifier(Modifier::BOLD) } else { st.fg(theme::pal().muted).remove_modifier(Modifier::BOLD) };
                 // menus: a `›` on the right (a submenu opens)
                 let mark = if submenu { " ›" } else if items { "" } else { "  " };
                 let room_w = (row.width as usize).saturating_sub(2 + mark.width());

@@ -68,10 +68,14 @@ config:  ~/.config/codehead.toml ($CODEHEAD_CONFIG overrides). keys, each overri
            agent  = \"amon\"      default agent ($CODEHEAD_AGENT)
            prefix = \"task\"      branch prefix ($CODEHEAD_PREFIX)
            models = \"fable,opus,sonnet,haiku\"  Claude models ($CODEHEAD_MODELS)
+           messages = \"bubbles\"  thread view messages: bubbles or lines ($CODEHEAD_MESSAGES)
+           thoughts = \"hidden\"  thread view thoughts: hidden, folded or open ($CODEHEAD_THOUGHTS)
+           [keys]   menu = \"F2\" ($CODEHEAD_MENU_KEY), command = \">\" ($CODEHEAD_COMMAND_KEY)
+           [colors] scheme = \"coral\" | \"amber\" ($CODEHEAD_SCHEME); accent, text, … = \"#RRGGBB\"
            [aliases]
            \"project:platform\" = \"~/projects/exampleorg/project/notes/platform/\"
 settings: 4th tab. edit fields and path aliases; ctrl+s saves, ctrl+r discards edits / reloads.
-          ctrl+n adds an alias; ctrl+d removes the current alias. blank field: default.
+          ctrl+n adds an alias; ctrl+d removes the current alias, on a field: back to its default (↺ too).
           path fields use the prompt's path suggestions: tab completes, esc closes suggestions.
           environment variables override file values. edits stay until saved or reloaded.
 default agent: config agent, else amon, else the first agent.
@@ -98,7 +102,8 @@ prompt:  @: agent names. >: commands, in dropdowns above the prompt box (never o
          256 chars → [Pasted text #n +L lines]. the files go into the message as a list.
 drafts:  an unsent task goes to ~/.cache/codehead/drafts ($CODEHEAD_DRAFTS) after every key. the new tab
          shows \"view drafts (n)\" on top: enter lists them; enter loads 1, d deletes it, esc: back.
-         a started thread drops its draft. drafts older than 30 days go.
+         a started thread drops its draft. drafts older than 30 days go. ctrl+s: the task as a kept
+         draft (★ saved, 0 cleanup by age), the form starts over.
 artifacts: codehead sets CLAUDE_CODE_ARTIFACT=1 for the sessions it starts: Claude Code agents can
          publish web artifacts (off by default in SDK sessions). a value set before codehead stays.
 esc:     close local controls, keep the current tab. tab / shift+tab: switch tabs.
@@ -110,7 +115,7 @@ debug:   $CODEHEAD_KEYLOG=<file>: every key of the text inputs, with its time (a
 inputs:  all text fields (title, prompt, agent form, filters, thread prompt): ctrl+z / ⌘z undo,
          ctrl+shift+z / ⌘⇧z redo (ctrl+y too). ⌘ keys need a terminal with the kitty keyboard protocol.
          Markdown lists (`- `, `* `, `1. `, 2 spaces per layer): enter starts the next item at the same
-         layer; enter / backspace on an empty item: 1 layer out (1st layer: the marker goes).
+         layer; enter / backspace on an empty item: 1 layer out (1st layer: the marker goes), space: 1 layer in.
 start:   the new tab. notes: tab to the notes field, enter.
 threads: worktrees, then recent Claude Code sessions. enter on a session:
          new thread in its dir, its last response as context.
@@ -128,6 +133,7 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          agent leaves and the new one gets the message with the old one's last messages.
          ctrl+i / ⌘i: VS Code on the thread's worktree (code on PATH).
          tool runs (▸): click opens / closes the calls (input + output); ctrl+o: all.
+         thoughts (setting thoughts = hidden | folded | open): ∴ rows, a click opens 1, ctrl+t: all.
          ctrl+v pastes a clipboard image as [Image #n], a dropped image path too. pasted text over
          256 chars: [Pasted text #n +L lines]. both go in as attachments.
          ⌘/ctrl+Enter (alt+Enter, ctrl+s) sends, Enter: new line. ↑ on the 1st row of an empty
@@ -360,6 +366,8 @@ fn enable_artifacts() {
 fn main() {
     enable_artifacts();
     sub();
+    // the palette before any screen (`--cost` draws in parse); a broken file fails in start
+    let _ = config::load();
     let args = parse();
     update::spawn_check();
     start(args);

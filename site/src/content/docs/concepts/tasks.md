@@ -37,3 +37,6 @@ Outside a git repository, the thread works in the current directory.
 
 An unsent task is saved after every key to `~/.cache/codehead/drafts`. The new tab shows
 **view drafts (n)** on top. A started thread drops its draft; drafts older than 30 days go.
+
+An idea for later (a usage limit hit, a thread you do not want yet): `ctrl+s` saves the task as
+a kept draft and empties the form. Kept drafts show **★ saved** in the list and never expire.

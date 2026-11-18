@@ -25,3 +25,7 @@ site:
 # Website production build into site/dist.
 site-build:
     cd site && bun install --frozen-lockfile && bun run build
+
+# Agent sprite pools (examples/sprites.rs): --force regenerates pcb + chip, --sheet prints them.
+sprites *args:
+    cargo run --quiet --example sprites -- {{args}}

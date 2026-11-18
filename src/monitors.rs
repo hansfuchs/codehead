@@ -147,7 +147,7 @@ impl Monitors {
         f.render_widget(Clear, anchor);
         let descriptions = self.watches.iter().map(|w| format!("{}: {}", w.agent, w.description)).collect::<Vec<_>>().join(" · ");
         let wave = ["◐", "◓", "◑", "◒"][tick % 4];
-        let style = if self.hover { theme::accent().bg(theme::HOVER) } else { theme::accent() };
+        let style = if self.hover { theme::accent().bg(theme::pal().hover) } else { theme::accent() };
         let hint = if self.open { "click: close" } else { "click: details" };
         f.render_widget(Paragraph::new(format!("{wave} monitors ({}) · {descriptions} · {hint}", self.watches.len())).style(style), anchor);
         if !self.open || area.height < 4 { return; }

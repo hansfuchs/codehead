@@ -13,6 +13,18 @@ pub struct File {
     pub agent: Option<String>,
     pub prefix: Option<String>,
     pub models: Option<String>,
+    /// Thread view messages: `bubbles` (default) or `lines`.
+    pub messages: Option<String>,
+    /// Thread view thoughts: `hidden` (default), `folded` or `open`.
+    pub thoughts: Option<String>,
+    /// `[keys] menu`: the menu key (F2).
+    pub menu_key: Option<String>,
+    /// `[keys] command`: the char that opens the command dropdown (`>`).
+    pub command_key: Option<String>,
+    /// `[colors] scheme`: a preset (coral, amber).
+    pub scheme: Option<String>,
+    /// `[colors]` overrides: color name (theme::NAMES) → `#RRGGBB`.
+    pub colors: BTreeMap<String, String>,
     pub aliases: BTreeMap<String, String>,
 }
 
@@ -44,6 +56,30 @@ fn parse(text: &str) -> Result<File, String> {
     let t: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
     let mut f = File::default();
     for (k, v) in t {
+        if k == "keys" {
+            for (name, v) in v.as_table().ok_or("keys: must be a table")? {
+                let v = v.as_str().ok_or_else(|| format!("keys.{name}: must be a string"))?.to_string();
+                validate("keys.".to_string() + name, &v)?;
+                match name.as_str() {
+                    "menu" => f.menu_key = Some(v),
+                    "command" => f.command_key = Some(v),
+                    _ => return Err(format!("unknown key keys.{name}")),
+                }
+            }
+            continue;
+        }
+        if k == "colors" {
+            for (name, v) in v.as_table().ok_or("colors: must be a table")? {
+                let v = v.as_str().ok_or_else(|| format!("colors.{name}: must be a string"))?.to_string();
+                validate("colors.".to_string() + name, &v)?;
+                if name == "scheme" {
+                    f.scheme = Some(v);
+                } else {
+                    f.colors.insert(name.clone(), v);
+                }
+            }
+            continue;
+        }
         if k == "aliases" {
             let aliases = v.as_table().ok_or("aliases: must be a table")?;
             for (name, target) in aliases {
@@ -67,6 +103,14 @@ fn parse(text: &str) -> Result<File, String> {
             "agent" => f.agent = Some(s),
             "prefix" => f.prefix = Some(s),
             "models" => f.models = Some(s),
+            "thoughts" => {
+                validate("thoughts".into(), &s)?;
+                f.thoughts = Some(s);
+            }
+            "messages" => {
+                validate("messages".into(), &s)?;
+                f.messages = Some(s);
+            }
             _ => return Err(format!("unknown key {k}")),
         }
     }
@@ -84,6 +128,7 @@ pub fn load() -> Result<File, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => File::default(),
         Err(e) => return Err(format!("{}: {e}", p.display())),
     };
+    crate::theme::set_palette(palette_of(&f));
     CFG.get_or_init(|| RwLock::new(f))
         .read()
         .map(|c| c.clone())
@@ -92,6 +137,73 @@ pub fn load() -> Result<File, String> {
 
 fn get() -> File {
     load().unwrap_or_else(|e| crate::fail(&e, 2))
+}
+
+/// Value V of setting KEY (a settings field: `messages`, `keys.menu`, `colors.accent` …): Err(why).
+pub fn validate(key: String, v: &str) -> Result<(), String> {
+    let v = v.trim();
+    match key.as_str() {
+        "messages" if crate::stream::Look::parse(v).is_none() => Err(format!("messages: bubbles or lines, not {v}")),
+        "thoughts" if crate::stream::Thoughts::parse(v).is_none() => Err(format!("thoughts: hidden, folded or open, not {v}")),
+        "keys.menu" => Bind::parse(v).map(|_| ()).ok_or_else(|| format!("keys.menu: F1-F12, ctrl+<letter> or alt+<letter>, not {v}")),
+        "keys.command" => command_char(v).map(|_| ()).ok_or_else(|| format!("keys.command: 1 symbol (not a letter, digit, space or @), not {v}")),
+        "colors.scheme" if crate::theme::Palette::preset(v).is_none() => {
+            Err(format!("colors.scheme: {}, not {v}", crate::theme::PRESETS.iter().map(|p| p.0).collect::<Vec<_>>().join(" or ")))
+        }
+        k if k.starts_with("colors.") && k != "colors.scheme" => {
+            let name = &k["colors.".len()..];
+            if !crate::theme::NAMES.contains(&name) {
+                return Err(format!("unknown key {k}"));
+            }
+            crate::theme::parse_hex(v).map(|_| ()).ok_or_else(|| format!("{k}: #RRGGBB, not {v}"))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A key of the keyboard as a setting: `F2`, `ctrl+p`, `alt+m`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bind {
+    pub code: ratatui::crossterm::event::KeyCode,
+    pub mods: ratatui::crossterm::event::KeyModifiers,
+    /// As the hints show it.
+    pub label: String,
+}
+
+impl Bind {
+    pub fn parse(s: &str) -> Option<Bind> {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let s = s.trim();
+        let lower = s.to_ascii_lowercase();
+        if let Some(n) = lower.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()).filter(|n| (1..=12).contains(n)) {
+            return Some(Bind { code: KeyCode::F(n), mods: KeyModifiers::NONE, label: format!("F{n}") });
+        }
+        let (mods, rest, name) = if let Some(r) = lower.strip_prefix("ctrl+") {
+            (KeyModifiers::CONTROL, r, "ctrl")
+        } else {
+            (KeyModifiers::ALT, lower.strip_prefix("alt+")?, "alt")
+        };
+        let mut chars = rest.chars();
+        let c = chars.next().filter(|c| c.is_ascii_lowercase())?;
+        chars.next().is_none().then(|| Bind { code: KeyCode::Char(c), mods, label: format!("{name}+{c}") })
+    }
+
+    /// K is this key.
+    pub fn matches(&self, k: &ratatui::crossterm::event::KeyEvent) -> bool {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let core = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        match (self.code, k.code) {
+            (KeyCode::Char(a), KeyCode::Char(b)) => a == b.to_ascii_lowercase() && k.modifiers.intersection(core) == self.mods,
+            (a, b) => a == b && k.modifiers.intersection(core) == self.mods,
+        }
+    }
+}
+
+/// The command trigger of S: 1 symbol.
+fn command_char(s: &str) -> Option<char> {
+    let mut c = s.trim().chars();
+    let ch = c.next()?;
+    (c.next().is_none() && !ch.is_alphanumeric() && !ch.is_whitespace() && ch != '@').then_some(ch)
 }
 
 pub fn validate_alias(name: &str, target: &str) -> Result<(), String> {
@@ -129,6 +241,8 @@ fn document(base: &str, file: &File) -> Result<String, String> {
         ("agent", &file.agent),
         ("prefix", &file.prefix),
         ("models", &file.models),
+        ("messages", &file.messages),
+        ("thoughts", &file.thoughts),
     ] {
         if let Some(value) = value {
             if doc.get(key).and_then(|v| v.as_str()) != Some(value) {
@@ -140,6 +254,33 @@ fn document(base: &str, file: &File) -> Result<String, String> {
             }
         } else {
             doc.remove(key);
+        }
+    }
+    let keys: BTreeMap<String, String> = [("menu", &file.menu_key), ("command", &file.command_key)]
+        .into_iter()
+        .filter_map(|(k, v)| v.clone().map(|v| (k.to_string(), v)))
+        .collect();
+    let mut colors = file.colors.clone();
+    if let Some(s) = &file.scheme {
+        colors.insert("scheme".into(), s.clone());
+    }
+    for (name, table) in [("keys", &keys), ("colors", &colors)] {
+        if table.is_empty() {
+            doc.remove(name);
+            continue;
+        }
+        if !doc.contains_key(name) {
+            doc[name] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        let t = doc[name].as_table_like_mut().ok_or_else(|| format!("{name}: must be a table"))?;
+        let gone: Vec<String> = t.iter().filter(|(k, _)| !table.contains_key(*k)).map(|(k, _)| k.to_string()).collect();
+        for k in gone {
+            t.remove(&k);
+        }
+        for (k, v) in table {
+            if t.get(k).and_then(|x| x.as_str()) != Some(v) {
+                t.insert(k, toml_edit::Item::Value(toml_edit::Value::from(v.clone())));
+            }
         }
     }
     if !file.aliases.is_empty() || doc.contains_key("aliases") {
@@ -215,7 +356,69 @@ pub fn save_file(path: &std::path::Path, base: &str, file: &File) -> Result<Stri
     result
 }
 
+/// Setting KEY of F (a settings field), None: unset (the default applies).
+impl File {
+    pub fn get(&self, key: &str) -> Option<String> {
+        match key {
+            "notes" => self.notes.clone(),
+            "styles" => self.styles.clone(),
+            "agent" => self.agent.clone(),
+            "prefix" => self.prefix.clone(),
+            "models" => self.models.clone(),
+            "messages" => self.messages.clone(),
+            "thoughts" => self.thoughts.clone(),
+            "keys.menu" => self.menu_key.clone(),
+            "keys.command" => self.command_key.clone(),
+            "colors.scheme" => self.scheme.clone(),
+            k => k.strip_prefix("colors.").and_then(|n| self.colors.get(n).cloned()),
+        }
+    }
+
+    pub fn set(&mut self, key: &str, v: Option<String>) {
+        match key {
+            "notes" => self.notes = v,
+            "styles" => self.styles = v,
+            "agent" => self.agent = v,
+            "prefix" => self.prefix = v,
+            "models" => self.models = v,
+            "messages" => self.messages = v,
+            "thoughts" => self.thoughts = v,
+            "keys.menu" => self.menu_key = v,
+            "keys.command" => self.command_key = v,
+            "colors.scheme" => self.scheme = v,
+            k => {
+                if let Some(n) = k.strip_prefix("colors.") {
+                    match v {
+                        Some(v) => self.colors.insert(n.to_string(), v),
+                        None => self.colors.remove(n),
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// The palette of F: its scheme ($CODEHEAD_SCHEME first) + its color overrides.
+pub fn palette_of(f: &File) -> crate::theme::Palette {
+    let scheme = env("CODEHEAD_SCHEME").or_else(|| f.scheme.clone());
+    crate::theme::Palette::build(scheme.as_deref(), f.colors.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+}
+
+/// The menu key: $CODEHEAD_MENU_KEY, else `[keys] menu`, else F2.
+pub fn menu_key() -> Bind {
+    // tests: the defaults, never the machine's config
+    let set = if cfg!(test) { None } else { env("CODEHEAD_MENU_KEY").or_else(|| load().ok()?.menu_key) };
+    set.and_then(|k| Bind::parse(&k)).unwrap_or_else(|| Bind::parse("F2").expect("F2 parses"))
+}
+
+/// The command trigger: $CODEHEAD_COMMAND_KEY, else `[keys] command`, else `>`.
+pub fn command_key() -> char {
+    let set = if cfg!(test) { None } else { env("CODEHEAD_COMMAND_KEY").or_else(|| load().ok()?.command_key) };
+    set.and_then(|k| command_char(&k)).unwrap_or('>')
+}
+
 pub fn apply(file: File) {
+    crate::theme::set_palette(palette_of(&file));
     *CFG.get_or_init(|| RwLock::new(File::default()))
         .write()
         .unwrap_or_else(|e| e.into_inner()) = file;
@@ -275,6 +478,11 @@ pub fn defaults() -> File {
         styles: Some(app_dir().join("output-styles").display().to_string()),
         prefix: Some("task".into()),
         models: Some("fable,opus,sonnet,haiku".into()),
+        messages: Some("bubbles".into()),
+        thoughts: Some("hidden".into()),
+        menu_key: Some("F2".into()),
+        command_key: Some(">".into()),
+        scheme: Some(crate::theme::PRESETS[0].0.into()),
         ..File::default()
     }
 }
@@ -318,9 +526,50 @@ pub fn models() -> Vec<String> {
         .collect()
 }
 
+/// How the thread view shows thoughts: $CODEHEAD_THOUGHTS, else `thoughts`, else hidden.
+pub fn thoughts() -> crate::stream::Thoughts {
+    env("CODEHEAD_THOUGHTS")
+        .or_else(|| get().thoughts.clone())
+        .and_then(|m| crate::stream::Thoughts::parse(&m))
+        .unwrap_or_default()
+}
+
+/// How the thread view draws messages: $CODEHEAD_MESSAGES, else `messages`, else bubbles.
+pub fn messages() -> crate::stream::Look {
+    env("CODEHEAD_MESSAGES")
+        .or_else(|| get().messages.clone())
+        .and_then(|m| crate::stream::Look::parse(&m))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_and_colors_tables_round_trip() {
+        let f = parse("[keys]\nmenu = \"ctrl+p\"\ncommand = \"!\"\n[colors]\nscheme = \"amber\"\naccent = \"#112233\"\n").unwrap();
+        assert_eq!((f.menu_key.as_deref(), f.command_key.as_deref(), f.scheme.as_deref()), (Some("ctrl+p"), Some("!"), Some("amber")));
+        assert_eq!(f.colors["accent"], "#112233");
+        let p = palette_of(&f);
+        assert_eq!(p.accent, ratatui::style::Color::Rgb(0x11, 0x22, 0x33));
+        assert_eq!(p.text, crate::theme::AMBER.text);
+        // written back: same tables; unset keys go
+        let mut g = f.clone();
+        g.set("colors.accent", None);
+        g.set("keys.command", None);
+        let text = document("[keys]\nmenu = \"ctrl+p\"\ncommand = \"!\"\n[colors]\nscheme = \"amber\"\naccent = \"#112233\"\n", &g).unwrap();
+        let back = parse(&text).unwrap();
+        assert_eq!(back, g);
+        for bad in ["[keys]\nmenu = \"x\"", "[keys]\ncommand = \"ab\"", "[colors]\nscheme = \"pink\"", "[colors]\naccent = \"red\"", "[colors]\nfoo = \"#000000\""] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        let b = Bind::parse("ctrl+p").unwrap();
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        assert!(b.matches(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+        assert!(!b.matches(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+        assert!(Bind::parse("F2").unwrap().matches(&KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)));
+    }
 
     #[test]
     fn parses_keys() {
