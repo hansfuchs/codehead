@@ -143,6 +143,18 @@ install_codehead() {
   else
     warn "portless needs Node 24+ and npm: https://github.com/vercel-labs/portless (agents use \$CODEHEAD_PORT meanwhile)"
   fi
+  # its local CA in the OS trust store: https://*.localhost without browser warnings (once)
+  if command -v portless >/dev/null 2>&1; then
+    if portless doctor --json 2>/dev/null | grep -q "Local CA is trusted"; then
+      good "portless: local CA trusted"
+    elif (: </dev/tty) 2>/dev/null; then
+      say "portless trust: adds its local CA to the OS trust store (may ask for your password) …"
+      # curl | sh: stdin is the script, so the prompt reads the terminal
+      if portless trust </dev/tty >/dev/tty 2>&1; then good "portless: local CA trusted"; else warn "portless trust failed: run 'portless trust' later"; fi
+    else
+      warn "0 terminal: run 'portless trust' once for https://*.localhost"
+    fi
+  fi
 
   # yazi: the file browser of the thread view (ctrl+y, files view y)
   if command -v yazi >/dev/null 2>&1; then
