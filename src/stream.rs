@@ -208,6 +208,7 @@ impl Thread {
                 self.items.push(Item::Note { agent, text: "left the thread".into(), color: theme::pal().muted });
             }
             Kind::Error { message } => self.items.push(Item::Note { agent, text: message.clone(), color: theme::pal().danger }),
+            Kind::Edits { summary } => self.items.push(Item::Note { agent, text: format!("got the edits since its last turn · {summary}"), color: theme::pal().muted }),
         }
     }
 

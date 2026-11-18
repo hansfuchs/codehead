@@ -10,6 +10,7 @@
 
 pub mod acp;
 pub mod client;
+pub mod edits;
 pub mod guard;
 pub mod harness;
 pub mod harnesses;

@@ -16,6 +16,7 @@ prefix = "task"                       # $CODEHEAD_PREFIX
 models = "fable,opus,sonnet,haiku"    # $CODEHEAD_MODELS
 messages = "bubbles"                  # $CODEHEAD_MESSAGES
 thoughts = "hidden"                   # $CODEHEAD_THOUGHTS
+edits = "diff"                       # $CODEHEAD_EDITS
 
 [keys]
 menu    = "F2"                        # $CODEHEAD_MENU_KEY
@@ -38,6 +39,7 @@ accent = "#FF7565"                    # overrides 1 color of the scheme
 | `models` | `fable,opus,sonnet,haiku` | Claude models in the agent form |
 | `messages` | `bubbles` | Thread view messages: `bubbles` (boxes, your messages on the right) or `lines` (name badge, a bar in the agent's color) |
 | `thoughts` | `hidden` | Agent thoughts in the thread view: `hidden`, `folded` (a click opens them) or `open` |
+| `edits` | `diff` | What an agent gets told, before its next turn, of edits in its worktree it did not make: `off`, `files` (files and line ranges) or `diff` (also your diff, max. 150 lines) |
 | `[keys] menu` | `F2` | the menu key: `F1`-`F12`, `ctrl+<letter>`, `alt+<letter>` |
 | `[keys] command` | `>` | the char that opens the command dropdown in a prompt: 1 symbol |
 | `[colors] scheme` | `coral` | color preset: `coral` (cool grays, coral accent) or `amber` (warm paper, amber accent) |

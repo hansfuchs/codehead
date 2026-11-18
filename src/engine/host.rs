@@ -138,8 +138,18 @@ impl Host {
 
     fn deliver(&mut self, agent: &str, text: &str) -> Result<(), String> {
         self.ensure(agent)?;
+        let mut text = text.to_string();
+        // a new turn: edits in the worktree since the agent's last turn, not its own, go first
+        if self.sessions.get(agent).is_some_and(|l| !l.busy) {
+            let others = self.sessions.iter().any(|(n, l)| n != agent && l.busy);
+            let dir = self.thread()?.work_dir();
+            if let Some(n) = super::edits::turn_start(&self.id, &dir, agent, others) {
+                self.log(Some(agent), Kind::Edits { summary: n.summary });
+                text = format!("{}\n\n{text}", n.text);
+            }
+        }
         let live = self.sessions.get_mut(agent).ok_or("0 session")?;
-        live.session.prompt(text)?;
+        live.session.prompt(&text)?;
         if !live.busy {
             live.busy = true;
             self.log(Some(agent), Kind::TurnStart);
@@ -346,6 +356,11 @@ impl Host {
                         }
                         // a turn ends: its open asks are moot (the view drops them too)
                         self.asks.retain(|_, (a, _)| *a != agent);
+                        // its edits go in the log of edits (the next note of every other agent)
+                        if let Ok(t) = self.thread() {
+                            let idle = !self.sessions.values().any(|l| l.busy);
+                            super::edits::turn_end(&self.id, &t.work_dir(), &agent, idle);
+                        }
                     }
                     _ => {}
                 }

@@ -229,6 +229,9 @@ pub enum Kind {
     Leave,
     /// A session failed or ended without a turn end.
     Error { message: String },
+    /// The agent got a note of edits in its worktree since its last turn, not its own: SUMMARY
+    /// (1 line: who, files, line ranges).
+    Edits { summary: String },
 }
 
 impl Event {

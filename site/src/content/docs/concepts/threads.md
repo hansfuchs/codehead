@@ -69,3 +69,29 @@ codehead ctl 6a1f3c '{"op":"stop"}'
 The `>` command **branch** copies a thread: its events, agents and directory. Each agent's
 next session forks its Claude Code session (`--fork-session`), so the 2 threads go their own
 ways from there. Files are shared: same directory or worktree.
+
+## Your edits
+
+You edit the agents' files in your IDE between their turns. Before the next turn of an agent,
+the host tells it what changed in the worktree since its last turn and was not its own work:
+
+```
+[codehead: changes in this worktree since your last turn, not made by you. Read a file again before you edit it.]
+owner:
+- src/deploy.rs:40-52 (+5 −2)
+- src/retry.rs (new)
+@lilith:
+- src/api.rs:10-30 (+18 −3)
+owner diff:
+…
+[end of changes]
+```
+
+The thread view shows the same as a note under the agent's name. Whitespace-only edits (a
+formatter on save) are left out. The `edits` setting picks `off`, `files` or `diff` (default).
+
+How: at each turn's start and end, the host writes a git tree of the worktree (tracked and
+untracked files, ignored ones left out) through a temp index, so your index, HEAD and branch
+stay as they are. Your edits are the changes while 0 agents work; an edit you make while an
+agent works counts as that agent's. A worktree with more than 2000 untracked files gets 0
+note. State: `threads/<id>/edits.json`.
