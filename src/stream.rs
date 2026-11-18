@@ -593,7 +593,15 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                 let (body, files) = split_attachments(text);
                 let bw = (w * 3 / 4).max(20).min(w);
                 let bg = Style::default().bg(theme::pal().hover);
-                let mut rows = render::plain(body.trim_end(), bw.saturating_sub(4), theme::text().bg(theme::pal().hover), &[]);
+                // markdown as the agents' text (bold, lists, code); the hover bg under every span
+                let mut rows = memo::markdown(body.trim_end(), bw.saturating_sub(4), &[]);
+                for r in &mut rows {
+                    for s in &mut r.line.spans {
+                        if s.style.bg.is_none() {
+                            s.style = s.style.bg(theme::pal().hover);
+                        }
+                    }
+                }
                 rows.extend(files.iter().map(|f| Row::plain(Line::styled(format!("📎 {f}"), theme::muted().bg(theme::pal().hover)))));
                 let inner = rows.iter().map(|r| r.line.width()).max().unwrap_or(0);
                 let box_w = inner + 4;
@@ -948,7 +956,7 @@ fn owner_bubble(d: &mut Drawn, w: usize, text: &str, to_note: &str, ts: u64) {
     d.rows.push(Row { line: Line::from([vec![pad.clone()], top.line.spans].concat()), ..Default::default() });
     let bar = [pad.clone(), Span::styled("│ ", border)];
     let mut rows = vec![Row::plain(Line::from(bar.to_vec()))];
-    rows.extend(render::plain(body, left + bw - 2, theme::text(), &bar));
+    rows.extend(memo::markdown(body, left + bw - 2, &bar));
     for mut r in rows {
         let rw = r.line.width();
         r.line.spans.push(Span::raw(" ".repeat((left + bw - 1).saturating_sub(rw))));
@@ -1250,6 +1258,24 @@ mod tests {
             }
         }
         panic!("0 {at}: {:?}", rows.iter().map(|r| &r.0).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn owner_messages_render_markdown_in_both_looks() {
+        let mut t = Thread::default();
+        t.push(&ev(None, Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text: "fix **the deploy** now\n- 1st `step`\n- 2nd step\nkeep this line".into() }));
+        let none = HashSet::new();
+        let fold = Fold { runs: &none, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &none, all_thoughts: false };
+        for look in [Look::Bubbles, Look::Lines] {
+            let d = draw(&t, look, 70, &Colors::new(), &[], &fold, &Picker::default());
+            let s = text(&d);
+            assert!(s.contains("fix the deploy now") && !s.contains("**"), "{look:?} bold: 0 asterisks\n{s}");
+            assert!(s.contains("• 1st step") && s.contains("• 2nd step") && !s.contains('`'), "{look:?} list + inline code\n{s}");
+            // a line break of the source stays
+            assert!(s.lines().any(|l| l.trim_end().trim_end_matches('│').trim().ends_with("keep this line")), "{look:?}\n{s}");
+            let bold = d.rows.iter().flat_map(|r| r.line.spans.iter()).find(|sp| sp.content.contains("deploy")).unwrap();
+            assert!(bold.style.add_modifier.contains(Modifier::BOLD), "{look:?} bold span");
+        }
     }
 
     #[test]
