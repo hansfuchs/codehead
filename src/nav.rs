@@ -96,7 +96,7 @@ fn last_item(id: &str) -> Option<u64> {
 
 /// Every thread (archived ones: 0), newest activity first.
 pub fn load() -> Vec<Card> {
-    let threads = crate::threads::all_threads();
+    let threads = crate::threads::all_threads_lite();
     let mut seen = read_seen();
     let mut new_seen = false;
     let mut cards: Vec<Card> = threads
@@ -116,7 +116,7 @@ pub fn load() -> Vec<Card> {
             };
             let dir = [t.worktree.clone(), t.dir.clone()].into_iter().flatten().map(PathBuf::from).find(|p| p.is_dir());
             Card {
-                busy: t.live > 0 && !crate::engine::client::state(&t.id).1.is_empty(),
+                busy: t.busy,
                 unread,
                 activity: last.unwrap_or(0).max(t.updated * 1000),
                 dir,

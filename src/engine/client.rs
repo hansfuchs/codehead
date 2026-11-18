@@ -52,8 +52,13 @@ pub fn ensure(id: &str) -> Result<(), String> {
 
 /// Command C to the host of thread ID, which is up. Err: 0 host, or the host's error.
 pub fn send(id: &str, c: &Value) -> Result<Value, String> {
+    send_within(id, c, Duration::from_secs(30))
+}
+
+/// `send` with a reply deadline of WAIT: a busy host never blocks a list.
+pub fn send_within(id: &str, c: &Value, wait: Duration) -> Result<Value, String> {
     let mut s = UnixStream::connect(socket(id)).map_err(|e| format!("host of {id}: {e}"))?;
-    s.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    s.set_read_timeout(Some(wait)).ok();
     writeln!(s, "{c}").map_err(|e| e.to_string())?;
     let mut line = String::new();
     BufReader::new(&s).read_line(&mut line).map_err(|e| e.to_string())?;
@@ -69,7 +74,7 @@ pub fn call(id: &str, c: &Value) -> Result<Value, String> {
 
 /// Live and busy agents of thread ID (empty: 0 host).
 pub fn state(id: &str) -> (Vec<String>, Vec<String>) {
-    let Ok(v) = send(id, &serde_json::json!({"op": "ping"})) else { return Default::default() };
+    let Ok(v) = send_within(id, &serde_json::json!({"op": "ping"}), Duration::from_millis(500)) else { return Default::default() };
     let names = |k: &str| v[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
     (names("live"), names("busy"))
 }

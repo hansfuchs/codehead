@@ -259,6 +259,22 @@ pub fn append(id: &str, e: &Event) -> Result<(), String> {
     f.write_all(&line).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// The events in the last BYTES of thread ID's log (a cut 1st line left out).
+pub fn events_tail(id: &str, bytes: u64) -> Vec<Event> {
+    let Ok(mut f) = std::fs::File::open(events_path(id)) else { return Vec::new() };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let from = len.saturating_sub(bytes);
+    if f.seek(SeekFrom::Start(from)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let body = if from > 0 { buf.iter().position(|&b| b == b'\n').map(|i| &buf[i + 1..]).unwrap_or(&[]) } else { &buf[..] };
+    body.split(|&b| b == b'\n').filter(|l| !l.is_empty()).filter_map(|l| serde_json::from_slice(l).ok()).collect()
+}
+
 /// Every event of thread ID.
 pub fn events(id: &str) -> Vec<Event> {
     let mut t = Tail::new(id);

@@ -115,3 +115,19 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
 }
+
+/// $CODEHEAD_TRACE=1: `<ms since start> <label>` lines in logs/trace.log (boot and redraw timing).
+pub fn trace(label: &str) {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    static ON: OnceLock<bool> = OnceLock::new();
+    let start = START.get_or_init(std::time::Instant::now);
+    if !*ON.get_or_init(|| std::env::var_os("CODEHEAD_TRACE").is_some_and(|v| !v.is_empty())) {
+        return;
+    }
+    use std::io::Write;
+    let _ = std::fs::create_dir_all(logs_dir());
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(logs_dir().join("trace.log")) {
+        let _ = writeln!(f, "{:>6} {label}", start.elapsed().as_millis());
+    }
+}

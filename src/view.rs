@@ -2107,7 +2107,9 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     }
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
     let _sub = subscribe(id, tx.clone());
+    crate::engine::trace("view new …");
     let mut v = View::new(id, cwd, title, tx);
+    crate::engine::trace("view new");
     // a handoff: its document waits as the prompt draft
     if let Some(d) = crate::handoff::take_draft(id) {
         v.input.set_text(&d);
@@ -2129,6 +2131,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
         let every = if v.animating() { Duration::from_millis(150) } else { Duration::from_secs(1) };
         if dirty || drawn.elapsed() >= every {
             term.draw(|f| v.draw(f)).map_err(|e| e.to_string())?;
+            crate::engine::trace("view draw");
             drawn = Instant::now();
             dirty = false;
         }

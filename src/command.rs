@@ -231,7 +231,7 @@ pub fn notes(root: &Path) -> Vec<Item> {
 
 /// Every thread: its name (1st line of the title). Oldest first.
 fn threads() -> Vec<Item> {
-    let mut v: Vec<Item> = crate::threads::all_threads()
+    let mut v: Vec<Item> = crate::threads::all_threads_lite()
         .into_iter()
         .filter(|t| !t.title.trim().is_empty())
         .map(|t| {

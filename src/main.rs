@@ -420,6 +420,7 @@ fn enable_artifacts() {
 }
 
 fn main() {
+    engine::trace("main");
     enable_artifacts();
     sub();
     // the palette before any screen (`--cost` draws in parse); a broken file fails in start
@@ -459,6 +460,7 @@ fn start(args: Args) {
         let list: Vec<String> = engine::harnesses::ALL.iter().map(|h| format!("  {} ({}): {}", h.label, h.bin, h.install)).collect();
         fail(&format!("0 harnesses on PATH: codehead's agents run on one of these:\n{}", list.join("\n")), 1);
     }
+    engine::trace("harnesses");
     let mut all = agents::cached();
     let picks: Vec<String> = args.agent.iter().flat_map(|a| a.split(',')).map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
     if picks.iter().any(|p| !all.iter().any(|a| &a.name == p)) {
@@ -485,7 +487,9 @@ fn start(args: Args) {
         logs: engine::logs_dir(),
         drafts: drafts::dir(),
     };
+    engine::trace("app new …");
     let mut app = App::new(cfg, &args.title);
+    engine::trace("app new");
 
     restore_on_panic();
     catch_signals();
@@ -507,7 +511,9 @@ fn start(args: Args) {
     let plain = args.view.is_none() && args.title.is_empty() && args.agent.is_none() && args.branch.is_none() && !args.copy && !args.dry;
     let latest = plain.then(|| engine::store::all().into_iter().next().map(|t| t.id)).flatten();
     if let Some(id) = args.view.as_ref().or(latest.as_ref()) {
-        let t = threads::all_threads().into_iter().find(|t| t.id.starts_with(id));
+        engine::trace("latest");
+        let t = threads::all_threads_lite().into_iter().find(|t| t.id.starts_with(id));
+        engine::trace("all_threads");
         let Some(t) = t else { tty.leave(&mut out); fail(&format!("no thread {id}"), 2) };
         let dir = [t.worktree.clone(), t.dir.clone()].into_iter().flatten().map(PathBuf::from).find(|p| p.is_dir()).unwrap_or_else(|| cwd.clone());
         // --view opens a done thread again; the auto-open leaves its state as it is

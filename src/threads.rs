@@ -57,7 +57,9 @@ fn activity(id: &str) -> (bool, Option<String>, Vec<(String, String, String)>) {
     let mut open: Vec<(String, String)> = Vec::new();
     let mut error: Option<String> = None;
     let mut notes: Vec<(String, String, String)> = Vec::new();
-    for e in crate::engine::store::events(id).into_iter().rev().take(400).collect::<Vec<_>>().into_iter().rev() {
+    // the last 400 events: the last 512 KiB of the log hold them (0 full read of a 10 MB log)
+    let tail = crate::engine::store::events_tail(id, 512 << 10);
+    for e in tail.into_iter().rev().take(400).collect::<Vec<_>>().into_iter().rev() {
         let a = e.agent.clone().unwrap_or_default();
         match e.kind {
             Kind::Ask { id, .. } => open.push((a, id)),
@@ -192,13 +194,45 @@ pub fn checkouts(repo: &Path) -> std::collections::HashMap<String, String> {
     map
 }
 
-/// Every thread, newest first.
+/// Every thread, newest first, with git stats and live URLs (threads tab).
 pub fn all_threads() -> Vec<Thread> {
+    scan(true)
+}
+
+/// Every thread, newest first, 0 git stats, 0 URLs: thread header, mention menu, boot.
+pub fn all_threads_lite() -> Vec<Thread> {
+    scan(false)
+}
+
+/// F over ITEMS on up to 8 OS threads, order kept.
+pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8);
+    if items.len() < 2 || n == 1 {
+        return items.iter().map(&f).collect();
+    }
+    let size = items.len().div_ceil(n);
+    std::thread::scope(|s| {
+        let parts: Vec<_> = items.chunks(size).map(|c| s.spawn(|| c.iter().map(&f).collect::<Vec<R>>())).collect();
+        parts.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    })
+}
+
+fn scan(full: bool) -> Vec<Thread> {
     // portless: 1 read of the live routes for every thread
-    let routes = if crate::portless::active() { crate::portless::routes() } else { Vec::new() };
-    crate::engine::store::all()
-        .into_iter()
-        .map(|t| {
+    let routes = if full && crate::portless::active() { crate::portless::routes() } else { Vec::new() };
+    let list = crate::engine::store::all();
+    // git stats: once per work dir (threads share dirs), archived threads skipped
+    let stats: std::collections::HashMap<PathBuf, Option<(usize, usize, usize)>> = if full {
+        let mut dirs: Vec<PathBuf> = list.iter().filter(|t| t.state != "archived" && t.state != "deleted").map(|t| t.work_dir()).collect();
+        dirs.sort();
+        dirs.dedup();
+        let s = par_map(&dirs, |d| shortstat(d));
+        dirs.into_iter().zip(s).collect()
+    } else {
+        Default::default()
+    };
+    par_map(&list, |t| {
+            let t = t.clone();
             let (live, busy) = if crate::engine::client::alive(&t.id) { crate::engine::client::state(&t.id) } else { (Vec::new(), Vec::new()) };
             let (ask, error, notes) = activity(&t.id);
             let needs = if ask {
@@ -212,7 +246,7 @@ pub fn all_threads() -> Vec<Thread> {
                 live: live.len(),
                 busy: !busy.is_empty(),
                 needs,
-                stat: shortstat(&t.work_dir()),
+                stat: stats.get(&t.work_dir()).copied().flatten(),
                 agents: t.agents.clone(),
                 notes,
                 task: t.task.clone(),
@@ -228,8 +262,7 @@ pub fn all_threads() -> Vec<Thread> {
                 state: t.state,
                 id: t.id,
             }
-        })
-        .collect()
+    })
 }
 
 /// A new linked worktree of REPO on BRANCH (made from HEAD when it does not exist):
