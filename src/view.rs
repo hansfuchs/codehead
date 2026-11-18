@@ -176,6 +176,8 @@ struct View {
     changes: crate::changes::View,
     prompt_focus: bool,
     bar_rects: Vec<(Rect, Pane)>,
+    /// A review comment in the prompt: file, line, the draft the prompt had before.
+    commenting: Option<(String, u32, String)>,
     // thread header: cards of the open threads (tab)
     nav_on: bool,
     nav_cards: Vec<crate::nav::Card>,
@@ -265,6 +267,7 @@ impl View {
             changes: crate::changes::View::new(id, cwd),
             prompt_focus: false,
             bar_rects: Vec::new(),
+            commenting: None,
             // tests: 0 shared state between parallel views
             nav_on: !cfg!(test) && NAV_ON.load(std::sync::atomic::Ordering::Relaxed),
             nav_cards: Vec::new(),
@@ -380,6 +383,15 @@ impl View {
     // ---------- send ----------
 
     fn submit(&mut self) {
+        // a review comment: into the batch, the draft back, the keys back to the changes view
+        if let Some((file, line, draft)) = self.commenting.take() {
+            let text = self.input.text();
+            self.changes.add_comment(&file, line, &text);
+            self.input.set_text(&draft);
+            self.prompt_focus = false;
+            self.toast(format!("comment on {file}:{line} · {} in the batch · C: send", self.changes.comment_count()));
+            return;
+        }
         let mut text = self.input.text().trim_end().to_string();
         if text.trim().is_empty() {
             return;
@@ -627,6 +639,9 @@ impl View {
             }
             // the prompt in the changes view: esc gives the keys back to the view
             KeyCode::Esc if self.pane == Pane::Changes && self.prompt_focus => {
+                if let Some((_, _, draft)) = self.commenting.take() {
+                    self.input.set_text(&draft);
+                }
                 self.prompt_focus = false;
                 return false;
             }
@@ -758,6 +773,19 @@ impl View {
             crate::changes::Act::None => {}
             crate::changes::Act::Toast(t) => self.toast(t),
             crate::changes::Act::Open(file, line) => self.open_at(&file, line),
+            crate::changes::Act::Comment(file, line) => {
+                // the prompt takes the comment; its draft waits
+                let draft = self.input.text();
+                self.input.set_text("");
+                self.commenting = Some((file, line, draft));
+                self.prompt_focus = true;
+            }
+            crate::changes::Act::Send(text) => {
+                self.back = 0;
+                self.pending.push((text.clone(), Instant::now(), None));
+                self.host("send", json!({"op": "prompt", "text": text}));
+                self.toast("review comments sent to the lead");
+            }
         }
     }
 
@@ -1470,7 +1498,9 @@ impl View {
                 Pane::Chat => " chat ".to_string(),
                 Pane::Changes => {
                     let (done, all) = self.changes.progress();
-                    if all == 0 { " changes ".to_string() } else { format!(" changes {done}/{all} ") }
+                    let n = self.changes.comment_count();
+                    let c = if n > 0 { format!("✎{n} ") } else { String::new() };
+                    if all == 0 { format!(" changes {c}") } else { format!(" changes {done}/{all} {c}") }
                 }
             };
             let st = if p == self.pane { theme::pill() } else { theme::muted() };
@@ -1576,7 +1606,8 @@ impl View {
         let right = match &self.toast {
             Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Span::styled(format!("{m} "), theme::accent()),
             _ if self.nav_on => Span::styled("←→: pick thread · enter: open · tab / esc: close ", theme::accent()),
-            _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled("j k: box · n p: hunk · space: reviewed · enter: fold · o: IDE · s: layout · i: prompt · shift+tab: chat ", theme::muted()),
+            _ if let Some((file, line, _)) = &self.commenting => Span::styled(format!("comment on {file}:{line} · ⌘/ctrl+⏎: add to the batch · esc: cancel "), theme::accent()),
+            _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled("j k · space: reviewed · c: comment · C: send · o: IDE · s: layout · i: prompt ", theme::muted()),
             _ if self.pane == Pane::Changes => Span::styled("esc: back to the changes · shift+tab: chat ", theme::muted()),
             _ => Span::styled(format!("tab: threads · shift+tab: changes · esc: interrupt · esc esc: codehead · {}: menu ", crate::config::menu_key().label), theme::muted()),
         };
@@ -2145,5 +2176,31 @@ mod pane_tests {
         press(&mut v, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!v.prompt_focus && v.input.text() == "h");
         assert!(v.last_esc.is_none(), "0 interrupt / back timer");
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::*;
+
+    #[test]
+    fn a_comment_borrows_the_prompt_and_gives_the_draft_back() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("commenttest-0000", Path::new("/tmp"), "t", tx);
+        v.set_pane(Pane::Changes);
+        v.input.set_text("half a message");
+        v.changes_act(crate::changes::Act::Comment("src/a.rs".into(), 12));
+        assert!(v.prompt_focus && v.input.text().is_empty());
+        v.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!(v.changes.comment_count(), 1);
+        assert!(!v.prompt_focus && v.input.text() == "half a message" && v.commenting.is_none());
+        // esc cancels: 0 comment, the draft back
+        v.changes_act(crate::changes::Act::Comment("src/a.rs".into(), 13));
+        v.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(v.changes.comment_count(), 1);
+        assert_eq!(v.input.text(), "half a message");
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("commenttest-0000"));
     }
 }

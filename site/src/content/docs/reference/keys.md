@@ -73,4 +73,7 @@ diff changes later, it shows `updated`.
 | `s` | side by side / unified |
 | `r` | read git again (it also does every 4 s) |
 | `R` | rank again (setting `rank`) |
+| `c` | comment on the line under the cursor: the prompt takes it, `⌘/ctrl+⏎` adds it to the batch, `esc` cancels (the draft comes back) |
+| `x` | delete the comment under the cursor |
+| `C` | send all comments as 1 message to the lead (`file:line`: text each) |
 | `i` | the prompt gets the keys; `esc` gives them back |

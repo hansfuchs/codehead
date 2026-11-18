@@ -576,6 +576,10 @@ pub enum Act {
     /// Open FILE (relative to the worktree) at LINE in the IDE.
     Open(String, u32),
     Toast(String),
+    /// Write a comment on LINE of FILE (the prompt takes the text).
+    Comment(String, u32),
+    /// Send this text to the thread (the review comments batch).
+    Send(String),
 }
 
 /// A drawn row: its line, the file it belongs to, the new-side line it points at.
@@ -588,6 +592,46 @@ struct Row {
     head: bool,
     /// A hunk's 1st row.
     hunk: bool,
+    /// A review comment's row: its index.
+    comment: Option<usize>,
+}
+
+/// A review comment on LINE (new side) of PATH, for the batch to an agent.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Comment {
+    pub path: String,
+    pub line: u32,
+    pub text: String,
+}
+
+fn comments_path(id: &str) -> PathBuf {
+    crate::engine::store::thread_dir(id).join("comments.json")
+}
+
+fn read_comments(id: &str) -> Vec<Comment> {
+    std::fs::read(comments_path(id)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn write_comments(id: &str, c: &[Comment]) {
+    if let Ok(b) = serde_json::to_vec_pretty(c) {
+        let _ = crate::engine::write_atomic(&comments_path(id), &b);
+    }
+}
+
+/// The batch message of COMMENTS (0 comments: None).
+pub fn batch(comments: &[Comment]) -> Option<String> {
+    if comments.is_empty() {
+        return None;
+    }
+    let mut s = String::from("Review comments on the changes (file:line, new side). Address each one:\n");
+    for c in comments {
+        let mut lines = c.text.lines();
+        s.push_str(&format!("- `{}:{}`: {}\n", c.path, c.line, lines.next().unwrap_or_default()));
+        for l in lines {
+            s.push_str(&format!("  {l}\n"));
+        }
+    }
+    Some(s.trim_end().to_string())
 }
 
 pub struct View {
@@ -616,6 +660,8 @@ pub struct View {
     rank_error: Option<String>,
     /// The rank model (setting `rank`), None: path rules.
     rank_model: Option<String>,
+    /// Review comments, for 1 batch message (`C`).
+    comments: Vec<Comment>,
 }
 
 impl View {
@@ -640,6 +686,7 @@ impl View {
             ranking: None,
             rank_error: None,
             rank_model: if cfg!(test) { None } else { crate::config::rank_model() },
+            comments: read_comments(id),
         }
     }
 
@@ -778,7 +825,7 @@ impl View {
             return;
         }
         let w = usize::from(width);
-        let mut rows: Vec<Row> = vec![Row { line: self.summary(), file: 0, at: None, head: false, hunk: false }];
+        let mut rows: Vec<Row> = vec![Row { line: self.summary(), file: 0, at: None, head: false, hunk: false, comment: None }];
         // group heads: the model's groups (title, why), else the path-rule categories
         let mut last: Option<(Option<usize>, Cat)> = None;
         for (i, f) in self.changes.files.iter().enumerate() {
@@ -797,8 +844,8 @@ impl View {
                     ]),
                     None => Line::styled(format!(" {}", f.cat.label()), theme::muted().add_modifier(Modifier::BOLD)),
                 };
-                rows.push(Row { line: Line::raw(""), file: i, at: None, head: false, hunk: false });
-                rows.push(Row { line, file: i, at: None, head: false, hunk: false });
+                rows.push(Row { line: Line::raw(""), file: i, at: None, head: false, hunk: false, comment: None });
+                rows.push(Row { line, file: i, at: None, head: false, hunk: false, comment: None });
             }
             last = Some(here);
             self.file_rows(&mut rows, i, f, w, side);
@@ -845,9 +892,9 @@ impl View {
         head.push(Span::styled(right, theme::muted()));
         head.push(Span::styled("─╮", border));
         let first = f.first_line();
-        rows.push(Row { line: Line::from(head), file: i, at: Some(first), head: true, hunk: false });
+        rows.push(Row { line: Line::from(head), file: i, at: Some(first), head: true, hunk: false, comment: None });
         if self.folded(f) {
-            rows.push(Row { line: Line::styled(format!("╰{}╯", "─".repeat(w.saturating_sub(2))), border), file: i, at: Some(first), head: false, hunk: false });
+            rows.push(Row { line: Line::styled(format!("╰{}╯", "─".repeat(w.saturating_sub(2))), border), file: i, at: Some(first), head: false, hunk: false, comment: None });
             return;
         }
         let inner = w.saturating_sub(4);
@@ -862,16 +909,16 @@ impl View {
         // the model's why of the file: the box's 1st row
         if let Some((_, _, why)) = self.ranked(&f.path).filter(|x| !x.2.is_empty()) {
             let st = theme::muted().add_modifier(Modifier::ITALIC);
-            rows.push(Row { line: bar(vec![Span::styled(crate::nav::fit(why, inner), st)]), file: i, at: Some(first), head: false, hunk: false });
+            rows.push(Row { line: bar(vec![Span::styled(crate::nav::fit(why, inner), st)]), file: i, at: Some(first), head: false, hunk: false, comment: None });
         }
         if f.binary || f.hunks.is_empty() {
             let note = if f.binary { "binary file" } else { "0 line changes (mode or rename)" };
-            rows.push(Row { line: bar(vec![Span::styled(note.to_string(), theme::muted())]), file: i, at: Some(first), head: false, hunk: false });
+            rows.push(Row { line: bar(vec![Span::styled(note.to_string(), theme::muted())]), file: i, at: Some(first), head: false, hunk: false, comment: None });
         }
         let num_w = f.hunks.iter().flat_map(|h| &h.lines).filter_map(|l| l.new.max(l.old)).max().unwrap_or(1).to_string().len().max(3);
         for h in &f.hunks {
             let label = format!("⋯ {}", if h.ctx.is_empty() { format!("line {}", h.new) } else { h.ctx.clone() });
-            rows.push(Row { line: bar(vec![Span::styled(crate::nav::fit(&label, inner), theme::muted())]), file: i, at: Some(h.new.max(1)), head: false, hunk: true });
+            rows.push(Row { line: bar(vec![Span::styled(crate::nav::fit(&label, inner), theme::muted())]), file: i, at: Some(h.new.max(1)), head: false, hunk: true, comment: None });
             // a new or deleted file: 1 side only, unified uses the room
             let painted = paint(f, h);
             if side && !matches!(f.status, Status::New | Status::Deleted) {
@@ -886,11 +933,47 @@ impl View {
                     let room = inner.saturating_sub(num.len() + 3);
                     let mut spans = vec![Span::styled(num, theme::muted()), sign_span(l.kind)];
                     spans.extend(painted_spans(p, l.kind, room));
-                    rows.push(Row { line: bar(spans), file: i, at: l.new.or(l.old), head: false, hunk: false });
+                    rows.push(Row { line: bar(spans), file: i, at: l.new.or(l.old), head: false, hunk: false, comment: None });
                 }
             }
         }
-        rows.push(Row { line: Line::styled(format!("╰{}╯", "─".repeat(w.saturating_sub(2))), border), file: i, at: None, head: false, hunk: false });
+        // review comments: under the 1st diff row of their line, else at the box's end
+        let start = rows.iter().rposition(|r| r.head && r.file == i).unwrap_or(0);
+        for (ci, c) in self.comments.iter().enumerate().filter(|(_, c)| c.path == f.path) {
+            // the last row of the 1st run on that line (a removed line, then the added one)
+            let hit = |r: &Row| !r.head && !r.hunk && r.comment.is_none() && r.at == Some(c.line);
+            let at = rows[start..].iter().position(hit).map_or(rows.len(), |p| {
+                let first = start + p;
+                first + 1 + rows[first + 1..].iter().take_while(|r| hit(r)).count()
+            });
+            // after the comments already under that row
+            let at = at + rows[at..].iter().take_while(|r| r.comment.is_some()).count();
+            let st = Style::default().fg(theme::pal().accent);
+            let mut new: Vec<Row> = Vec::new();
+            for (k, l) in c.text.lines().enumerate() {
+                let head = if k == 0 { format!("✎ {}: ", c.line) } else { "  ".to_string() };
+                let room = inner.saturating_sub(head.width());
+                new.push(Row { line: bar(vec![Span::styled(head, st.add_modifier(Modifier::BOLD)), Span::styled(crate::nav::fit(l, room), st)]), file: i, at: Some(c.line), head: false, hunk: false, comment: Some(ci) });
+            }
+            rows.splice(at..at, new);
+        }
+        rows.push(Row { line: Line::styled(format!("╰{}╯", "─".repeat(w.saturating_sub(2))), border), file: i, at: None, head: false, hunk: false, comment: None });
+    }
+
+    /// The review comments (for the view bar and the hint row).
+    pub fn comment_count(&self) -> usize {
+        self.comments.len()
+    }
+
+    /// Add a comment TEXT on LINE of PATH; the rows show it at once.
+    pub fn add_comment(&mut self, path: &str, line: u32, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        self.comments.push(Comment { path: path.to_string(), line, text: text.to_string() });
+        write_comments(&self.id, &self.comments);
+        self.rebuild_here();
     }
 
     /// Hunk H side by side: the old side left, the new side right; a run of removed lines pairs
@@ -913,7 +996,7 @@ impl View {
                 let mut s = cell(Some(k), true);
                 s.push(Span::styled(" │ ", theme::line()));
                 s.extend(cell(Some(k), false));
-                rows.push(Row { line: bar(s), file: i, at: ls[k].new, head: false, hunk: false });
+                rows.push(Row { line: bar(s), file: i, at: ls[k].new, head: false, hunk: false, comment: None });
                 k += 1;
                 continue;
             }
@@ -925,7 +1008,7 @@ impl View {
                 s.push(Span::styled(" │ ", theme::line()));
                 s.extend(cell(ak, false));
                 let at = ak.and_then(|x| ls[x].new).or_else(|| (a > 0).then(|| ls[k + d].new).flatten()).or_else(|| dk.and_then(|x| ls[x].old));
-                rows.push(Row { line: bar(s), file: i, at, head: false, hunk: false });
+                rows.push(Row { line: bar(s), file: i, at, head: false, hunk: false, comment: None });
             }
             k += d + a;
         }
@@ -1026,6 +1109,26 @@ impl View {
                 self.refresh(true);
                 return Act::Toast("changes: reading git".into());
             }
+            KeyCode::Char('c') => {
+                if let (Some(f), Some(r)) = (self.file_at(), self.rows.get(self.at)) {
+                    return Act::Comment(f.path.clone(), r.at.unwrap_or_else(|| f.first_line()));
+                }
+            }
+            KeyCode::Char('x') => {
+                if let Some(ci) = self.rows.get(self.at).and_then(|r| r.comment) {
+                    self.comments.remove(ci);
+                    write_comments(&self.id, &self.comments);
+                    self.rebuild_here();
+                    return Act::Toast(format!("comment deleted · {} left", self.comments.len()));
+                }
+            }
+            KeyCode::Char('C') => {
+                let Some(text) = batch(&self.comments) else { return Act::Toast("0 comments · c: comment on the line".into()) };
+                self.comments.clear();
+                write_comments(&self.id, &self.comments);
+                self.built = None;
+                return Act::Send(text);
+            }
             KeyCode::Char('o') => {
                 if let (Some(f), Some(r)) = (self.file_at(), self.rows.get(self.at)) {
                     return Act::Open(f.path.clone(), r.at.unwrap_or_else(|| f.first_line()));
@@ -1037,6 +1140,15 @@ impl View {
     }
 
     /// The rows change (fold, layout): the cursor stays on its file's header.
+    /// The rows change (a comment): the cursor stays on its row number.
+    fn rebuild_here(&mut self) {
+        let width = self.built.map_or(self.area.width.saturating_sub(1), |b| b.0);
+        let at = self.at;
+        self.built = None;
+        self.build(width);
+        self.at = at.min(self.rows.len().saturating_sub(1));
+    }
+
     fn rebuild_on_file(&mut self) {
         let file = self.rows.get(self.at).map(|r| r.file);
         let width = self.built.map_or(self.area.width.saturating_sub(1), |b| b.0);
@@ -1213,6 +1325,31 @@ Binary files a/img.png and b/img.png differ
         v.built = None;
         v.build(100);
         assert!(text(&v)[0].ends_with("path order"));
+    }
+
+    #[test]
+    fn comments_sit_under_their_line_and_go_out_as_1_batch() {
+        let mut v = view(parse(DIFF));
+        v.id = "changes-comments-0000".into();
+        v.comments.clear();
+        v.build(100);
+        v.add_comment("src/a.rs", 11, "why 3?\nkeep 2");
+        v.add_comment("src/a.rs", 99, "outside any hunk");
+        let t = text(&v);
+        let at = t.iter().position(|l| l.contains("+ let b = 3;")).unwrap();
+        assert!(t[at + 1].contains("✎ 11: why 3?") && t[at + 2].contains("keep 2"), "{t:#?}");
+        let end = t.iter().position(|l| l.contains("outside any hunk")).unwrap();
+        assert!(t[end + 1].starts_with('╰'), "orphan at the box end: {t:#?}");
+        // x on a comment row deletes it
+        v.at = v.rows.iter().position(|r| r.comment == Some(1)).unwrap();
+        v.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(v.comment_count(), 1);
+        match v.key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT)) {
+            Act::Send(s) => assert_eq!(s, "Review comments on the changes (file:line, new side). Address each one:\n- `src/a.rs:11`: why 3?\n  keep 2"),
+            a => panic!("{a:?}"),
+        }
+        assert_eq!(v.comment_count(), 0);
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-comments-0000"));
     }
 
     #[test]
