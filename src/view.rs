@@ -845,36 +845,35 @@ impl View {
         }
     }
 
-    /// VS Code (family) at FILE:LINE of the worktree: the window that has it open, else a new one.
+    /// The IDE (setting `editor`) at FILE:LINE of the worktree (VS Code: the window that has it open).
     fn open_at(&mut self, file: &str, line: u32) {
-        let Some(cli) = vscode_cli() else {
-            self.toast("VS Code: 0 CLI found (code, codium, code-insiders; $CODEHEAD_VSCODE)");
-            return;
-        };
-        let target = format!("{}:{line}", self.cwd.join(file).display());
-        let ok = std::process::Command::new(&cli)
-            .arg(&self.cwd)
-            .arg("-g")
-            .arg(&target)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .is_ok();
-        self.toast(if ok { format!("IDE: {file}:{line}") } else { format!("VS Code: {} did not start", cli.display()) });
+        let cwd = self.cwd.clone();
+        self.open_editor(|k| crate::editor::args_at(k, &cwd, file, line), format!("{file}:{line}"));
     }
 
     fn mention_open(&self) -> bool {
         self.mention.is_open(&self.input, &self.roster)
     }
 
+    /// ctrl+i: the IDE on the thread's worktree.
     fn open_vscode(&mut self) {
-        let Some(cli) = vscode_cli() else {
-            self.toast("VS Code: 0 CLI found (code, codium, code-insiders; $CODEHEAD_VSCODE)");
+        let cwd = self.cwd.clone();
+        self.open_editor(|k| crate::editor::args_dir(k, &cwd), cwd.display().to_string());
+    }
+
+    /// Start the IDE with ARGS (by its kind); the toast names WHAT, else why not; once: the trust hint.
+    fn open_editor(&mut self, args: impl Fn(crate::editor::Kind) -> Vec<std::ffi::OsString>, what: String) {
+        let Some(e) = crate::editor::find() else {
+            self.toast("IDE: 0 found · setting editor (code, cursor, zed, idea …)");
             return;
         };
-        let ok = std::process::Command::new(&cli).arg("-n").arg(&self.cwd).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok();
-        self.toast(if ok { format!("VS Code: {}", self.cwd.display()) } else { format!("VS Code: {} did not start", cli.display()) });
+        match crate::editor::spawn(&e, &args(e.kind)) {
+            Ok(()) => {
+                let hint = crate::editor::trust_hint(&self.cwd);
+                self.toast(hint.unwrap_or_else(|| format!("IDE: {what}")));
+            }
+            Err(err) => self.toast(format!("IDE: {err}")),
+        }
     }
 
     // ---------- thread header ----------
@@ -1060,7 +1059,7 @@ impl View {
             Item { label: format!("thread header: {}", if self.nav_on { "close" } else { "open" }), key: "tab".into(), id: 0 },
             Item { label: "tool calls: open / close all".into(), key: "ctrl+o".into(), id: 1 },
             Item { label: "thoughts: open / close all".into(), key: "ctrl+t".into(), id: 13 },
-            Item { label: "VS Code on the worktree".into(), key: "ctrl+i".into(), id: 2 },
+            Item { label: "IDE on the worktree".into(), key: "ctrl+i".into(), id: 2 },
             Item { label: "back to the start screen".into(), key: "esc esc".into(), id: 3 },
             Item { label: "agents: mention · →: replace an agent".into(), key: "@".into(), id: 4 },
             Item { label: "commands: files, notes, threads, skills, branch".into(), key: crate::config::command_key().to_string(), id: 5 },
@@ -1759,24 +1758,6 @@ fn title_case(word: &str) -> String {
 /// Effort level as the header shows it: `medium` → `Medium`, `xhigh` → `XHigh`.
 fn effort_label(level: &str) -> String {
     if level == "xhigh" { "XHigh".into() } else { title_case(level) }
-}
-
-/// The VS Code CLI: $CODEHEAD_VSCODE, else code / codium / code-insiders on PATH, else the
-/// macOS app bundles.
-fn vscode_cli() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("CODEHEAD_VSCODE").map(PathBuf::from).filter(|p| p.is_file()) {
-        return Some(p);
-    }
-    let names = ["code", "codium", "code-insiders"];
-    let on_path = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).flat_map(|d| names.map(|n| d.join(n))).find(|p| p.is_file()));
-    let home = crate::config::home();
-    let bundles = [("Visual Studio Code.app", "code"), ("VSCodium.app", "codium"), ("Visual Studio Code - Insiders.app", "code-insiders")];
-    on_path.or_else(|| {
-        [PathBuf::from("/Applications"), home.join("Applications")]
-            .iter()
-            .flat_map(|d| bundles.map(|(app, bin)| d.join(app).join("Contents/Resources/app/bin").join(bin)))
-            .find(|p| p.is_file())
-    })
 }
 
 /// A stream row's text without the message bar on its left.

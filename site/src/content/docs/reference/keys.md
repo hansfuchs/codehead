@@ -47,7 +47,7 @@ description: Every key, per screen.
 | `ctrl+c` | clear the prompt; twice on an empty prompt: quit |
 | `ctrl+o` | open / close all tool runs |
 | `ctrl+t` | open / close all thoughts (hidden: show them) |
-| `ctrl+i` | VS Code on the thread's worktree (`⌘i`) |
+| `ctrl+i` | the IDE (setting `editor`) on the thread's worktree (`⌘i`) |
 | `pgup` `pgdn`, `shift+↑↓`, wheel | scroll the stream |
 | `tab` | thread header: the open threads (`←→` pick, `enter` open) |
 | `shift+tab` | next view of the thread: chat → changes |
@@ -69,7 +69,7 @@ diff changes later, it shows `updated`.
 | `↑` `↓`, `pgup` `pgdn`, `g` `G` | move the cursor |
 | `space` | reviewed on / off (the cursor goes to the next box) |
 | `enter` | fold / unfold the box |
-| `o` | VS Code at the line under the cursor (the window that has the worktree open) |
+| `o` | the IDE at the line under the cursor (VS Code family: the window that has the worktree open) |
 | `s` | side by side / unified |
 | `r` | read git again (it also does every 4 s) |
 | `R` | rank again (setting `rank`) |

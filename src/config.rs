@@ -24,6 +24,8 @@ pub struct File {
     pub edits: Option<String>,
     /// Changes view order: `claude:<model>` (default `claude:haiku`) ranks the files, `off`: path rules.
     pub rank: Option<String>,
+    /// The IDE: `auto` (default), a command name (code, cursor, zed, idea …) or a path.
+    pub editor: Option<String>,
     /// `[keys] menu`: the menu key (F2).
     pub menu_key: Option<String>,
     /// `[keys] command`: the char that opens the command dropdown (`>`).
@@ -123,6 +125,7 @@ fn parse(text: &str) -> Result<File, String> {
                 validate("edits".into(), &s)?;
                 f.edits = Some(s);
             }
+            "editor" => f.editor = Some(s),
             "rank" => {
                 validate("rank".into(), &s)?;
                 f.rank = Some(s);
@@ -264,6 +267,7 @@ fn document(base: &str, file: &File) -> Result<String, String> {
         ("thoughts", &file.thoughts),
         ("edits", &file.edits),
         ("rank", &file.rank),
+        ("editor", &file.editor),
     ] {
         if let Some(value) = value {
             if doc.get(key).and_then(|v| v.as_str()) != Some(value) {
@@ -391,6 +395,7 @@ impl File {
             "thoughts" => self.thoughts.clone(),
             "edits" => self.edits.clone(),
             "rank" => self.rank.clone(),
+            "editor" => self.editor.clone(),
             "keys.menu" => self.menu_key.clone(),
             "keys.command" => self.command_key.clone(),
             "colors.scheme" => self.scheme.clone(),
@@ -410,6 +415,7 @@ impl File {
             "thoughts" => self.thoughts = v,
             "edits" => self.edits = v,
             "rank" => self.rank = v,
+            "editor" => self.editor = v,
             "keys.menu" => self.menu_key = v,
             "keys.command" => self.command_key = v,
             "colors.scheme" => self.scheme = v,
@@ -509,6 +515,7 @@ pub fn defaults() -> File {
         thoughts: Some("hidden".into()),
         edits: Some("diff".into()),
         rank: Some("claude:haiku".into()),
+        editor: Some("auto".into()),
         menu_key: Some("F2".into()),
         command_key: Some(">".into()),
         scheme: Some(crate::theme::PRESETS[0].0.into()),
@@ -577,6 +584,11 @@ pub fn edits() -> crate::engine::edits::Mode {
         .or_else(|| get().edits.clone())
         .and_then(|m| crate::engine::edits::Mode::parse(&m))
         .unwrap_or_default()
+}
+
+/// The `editor` setting (None: unset; `auto` applies).
+pub fn editor() -> Option<String> {
+    get().editor.clone().filter(|s| !s.is_empty())
 }
 
 /// The model that ranks the changes view: $CODEHEAD_RANK, else `rank`, else claude:haiku.

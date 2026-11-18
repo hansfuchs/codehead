@@ -15,6 +15,7 @@ mod command;
 mod config;
 mod cost;
 mod drafts;
+mod editor;
 mod engine;
 mod dropdown;
 mod mention;
@@ -141,7 +142,7 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          Claude Code session (claude --resume ID --fork-session). the old thread stays.
          @: agent names. ←→ on a name: + add, or ⇄ replace an agent of the thread: on send, the old
          agent leaves and the new one gets the message with the old one's last messages.
-         ctrl+i / ⌘i: VS Code on the thread's worktree (code on PATH).
+         ctrl+i / ⌘i: the IDE on the thread's worktree (setting editor: auto, code, cursor, zed, idea …).
          views: shift+tab next (chat → changes), alt+1 / alt+2. changes: 1 box per file in review
          order (schema, logic, config, UI, docs, tests, generated), j k box, n p hunk, space
          reviewed, enter fold, o VS Code at the line, s side by side / unified, i prompt (esc back).
