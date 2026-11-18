@@ -36,6 +36,23 @@ pub enum Exit {
     Open { id: String, dir: PathBuf, title: String, note: String },
 }
 
+/// Views of a thread: the view bar in the title row (shift+tab: next, alt+1 / alt+2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pane {
+    #[default]
+    Chat,
+    Changes,
+}
+
+impl Pane {
+    const ALL: [Pane; 2] = [Pane::Chat, Pane::Changes];
+
+    fn next(self) -> Pane {
+        let i = Pane::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        Pane::ALL[(i + 1) % Pane::ALL.len()]
+    }
+}
+
 /// Thread header open (tab toggles it; kept across the thread switches it makes).
 static NAV_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -154,6 +171,11 @@ struct View {
     pending: Vec<(String, Instant, Option<String>)>,
     /// Per agent: live text not logged yet (token chunks), shown at the end of the stream.
     live: Vec<(String, String)>,
+    // views of the thread (view bar): chat or changes; the prompt's focus outside chat
+    pane: Pane,
+    changes: crate::changes::View,
+    prompt_focus: bool,
+    bar_rects: Vec<(Rect, Pane)>,
     // thread header: cards of the open threads (tab)
     nav_on: bool,
     nav_cards: Vec<crate::nav::Card>,
@@ -239,6 +261,10 @@ impl View {
             queued: None,
             pending: Vec::new(),
             live: Vec::new(),
+            pane: Pane::Chat,
+            changes: crate::changes::View::new(id, cwd),
+            prompt_focus: false,
+            bar_rects: Vec::new(),
             // tests: 0 shared state between parallel views
             nav_on: !cfg!(test) && NAV_ON.load(std::sync::atomic::Ordering::Relaxed),
             nav_cards: Vec::new(),
@@ -544,6 +570,31 @@ impl View {
         if self.nav_on && self.nav_key(k) {
             return self.nav_switch;
         }
+        // views of the thread: shift+tab the next one, alt+1 / alt+2 chat / changes
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        if k.code == KeyCode::BackTab && !ctrl && !alt && !self.mention_open() {
+            self.set_pane(self.pane.next());
+            return false;
+        }
+        if alt && !ctrl && let KeyCode::Char(c @ '1'..='9') = k.code {
+            if let Some(p) = Pane::ALL.get(usize::from(c as u8 - b'1')) {
+                self.set_pane(*p);
+            }
+            return false;
+        }
+        // the changes view with the focus: its keys (esc, tab, ctrl+c and the menu key: as in chat)
+        if self.pane == Pane::Changes && !self.prompt_focus {
+            let through = matches!(k.code, KeyCode::Esc | KeyCode::Tab) || (ctrl && k.code == KeyCode::Char('c')) || crate::config::menu_key().matches(&k);
+            if !through {
+                if k.code == KeyCode::Char('i') && !ctrl && !alt {
+                    self.prompt_focus = true;
+                    return false;
+                }
+                let act = self.changes.key(k);
+                self.changes_act(act);
+                return false;
+            }
+        }
         // an open ask with the focus: its keys before the prompt's (text in the prompt or not)
         if let Some(a) = self.thread.asks.first().cloned() {
             let act = self.ask.key(&a, k);
@@ -574,6 +625,11 @@ impl View {
                 self.open_menu();
                 return false;
             }
+            // the prompt in the changes view: esc gives the keys back to the view
+            KeyCode::Esc if self.pane == Pane::Changes && self.prompt_focus => {
+                self.prompt_focus = false;
+                return false;
+            }
             KeyCode::Esc => {
                 if self.last_esc.is_some_and(|t| t.elapsed() < DOUBLE_ESC) {
                     self.esc_interrupt = None;
@@ -590,8 +646,8 @@ impl View {
                 }
                 return false;
             }
-            // tab / shift+tab: the thread header (prompt text or not; dropdowns took theirs above)
-            KeyCode::Tab | KeyCode::BackTab if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && !self.mention_open() => {
+            // tab: the thread header (prompt text or not; dropdowns took theirs above)
+            KeyCode::Tab if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && !self.mention_open() => {
                 self.set_nav(!self.nav_on);
                 return false;
             }
@@ -682,6 +738,46 @@ impl View {
             self.input.newline();
         }
         false
+    }
+
+    /// Switch to view P of the thread. The changes view: git read at once, keys to the view.
+    fn set_pane(&mut self, p: Pane) {
+        if self.pane == p {
+            return;
+        }
+        self.pane = p;
+        self.prompt_focus = false;
+        self.dirty = true;
+        if p == Pane::Changes {
+            self.changes.refresh(true);
+        }
+    }
+
+    fn changes_act(&mut self, a: crate::changes::Act) {
+        match a {
+            crate::changes::Act::None => {}
+            crate::changes::Act::Toast(t) => self.toast(t),
+            crate::changes::Act::Open(file, line) => self.open_at(&file, line),
+        }
+    }
+
+    /// VS Code (family) at FILE:LINE of the worktree: the window that has it open, else a new one.
+    fn open_at(&mut self, file: &str, line: u32) {
+        let Some(cli) = vscode_cli() else {
+            self.toast("VS Code: 0 CLI found (code, codium, code-insiders; $CODEHEAD_VSCODE)");
+            return;
+        };
+        let target = format!("{}:{line}", self.cwd.join(file).display());
+        let ok = std::process::Command::new(&cli)
+            .arg(&self.cwd)
+            .arg("-g")
+            .arg(&target)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok();
+        self.toast(if ok { format!("IDE: {file}:{line}") } else { format!("VS Code: {} did not start", cli.display()) });
     }
 
     fn mention_open(&self) -> bool {
@@ -983,7 +1079,23 @@ impl View {
             }
             return;
         }
+        let click = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
+        // the view bar
+        if click && let Some(&(_, p)) = self.bar_rects.iter().find(|(r, _)| r.contains(at)) {
+            self.set_pane(p);
+            return;
+        }
         let in_stream = self.stream_rect.contains(at);
+        if self.pane == Pane::Changes {
+            if in_stream {
+                self.prompt_focus = self.prompt_focus && !click;
+                self.changes.mouse(m);
+                return;
+            }
+            if click && self.input_rect.contains(at) {
+                self.prompt_focus = true;
+            }
+        }
         match m.kind {
             MouseEventKind::ScrollUp if in_stream => self.scroll(3),
             MouseEventKind::ScrollDown if in_stream => self.scroll(-3),
@@ -1184,36 +1296,8 @@ impl View {
         if named.is_empty() { self.members.first().cloned().into_iter().collect() } else { named }
     }
 
-    fn draw(&mut self, f: &mut Frame) {
-        let full = f.area();
-        f.render_widget(Paragraph::new("").style(theme::text()), full);
-        if self.nav_on {
-            self.load_nav(false);
-        }
-        let nav_h = if self.nav_on { crate::nav::CARD_H + 1 } else { 0 };
-        let area = Rect { y: full.y + nav_h, height: full.height.saturating_sub(nav_h), ..full };
-        if self.nav_on {
-            self.draw_nav(f, Rect { height: nav_h.min(full.height), ..full });
-        }
-        // bottom up: footer, the bubble's hint row, the input bubble (its top border: the header's
-        // bottom line), the header (agents + tokens box), the title row, monitors, the stream
-        let foot = Rect { y: area.bottom().saturating_sub(1), height: 1, ..area };
-        let hint = Rect { y: foot.y.saturating_sub(1), ..foot };
-        let in_w = input_width(area.width).max(1);
-        let n = (self.input.rows_for(in_w) as u16).clamp(1, INPUT_ROWS);
-        let bubble_bottom = hint.y.saturating_sub(1);
-        let in_top = bubble_bottom.saturating_sub(n);
-        let head_rows = header_rows(self.members.len());
-        let head_h = if area.height >= MIN_HEADER_SCREEN && !self.members.is_empty() { head_rows + 1 } else { 0 };
-        // the bubble's top border: the header's bottom line (shared), else a row of its own
-        let bubble_top = in_top.saturating_sub(1);
-        let header = Rect { y: (bubble_top + 1).saturating_sub(head_h), height: head_h, ..area };
-        let title = Rect { y: if head_h > 0 { header.y } else { bubble_top }.saturating_sub(1), height: 1, ..area };
-        let mon_h = self.monitors.rows(area.width, area.height / 3);
-        let mon = Rect { y: title.y.saturating_sub(mon_h), height: mon_h, ..area };
-        let st = Rect { x: area.x, y: area.y, width: area.width, height: mon.y.saturating_sub(area.y) };
-        self.stream_rect = st;
-
+    /// The stream in ST: the thread's items, sends below them, waves, selection, hover.
+    fn draw_stream(&mut self, f: &mut Frame, st: Rect) {
         // stream
         if self.dirty || self.width != st.width {
             // scrolled back: the top row stays where it is (new events, folds, a resize)
@@ -1333,14 +1417,73 @@ impl View {
             f.render_widget(Paragraph::new(Line::styled(format!("  {note}"), theme::muted())), Rect { y: st.bottom().saturating_sub(1), height: 1, ..st });
         }
 
+    }
+
+    fn draw(&mut self, f: &mut Frame) {
+        let full = f.area();
+        f.render_widget(Paragraph::new("").style(theme::text()), full);
+        if self.nav_on {
+            self.load_nav(false);
+        }
+        let nav_h = if self.nav_on { crate::nav::CARD_H + 1 } else { 0 };
+        let area = Rect { y: full.y + nav_h, height: full.height.saturating_sub(nav_h), ..full };
+        if self.nav_on {
+            self.draw_nav(f, Rect { height: nav_h.min(full.height), ..full });
+        }
+        // bottom up: footer, the bubble's hint row, the input bubble (its top border: the header's
+        // bottom line), the header (agents + tokens box), the title row, monitors, the stream
+        let foot = Rect { y: area.bottom().saturating_sub(1), height: 1, ..area };
+        let hint = Rect { y: foot.y.saturating_sub(1), ..foot };
+        let in_w = input_width(area.width).max(1);
+        let n = (self.input.rows_for(in_w) as u16).clamp(1, INPUT_ROWS);
+        let bubble_bottom = hint.y.saturating_sub(1);
+        let in_top = bubble_bottom.saturating_sub(n);
+        let head_rows = header_rows(self.members.len());
+        // the agents box + cost box: chat only (the changes view takes the room)
+        let head_h = if area.height >= MIN_HEADER_SCREEN && !self.members.is_empty() && self.pane == Pane::Chat { head_rows + 1 } else { 0 };
+        // the bubble's top border: the header's bottom line (shared), else a row of its own
+        let bubble_top = in_top.saturating_sub(1);
+        let header = Rect { y: (bubble_top + 1).saturating_sub(head_h), height: head_h, ..area };
+        let title = Rect { y: if head_h > 0 { header.y } else { bubble_top }.saturating_sub(1), height: 1, ..area };
+        let mon_h = self.monitors.rows(area.width, area.height / 3);
+        let mon = Rect { y: title.y.saturating_sub(mon_h), height: mon_h, ..area };
+        let st = Rect { x: area.x, y: area.y, width: area.width, height: mon.y.saturating_sub(area.y) };
+        self.stream_rect = st;
+
+        if self.pane == Pane::Chat {
+            self.draw_stream(f, st);
+        } else {
+            self.changes.draw(f, st);
+        }
         if mon_h > 0 {
             self.monitors.render(f, mon, self.tick());
         }
 
-        // title row: the thread title, the stream's position, the pills
-        let note = if self.back > 0 { format!("↑{} · esc: live ", self.back) } else { String::new() };
-        let room = usize::from(title.width.saturating_sub(4)).saturating_sub(note.chars().count() + 1);
-        let mut spans = vec![Span::styled(format!("{} ", crate::nav::fit(&self.title, room)), theme::accent_bold())];
+        // title row: the view bar (views of the thread), the thread title, the stream's position, the pills
+        let note = if self.back > 0 && self.pane == Pane::Chat { format!("↑{} · esc: live ", self.back) } else { String::new() };
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        self.bar_rects.clear();
+        let mut x = title.x + 2;
+        for p in Pane::ALL {
+            let label = match p {
+                Pane::Chat if !self.thread.asks.is_empty() => format!(" chat ?{} ", self.thread.asks.len()),
+                Pane::Chat => " chat ".to_string(),
+                Pane::Changes => {
+                    let (done, all) = self.changes.progress();
+                    if all == 0 { " changes ".to_string() } else { format!(" changes {done}/{all} ") }
+                }
+            };
+            let st = if p == self.pane { theme::pill() } else { theme::muted() };
+            let w = unicode_width::UnicodeWidthStr::width(label.as_str()) as u16;
+            self.bar_rects.push((Rect { x, y: title.y, width: w, height: 1 }, p));
+            x += w + 1;
+            spans.push(Span::styled(label, st));
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled("│ ", theme::line()));
+        let used: usize = spans.iter().map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref())).sum();
+        let room = usize::from(title.width.saturating_sub(4)).saturating_sub(note.chars().count() + 1 + used);
+        spans.push(Span::styled(format!("{} ", crate::nav::fit(&self.title, room)), theme::accent_bold()));
         if !note.is_empty() {
             spans.push(Span::styled(note, theme::muted()));
         }
@@ -1411,7 +1554,8 @@ impl View {
         let menu_open = self.menu.is_some();
         // an open ask with the focus: 0 cursor in the prompt (its keys go to the ask)
         let ask_keys = !self.thread.asks.is_empty() && self.ask.focus && !self.ask.sent;
-        self.input.render(f, self.input_rect, !menu_open && !ask_keys);
+        let prompt_keys = self.pane == Pane::Chat || self.prompt_focus;
+        self.input.render(f, self.input_rect, !menu_open && !ask_keys && prompt_keys);
 
         // hint row: who gets the message, the send keys
         let mut to = vec![Span::styled("  → ", theme::muted())];
@@ -1432,7 +1576,9 @@ impl View {
         let right = match &self.toast {
             Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Span::styled(format!("{m} "), theme::accent()),
             _ if self.nav_on => Span::styled("←→: pick thread · enter: open · tab / esc: close ", theme::accent()),
-            _ => Span::styled(format!("tab: threads · esc: interrupt · esc esc: codehead · {}: menu ", crate::config::menu_key().label), theme::muted()),
+            _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled("j k: box · n p: hunk · space: reviewed · enter: fold · o: IDE · s: layout · i: prompt · shift+tab: chat ", theme::muted()),
+            _ if self.pane == Pane::Changes => Span::styled("esc: back to the changes · shift+tab: chat ", theme::muted()),
+            _ => Span::styled(format!("tab: threads · shift+tab: changes · esc: interrupt · esc esc: codehead · {}: menu ", crate::config::menu_key().label), theme::muted()),
         };
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), foot);
 
@@ -1928,8 +2074,13 @@ mod nav_tests {
         assert_eq!(v.input.text(), "half a message");
         v.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(!v.nav_on, "tab again: header closed");
+        // shift+tab: the next view of the thread, 0 header
         v.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert!(v.nav_on, "shift+tab: header open");
+        assert!(!v.nav_on && v.pane == Pane::Changes, "shift+tab: changes view");
+        v.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(v.pane, Pane::Chat);
+        v.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(v.nav_on, "tab: header open");
         // enter on this thread: the header closes, the view stays
         assert!(!v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(!v.nav_on);
@@ -1941,5 +2092,58 @@ mod nav_tests {
         assert!(v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(matches!(&v.exit, Exit::Open { id, .. } if id == "c"));
         reset_nav();
+    }
+}
+
+/// Views of a thread: the view bar, keys to the changes view, the prompt's focus.
+#[cfg(test)]
+mod pane_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn view() -> View {
+        let (tx, _rx) = mpsc::channel();
+        View::new("panetest-0000", Path::new("/tmp"), "thread p", tx)
+    }
+
+    fn press(v: &mut View, k: KeyCode, m: KeyModifiers) -> bool {
+        v.key(KeyEvent::new(k, m))
+    }
+
+    fn screen(v: &mut View) -> String {
+        let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        t.draw(|f| v.draw(f)).unwrap();
+        let b = t.backend().buffer().clone();
+        (0..30).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn view_bar_shows_both_views_and_alt_digits_switch() {
+        let mut v = view();
+        let s = screen(&mut v);
+        assert!(s.contains(" chat   changes  │ thread p"), "{s}");
+        assert!(s.contains("shift+tab: changes"), "{s}");
+        press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
+        assert_eq!(v.pane, Pane::Changes);
+        let s = screen(&mut v);
+        assert!(s.contains("space: reviewed") && s.contains("i: prompt"), "{s}");
+        press(&mut v, KeyCode::Char('1'), KeyModifiers::ALT);
+        assert_eq!(v.pane, Pane::Chat);
+    }
+
+    #[test]
+    fn changes_view_keeps_letters_from_the_prompt_until_i() {
+        let mut v = view();
+        press(&mut v, KeyCode::BackTab, KeyModifiers::SHIFT);
+        press(&mut v, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(v.input.text(), "", "j: a view key");
+        press(&mut v, KeyCode::Char('i'), KeyModifiers::NONE);
+        assert!(v.prompt_focus);
+        press(&mut v, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert_eq!(v.input.text(), "h");
+        // esc: the keys back to the view, the text stays
+        press(&mut v, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!v.prompt_focus && v.input.text() == "h");
+        assert!(v.last_esc.is_none(), "0 interrupt / back timer");
     }
 }

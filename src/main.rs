@@ -6,6 +6,7 @@ mod app;
 mod ask;
 mod attach;
 mod cards;
+mod changes;
 mod background;
 mod claude;
 mod clip;
@@ -111,7 +112,7 @@ drafts:  an unsent task goes to ~/.cache/codehead/drafts ($CODEHEAD_DRAFTS) afte
 artifacts: codehead sets CLAUDE_CODE_ARTIFACT=1 for the sessions it starts: Claude Code agents can
          publish web artifacts (off by default in SDK sessions). a value set before codehead stays.
 esc:     1 level back: never applies, never drops edits unasked (agent form, ctrl+r reset: asked).
-tabs:    ctrl+← / ctrl+→ switch tabs (word jumps: alt+←→). tab / shift+tab: next / previous field.
+tabs:    alt+1-4 switch tabs (word jumps: ctrl / alt+←→). tab / shift+tab: next / previous field.
 esc esc: quit from the new tab. ctrl+c: quit at once.
 updates: 1 check per day (github.com releases, in the background). a newer release: 1 line after
          codehead quits. codehead --update installs it. $CODEHEAD_NO_UPDATE_CHECK=1: 0 checks.
@@ -140,6 +141,9 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          @: agent names. ←→ on a name: + add, or ⇄ replace an agent of the thread: on send, the old
          agent leaves and the new one gets the message with the old one's last messages.
          ctrl+i / ⌘i: VS Code on the thread's worktree (code on PATH).
+         views: shift+tab next (chat → changes), alt+1 / alt+2. changes: 1 box per file in review
+         order (schema, logic, config, UI, docs, tests, generated), j k box, n p hunk, space
+         reviewed, enter fold, o VS Code at the line, s side by side / unified, i prompt (esc back).
          tool runs (▸): click opens / closes the calls (input + output); ctrl+o: all.
          thoughts (setting thoughts = hidden | folded | open): ∴ rows, a click opens 1, ctrl+t: all.
          ctrl+v pastes a clipboard image as [Image #n], a dropped image path too. pasted text over

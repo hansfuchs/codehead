@@ -2029,9 +2029,13 @@ impl App {
         if ctrl && matches!(k.code, KeyCode::Char('c')) {
             return self.ctrl_c();
         }
-        // ctrl+←→: the main tabs from every field (word jumps: alt+←→); tab: the next field
-        if ctrl && !k.modifiers.contains(KeyModifiers::SHIFT) && matches!(k.code, KeyCode::Left | KeyCode::Right) && !self.cfg.copy_mode {
-            let to = if k.code == KeyCode::Right { self.cur_tab().next() } else { self.cur_tab().prev() };
+        // alt+1..4: the main tabs from every field (ctrl / alt+←→: word jumps); tab: the next field
+        if k.modifiers.contains(KeyModifiers::ALT)
+            && !ctrl
+            && !self.cfg.copy_mode
+            && let KeyCode::Char(c @ '1'..='4') = k.code
+        {
+            let to = [Tab::New, Tab::Threads, Tab::Agents, Tab::Settings][usize::from(c as u8 - b'1')];
             self.switch_tab(to);
             // the keys: in the tab's content; settings: on its tabs row (0 path dropdown at entry)
             if to != Tab::Settings {
@@ -2359,7 +2363,7 @@ impl App {
                 self.screen = Screen::Compose;
                 self.field = Field::Notes;
             }
-            // tab: done with the notes, back to the task (main tabs: ctrl+←→)
+            // tab: done with the notes, back to the task (main tabs: alt+1-4)
             KeyCode::Tab | KeyCode::BackTab => {
                 self.screen = Screen::Compose;
                 self.field = Field::Notes;
@@ -2417,7 +2421,7 @@ impl App {
             }
             KeyCode::Enter => self.open_thread(),
             KeyCode::Char('c') => self.toggle_context(),
-            // a list: 0 fields to tab to (main tabs: ctrl+←→)
+            // a list: 0 fields to tab to (main tabs: alt+1-4)
             KeyCode::Tab | KeyCode::BackTab => {}
             KeyCode::Esc if self.tfilter.as_deref().is_some_and(|q| !q.is_empty()) => {
                 self.tfilter = None;
@@ -2522,7 +2526,7 @@ impl App {
         let plain = !k.modifiers.contains(KeyModifiers::SHIFT);
         match k.code {
             KeyCode::Esc => return,
-            // tab: the next field (main tabs: ctrl+←→)
+            // tab: the next field (main tabs: alt+1-4)
             KeyCode::Tab if k.modifiers.is_empty() => return self.tab_field(1),
             KeyCode::BackTab => return self.tab_field(-1),
             // cmd+enter (SUPER) needs a terminal that reports it (kitty keyboard protocol)
@@ -3623,18 +3627,18 @@ impl App {
             Screen::Compose if self.field == Field::Where => &[("←→", "current · new branch · new worktree · main · recent"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
             Screen::Compose if self.field == Field::Opts => &[("←→", "box"), ("space", "check / uncheck"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.drafts_menu.is_some() => &[("↑↓", "move"), ("enter", "load"), ("d", "delete"), ("esc", "back")],
-            Screen::Compose if self.field == Field::Drafts => &[("enter", "list drafts"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("ctrl+←→", "tabs")],
+            Screen::Compose if self.field == Field::Drafts => &[("enter", "list drafts"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("alt+1-4", "tabs")],
             Screen::Compose if self.field == Field::Prompt => &[("@", "agents"), (cmd.as_str(), "commands"), ("dir/", "paths"), ("ctrl+v", "image"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("esc esc", "quit")],
             Screen::Compose if self.field == Field::Notes => &[("enter", "pick notes"), ("x", "drop"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
-            Screen::Compose => &[("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("tab", "next field"), ("ctrl+←→", "tabs"), ("esc esc", "quit")],
+            Screen::Compose => &[("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("tab", "next field"), ("alt+1-4", "tabs"), ("esc esc", "quit")],
             Screen::Pick if self.tfilter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to list")],
             Screen::Pick if self.filter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter", "done"), ("esc", "clear")],
             Screen::Pick if self.tab == Tab::Notes && self.cfg.copy_mode => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "copy"), ("esc", "quit")],
             Screen::Pick if self.tab == Tab::Notes => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "confirm"), ("esc", "new"), ("tab", "back")],
-            Screen::Pick if self.tab == Tab::Threads => &[("↑↓", "move"), ("f", "filter"), ("space", "select"), ("c", "context"), ("enter", "open"), ("ctrl+←→", "tabs")],
-            Screen::Pick if self.tab == Tab::Settings => &[("↑↓", "move"), ("enter", "edit / done"), ("ctrl+d", "default"), ("d", "delete alias"), ("ctrl+n", "add alias"), ("tab", "next field"), ("esc", "undo edit"), ("ctrl+←→", "tabs")],
+            Screen::Pick if self.tab == Tab::Threads => &[("↑↓", "move"), ("f", "filter"), ("space", "select"), ("c", "context"), ("enter", "open"), ("alt+1-4", "tabs")],
+            Screen::Pick if self.tab == Tab::Settings => &[("↑↓", "move"), ("enter", "edit / done"), ("ctrl+d", "default"), ("d", "delete alias"), ("ctrl+n", "add alias"), ("tab", "next field"), ("esc", "undo edit"), ("alt+1-4", "tabs")],
             Screen::Pick if self.afilter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to cards")],
-            Screen::Pick => &[("↑↓←→", "move"), ("f", "filter"), ("enter", "edit"), ("ctrl+←→", "tabs")],
+            Screen::Pick => &[("↑↓←→", "move"), ("f", "filter"), ("enter", "edit"), ("alt+1-4", "tabs")],
         };
         for (k, l) in hints {
             spans.extend(hint(k, l));
@@ -4568,15 +4572,15 @@ mod render_tests {
         std::fs::write(&a.settings_path, &config).unwrap();
 
         a.switch_tab(Tab::Agents);
-        key(&mut a, KeyCode::Right, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings && a.tabs_focus);
         let screen = dump(&mut a, 100, 36);
         assert!(!screen.contains("deploy.md"), "{screen}");
-        key(&mut a, KeyCode::Right, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('1'), KeyModifiers::ALT);
         assert!(a.screen == Screen::Compose);
         assert_eq!(std::fs::read_to_string(&a.settings_path).unwrap(), config);
 
-        key(&mut a, KeyCode::Left, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings && a.tabs_focus);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(!a.tabs_focus);
@@ -4588,11 +4592,11 @@ mod render_tests {
 
         // Re-entry must remove focus even after the path field was active.
         a.switch_tab(Tab::Agents);
-        key(&mut a, KeyCode::Right, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings && a.tabs_focus);
         let screen = dump(&mut a, 100, 36);
         assert!(!screen.contains("deploy.md"), "{screen}");
-        key(&mut a, KeyCode::Left, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('3'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Agents);
         assert_eq!(std::fs::read_to_string(&a.settings_path).unwrap(), config);
     }
@@ -4613,10 +4617,10 @@ mod render_tests {
         assert!(a.last_esc.is_none(), "dropdown Escape must not arm double Escape");
         let screen = dump(&mut a, 100, 100);
         assert!(!screen.contains("deploy.md"), "{screen}");
-        // tab: the next field (the alias box locked), still settings; ctrl+→: the next tab
+        // tab: the next field (the alias box locked), still settings; alt+1: the task tab
         key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
         assert!(a.screen == Screen::Pick && a.tab == Tab::Settings);
-        key(&mut a, KeyCode::Right, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('1'), KeyModifiers::ALT);
         assert!(a.screen == Screen::Compose);
     }
 
@@ -4625,7 +4629,7 @@ mod render_tests {
         let mut a = app();
         a.title.set_text("task title");
         a.prompt.set_text("task prompt");
-        key(&mut a, KeyCode::Left, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
@@ -4636,15 +4640,15 @@ mod render_tests {
         assert!(screen.lines().next().unwrap().contains("settings"), "{screen}");
         assert!(screen.contains("not applied"), "{screen}");
         assert!(screen.contains("~/notes/platform/"), "{screen}");
-        // ctrl+→ / ctrl+←: away and back, the form edits and the task text stay
-        key(&mut a, KeyCode::Right, KeyModifiers::CONTROL);
+        // alt+1 / alt+4: away and back, the form edits and the task text stay
+        key(&mut a, KeyCode::Char('1'), KeyModifiers::ALT);
         assert!(a.screen == Screen::Compose);
         assert_eq!(a.title.text(), "task title");
         assert_eq!(a.prompt.text(), "task prompt");
-        key(&mut a, KeyCode::Left, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
         let screen = dump(&mut a, 100, 24);
         assert!(screen.contains("~/notes/platform/"), "{screen}");
-        key(&mut a, KeyCode::Left, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('3'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Agents);
     }
 
@@ -4652,7 +4656,7 @@ mod render_tests {
     fn settings_esc_undoes_the_field_edit_and_never_applies() {
         let mut a = app();
         let before = std::fs::read_to_string(&a.settings_path).unwrap_or_default();
-        key(&mut a, KeyCode::Left, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.tab == Tab::Settings && !a.tabs_focus);
         // a plain field: typed, esc → the text at entry, 0 write
@@ -4680,26 +4684,26 @@ mod render_tests {
     }
 
     #[test]
-    fn ctrl_arrows_switch_tabs_and_tab_walks_the_fields() {
+    fn alt_digits_switch_tabs_and_tab_walks_the_fields() {
         let mut a = app();
-        let ctrl = |a: &mut App, c: KeyCode| key(a, c, KeyModifiers::CONTROL);
-        ctrl(&mut a, KeyCode::Right);
+        let alt = |a: &mut App, d: char| key(a, KeyCode::Char(d), KeyModifiers::ALT);
+        alt(&mut a, '2');
         assert!(a.screen == Screen::Pick && a.tab == Tab::Threads && !a.tabs_focus);
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         assert!(a.screen == Screen::Pick && a.tab == Tab::Threads);
         // tab on a list: 0 tab switch
         key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
         assert!(a.tab == Tab::Threads);
-        ctrl(&mut a, KeyCode::Left);
+        alt(&mut a, '1');
         assert!(a.screen == Screen::Compose && a.field == Field::Prompt);
-        // ctrl+→ round: threads, agents, settings, task
-        for t in [Tab::Threads, Tab::Agents, Tab::Settings] {
-            ctrl(&mut a, KeyCode::Right);
+        // alt+2..4: threads, agents, settings
+        for (t, d) in [(Tab::Threads, '2'), (Tab::Agents, '3'), (Tab::Settings, '4')] {
+            alt(&mut a, d);
             assert!(a.screen == Screen::Pick && a.tab == t);
         }
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         assert!(a.tab == Tab::Settings);
-        ctrl(&mut a, KeyCode::Right);
+        alt(&mut a, '1');
         assert!(a.screen == Screen::Compose);
         // the agents tab loaded the machine's agents: 1 card again (↓ leaves the cards)
         a.agents.truncate(1);
@@ -4720,13 +4724,18 @@ mod render_tests {
         }
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
         assert!(a.tabs_focus);
-        // ctrl+←→ in the prompt: tabs (word jumps: alt+←→)
+        // alt+digit in the prompt: tabs; ctrl / alt+←→: word jumps
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         type_text(&mut a, "one two");
         key(&mut a, KeyCode::Left, KeyModifiers::ALT);
         type_text(&mut a, "X");
         assert_eq!(a.prompt.text(), "one Xtwo");
-        ctrl(&mut a, KeyCode::Right);
+        // ctrl+←: a word jump too, 0 tab switch
+        key(&mut a, KeyCode::Left, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Left, KeyModifiers::CONTROL);
+        type_text(&mut a, "Y");
+        assert!(a.screen == Screen::Compose && a.prompt.text() == "Yone Xtwo", "{}", a.prompt.text());
+        alt(&mut a, '2');
         assert!(a.tab == Tab::Threads && a.screen == Screen::Pick);
     }
 
@@ -4880,11 +4889,11 @@ mod render_tests {
         a.paste("line one\nline two");
         println!("--- compose\n{}", dump(&mut a, 100, 22));
         println!("--- message\n{}", a.message());
-        key(&mut a, KeyCode::Right, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('2'), KeyModifiers::ALT);
         println!("--- threads\n{}", dump(&mut a, 120, 14));
         key(&mut a, KeyCode::Char('3'), KeyModifiers::NONE);
         assert!(a.tab == Tab::Threads, "0 number keys for tabs");
-        key(&mut a, KeyCode::Right, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('3'), KeyModifiers::ALT);
         println!("--- agents\n{}", dump(&mut a, 120, 14));
         key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
         println!("--- new agent\n{}", dump(&mut a, 120, 42));

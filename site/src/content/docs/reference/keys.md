@@ -12,7 +12,8 @@ description: Every key, per screen.
 | --- | --- |
 | `F2` | menu: quick commands (`n`: new thread), threads, tokens, agents |
 | `tab` / `shift+tab` | next / previous field (a question: its choices ↔ the prompt) |
-| `ctrl+←` `ctrl+→` | previous / next tab of the start screen (word jumps: `alt+←` `alt+→`) |
+| `alt+1`-`alt+4` | start screen: new, threads, agents, settings tab (macOS: Option as Meta) |
+| `ctrl+←` `ctrl+→`, `alt+←` `alt+→` | word jumps in a text field |
 | `esc` | 1 level back: never applies, never drops edits unasked |
 | `ctrl+z` / `ctrl+shift+z` | undo / redo in any text field (`⌘z` / `⌘⇧z`) |
 
@@ -48,3 +49,25 @@ description: Every key, per screen.
 | `ctrl+t` | open / close all thoughts (hidden: show them) |
 | `ctrl+i` | VS Code on the thread's worktree (`⌘i`) |
 | `pgup` `pgdn`, `shift+↑↓`, wheel | scroll the stream |
+| `tab` | thread header: the open threads (`←→` pick, `enter` open) |
+| `shift+tab` | next view of the thread: chat → changes |
+| `alt+1` / `alt+2` | chat / changes view |
+
+## Changes view
+
+The branch's changes against its base (merge-base with `origin/<default>`; on the default
+branch: uncommitted only), 1 box per file, in review order: schema / API, logic, config, UI,
+docs, tests, generated (folded). Side by side from 170 columns. A reviewed box folds; if its
+diff changes later, it shows `updated`.
+
+| Key | Action |
+| --- | --- |
+| `j` / `k` | next / previous box |
+| `n` / `p` | next / previous hunk |
+| `↑` `↓`, `pgup` `pgdn`, `g` `G` | move the cursor |
+| `space` | reviewed on / off (the cursor goes to the next box) |
+| `enter` | fold / unfold the box |
+| `o` | VS Code at the line under the cursor (the window that has the worktree open) |
+| `s` | side by side / unified |
+| `r` | read git again (it also does every 4 s) |
+| `i` | the prompt gets the keys; `esc` gives them back |

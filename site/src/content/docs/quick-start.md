@@ -20,7 +20,7 @@ description: From 0 to a running thread in a few minutes.
    `claude/opus`), a mode. `autopilot` works without asking; `supervised` asks before each
    tool call. The agent is a file now: `~/.config/codehead/agents/<name>.toml`.
 
-4. Back on the **new** tab (`ctrl+←` `ctrl+→` switch tabs), type the task in the prompt: its 1st
+4. Back on the **new** tab (`alt+1`; `alt+1`-`alt+4` switch tabs), type the task in the prompt: its 1st
    line is the thread's title (or type one in the title field). `@` lists agents, `>`
    lists commands, `tab` moves between fields.
 
