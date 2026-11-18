@@ -608,23 +608,25 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                 let box_w = inner + 4;
                 let left = w.saturating_sub(box_w);
                 let stamp = format!("{}{to_note} ", clock(*ts));
+                let n = rows.len();
                 for (i, r) in rows.into_iter().enumerate() {
                     let pad = inner - r.line.width();
-                    let lead = if i == 0 && stamp.chars().count() < left {
-                        vec![Span::styled(format!("{stamp:>left$}"), theme::muted())]
-                    } else {
-                        vec![Span::raw(" ".repeat(left))]
-                    };
-                    let mut spans = lead;
+                    // left of the box: the time on the 1st row, a copy button on the last
+                    let st = if i == 0 && stamp.width() < left { stamp.clone() } else { String::new() };
+                    let copy = i + 1 == n && st.width() + 6 < left;
+                    let used = st.width() + if copy { 5 } else { 0 };
+                    let mut spans = vec![Span::raw(" ".repeat(left - used)), Span::styled(st, theme::muted())];
+                    let mut copies: Vec<(u16, u16, String)> = Vec::new();
+                    if copy {
+                        spans.push(Span::styled("copy ", theme::accent()));
+                        copies.push(((left - 5) as u16, (left - 1) as u16, text.trim_end().to_string()));
+                    }
                     spans.push(Span::styled("  ", bg));
                     spans.extend(r.line.spans);
                     spans.push(Span::styled(" ".repeat(pad + 2), bg));
                     let shift = (left + 2) as u16;
-                    d.rows.push(Row {
-                        line: Line::from(spans),
-                        links: r.links.into_iter().map(|(a, b, u)| (a + shift, b + shift, u)).collect(),
-                        copies: r.copies.into_iter().map(|(a, b, u)| (a + shift, b + shift, u)).collect(),
-                    });
+                    copies.extend(r.copies.into_iter().map(|(a, b, u)| (a + shift, b + shift, u)));
+                    d.rows.push(Row { line: Line::from(spans), links: r.links.into_iter().map(|(a, b, u)| (a + shift, b + shift, u)).collect(), copies });
                 }
                 last_agent = None;
             }
@@ -964,7 +966,19 @@ fn owner_bubble(d: &mut Drawn, w: usize, text: &str, to_note: &str, ts: u64) {
         r.line.spans.push(Span::styled("│", border));
         d.rows.push(r);
     }
-    d.rows.push(Row::plain(Line::from(vec![pad, Span::styled(format!("╰{}╯", "─".repeat(bw - 2)), border)])));
+    // the bottom border: a copy button on the right (the message as sent)
+    let button = " copy ";
+    if bw >= button.width() + 6 {
+        let fill = bw - 2 - button.width() - 2;
+        let at = (left + 1 + fill) as u16;
+        d.rows.push(Row {
+            line: Line::from(vec![pad, Span::styled(format!("╰{}", "─".repeat(fill)), border), Span::styled(button, theme::accent()), Span::styled("──╯", border)]),
+            copies: vec![(at, at + button.width() as u16, text.trim_end().to_string())],
+            ..Default::default()
+        });
+    } else {
+        d.rows.push(Row::plain(Line::from(vec![pad, Span::styled(format!("╰{}╯", "─".repeat(bw - 2)), border)])));
+    }
     for f in files {
         let name = f.rsplit('/').next().unwrap_or(f);
         let label = format!("📎 {name}");
@@ -1259,6 +1273,23 @@ mod tests {
             }
         }
         panic!("0 {at}: {:?}", rows.iter().map(|r| &r.0).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn owner_messages_have_a_copy_button_in_both_looks() {
+        let mut t = Thread::default();
+        let msg = "fix **the deploy**\nsecond line";
+        t.push(&ev(None, Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text: msg.into() }));
+        let none = HashSet::new();
+        let fold = Fold { runs: &none, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &none, all_thoughts: false };
+        for look in [Look::Bubbles, Look::Lines] {
+            let d = draw(&t, look, 70, &Colors::new(), &[], &fold, &Picker::default());
+            let row = d.rows.iter().find(|r| r.copies.iter().any(|c| c.2 == msg)).unwrap_or_else(|| panic!("{look:?}: 0 copy button"));
+            let (a, b, _) = row.copies.iter().find(|c| c.2 == msg).unwrap().clone();
+            let cells: String = row.line.spans.iter().flat_map(|s| s.content.chars()).collect();
+            let hit: String = cells.chars().skip(usize::from(a)).take(usize::from(b - a)).collect();
+            assert_eq!(hit.trim(), "copy", "{look:?}: the copy range sits on the button: {cells:?}");
+        }
     }
 
     #[test]
