@@ -45,6 +45,9 @@ pub struct Thread {
     pub setup: Option<String>,
     #[serde(default)]
     pub parent: Option<String>,
+    /// portless: the worktree's live URLs.
+    #[serde(default)]
+    pub urls: Vec<String>,
 }
 
 /// From the tail of thread ID's log: an open question, the last error (a turn that ended in
@@ -191,6 +194,8 @@ pub fn checkouts(repo: &Path) -> std::collections::HashMap<String, String> {
 
 /// Every thread, newest first.
 pub fn all_threads() -> Vec<Thread> {
+    // portless: 1 read of the live routes for every thread
+    let routes = if crate::portless::active() { crate::portless::routes() } else { Vec::new() };
     crate::engine::store::all()
         .into_iter()
         .map(|t| {
@@ -214,6 +219,7 @@ pub fn all_threads() -> Vec<Thread> {
                 port: t.port,
                 setup: t.setup.clone(),
                 parent: t.parent.clone(),
+                urls: t.worktree.as_ref().and(t.branch.as_deref()).map(|b| crate::portless::urls_of(&routes, &crate::portless::prefix(b))).unwrap_or_default(),
                 updated: t.updated / 1000,
                 worktree: t.worktree.clone(),
                 branch: t.branch.clone(),
@@ -326,6 +332,9 @@ pub fn preview_header(w: &Worktree) -> Vec<Line<'static>> {
             }
             if let Some(s) = &t.setup {
                 facts.push(format!("setup {s}"));
+            }
+            for u in &t.urls {
+                facts.push(format!("↗ {}", u.trim_start_matches("https://")));
             }
             if let Some(p) = &t.parent {
                 facts.push(format!("continues {}", p.chars().take(12).collect::<String>()));

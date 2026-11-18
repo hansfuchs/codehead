@@ -145,8 +145,17 @@ fn harness_command(bin: &str, s: &Spec) -> Command {
     if let Some(h) = crate::config::home_repo() {
         c.env("CODEHEAD_HOME_REPO", h);
     }
-    if let Some(p) = super::store::load(s.thread).and_then(|t| t.port) {
-        c.env("CODEHEAD_PORT", p.to_string());
+    if let Some(t) = super::store::load(s.thread) {
+        if let Some(p) = t.port {
+            c.env("CODEHEAD_PORT", p.to_string());
+        }
+        // portless: the worktree's label, so its URLs stay fixed
+        if crate::portless::active()
+            && t.worktree.is_some()
+            && let Some(b) = &t.branch
+        {
+            c.env("PORTLESS_PREFIX", crate::portless::prefix(b));
+        }
     }
     c
 }
@@ -500,9 +509,13 @@ Thread: {title}\nAgents on the thread: {list}",
     if let Some(h) = crate::config::home_repo() {
         s.push_str(&home_block(&h));
     }
+    if crate::portless::active() {
+        s.push_str(&crate::portless::prompt(thread.worktree.as_ref().and(thread.branch.as_deref())));
+    }
     if let Some(p) = thread.port {
+        let what = if crate::portless::active() { "databases, queues and other non-HTTP listeners" } else { "dev servers and other listeners" };
         s.push_str(&format!(
-            "\nPorts of this thread: {p}-{} ($CODEHEAD_PORT = {p}). Start dev servers and other listeners on these, never on the defaults: other threads run next to you.",
+            "\nPorts of this thread: {p}-{} ($CODEHEAD_PORT = {p}). Start {what} on these, never on the defaults: other threads run next to you.",
             p + crate::setup::PORTS - 1
         ));
     }

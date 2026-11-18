@@ -92,6 +92,10 @@ pub fn env(root: &Path, wt: &Path, id: &str, branch: &str, port: Option<u16>) ->
         v.push(("CODEHEAD_PORT".into(), p.to_string()));
         v.push(("CONDUCTOR_PORT".into(), p.to_string()));
     }
+    // portless: the worktree's label (services the script starts get its URLs)
+    if !branch.is_empty() && crate::portless::active() {
+        v.push(("PORTLESS_PREFIX".into(), crate::portless::prefix(branch)));
+    }
     v
 }
 

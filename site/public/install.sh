@@ -134,6 +134,16 @@ install_codehead() {
   done
   [ -n "$found_harness" ] || warn "0 harnesses on PATH (claude, codex, opencode, goose, …): https://codehead.sh/docs/requirements/"
 
+  # portless: dev servers at https://<worktree>.<app>.localhost, 1 per worktree (needs Node 24+)
+  if command -v portless >/dev/null 2>&1; then
+    good "portless: $(portless --version 2>/dev/null | head -1)"
+  elif command -v npm >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge 24 ]; then
+    say "installing portless (npm -g) …"
+    if npm install -g portless >/dev/null 2>&1; then good "portless: installed"; else warn "npm install -g portless failed: https://github.com/vercel-labs/portless"; fi
+  else
+    warn "portless needs Node 24+ and npm: https://github.com/vercel-labs/portless (agents use \$CODEHEAD_PORT meanwhile)"
+  fi
+
   # yazi: the file browser of the thread view (ctrl+y, files view y)
   if command -v yazi >/dev/null 2>&1; then
     good "yazi: $(yazi --version 2>/dev/null | head -1)"

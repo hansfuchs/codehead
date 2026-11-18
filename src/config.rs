@@ -28,6 +28,8 @@ pub struct File {
     pub review: Option<String>,
     /// The IDE: `auto` (default), a command name (code, cursor, zed, idea …) or a path.
     pub editor: Option<String>,
+    /// Dev server ports: `auto` (default: portless when on PATH), `portless`, `block`.
+    pub ports: Option<String>,
     /// `[keys] menu`: the menu key (F2).
     pub menu_key: Option<String>,
     /// `[keys] command`: the char that opens the command dropdown (`>`).
@@ -128,6 +130,10 @@ fn parse(text: &str) -> Result<File, String> {
                 f.edits = Some(s);
             }
             "editor" => f.editor = Some(s),
+            "ports" => {
+                validate("ports".into(), &s)?;
+                f.ports = Some(s);
+            }
             "rank" => {
                 validate("rank".into(), &s)?;
                 f.rank = Some(s);
@@ -171,6 +177,7 @@ pub fn validate(key: String, v: &str) -> Result<(), String> {
         "messages" if crate::stream::Look::parse(v).is_none() => Err(format!("messages: bubbles or lines, not {v}")),
         "thoughts" if crate::stream::Thoughts::parse(v).is_none() => Err(format!("thoughts: hidden, folded or open, not {v}")),
         "edits" if crate::engine::edits::Mode::parse(v).is_none() => Err(format!("edits: off, files or diff, not {v}")),
+        "ports" if crate::portless::Mode::parse(v).is_none() => Err(format!("ports: auto, portless or block, not {v}")),
         "rank" | "review" if v != "off" && !v.strip_prefix("claude:").is_some_and(|m| !m.is_empty()) => Err(format!("{key}: off or claude:<model>, not {v}")),
         "keys.menu" => Bind::parse(v).map(|_| ()).ok_or_else(|| format!("keys.menu: F1-F12, ctrl+<letter> or alt+<letter>, not {v}")),
         "keys.command" => command_char(v).map(|_| ()).ok_or_else(|| format!("keys.command: 1 symbol (not a letter, digit, space or @), not {v}")),
@@ -275,6 +282,7 @@ fn document(base: &str, file: &File) -> Result<String, String> {
         ("rank", &file.rank),
         ("review", &file.review),
         ("editor", &file.editor),
+        ("ports", &file.ports),
     ] {
         if let Some(value) = value {
             if doc.get(key).and_then(|v| v.as_str()) != Some(value) {
@@ -404,6 +412,7 @@ impl File {
             "rank" => self.rank.clone(),
             "review" => self.review.clone(),
             "editor" => self.editor.clone(),
+            "ports" => self.ports.clone(),
             "keys.menu" => self.menu_key.clone(),
             "keys.command" => self.command_key.clone(),
             "colors.scheme" => self.scheme.clone(),
@@ -425,6 +434,7 @@ impl File {
             "rank" => self.rank = v,
             "review" => self.review = v,
             "editor" => self.editor = v,
+            "ports" => self.ports = v,
             "keys.menu" => self.menu_key = v,
             "keys.command" => self.command_key = v,
             "colors.scheme" => self.scheme = v,
@@ -526,6 +536,7 @@ pub fn defaults() -> File {
         rank: Some("claude:haiku".into()),
         review: Some("claude:sonnet".into()),
         editor: Some("auto".into()),
+        ports: Some("auto".into()),
         menu_key: Some("F2".into()),
         command_key: Some(">".into()),
         scheme: Some(crate::theme::PRESETS[0].0.into()),
@@ -601,6 +612,11 @@ pub fn edits() -> crate::engine::edits::Mode {
 pub fn review_model() -> Option<String> {
     let v = env("CODEHEAD_REVIEW").or_else(|| get().review.clone()).unwrap_or_else(|| "claude:sonnet".into());
     v.strip_prefix("claude:").filter(|m| !m.is_empty()).map(str::to_string)
+}
+
+/// Dev server ports: $CODEHEAD_PORTS, else `ports`, else auto.
+pub fn ports() -> crate::portless::Mode {
+    env("CODEHEAD_PORTS").or_else(|| get().ports.clone()).and_then(|m| crate::portless::Mode::parse(&m)).unwrap_or_default()
 }
 
 /// The `editor` setting (None: unset; `auto` applies).

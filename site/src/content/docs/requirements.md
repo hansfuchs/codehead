@@ -42,6 +42,7 @@ is installed and the command codehead runs.
 - **Editor**: `$VISUAL` or `$EDITOR` (default `nvim`, else `vi`), to edit notes.
 - **IDE**: VS Code, VSCodium, Cursor, Zed or a JetBrains IDE (setting `editor`), for `ctrl+i` and
   the changes view `o`.
+- **portless** (Node 24+): dev server URLs per worktree; the install script installs it (`npm -g`).
 - **yazi**: the file browser (`ctrl+y`, files view `y`); the install script installs it (brew,
   else `cargo binstall`).
 - **claude** (Claude Code), logged in: the changes view order (`rank`), the reviewer (`review`),

@@ -47,6 +47,7 @@ accent = "#FF7565"                    # overrides 1 color of the scheme
 | `edits` | `diff` | What an agent gets told, before its next turn, of edits in its worktree it did not make: `off`, `files` (files and line ranges) or `diff` (also your diff, max. 150 lines) |
 | `rank` | `claude:haiku` | Changes view order: `claude:<model>` groups the changed files (1 call per set of paths, about 1 cent with haiku; cached in `threads/<id>/rank.json`), `off`: path rules only |
 | `review` | `claude:sonnet` | Changes view `V`: `claude:<model>` reviews the branch diff with read-only tools (Read, Grep, Glob) and returns findings (file, line, severity, title, body), kept in `threads/<id>/findings.json`; `off`: 0 reviews |
+| `ports` | `auto` | Dev servers: `auto` (portless when it is on PATH), `portless`, or `block` (only the `$CODEHEAD_PORT` block). With portless, agents run `portless run <command>` and each worktree gets `https://<branch tail>.<app>.localhost` |
 | `editor` | `auto` | The IDE of `ctrl+i` and the changes view `o`: `auto` (VS Code, VSCodium, Cursor, Zed, JetBrains: the 1st found), a command (`code`, `cursor`, `zed`, `idea` …), a path, or `terminal` ($VISUAL / $EDITOR full screen in codehead's terminal, at the line). Trust codehead's worktrees dir once in the IDE: every worktree under it is trusted |
 | `[keys] menu` | `F2` | the menu key: `F1`-`F12`, `ctrl+<letter>`, `alt+<letter>` |
 | `[keys] command` | `>` | the char that opens the command dropdown in a prompt: 1 symbol |

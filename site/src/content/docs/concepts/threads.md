@@ -106,8 +106,14 @@ A thread on a new branch + worktree works like the main checkout, with 0 manual 
 - **Local files**: the paths in `.worktreeinclude` (repo root, 1 per line, `#` comments) are
   copied from the main checkout: an APFS clone on macOS, a reflink where the file system has
   one. 0 file: every gitignored `.env*` file of the root. A path the worktree has stays.
-- **Ports**: each worktree thread gets 10 ports, `$CODEHEAD_PORT` (40000, 40010, …) to `+9`.
-  Agents get them in their env and their system prompt.
+- **Dev server URLs** ([portless](https://github.com/vercel-labs/portless), installed with
+  codehead when Node 24+ is there; setting `ports`): agents start dev servers with
+  `portless run <command>`, and each worktree gets its own `https://<branch tail>.<app>.localhost`
+  (`$PORTLESS_PREFIX` in the agents' and the setup script's env). The thread view's top row
+  shows the live URL on the right (a click opens it); the threads tab shows it in the details.
+- **Ports**: each worktree thread gets 10 ports, `$CODEHEAD_PORT` (40000, 40010, …) to `+9`, in
+  the agents' env and system prompt: for databases and other non-HTTP services (with
+  `ports = "block"`: for dev servers too).
 - **Setup**: `.codehead/setup`, else `.agents/setup`, else `conductor.json` `scripts.setup`
   runs in the new worktree before the 1st turn (20 min max). The thread shows it as a `setup`
   tool run; messages wait for it. A failed setup: the agents get its output and a note.

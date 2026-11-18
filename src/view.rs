@@ -182,6 +182,12 @@ struct View {
     /// The changes view with the chat left of it (wide terminals; alt+\ toggles); the view's area.
     split: bool,
     view_rect: Rect,
+    /// portless: the live URLs of this thread's worktree (read every 5 s), the read on its way, the
+    /// link on row 0.
+    urls: Vec<String>,
+    urls_read: Option<Receiver<Vec<String>>>,
+    urls_at: Option<Instant>,
+    url_rect: Option<(Rect, String)>,
     /// A review comment in the prompt: file, line, the draft the prompt had before.
     commenting: Option<(String, u32, String)>,
     /// A commit message in the prompt: the draft the prompt had before; a model's draft on its way.
@@ -283,6 +289,10 @@ impl View {
             bar_rects: Vec::new(),
             split: true,
             view_rect: Rect::default(),
+            urls: Vec::new(),
+            urls_read: None,
+            urls_at: None,
+            url_rect: None,
             commenting: None,
             committing: None,
             drafting: None,
@@ -958,6 +968,29 @@ impl View {
         self.open_editor(|k| crate::editor::args_at(k, &cwd, file, line), format!("{file}:{line}"));
     }
 
+    /// portless: read this thread's live URLs every 5 s (on a thread). 0 portless, 0 worktree: 0.
+    fn poll_urls(&mut self) {
+        if let Some(rx) = &self.urls_read
+            && let Ok(u) = rx.try_recv()
+        {
+            self.urls_read = None;
+            self.urls = u;
+        }
+        if cfg!(test) || self.urls_read.is_some() || self.urls_at.is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
+            return;
+        }
+        self.urls_at = Some(Instant::now());
+        let Some(prefix) = store::load(&self.id).filter(|t| t.worktree.is_some()).and_then(|t| t.branch).map(|b| crate::portless::prefix(&b)) else { return };
+        if !crate::portless::active() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::portless::urls_of(&crate::portless::routes(), &prefix));
+        });
+        self.urls_read = Some(rx);
+    }
+
     fn mention_open(&self) -> bool {
         self.mention.is_open(&self.input, &self.roster)
     }
@@ -1277,6 +1310,15 @@ impl View {
             return;
         }
         let click = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
+        // the worktree's URL (portless): the browser
+        if click && let Some((r, url)) = &self.url_rect
+            && r.contains(at)
+        {
+            let url = url.clone();
+            open_url(&url);
+            self.toast(format!("open {url}"));
+            return;
+        }
         // the view bar
         if click && let Some(&(_, p)) = self.bar_rects.iter().find(|(r, _)| r.contains(at)) {
             self.set_pane(p);
@@ -1750,9 +1792,25 @@ impl View {
         }
         spans.push(Span::styled("│ ", theme::line()));
         let used: usize = spans.iter().map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref())).sum();
-        let room = usize::from(top.width.saturating_sub(4)).saturating_sub(used);
+        // portless: the worktree's live URL on the right (a click opens it)
+        self.poll_urls();
+        self.url_rect = None;
+        let link = self.urls.first().map(|u| {
+            let host = u.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/');
+            let more = if self.urls.len() > 1 { format!(" +{}", self.urls.len() - 1) } else { String::new() };
+            (format!("↗ {host}{more} "), u.clone())
+        });
+        let link_w = link.as_ref().map_or(0, |(t, _)| unicode_width::UnicodeWidthStr::width(t.as_str()));
+        let room = usize::from(top.width.saturating_sub(4)).saturating_sub(used + link_w + 1);
         spans.push(Span::styled(format!("{} ", crate::nav::fit(&self.title, room)), theme::accent_bold()));
         f.render_widget(Paragraph::new(Line::from(spans)), Rect { x: top.x + 2, width: top.width.saturating_sub(2), ..top });
+        if let Some((text, url)) = link
+            && top.width as usize > link_w + used + 4
+        {
+            let r = Rect { x: top.right() - link_w as u16, width: link_w as u16, ..top };
+            f.render_widget(Paragraph::new(Span::styled(text, theme::accent().add_modifier(Modifier::UNDERLINED))), r);
+            self.url_rect = Some((r, url));
+        }
         let mut low: Vec<Span<'static>> = Vec::new();
         if !note.is_empty() {
             low.push(Span::styled(note, theme::muted()));
