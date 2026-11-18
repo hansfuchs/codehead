@@ -16,7 +16,7 @@ The thread view has these parts, top to bottom:
   the tokens box: tokens, cost and context per agent, the last hour as a sparkline, and your
   plan's usage windows.
 - **Prompt**: a rounded bubble below the header. `enter` adds a line, `ctrl+enter` sends
-  (`⌘enter`, `alt+enter`, `ctrl+s` too). `↑` on the 1st row of an empty prompt walks your
+  (`⌘enter`, `alt+enter` too; `ctrl+s` never sends). `↑` on the 1st row of an empty prompt walks your
   sent messages. The row below names who gets the message (`→ ada`: the lead, or the
   `@named` agents).
 
@@ -80,7 +80,7 @@ asks them 1 by 1.
 
 ## Steering
 
-- `esc`: interrupt the running turns (scrolled up: back to live first).
+- `esc`: interrupt the running turns after 0.5 s (scrolled up: back to live first).
 - `esc esc`: back to the start screen. The thread keeps running.
 - `F2`: the menu. `n` in its **quick** tab: a new thread. Its **agents** tab shows the agents of the
   thread as cards by harness, adds and removes them; **threads**

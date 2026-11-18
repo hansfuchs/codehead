@@ -80,16 +80,45 @@ pub fn language<'a>(text: &str, sources: &'a [Source]) -> &'a str {
     else { "text" }
 }
 
-/// Last source line as colored characters. Replaying preceding lines preserves parser state
-/// through multiline strings, comments, streamed continuations, and terminal redraws.
-pub fn last_line(text: &str, language: &str) -> Vec<(Color, char)> {
+/// Colored characters of each line of TEXT.
+pub type Lines = std::sync::Arc<Vec<Vec<(Color, char)>>>;
+
+/// Blocks kept by `highlight`: a redraw renders each block again.
+const CACHE_CAP: usize = 256;
+
+/// Each source line as colored characters, in 1 pass: the parser state goes through
+/// multiline strings and comments. Cached per (text, language): redraws and streamed
+/// continuations of other blocks cost 0 highlight.
+pub fn highlight(text: &str, language: &str) -> Lines {
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+    use std::sync::Mutex;
+    static CACHE: OnceLock<Mutex<HashMap<(u64, String), Lines>>> = OnceLock::new();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    let key = (h.finish(), language.to_string());
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(l) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return l;
+    }
+    let lines = Lines::new(highlight_all(text, language));
+    if let Ok(mut c) = cache.lock() {
+        if c.len() >= CACHE_CAP {
+            c.clear();
+        }
+        c.insert(key, lines.clone());
+    }
+    lines
+}
+
+fn highlight_all(text: &str, language: &str) -> Vec<Vec<(Color, char)>> {
     let syntaxes = syntaxes();
     let language = language.to_lowercase();
     let syntax = syntaxes.find_syntax_by_token(token(&language)).unwrap_or_else(|| syntaxes.find_syntax_plain_text());
     let mut highlighter = HighlightLines::new(syntax, theme());
-    let mut out = Vec::new();
+    let mut all = Vec::new();
     for line in LinesWithEndings::from(text) {
-        out.clear();
+        let mut out = Vec::new();
         match highlighter.highlight_line(line, syntaxes) {
             Ok(spans) => for (style, text) in spans {
                 let fg = style.foreground;
@@ -100,8 +129,15 @@ pub fn last_line(text: &str, language: &str) -> Vec<(Color, char)> {
             },
             Err(_) => out.extend(line.chars().filter(|c| !c.is_control()).map(|c| (crate::theme::pal().text, c))),
         }
+        all.push(out);
     }
-    out
+    all
+}
+
+/// Last source line as colored characters (the lines before set the parser state).
+#[cfg(test)]
+pub fn last_line(text: &str, language: &str) -> Vec<(Color, char)> {
+    highlight_all(text, language).pop().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -115,6 +151,19 @@ mod tests {
         assert_eq!(language("{ value: true }", &sources), "ts");
         assert_eq!(language("def greet():", &sources), "python");
         assert_eq!(language("echo hello", &[]), "sh");
+    }
+
+    #[test]
+    fn one_pass_matches_the_line_by_line_replay() {
+        let text = "/* a\n   comment */\nconst s = `multi\nline`;\nlet n = 1;";
+        let all = highlight(text, "ts");
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(all.len(), lines.len());
+        for i in 0..lines.len() {
+            assert_eq!(all[i], last_line(&lines[..=i].join("\n"), "ts"), "line {i}");
+        }
+        // cached: the same Arc
+        assert!(std::sync::Arc::ptr_eq(&all, &highlight(text, "ts")));
     }
 
     #[test]

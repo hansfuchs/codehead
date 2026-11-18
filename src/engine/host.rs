@@ -12,6 +12,9 @@
 //! - `status` {agent, state, note}: the `set_status` tool.
 //! - `reload` {agent, fresh?}: end the agent's idle session (its profile changed).
 //! - `ping`: live / busy agents, open asks.
+//! - `subscribe`: the connection stays open; the host writes 1 JSON line per push: `live`
+//!   {agent, text} (the live text so far, once), `delta` {agent, text} (a token chunk), `wake`
+//!   (new log lines).
 //! - `stop`: end every session, exit.
 //!
 //! Sessions start on the first message to their agent and resume the agent's last harness
@@ -41,6 +44,8 @@ pub fn socket(id: &str) -> PathBuf {
 
 enum Input {
     Cmd(Value, Sender<Value>),
+    /// A view subscribed: lines for it (`wake`, `delta`) go to this sender.
+    Subscribe(Sender<String>),
     Harness(String, Out),
 }
 
@@ -61,6 +66,10 @@ struct Host {
     last: Instant,
     /// `stop` came: exit after its reply.
     stopping: bool,
+    /// Open views (`subscribe`): each gets `wake` per log line and the live text chunks.
+    subs: std::cell::RefCell<Vec<Sender<String>>>,
+    /// Per agent: live text since its last logged message: a new subscriber gets it first.
+    live: HashMap<String, String>,
 }
 
 /// @names in TEXT that name an active agent, in order, once each.
@@ -85,6 +94,21 @@ impl Host {
         if let Err(e) = store::append(&self.id, &Event::new(agent, kind)) {
             eprintln!("log: {e}");
         }
+        self.push(&json!({"op": "wake"}));
+    }
+
+    /// A view subscribed: the live text so far first, then each push.
+    fn subscribe(&self, s: Sender<String>) {
+        for (agent, text) in &self.live {
+            let _ = s.send(json!({"op": "live", "agent": agent, "text": text}).to_string());
+        }
+        self.subs.borrow_mut().push(s);
+    }
+
+    /// Send line V to each subscribed view; closed views go.
+    fn push(&self, v: &Value) {
+        let line = v.to_string();
+        self.subs.borrow_mut().retain(|s| s.send(line.clone()).is_ok());
     }
 
     fn thread(&self) -> Result<store::Thread, String> {
@@ -124,7 +148,10 @@ impl Host {
     }
 
     fn cmd(&mut self, c: &Value) -> Result<Value, String> {
-        self.last = Instant::now();
+        // a status poll (`ping`) is no activity: an open view must not keep the host alive
+        if c["op"].as_str() != Some("ping") {
+            self.last = Instant::now();
+        }
         let s = |k: &str| c[k].as_str().unwrap_or_default().to_string();
         let list = |k: &str| -> Vec<String> {
             match &c[k] {
@@ -181,8 +208,11 @@ impl Host {
             }
             "answer" => {
                 let id = s("id");
-                let (agent, req) = self.asks.remove(&id).ok_or_else(|| format!("no open ask {id}"))?;
-                let live = self.sessions.get_mut(&agent).ok_or_else(|| format!("{agent}: session gone"))?;
+                let (agent, req) = self.asks.get(&id).cloned().ok_or_else(|| format!("no open ask {id}"))?;
+                let Some(live) = self.sessions.get_mut(&agent) else {
+                    self.asks.remove(&id);
+                    return Err(format!("{agent}: session gone"));
+                };
                 let allow = c["allow"].as_bool().unwrap_or(false);
                 // an ACP option picks itself, allow or reject
                 if allow || c["option"].is_string() {
@@ -198,17 +228,28 @@ impl Host {
                     let why = c["note"].as_str().filter(|n| !n.is_empty()).unwrap_or("The owner said no.");
                     live.session.deny(&id, why)?;
                 }
+                // answered: the ask goes only now (a failed write keeps it open for a retry)
+                self.asks.remove(&id);
                 self.log(Some(&agent), Kind::Answer { id, allow, label: s("label") });
                 Ok(json!({}))
             }
             "interrupt" => {
-                let mut n = 0;
-                for live in self.sessions.values_mut().filter(|l| l.busy) {
-                    live.session.interrupt()?;
-                    live.interrupted = true;
-                    n += 1;
+                let (mut stopped, mut errs) = (Vec::new(), Vec::new());
+                for (name, live) in self.sessions.iter_mut().filter(|(_, l)| l.busy) {
+                    match live.session.interrupt() {
+                        Ok(()) => {
+                            live.interrupted = true;
+                            stopped.push(name.clone());
+                        }
+                        Err(e) => errs.push(format!("{name}: {e}")),
+                    }
                 }
-                Ok(json!({"interrupted": n}))
+                // their open asks are moot: 0 answer comes (ACP: `cancel` answered them)
+                self.asks.retain(|_, (a, _)| !stopped.contains(a));
+                if !errs.is_empty() {
+                    return Err(errs.join("; "));
+                }
+                Ok(json!({"interrupted": stopped.len()}))
             }
             "join" => {
                 let agent = s("agent");
@@ -267,6 +308,9 @@ impl Host {
         self.last = Instant::now();
         match o {
             Out::Event(mut kind) => {
+                if matches!(kind, Kind::Text { .. } | Kind::Tool { .. } | Kind::TurnEnd { .. }) {
+                    self.live.remove(&agent);
+                }
                 // an interrupted turn: Claude Code ends it with `error_during_execution`
                 if let Kind::TurnEnd { error, .. } = &mut kind
                     && let Some(l) = self.sessions.get_mut(&agent)
@@ -300,24 +344,33 @@ impl Host {
                         if let Some(l) = self.sessions.get_mut(&agent) {
                             l.busy = false;
                         }
+                        // a turn ends: its open asks are moot (the view drops them too)
+                        self.asks.retain(|_, (a, _)| *a != agent);
                     }
                     _ => {}
                 }
                 self.log(Some(&agent), kind);
             }
+            Out::Delta(text) => {
+                self.push(&json!({"op": "delta", "agent": agent, "text": text}));
+                self.live.entry(agent).or_default().push_str(&text);
+            }
             Out::Limits(l) => {
                 // 1 file for every host: the plan's windows are the account's, not the thread's
+                // hosts of other threads write it too: under its lock
                 let path = super::data_dir().join("limits.json");
-                let mut v: Value = std::fs::read(&path).ok().and_then(|t| serde_json::from_slice(&t).ok()).unwrap_or_else(|| json!({}));
-                for (w, pct, resets) in l {
-                    v["claude"][w] = json!({"pct": pct, "resets": resets});
-                }
-                let _ = super::write_atomic(&path, v.to_string().as_bytes());
+                let _ = super::locked(&super::data_dir().join("limits.lock"), || {
+                    let mut v: Value = std::fs::read(&path).ok().and_then(|t| serde_json::from_slice(&t).ok()).unwrap_or_else(|| json!({}));
+                    for (w, pct, resets) in l {
+                        v["claude"][w] = json!({"pct": pct, "resets": resets});
+                    }
+                    super::write_atomic(&path, v.to_string().as_bytes())
+                });
             }
             Out::Control(id, req) => {
                 // ACP agents: the mode decides what runs without the owner
                 if let Some(l) = self.sessions.get_mut(&agent)
-                    && l.session.is_acp()
+                    && l.session.host_allows()
                     && let Some(a) = roster::get(&agent)
                     && super::guard::auto_allow(&a.mode, req["tool_name"].as_str().unwrap_or_default(), req["input"]["_kind"].as_str().unwrap_or_default(), &req["input"])
                 {
@@ -332,14 +385,33 @@ impl Host {
                 }
             }
             Out::Exit(err) => {
+                self.live.remove(&agent);
                 if let Some(mut l) = self.sessions.remove(&agent) {
-                    let status = l.session.child.wait().ok().and_then(|s| s.code());
-                    if l.busy || status.is_some_and(|c| c != 0) {
+                    // stdout closed or the setup failed: the process can still run. A short
+                    // grace, then kill: a blocking wait here stops the host loop.
+                    let at = Instant::now();
+                    let mut status = None;
+                    while at.elapsed() < Duration::from_secs(2) {
+                        match l.session.child.try_wait() {
+                            Ok(Some(s)) => {
+                                status = Some(s);
+                                break;
+                            }
+                            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                            Err(_) => break,
+                        }
+                    }
+                    let killed = status.is_none();
+                    if killed {
+                        l.session.kill();
+                    }
+                    let status = status.and_then(|s| s.code());
+                    if l.busy || killed || status.is_some_and(|c| c != 0) {
                         let tail: Vec<&str> = err.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
                         let msg = if tail.is_empty() { format!("session ended (exit {status:?})") } else { tail.join("\n") };
                         self.log(Some(&agent), Kind::Error { message: msg });
                         if l.busy {
-                            self.log(Some(&agent), Kind::TurnEnd { cost: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0, ctx: 0, ms: 0, error: Some("session ended".into()) });
+                            self.log(Some(&agent), session_ended());
                         }
                     }
                 }
@@ -349,10 +421,50 @@ impl Host {
     }
 
     fn stop(&mut self) {
-        for (_, mut l) in self.sessions.drain() {
+        let sessions: Vec<(String, Live)> = self.sessions.drain().collect();
+        for (agent, mut l) in sessions {
             l.session.kill();
+            // a turn the stop cut: closed in the log (else the view shows it at work forever)
+            if l.busy {
+                self.log(Some(&agent), session_ended());
+            }
         }
         let _ = std::fs::remove_file(socket(&self.id));
+    }
+
+    /// Turns a crashed host left open (a `turn_start` with 0 `turn_end`): closed at start.
+    fn close_open_turns(&self) {
+        let mut open: Vec<String> = Vec::new();
+        for e in store::events(&self.id) {
+            let Some(a) = e.agent else { continue };
+            match e.kind {
+                Kind::TurnStart if !open.contains(&a) => open.push(a),
+                Kind::TurnEnd { .. } | Kind::Leave => open.retain(|x| *x != a),
+                _ => {}
+            }
+        }
+        for a in open {
+            self.log(Some(&a), session_ended());
+        }
+    }
+}
+
+/// The end of a turn whose session ended (stop, crash, exit): 0 cost known.
+fn session_ended() -> Kind {
+    Kind::TurnEnd { cost: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0, ctx: 0, window: 0, ms: 0, error: Some("session ended".into()) }
+}
+
+/// SIGTERM / SIGINT / SIGHUP came: the host loop ends its sessions and exits.
+static SIGNALED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    SIGNALED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn catch_signals() {
+    for s in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: the handler only stores to an atomic (async-signal-safe).
+        unsafe { libc::signal(s, on_signal as *const () as libc::sighandler_t) };
     }
 }
 
@@ -360,6 +472,19 @@ fn serve(conn: UnixStream, tx: Sender<Input>) {
     let Ok(mut w) = conn.try_clone() else { return };
     for line in BufReader::new(conn).lines().map_while(Result::ok) {
         let reply = match serde_json::from_str::<Value>(&line) {
+            // a view subscribes: this connection carries the host's lines from now on
+            Ok(c) if c["op"] == "subscribe" => {
+                let (stx, srx) = mpsc::channel::<String>();
+                if tx.send(Input::Subscribe(stx)).is_err() || writeln!(w, "{}", json!({"ok": true})).is_err() {
+                    return;
+                }
+                for l in srx {
+                    if writeln!(w, "{l}").is_err() {
+                        return;
+                    }
+                }
+                return;
+            }
             Ok(c) => {
                 let (rtx, rrx) = mpsc::channel();
                 if tx.send(Input::Cmd(c, rtx)).is_err() {
@@ -376,14 +501,17 @@ fn serve(conn: UnixStream, tx: Sender<Input>) {
 }
 
 /// Bind the socket of thread ID. Err: another host serves it (or the bind failed).
-fn bind(id: &str) -> Result<UnixListener, String> {
+/// The lock file (held for the host's life) closes the race of 2 hosts started at once.
+fn bind(id: &str) -> Result<(UnixListener, std::fs::File), String> {
     let path = socket(id);
     std::fs::create_dir_all(super::run_dir()).map_err(|e| e.to_string())?;
+    let lock = super::lock(&super::run_dir().join(format!("{id}.lock")), false).map_err(|_| "a host serves this thread".to_string())?;
     if UnixStream::connect(&path).is_ok() {
         return Err("a host serves this thread".into());
     }
     let _ = std::fs::remove_file(&path);
-    UnixListener::bind(&path).map_err(|e| format!("{}: {e}", path.display()))
+    let l = UnixListener::bind(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok((l, lock))
 }
 
 /// Run the host of thread ID until idle or `stop`.
@@ -392,8 +520,8 @@ pub fn run(id: &str) -> ! {
         eprintln!("codehead host: no thread {id}");
         std::process::exit(2)
     };
-    let listener = match bind(&t.id) {
-        Ok(l) => l,
+    let (listener, _lock) = match bind(&t.id) {
+        Ok(b) => b,
         Err(e) => {
             eprintln!("codehead host {}: {e}", t.id);
             std::process::exit(0)
@@ -417,9 +545,12 @@ pub fn run(id: &str) -> ! {
         }
     });
     let exe = std::env::current_exe().unwrap_or_else(|_| Path::new("codehead").to_path_buf());
-    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false };
+    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new() };
+    catch_signals();
+    h.close_open_turns();
     loop {
-        match rx.recv_timeout(Duration::from_secs(5)) {
+        // 1 s: a signal ends the host within a second
+        match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(Input::Cmd(c, reply)) => {
                 let r = match h.cmd(&c) {
                     Ok(mut v) => {
@@ -430,11 +561,12 @@ pub fn run(id: &str) -> ! {
                 };
                 let _ = reply.send(r);
             }
+            Ok(Input::Subscribe(s)) => h.subscribe(s),
             Ok(Input::Harness(a, o)) => h.harness(a, o),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        if h.stopping {
+        if h.stopping || SIGNALED.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
         let busy = h.sessions.values().any(|l| l.busy);
@@ -453,6 +585,33 @@ pub fn run(id: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subscribers_get_live_text_then_chunks_and_wakes() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::channel::<Input>();
+        std::thread::spawn(move || serve(a, tx));
+        let mut w = b.try_clone().unwrap();
+        writeln!(w, "{}", json!({"op": "subscribe"})).unwrap();
+        let Ok(Input::Subscribe(s)) = rx.recv() else { panic!("0 subscribe") };
+        let (htx, _hrx) = mpsc::channel();
+        let mut h = Host { id: "t".into(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new() };
+        h.live.insert("ada".into(), "Hel".into());
+        h.subscribe(s);
+        h.harness("ada".into(), Out::Delta("lo".into()));
+        h.push(&json!({"op": "wake"}));
+        let mut r = BufReader::new(b);
+        let mut line = || {
+            let mut l = String::new();
+            r.read_line(&mut l).unwrap();
+            serde_json::from_str::<Value>(&l).unwrap()
+        };
+        assert_eq!(line()["ok"], true);
+        assert_eq!(line(), json!({"op": "live", "agent": "ada", "text": "Hel"}));
+        assert_eq!(line(), json!({"op": "delta", "agent": "ada", "text": "lo"}));
+        assert_eq!(line(), json!({"op": "wake"}));
+        assert_eq!(h.live["ada"], "Hello");
+    }
 
     #[test]
     fn mentions_match_names_once_in_order() {

@@ -47,6 +47,10 @@ fn open() -> String {
     "open".into()
 }
 
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
 pub fn threads_dir() -> PathBuf {
     data_dir().join("threads")
 }
@@ -111,14 +115,19 @@ pub fn load(id: &str) -> Option<Thread> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
-/// Change thread ID: read, F, write. Last writer wins (the host and the view rarely touch the
-/// same fields at once).
+/// Change thread ID: read, F, write, under the thread's `flock` (host, views and the CLI write
+/// `thread.json`: 0 lost updates).
 pub fn update(id: &str, f: impl FnOnce(&mut Thread)) -> Result<Thread, String> {
-    let mut t = load(id).ok_or_else(|| format!("no thread {id}"))?;
-    f(&mut t);
-    t.updated = now_ms();
-    t.save()?;
-    Ok(t)
+    let full = load(id).ok_or_else(|| format!("no thread {id}"))?.id;
+    let lock = thread_dir(&full).join("thread.lock");
+    super::locked(&lock, || {
+        let mut t = load(&full).ok_or_else(|| format!("no thread {id}"))?;
+        f(&mut t);
+        t.updated = now_ms();
+        t.save()?;
+        Ok(t)
+    })
+    .map_err(|e| format!("{}: {e}", lock.display()))?
 }
 
 /// Every thread, newest activity first.
@@ -204,6 +213,9 @@ pub enum Kind {
         cache_write: u64,
         /// Tokens in the context window after the turn.
         ctx: u64,
+        /// Size of the context window in tokens (0: unknown, older events).
+        #[serde(default, skip_serializing_if = "is_zero")]
+        window: u64,
         ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
@@ -292,6 +304,21 @@ mod tests {
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].kind, Kind::TurnStart);
         assert_eq!(load(&t.id[..10]).unwrap().agents, vec!["ada".to_string()]);
+        // 8 writers at once (host, views, CLI): the lock keeps each update
+        let writers: Vec<_> = (0..8)
+            .map(|w| {
+                let id = t.id.clone();
+                std::thread::spawn(move || {
+                    for i in 0..10 {
+                        update(&id, |t| t.agents.push(format!("a{w}-{i}"))).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        assert_eq!(load(&t.id).unwrap().agents.len(), 81);
         let _ = std::fs::remove_dir_all(home);
     }
 }

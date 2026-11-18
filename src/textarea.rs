@@ -667,10 +667,31 @@ impl TextArea {
         re.find_iter(&text).map(|m| (text[..m.start()].chars().count(), text[..m.end()].chars().count())).collect()
     }
 
+    /// Rebuild the visual rows from the text at the last render width. An edit + ↑/↓ in 1 event
+    /// batch reads the rows before the next render: stale rows point past the text.
+    fn layout(&mut self) {
+        if self.area.width == 0 {
+            return;
+        }
+        let width = self.area.width.saturating_sub(1) as usize;
+        self.vis.clear();
+        for (row, l) in self.lines.iter().enumerate() {
+            let segs = wrap(l, width);
+            let n = segs.len();
+            for (i, (start, end)) in segs.into_iter().enumerate() {
+                self.vis.push(Seg { row, start, end, last: i + 1 == n });
+            }
+        }
+    }
+
     /// Visual row index + x of a position.
     fn visual_of(&self, p: Pos) -> (usize, usize) {
+        let Some(line) = self.lines.get(p.row) else { return (0, 0) };
+        if p.col > line.len() {
+            return (0, 0);
+        }
         for (i, s) in self.vis.iter().enumerate() {
-            if s.row == p.row && p.col >= s.start && (p.col < s.end || (s.last && p.col == s.end)) {
+            if s.row == p.row && s.start <= line.len() &&p.col >= s.start && (p.col < s.end || (s.last && p.col == s.end)) {
                 return (i, width_of(&self.lines[s.row][s.start..p.col]));
             }
         }
@@ -680,9 +701,9 @@ impl TextArea {
     /// Position at visual row VROW, display column X.
     fn pos_at(&self, vrow: usize, x: usize) -> Pos {
         let Some(s) = self.vis.get(vrow.min(self.vis.len().saturating_sub(1))) else { return Pos::default() };
-        let line = &self.lines[s.row];
-        let (mut col, mut w) = (s.start, 0);
-        while col < s.end {
+        let Some(line) = self.lines.get(s.row) else { return Pos::default() };
+        let (end, mut col, mut w) = (s.end.min(line.len()), s.start.min(line.len()), 0);
+        while col < end {
             let c = cw(line[col]);
             if w + c > x {
                 // click on the right half of a wide char → after it
@@ -701,6 +722,7 @@ impl TextArea {
     }
 
     fn vertical(&mut self, delta: isize, select: bool) {
+        self.layout();
         if self.vis.is_empty() {
             return;
         }
@@ -721,6 +743,7 @@ impl TextArea {
     }
 
     fn line_edge(&mut self, end: bool, select: bool) {
+        self.layout();
         let (vrow, _) = self.visual_of(self.cur);
         let p = match self.vis.get(vrow) {
             Some(s) if end => Pos { row: s.row, col: if s.last { s.end } else { s.end.saturating_sub(1).max(s.start) } },
@@ -1032,15 +1055,9 @@ impl TextArea {
     // ---------- render ----------
     pub fn render(&mut self, f: &mut Frame, area: Rect, focused: bool) {
         self.area = area;
-        let width = area.width.saturating_sub(1) as usize;
         self.vis.clear();
-        for (row, l) in self.lines.iter().enumerate() {
-            let segs = wrap(l, width);
-            let n = segs.len();
-            for (i, (start, end)) in segs.into_iter().enumerate() {
-                self.vis.push(Seg { row, start, end, last: i + 1 == n });
-            }
-        }
+        self.layout();
+        let width = area.width.saturating_sub(1) as usize;
         let h = area.height as usize;
         let (crow, cx) = self.visual_of(self.cur);
         if self.follow {
@@ -1147,6 +1164,19 @@ mod tests {
         assert_eq!(t.text(), "");
         t.restore(true);
         assert_eq!(t.text(), "[Image #3]");
+    }
+
+    #[test]
+    fn arrows_after_an_edit_without_a_render_read_fresh_rows() {
+        // 1 event batch: the text shrinks, then ↑ / ↓ / end before the next render
+        let mut t = ta("first line\nsecond line that is long\nthird");
+        t.render_for_test(12);
+        t.set_text("x");
+        for code in [KeyCode::Up, KeyCode::Down, KeyCode::End, KeyCode::Home] {
+            t.key(KeyEvent::new(code, KeyModifiers::NONE));
+        }
+        assert_eq!(t.text(), "x");
+        assert!(t.cur.row == 0 && t.cur.col <= 1);
     }
 
     #[test]

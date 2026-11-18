@@ -1,5 +1,5 @@
 //! Markdown → styled terminal rows, wrapped to a width: the agents' messages in the thread view.
-//! Code blocks get syntax colors (`code::last_line`), links stay clickable (their rows carry the
+//! Code blocks get syntax colors (`code::highlight`), links stay clickable (their rows carry the
 //! URL ranges).
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -35,8 +35,71 @@ struct Piece {
     copy: Option<String>,
 }
 
+thread_local! {
+    /// `@name` mentions of this draw: (agent name, color). The stream sets them per draw.
+    static MARKS: std::cell::RefCell<Vec<(String, Color)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The agents whose `@name` mentions rows drawn from now on color (the stream's roster).
+pub fn set_marks(marks: Vec<(String, Color)>) {
+    MARKS.with_borrow_mut(|m| *m = marks);
+}
+
+/// A hash of the marks: cached rows of another roster are stale.
+pub fn marks_hash() -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    MARKS.with_borrow(|m| m.hash(&mut h));
+    h.finish()
+}
+
+/// TEXT in STYLE as spans, each `@name` of MARKS in its agent's color, bold. The matcher of the
+/// prompt (`textarea::mention_colors`): 1 rule for the prompt and the stream.
+pub fn mention_spans(text: &str, style: Style, marks: &[(String, Color)]) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let colors = crate::textarea::mention_colors(&chars, marks);
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut cur: Option<Color> = None;
+    let st = |c: Option<Color>| match c {
+        Some(c) => style.fg(c).add_modifier(Modifier::BOLD),
+        None => style,
+    };
+    for (ch, c) in chars.into_iter().zip(colors) {
+        if c != cur && !run.is_empty() {
+            out.push(Span::styled(std::mem::take(&mut run), st(cur)));
+        }
+        cur = c;
+        run.push(ch);
+    }
+    if !run.is_empty() || out.is_empty() {
+        out.push(Span::styled(run, st(cur)));
+    }
+    out
+}
+
+/// PIECES with each `@name` mention of this draw's marks as its own colored piece. 0 change in
+/// code (inline code, copies) and links.
+fn mention_pieces(pieces: &[Piece]) -> Vec<Piece> {
+    MARKS.with_borrow(|marks| {
+        if marks.is_empty() {
+            return pieces.to_vec();
+        }
+        pieces
+            .iter()
+            .flat_map(|p| {
+                if p.copy.is_some() || p.link.is_some() || p.style.fg == Some(CODE) || !p.text.contains('@') {
+                    return vec![p.clone()];
+                }
+                mention_spans(&p.text, p.style, marks).into_iter().map(|s| Piece { text: s.content.into_owned(), style: s.style, ..p.clone() }).collect()
+            })
+            .collect()
+    })
+}
+
 /// Wrap PIECES into rows of WIDTH: FIRST before the 1st row, REST before the others.
 fn wrap(pieces: &[Piece], width: usize, first: &[Span<'static>], rest: &[Span<'static>]) -> Vec<Row> {
+    let pieces = &mention_pieces(pieces);
     let pre_w = |p: &[Span<'static>]| p.iter().map(|s| s.content.width()).sum::<usize>();
     let mut rows = Vec::new();
     let mut cur: Vec<Span<'static>> = first.to_vec();
@@ -492,6 +555,9 @@ fn lang_w(lang: &str) -> usize {
 
 /// A code block: syntax colors on the panel color (FG: 1 color for every char instead), a head row
 /// with the language + a copy button. Long lines: cut at the row end, or WRAP.
+/// Code blocks up to this many lines get syntax colors (1 pass each, cached).
+const MAX_HIGHLIGHT: usize = 4000;
+
 pub fn code_rows(text: &str, lang: &str, width: usize, margin: &[Span<'static>], wrap: bool, fg: Option<Color>) -> Vec<Row> {
     let lang = if lang.is_empty() { crate::code::language(text, &[]) } else { lang };
     let lines: Vec<&str> = text.trim_end_matches('\n').split('\n').collect();
@@ -509,17 +575,13 @@ pub fn code_rows(text: &str, lang: &str, width: usize, margin: &[Span<'static>],
     head.push(Span::styled(button, bg.fg(theme::pal().accent)));
     let at = (mw + fill + lang_w(lang)) as u16;
     out.push(Row { line: Line::from(head), copies: vec![(at, at + button.width() as u16, text.trim_end_matches('\n').to_string())], ..Default::default() });
-    let mut so_far = String::new();
+    // 1 highlight pass per block (cached); very long blocks get plain rows
+    let colored = (fg.is_none() && lines.len() <= MAX_HIGHLIGHT).then(|| crate::code::highlight(&lines.join("\n"), lang));
     for (i, l) in lines.iter().enumerate() {
-        if i > 0 {
-            so_far.push('\n');
-        }
-        so_far.push_str(l);
-        // colors need the lines before (strings, comments): long blocks get plain rows
-        let chars: Vec<(Color, char)> = match fg {
-            Some(fg) => l.chars().filter(|c| !c.is_control()).map(|c| (fg, c)).collect(),
-            None if lines.len() <= 400 => crate::code::last_line(&so_far, lang),
-            None => l.chars().map(|c| (theme::pal().text, c)).collect(),
+        let chars: Vec<(Color, char)> = match (fg, colored.as_ref().and_then(|c| c.get(i))) {
+            (Some(fg), _) => l.chars().filter(|c| !c.is_control()).map(|c| (fg, c)).collect(),
+            (None, Some(c)) => c.clone(),
+            (None, None) => l.chars().map(|c| (theme::pal().text, c)).collect(),
         };
         let mut spans = margin.to_vec();
         spans.push(Span::styled(" ", bg));

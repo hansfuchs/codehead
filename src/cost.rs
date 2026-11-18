@@ -60,7 +60,7 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Context window of MODEL in tokens.
+/// Context window of MODEL in tokens: a guess for events without the harness' window.
 fn window_of(model: &str) -> u64 {
     if model.contains("[1m]") { 1_000_000 } else { 200_000 }
 }
@@ -72,6 +72,10 @@ pub fn limits() -> Vec<(String, String, f64, Option<u64>)> {
     let mut out = Vec::new();
     for (h, ws) in v.as_object().into_iter().flatten() {
         for (w, l) in ws.as_object().into_iter().flatten() {
+            // `seven_day_overage_included`: the 7d window again, with overage: 0 own row
+            if w.ends_with("_overage_included") {
+                continue;
+            }
             out.push((h.clone(), w.clone(), l["pct"].as_f64().unwrap_or(0.0), l["resets"].as_u64()));
         }
     }
@@ -88,7 +92,9 @@ pub fn uses(id: &str) -> Vec<AgentUse> {
         let i = match by.iter().position(|a| a.agent == name) {
             Some(i) => i,
             None => {
-                by.push(AgentUse { agent: name.clone(), harness: "claude".into(), live: live.contains(&name), ..Default::default() });
+                // the roster's harness; a removed agent: unknown
+                let harness = crate::engine::roster::get(&name).map_or_else(|| "?".into(), |r| r.harness);
+                by.push(AgentUse { agent: name.clone(), harness, live: live.contains(&name), ..Default::default() });
                 by.len() - 1
             }
         };
@@ -98,7 +104,7 @@ pub fn uses(id: &str) -> Vec<AgentUse> {
                 a.sessions += 1;
                 model.insert(name, m);
             }
-            crate::engine::store::Kind::TurnEnd { cost, input, output, cache_read, cache_write, ctx, .. } => {
+            crate::engine::store::Kind::TurnEnd { cost, input, output, cache_read, cache_write, ctx, window, .. } => {
                 a.input += input;
                 a.output += output;
                 a.cache_read += cache_read;
@@ -106,7 +112,9 @@ pub fn uses(id: &str) -> Vec<AgentUse> {
                 a.turns += 1;
                 a.usd += cost;
                 if ctx > 0 {
-                    a.ctx = Some((ctx, window_of(model.get(&name).map_or("", String::as_str))));
+                    // the harness' window; older events: a guess from the model name
+                    let size = if window > 0 { window } else { window_of(model.get(&name).map_or("", String::as_str)) };
+                    a.ctx = Some((ctx, size));
                 }
                 a.samples.push((e.ts / 1000, input + output));
             }
@@ -181,11 +189,15 @@ fn spark(samples: &[(u64, u64)], width: usize, now: u64) -> String {
     b.iter().map(|&v| if v == 0 { '·' } else { SPARK[((v * 7) / max) as usize] }).collect()
 }
 
-fn window(w: &str) -> &str {
+/// Short name of plan window W: `five_hour` → `5h`, `seven_day` → `7d`, `seven_day_opus` → `7d opus`.
+fn window(w: &str) -> String {
     match w {
-        "five_hour" => "5h",
-        "week" => "wk",
-        o => o,
+        "five_hour" => "5h".into(),
+        "seven_day" | "week" => "7d".into(),
+        o => match o.strip_prefix("seven_day_") {
+            Some(rest) => format!("7d {}", rest.replace('_', " ")),
+            None => o.replace('_', " "),
+        },
     }
 }
 
@@ -374,6 +386,14 @@ pub fn run(id: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_windows_get_short_names() {
+        assert_eq!(window("five_hour"), "5h");
+        assert_eq!(window("seven_day"), "7d");
+        assert_eq!(window("seven_day_opus"), "7d opus");
+        assert_eq!(window("other_window"), "other window");
+    }
 
     #[test]
     fn humanizes() {

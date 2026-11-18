@@ -75,6 +75,29 @@ pub fn new_id() -> String {
 }
 
 /// Write PATH atomically: a temp file next to it, then rename.
+/// F while this process holds an exclusive `flock` on PATH (made if missing): a read-modify-write
+/// of a file that hosts, views and the CLI share.
+pub fn locked<T>(path: &std::path::Path, f: impl FnOnce() -> T) -> std::io::Result<T> {
+    let _lock = lock(path, true)?;
+    Ok(f())
+}
+
+/// An exclusive `flock` on PATH (made if missing), held until the file drops. WAIT false: Err when
+/// another process holds it.
+pub fn lock(path: &std::path::Path, wait: bool) -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
+    let op = if wait { libc::LOCK_EX } else { libc::LOCK_EX | libc::LOCK_NB };
+    // SAFETY: flock(2) on an fd FILE owns; the lock ends when FILE closes.
+    if unsafe { libc::flock(file.as_raw_fd(), op) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;

@@ -3,9 +3,11 @@ title: Tasks
 description: The new tab, where a thread starts.
 ---
 
-A task is what you write on the **new** tab before a thread starts: a title, a prompt, notes,
+A task is what you write on the **new** tab before a thread starts: a prompt, a title, notes,
 agents and a place to work. Starting it makes a thread and sends the task to every picked
-agent as its first message.
+agent as its first message. The prompt comes first; the title is optional: 0 title, the
+prompt's 1st line names the thread (and its branch). Type, then `ctrl+enter`. `tab` / `shift+tab`
+walk the fields; `ctrl+←` `ctrl+→` switch tabs.
 
 ## Prompt
 

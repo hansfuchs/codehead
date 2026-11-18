@@ -8,7 +8,7 @@
 //! mode) picks an option. `session/cancel` stops the running prompt.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::process::ChildStdin;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -39,7 +39,9 @@ pub struct Setup {
 }
 
 struct State {
-    stdin: ChildStdin,
+    /// Lines for the agent's stdin: a writer thread writes them (a full pipe never blocks the
+    /// reader, which needs this state).
+    stdin: Sender<String>,
     next: u64,
     pending: HashMap<u64, Pending>,
     session: Option<String>,
@@ -59,6 +61,8 @@ struct State {
     setup: Setup,
     tx: Sender<(String, Out)>,
     name: String,
+    /// `Out::Exit` went out: 1 per session, a later one would end the next session of the agent.
+    dead: bool,
 }
 
 #[derive(Clone)]
@@ -71,9 +75,7 @@ fn mcp_servers(s: &Setup) -> Value {
 
 impl State {
     fn send(&mut self, v: &Value) -> Result<(), String> {
-        let mut line = v.to_string();
-        line.push('\n');
-        self.stdin.write_all(line.as_bytes()).and_then(|_| self.stdin.flush()).map_err(|e| e.to_string())
+        self.stdin.send(v.to_string()).map_err(|_| "agent stdin closed".to_string())
     }
 
     fn request(&mut self, method: &str, params: Value, why: Pending) -> Result<(), String> {
@@ -185,6 +187,7 @@ impl State {
                     cache_read: n("cachedReadTokens"),
                     cache_write: n("cachedWriteTokens"),
                     ctx: n("totalTokens"),
+                    window: 0,
                     ms: 0,
                     error,
                 }));
@@ -204,6 +207,10 @@ impl State {
                     // a thought before it: its own event, before the text
                     self.flush_thought();
                     self.text.push_str(t);
+                    // live in the view now; the log gets the whole text at the next tool call or turn end
+                    if !t.is_empty() {
+                        self.out(Out::Delta(t.into()));
+                    }
                 }
             }
             "agent_thought_chunk" => {
@@ -326,9 +333,19 @@ pub fn tool_of(tc: &Value) -> (String, Value) {
 
 /// Start the protocol on a spawned agent: stdout is read here, events go to TX.
 pub fn start(stdin: ChildStdin, stdout: std::process::ChildStdout, stderr: Arc<Mutex<Vec<String>>>, setup: Setup, name: String, tx: Sender<(String, Out)>) -> Conn {
+    let (wtx, wrx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut stdin = stdin;
+        for mut line in wrx {
+            line.push('\n');
+            if stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush()).is_err() {
+                return;
+            }
+        }
+    });
     let preamble = Some(setup.preamble.clone());
     let st = State {
-        stdin,
+        stdin: wtx,
         next: 0,
         pending: HashMap::new(),
         session: None,
@@ -343,6 +360,7 @@ pub fn start(stdin: ChildStdin, stdout: std::process::ChildStdout, stderr: Arc<M
         setup,
         tx,
         name,
+        dead: false,
     };
     let conn = Conn(Arc::new(Mutex::new(st)));
     {
@@ -354,21 +372,64 @@ pub fn start(stdin: ChildStdin, stdout: std::process::ChildStdout, stderr: Arc<M
         }
     }
     let c = conn.clone();
+    let tail = stderr.clone();
     std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-            let Ok(mut s) = c.0.lock() else { return };
+        super::harness::json_lines(stdout, |v| {
+            let Ok(mut s) = c.0.lock() else { return false };
             if let Err(e) = s.incoming(&v) {
+                // 0 session: the setup failed, the queue never runs → end the session
+                if s.session.is_none() {
+                    s.exit(&tail, &format!("acp: {e}"));
+                    return false;
+                }
                 s.out(Out::Event(Kind::Error { message: format!("acp: {e}") }));
             }
+            true
+        });
+        // stdout closed: the process ended (`exit` sends once: 0 2nd one after a setup error)
+        if let Ok(mut s) = c.0.lock() {
+            s.exit(&tail, "");
         }
-        // stdout closed: the process ended
-        let err = stderr.lock().map(|t| t.join("\n")).unwrap_or_default();
-        if let Ok(s) = c.0.lock() {
-            s.out(Out::Exit(err));
+    });
+    // an agent that never answers the setup: the session ends after SETUP_TIMEOUT
+    let c = conn.clone();
+    std::thread::spawn(move || {
+        let at = std::time::Instant::now();
+        while at.elapsed() < SETUP_TIMEOUT {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            match c.0.lock() {
+                Ok(s) if s.session.is_some() || s.dead => return,
+                Ok(_) => {}
+                Err(_) => return,
+            }
+        }
+        if let Ok(mut s) = c.0.lock()
+            && s.session.is_none()
+        {
+            s.exit(&stderr, &format!("acp: 0 session after {}s", SETUP_TIMEOUT.as_secs()));
         }
     });
     conn
+}
+
+/// Time for `initialize` + `session/new` (or `session/load`) to give a session.
+const SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+impl State {
+    /// End the session once: the stderr tail, then WHY. The host kills the process.
+    fn exit(&mut self, stderr: &Mutex<Vec<String>>, why: &str) {
+        if std::mem::replace(&mut self.dead, true) {
+            return;
+        }
+        let mut err = stderr.lock().map(|t| t.join("\n")).unwrap_or_default();
+        if !why.is_empty() {
+            if !err.is_empty() {
+                err.push('\n');
+            }
+            err.push_str(why);
+        }
+        self.out(Out::Exit(err));
+    }
 }
 
 impl Conn {
@@ -421,11 +482,11 @@ mod tests {
 
     #[test]
     fn thought_chunks_become_1_thought_before_the_next_text_or_tool() {
-        let mut child = std::process::Command::new("cat").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).spawn().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
+        let (stdin, _lines) = std::sync::mpsc::channel::<String>();
         let setup = Setup { cwd: "/".into(), resume: None, model: None, mcp: (String::new(), Vec::new(), Vec::new()), preamble: String::new() };
         let mut s = State {
-            stdin: child.stdin.take().unwrap(),
+            stdin,
             next: 0,
             pending: HashMap::new(),
             session: None,
@@ -440,6 +501,7 @@ mod tests {
             setup,
             tx,
             name: "ada".into(),
+            dead: false,
         };
         let chunk = |kind: &str, t: &str| json!({"sessionUpdate": kind, "content": {"type": "text", "text": t}});
         // empty chunks: 0 events
@@ -457,7 +519,5 @@ mod tests {
         assert_eq!(kinds[2], Kind::Thought { text: "Then the text.".into() });
         assert_eq!(kinds[3], Kind::Text { text: "Done.".into() });
         assert_eq!(kinds.len(), 4);
-        let _ = child.kill();
-        let _ = child.wait();
     }
 }

@@ -3,6 +3,7 @@
 mod agents;
 mod ansi;
 mod app;
+mod ask;
 mod attach;
 mod cards;
 mod background;
@@ -79,6 +80,7 @@ config:  ~/.config/codehead.toml ($CODEHEAD_CONFIG overrides). keys, each overri
 settings: 4th tab. edit fields and path aliases; ctrl+s saves, ctrl+r discards edits / reloads.
           ctrl+n adds an alias; ctrl+d removes the current alias, on a field: back to its default (↺ too).
           path fields use the prompt's path suggestions: tab completes, esc closes suggestions.
+          esc on a field: its edit undone (0 apply). tab / shift+tab: next / previous field.
           environment variables override file values. edits stay until saved or reloaded.
 default agent: config agent, else amon, else the first agent.
          preselected for new threads, takes over threads of deleted agents.
@@ -108,7 +110,8 @@ drafts:  an unsent task goes to ~/.cache/codehead/drafts ($CODEHEAD_DRAFTS) afte
          draft (★ saved, 0 cleanup by age), the form starts over.
 artifacts: codehead sets CLAUDE_CODE_ARTIFACT=1 for the sessions it starts: Claude Code agents can
          publish web artifacts (off by default in SDK sessions). a value set before codehead stays.
-esc:     close local controls, keep the current tab. tab / shift+tab: switch tabs.
+esc:     1 level back: never applies, never drops edits unasked (agent form, ctrl+r reset: asked).
+tabs:    ctrl+← / ctrl+→ switch tabs (word jumps: alt+←→). tab / shift+tab: next / previous field.
 esc esc: quit from the new tab. ctrl+c: quit at once.
 updates: 1 check per day (github.com releases, in the background). a newer release: 1 line after
          codehead quits. codehead --update installs it. $CODEHEAD_NO_UPDATE_CHECK=1: 0 checks.
@@ -118,7 +121,8 @@ inputs:  all text fields (title, prompt, agent form, filters, thread prompt): ct
          ctrl+shift+z / ⌘⇧z redo (ctrl+y too). ⌘ keys need a terminal with the kitty keyboard protocol.
          Markdown lists (`- `, `* `, `1. `, 2 spaces per layer): enter starts the next item at the same
          layer; enter / backspace on an empty item: 1 layer out (1st layer: the marker goes), space: 1 layer in.
-start:   the new tab. notes: tab to the notes field, enter.
+start:   the new tab: the prompt first (its 1st line: the thread title, unless the title field has one),
+         then title, where, agents, notes. type, ctrl+enter. notes: tab to the notes field, enter.
 threads: worktrees, then recent Claude Code sessions. enter on a session:
          new thread in its dir, its last response as context.
 thread view: the thread's agents on top (sprite, model, working / idle / waits on you; ★ the lead),
@@ -126,7 +130,9 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          prompt below, the cost box beside it (screens ≥ 100 columns).
          a message without @name goes to the lead; @name: to that agent (an agent not on the thread
          joins it). agents message each other with the `send` tool of codehead's MCP server.
-         wheel, pgup / pgdn, shift+↑↓: scroll · esc: back to live, else interrupt · esc esc: back.
+         wheel, pgup / pgdn, shift+↑↓: scroll · esc: back to live, else interrupt (after 0.5 s) · esc esc: back.
+         send: ctrl+enter (⌘enter, alt+enter); ctrl+s never sends. a question: ↑↓ space enter 1-9,
+         letters: Other, tab: question ↔ prompt.
          click a link: open it. ctrl+c: clears the prompt, 2× on an empty one closes codehead.
          >: commands, as in the task prompt (files: of the thread's worktree), and
          branch: a copy of the thread (events, members, dir); each agent's next session forks its
@@ -277,7 +283,24 @@ fn editor(path: &Path) {
 
 /// Every event ready within WAIT (the 1st one) and right after it, each with its read time.
 /// Read first, handled after: the handling time of 1 key never splits a burst of the OS.
+/// SIGTERM / SIGHUP came: the next `read_ready` fails, the screen loops end and restore the tty.
+static SIGNALED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    SIGNALED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn catch_signals() {
+    for s in [libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: the handler only stores to an atomic (async-signal-safe).
+        unsafe { libc::signal(s, on_signal as *const () as libc::sighandler_t) };
+    }
+}
+
 pub fn read_ready(wait: Duration) -> Result<Vec<(Event, Instant)>, String> {
+    if SIGNALED.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("terminated by a signal".into());
+    }
     let mut out = Vec::new();
     let mut wait = wait;
     while out.len() < 512 && event::poll(wait).map_err(|e| e.to_string())? {
@@ -453,6 +476,7 @@ fn start(args: Args) {
     let mut app = App::new(cfg, &args.title);
 
     restore_on_panic();
+    catch_signals();
     let mut out = io::stdout();
     let mut tty = Tty { enhanced: false };
     if let Err(e) = tty.enter(&mut out) {

@@ -90,6 +90,11 @@ impl Monitors {
 
     /// Rows for the monitors area at WIDTH: 0 (0 watches), 1 (the row), or the row + the open
     /// box (its lines + 2 border rows, at most MAX in all).
+    /// Monitors shown: their row animates.
+    pub fn active(&self) -> bool {
+        !self.watches.is_empty()
+    }
+
     pub fn rows(&self, width: u16, max: u16) -> u16 {
         if self.watches.is_empty() { return 0; }
         if !self.open { return 1; }

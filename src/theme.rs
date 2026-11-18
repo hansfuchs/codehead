@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 /// The colors of a scheme. A preset (coral, amber), then the `[colors]` overrides.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Palette {
     /// The single accent.
     pub accent: Color,

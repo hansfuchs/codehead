@@ -6,7 +6,7 @@ description: ~/.config/codehead.toml, key by key.
 codehead reads `~/.config/codehead.toml` (`$CODEHEAD_CONFIG` overrides the path). Per key, the
 environment variable wins over the file, the file over the default. The **settings** tab edits
 the same file: `ctrl+s` saves, `ctrl+r` reloads, `ctrl+d` (or a click on `↺`) sets the field back
-to its default.
+to its default. `esc` undoes the edit of the field (0 apply); `tab` / `shift+tab` walk the fields.
 
 ```toml
 notes  = "~/notes"                    # $CODEHEAD_NOTES

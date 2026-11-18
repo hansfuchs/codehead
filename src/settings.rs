@@ -1,5 +1,6 @@
 //! Settings form. Changes apply on leaving a field (or an alias box): codehead.toml is written, the
-//! app applies it. Invalid values: 0 write, the error shows.
+//! app applies it. Invalid values: 0 write, the error shows. Esc: the field as it was at entry, 0 write.
+//! tab / shift+tab: next / previous field.
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -49,7 +50,7 @@ const SPECS: [Spec; 20] = [
     spec("colors.danger", "danger", "errors", ""),
     spec("colors.warn", "warn", "blocked, questions", ""),
 ];
-const PLAIN: usize = SPECS.len();
+pub(crate) const PLAIN: usize = SPECS.len();
 /// Groups: the 1st field, the title, what the group sets.
 const SECTIONS: [(usize, &str, &str); 5] = [
     (0, "paths", "where codehead reads notes and output styles"),
@@ -76,8 +77,6 @@ fn group_head(f: &mut Frame, row: Option<Rect>, desc_row: Option<Rect>, title: &
 
 pub enum Action {
     None,
-    NextTab,
-    PrevTab,
     Header,
 }
 
@@ -97,11 +96,11 @@ pub struct Settings {
     base: Option<String>,
     saved: config::File,
     /// 6 plain fields, then 2 per alias (name, target).
-    fields: Vec<TextArea>,
+    pub(crate) fields: Vec<TextArea>,
     /// Navigation item: 0..6 plain fields, 6..6+n alias boxes, 6+n the add row.
-    focus: usize,
+    pub(crate) focus: usize,
     /// The field of the open (unlocked) alias box.
-    editing: Option<usize>,
+    pub(crate) editing: Option<usize>,
     offset: usize,
     rows: Vec<(Rect, Hit)>,
     status: String,
@@ -110,6 +109,10 @@ pub struct Settings {
     path_focus: Option<usize>,
     /// Written to codehead.toml, not yet applied by the app.
     applied: Option<config::File>,
+    /// The focused field and its text at entry: Esc puts it back (0 commit).
+    entry: Option<(usize, String)>,
+    /// The open alias box at its unlock: (its 1st field, name, target): Esc puts both back.
+    pair_entry: Option<(usize, String, String)>,
 }
 
 impl Settings {
@@ -128,6 +131,8 @@ impl Settings {
             paths: crate::paths::Paths::directory(&config::home()),
             path_focus: None,
             applied: None,
+            entry: None,
+            pair_entry: None,
         };
         if form.reload().is_none() {
             form.fields = (0..PLAIN).map(|_| Self::input("", "use default")).collect();
@@ -285,6 +290,11 @@ impl Settings {
         self.applied.take()
     }
 
+    /// Focus D items on (clamped: the 1st field, the add row).
+    fn step(&mut self, d: isize) {
+        self.focus = (self.focus as isize + d).clamp(0, self.add_item() as isize) as usize;
+    }
+
     fn add_alias(&mut self) {
         self.commit();
         self.push_alias("", "");
@@ -304,20 +314,53 @@ impl Settings {
     }
 
     pub fn key(&mut self, key: KeyEvent) -> Action {
-        let before = self.field();
+        let (before, was_editing) = (self.field(), self.editing);
         let action = self.key_inner(key);
+        // an alias box unlocked: its name + target for an Esc
+        if was_editing.is_none()
+            && let Some(i) = self.editing
+        {
+            let at = PLAIN + Self::alias_of(i) * 2;
+            self.pair_entry = Some((at, self.fields[at].text(), self.fields[at + 1].text()));
+        }
         if self.field() != before {
             self.focus_input();
         }
         action
     }
 
-    /// Keyboard entry into an input starts before its existing text.
+    /// Keyboard entry into an input starts before its existing text; its text then: Esc's target.
     pub fn focus_input(&mut self) {
         if let Some(i) = self.field() {
             self.fields[i].move_start();
         }
+        self.entry = self.field().map(|i| (i, self.fields[i].text()));
         self.paths.reset_input();
+    }
+
+    /// Esc: the focused field's text as it was at entry (an open alias box: both its fields), 0
+    /// commit. Esc never applies.
+    fn revert(&mut self) {
+        if let Some(i) = self.editing {
+            if let Some((at, name, target)) = self.pair_entry.take()
+                && at == PLAIN + Self::alias_of(i) * 2
+                && (self.fields[at].text() != name || self.fields[at + 1].text() != target)
+            {
+                self.fields[at].set_text(&name);
+                self.fields[at + 1].set_text(&target);
+                self.status = "alias edit undone".into();
+            }
+            self.editing = None;
+            return;
+        }
+        if let Some((i, text)) = self.entry.clone()
+            && Some(i) == self.field()
+            && self.fields[i].text() != text
+        {
+            self.fields[i].set_text(&text);
+            self.fields[i].move_start();
+            self.status = format!("{}: edit undone", SPECS.get(i).map_or("field", |s| s.key));
+        }
     }
 
     fn key_inner(&mut self, key: KeyEvent) -> Action {
@@ -355,17 +398,20 @@ impl Settings {
         if let Some(i) = self.editing {
             // the open alias box: ↑↓ name / target, enter / esc: lock it again
             match key.code {
-                KeyCode::Enter | KeyCode::Esc => {
+                KeyCode::Enter => {
                     self.editing = None;
                     self.commit();
                 }
+                // esc: the alias as it was at unlock, locked, 0 commit
+                KeyCode::Esc => self.revert(),
                 KeyCode::Up if key.modifiers.is_empty() && !(i - PLAIN).is_multiple_of(2) => self.editing = Some(i - 1),
                 KeyCode::Down if key.modifiers.is_empty() && (i - PLAIN).is_multiple_of(2) => self.editing = Some(i + 1),
                 KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {}
+                // tab: done with the alias, the next item
                 KeyCode::Tab | KeyCode::BackTab => {
                     self.editing = None;
                     self.commit();
-                    return if key.code == KeyCode::Tab { Action::NextTab } else { Action::PrevTab };
+                    self.step(if key.code == KeyCode::Tab { 1 } else { -1 });
                 }
                 _ => {
                     self.fields[i].key(key);
@@ -374,15 +420,20 @@ impl Settings {
             return Action::None;
         }
         match key.code {
+            // tab / shift+tab: the next / previous field (main tabs: ctrl+←→)
             KeyCode::Tab => {
                 self.commit();
-                return Action::NextTab;
+                self.step(1);
             }
             KeyCode::BackTab => {
                 self.commit();
-                return Action::PrevTab;
+                if self.focus == 0 {
+                    return Action::Header;
+                }
+                self.step(-1);
             }
-            KeyCode::Esc => self.commit(),
+            // esc: the field's edit undone, 0 commit
+            KeyCode::Esc => self.revert(),
             KeyCode::Up if key.modifiers.is_empty() => {
                 self.commit();
                 if self.focus == 0 {
@@ -907,10 +958,14 @@ mod tests {
         ));
         assert_eq!(form.fields[PLAIN + 1].text(), target);
         assert_eq!((form.focus, form.editing), (PLAIN, Some(PLAIN + 1)));
+        // tab: the alias locked, the next item (the add row); shift+tab: back on the alias
         assert!(matches!(
             form.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-            Action::NextTab
+            Action::None
         ));
+        assert_eq!((form.focus, form.editing), (PLAIN + 1, None));
+        form.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!((form.focus, form.editing), (PLAIN, None));
         // back into the box: a new field resets the dropdown's Escape state
         form.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         form.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));

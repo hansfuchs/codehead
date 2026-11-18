@@ -22,6 +22,9 @@ pub enum Out {
     Control(String, Value),
     /// Plan limits: window → (used %, resets at).
     Limits(Vec<(String, f64, Option<u64>)>),
+    /// Agent text not final yet (a token chunk): shown live, 0 log line. The final text comes
+    /// as `Kind::Text`.
+    Delta(String),
     /// The process ended: its last stderr lines.
     Exit(String),
 }
@@ -41,12 +44,105 @@ pub struct Spec<'a> {
 
 pub struct Session {
     pub child: Child,
-    io: Io,
+    driver: Box<dyn Driver>,
 }
 
-enum Io {
-    Claude(ChildStdin),
-    Acp(super::acp::Conn),
+/// The protocol of a session on the harness's stdin: Claude Code's stream-json or ACP.
+pub trait Driver {
+    fn prompt(&mut self, text: &str) -> Result<(), String>;
+    /// Allow request ID, with INPUT as the tool's input (a question's input carries the answers;
+    /// ACP: `_option`, the picked option id).
+    fn allow(&mut self, id: &str, input: &Value) -> Result<(), String>;
+    fn deny(&mut self, id: &str, why: &str) -> Result<(), String>;
+    /// Stop the running turn (the session stays).
+    fn interrupt(&mut self) -> Result<(), String>;
+    /// The host answers the permission requests itself, per the agent's mode (ACP).
+    fn host_allows(&self) -> bool {
+        false
+    }
+}
+
+/// Claude Code: 1 JSON line per message on stdin.
+struct ClaudeStream(ChildStdin);
+
+impl ClaudeStream {
+    fn write(&mut self, v: &Value) -> Result<(), String> {
+        let mut line = v.to_string();
+        line.push('\n');
+        self.0.write_all(line.as_bytes()).and_then(|_| self.0.flush()).map_err(|e| e.to_string())
+    }
+}
+
+impl Driver for ClaudeStream {
+    fn prompt(&mut self, text: &str) -> Result<(), String> {
+        self.write(&json!({"type": "user", "message": {"role": "user", "content": text}}))
+    }
+
+    fn allow(&mut self, id: &str, input: &Value) -> Result<(), String> {
+        self.write(&json!({"type": "control_response", "response": {"subtype": "success", "request_id": id, "response": {"behavior": "allow", "updatedInput": input}}}))
+    }
+
+    fn deny(&mut self, id: &str, why: &str) -> Result<(), String> {
+        self.write(&json!({"type": "control_response", "response": {"subtype": "success", "request_id": id, "response": {"behavior": "deny", "message": why}}}))
+    }
+
+    fn interrupt(&mut self) -> Result<(), String> {
+        self.write(&json!({"type": "control_request", "request_id": super::new_id(), "request": {"subtype": "interrupt"}}))
+    }
+}
+
+impl Driver for super::acp::Conn {
+    fn prompt(&mut self, text: &str) -> Result<(), String> {
+        super::acp::Conn::prompt(self, text)
+    }
+
+    fn allow(&mut self, id: &str, input: &Value) -> Result<(), String> {
+        self.answer(id, input["_option"].as_str(), &["allow_once", "allow_always"])
+    }
+
+    fn deny(&mut self, id: &str, _why: &str) -> Result<(), String> {
+        self.answer(id, None, &["reject_once", "reject_always"])
+    }
+
+    fn interrupt(&mut self) -> Result<(), String> {
+        self.cancel()
+    }
+
+    fn host_allows(&self) -> bool {
+        true
+    }
+}
+
+/// JSON lines of R → F until R ends or F says stop (false). Bytes, not text: a line with
+/// invalid UTF-8 is skipped, the reader goes on.
+pub(super) fn json_lines(r: impl std::io::Read, mut f: impl FnMut(Value) -> bool) {
+    let mut r = BufReader::new(r);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match r.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        let Ok(v) = serde_json::from_slice::<Value>(&buf) else { continue };
+        if !f(v) {
+            return;
+        }
+    }
+}
+
+/// Spawn options of a harness process: its own process group (a kill reaches its children).
+fn harness_command(bin: &str, s: &Spec) -> Command {
+    use std::os::unix::process::CommandExt;
+    let mut c = Command::new(bin);
+    c.current_dir(s.dir)
+        .env("CODEHEAD_THREAD", s.thread)
+        .env("CODEHEAD_AGENT", &s.agent.name)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    c
 }
 
 /// Output of a tool result kept in the log.
@@ -66,6 +162,8 @@ pub fn args(s: &Spec) -> Vec<String> {
         "--output-format",
         "stream-json",
         "--verbose",
+        // token chunks (`stream_event`): live text before each full message
+        "--include-partial-messages",
         "--permission-prompt-tool",
         "stdio",
         "--permission-mode",
@@ -101,7 +199,12 @@ pub(super) fn stderr_tail(stderr: std::process::ChildStderr) -> std::sync::Arc<s
     let tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let t = tail.clone();
     std::thread::spawn(move || {
-        for l in BufReader::new(stderr).lines().map_while(Result::ok) {
+        // bytes: a non-UTF-8 line must not end the reader (a full pipe blocks the harness)
+        let mut r = BufReader::new(stderr);
+        let mut buf = Vec::new();
+        while matches!(r.read_until(b'\n', &mut buf), Ok(n) if n > 0) {
+            let l = String::from_utf8_lossy(&buf).trim_end_matches(['\n', '\r']).to_string();
+            buf.clear();
             if let Ok(mut t) = t.lock() {
                 t.push(l);
                 let n = t.len();
@@ -125,14 +228,8 @@ pub fn spawn(s: &Spec, tx: Sender<(String, Out)>) -> Result<Session, String> {
 
 fn spawn_acp(s: &Spec, h: &super::harnesses::Harness, cmd: &[String], tx: Sender<(String, Out)>) -> Result<Session, String> {
     let bin = cmd.first().ok_or("empty ACP command")?;
-    let mut child = Command::new(bin)
+    let mut child = harness_command(bin, s)
         .args(&cmd[1..])
-        .current_dir(s.dir)
-        .env("CODEHEAD_THREAD", s.thread)
-        .env("CODEHEAD_AGENT", &s.agent.name)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("{} ({}): {e}. install: {}", h.label, cmd.join(" "), h.install))?;
     let stdin = child.stdin.take().ok_or("0 stdin")?;
@@ -146,20 +243,14 @@ fn spawn_acp(s: &Spec, h: &super::harnesses::Harness, cmd: &[String], tx: Sender
         preamble: s.system.to_string(),
     };
     let conn = super::acp::start(stdin, stdout, tail, setup, s.agent.name.clone(), tx);
-    Ok(Session { child, io: Io::Acp(conn) })
+    Ok(Session { child, driver: Box::new(conn) })
 }
 
 fn spawn_claude(s: &Spec, tx: Sender<(String, Out)>) -> Result<Session, String> {
-    let mut child = Command::new("claude")
+    let mut child = harness_command("claude", s)
         .args(args(s))
-        .current_dir(s.dir)
-        .env("CODEHEAD_THREAD", s.thread)
-        .env("CODEHEAD_AGENT", &s.agent.name)
         // Claude Code leaves the Artifact tools out of SDK sessions without this
         .env("CLAUDE_CODE_ARTIFACT", std::env::var("CLAUDE_CODE_ARTIFACT").unwrap_or_else(|_| "1".into()))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("claude: {e}"))?;
     let stdin = child.stdin.take().ok_or("claude: 0 stdin")?;
@@ -168,69 +259,55 @@ fn spawn_claude(s: &Spec, tx: Sender<(String, Out)>) -> Result<Session, String> 
     let name = s.agent.name.clone();
     std::thread::spawn(move || {
         let mut p = Parser::default();
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-            for o in p.line(&v) {
-                if tx.send((name.clone(), o)).is_err() {
-                    return;
-                }
-            }
+        let mut open = true;
+        json_lines(stdout, |v| {
+            open = p.line(&v).into_iter().all(|o| tx.send((name.clone(), o)).is_ok());
+            open
+        });
+        if open {
+            let err = err_tail.lock().map(|t| t.join("\n")).unwrap_or_default();
+            let _ = tx.send((name, Out::Exit(err)));
         }
-        let err = err_tail.lock().map(|t| t.join("\n")).unwrap_or_default();
-        let _ = tx.send((name, Out::Exit(err)));
     });
-    Ok(Session { child, io: Io::Claude(stdin) })
+    Ok(Session { child, driver: Box::new(ClaudeStream(stdin)) })
 }
 
 impl Session {
-    fn write(&mut self, v: &Value) -> Result<(), String> {
-        let Io::Claude(stdin) = &mut self.io else { return Err("not a Claude Code session".into()) };
-        let mut line = v.to_string();
-        line.push('\n');
-        stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush()).map_err(|e| e.to_string())
-    }
-
-    /// Codehead runs the tool calls of this session on the owner's word (ACP: the host
-    /// answers its permission requests itself in autopilot).
-    pub fn is_acp(&self) -> bool {
-        matches!(self.io, Io::Acp(_))
+    /// The host answers this session's permission requests per the agent's mode (ACP).
+    pub fn host_allows(&self) -> bool {
+        self.driver.host_allows()
     }
 
     pub fn prompt(&mut self, text: &str) -> Result<(), String> {
-        match &self.io {
-            Io::Acp(c) => c.prompt(text),
-            Io::Claude(_) => self.write(&json!({"type": "user", "message": {"role": "user", "content": text}})),
-        }
+        self.driver.prompt(text)
     }
 
-    /// Allow request ID, with INPUT as the tool's input (a question's input carries the answers;
-    /// ACP: `_option`, the picked option id).
     pub fn allow(&mut self, id: &str, input: &Value) -> Result<(), String> {
-        match &self.io {
-            Io::Acp(c) => c.answer(id, input["_option"].as_str(), &["allow_once", "allow_always"]),
-            Io::Claude(_) => self.write(&json!({"type": "control_response", "response": {"subtype": "success", "request_id": id,
-                "response": {"behavior": "allow", "updatedInput": input}}})),
-        }
+        self.driver.allow(id, input)
     }
 
     pub fn deny(&mut self, id: &str, why: &str) -> Result<(), String> {
-        match &self.io {
-            Io::Acp(c) => c.answer(id, None, &["reject_once", "reject_always"]),
-            Io::Claude(_) => self.write(&json!({"type": "control_response", "response": {"subtype": "success", "request_id": id,
-                "response": {"behavior": "deny", "message": why}}})),
-        }
+        self.driver.deny(id, why)
     }
 
-    /// Stop the running turn (the session stays).
     pub fn interrupt(&mut self) -> Result<(), String> {
-        match &self.io {
-            Io::Acp(c) => c.cancel(),
-            Io::Claude(_) => self.write(&json!({"type": "control_request", "request_id": super::new_id(), "request": {"subtype": "interrupt"}})),
-        }
+        self.driver.interrupt()
     }
 
+    /// End the harness and its children (its process group): SIGTERM, 2 s grace, SIGKILL.
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
+        let group = -(self.child.id() as i32);
+        // SAFETY: kill(2) on the process group this session's spawn created (process_group(0)).
+        unsafe { libc::kill(group, libc::SIGTERM) };
+        let at = std::time::Instant::now();
+        while at.elapsed() < std::time::Duration::from_secs(2) {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // SAFETY: as above; children left after the leader's exit go too.
+        unsafe { libc::kill(group, libc::SIGKILL) };
         let _ = self.child.wait();
     }
 }
@@ -242,6 +319,18 @@ pub struct Parser {
     cost_total: f64,
     /// Context tokens of the last assistant message.
     ctx: u64,
+    /// Model of the session (`init` line): its `modelUsage` entry gives the context window.
+    model: String,
+}
+
+/// Context window of the result's `modelUsage`: the session model's entry, else the largest
+/// (subagents on other models add entries). 0: unknown.
+fn window_of(usage: &Value, model: &str) -> u64 {
+    let size = |m: &Value| m["contextWindow"].as_u64().unwrap_or(0);
+    match usage.get(model) {
+        Some(m) if size(m) > 0 => size(m),
+        _ => usage.as_object().into_iter().flatten().map(|(_, m)| size(m)).max().unwrap_or(0),
+    }
 }
 
 fn text_of(content: &Value) -> String {
@@ -268,10 +357,13 @@ impl Parser {
     pub fn line(&mut self, v: &Value) -> Vec<Out> {
         let mut out = Vec::new();
         match v["type"].as_str().unwrap_or_default() {
-            "system" if v["subtype"] == "init" => out.push(Out::Event(Kind::Session {
-                session: v["session_id"].as_str().unwrap_or_default().into(),
-                model: v["model"].as_str().unwrap_or_default().into(),
-            })),
+            "system" if v["subtype"] == "init" => {
+                self.model = v["model"].as_str().unwrap_or_default().into();
+                out.push(Out::Event(Kind::Session {
+                    session: v["session_id"].as_str().unwrap_or_default().into(),
+                    model: self.model.clone(),
+                }));
+            }
             "assistant" if v["parent_tool_use_id"].is_null() => {
                 let u = &v["message"]["usage"];
                 let ctx = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].iter().map(|k| u[k].as_u64().unwrap_or(0)).sum::<u64>();
@@ -332,9 +424,20 @@ impl Parser {
                     cache_read: n("cache_read_input_tokens"),
                     cache_write: n("cache_creation_input_tokens"),
                     ctx: self.ctx,
+                    window: window_of(&v["modelUsage"], &self.model),
                     ms: v["duration_ms"].as_u64().unwrap_or(0),
                     error,
                 }));
+            }
+            // a token chunk of the main agent (subagents: 0)
+            "stream_event" if v["parent_tool_use_id"].is_null() => {
+                let e = &v["event"];
+                if e["type"] == "content_block_delta"
+                    && e["delta"]["type"] == "text_delta"
+                    && let Some(t) = e["delta"]["text"].as_str().filter(|t| !t.is_empty())
+                {
+                    out.push(Out::Delta(t.into()));
+                }
             }
             "rate_limit_event" => {
                 let w = &v["rate_limit_info"]["unifiedWindows"];
@@ -405,6 +508,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn json_lines_skip_a_non_utf8_line_and_go_on() {
+        let mut bytes = b"{\"a\":1}\n".to_vec();
+        bytes.extend_from_slice(b"{\"b\":\"\xff\xfe\"}\n");
+        bytes.extend_from_slice(b"{\"c\":3}\n");
+        let mut seen = Vec::new();
+        json_lines(&bytes[..], |v| {
+            seen.push(v);
+            true
+        });
+        assert_eq!(seen, vec![json!({"a": 1}), json!({"c": 3})]);
+    }
+
+    #[test]
+    fn kill_ends_the_harness_children_too() {
+        use std::os::unix::process::CommandExt;
+        // a harness with a background child (a dev server, a sleep)
+        let mut child = Command::new("sh").args(["-c", "sleep 60 & echo $!; wait"]).stdin(Stdio::piped()).stdout(Stdio::piped()).process_group(0).spawn().unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        let grandchild: i32 = line.trim().parse().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut s = Session { child, driver: Box::new(ClaudeStream(stdin)) };
+        s.kill();
+        // SAFETY: signal 0 only checks that the pid exists.
+        let alive = || unsafe { libc::kill(grandchild, 0) } == 0;
+        let at = std::time::Instant::now();
+        while alive() && at.elapsed() < std::time::Duration::from_secs(3) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!alive(), "grandchild {grandchild} still runs");
+    }
+
+    #[test]
     fn parser_maps_stream_json() {
         let mut p = Parser::default();
         let ev = |o: Vec<Out>| -> Vec<Kind> { o.into_iter().filter_map(|o| if let Out::Event(k) = o { Some(k) } else { None }).collect() };
@@ -419,13 +555,23 @@ mod tests {
         let a = json!({"type": "assistant", "parent_tool_use_id": null, "message": {"content": [
             {"type": "thinking", "thinking": "  ", "signature": "x"}, {"type": "thinking", "thinking": "CI=true missing, fixing it.\n\n", "signature": "y"}]}});
         assert_eq!(ev(p.line(&a)), vec![Kind::Thought { text: "CI=true missing, fixing it.".into() }]);
+        // token chunks: text deltas of the main agent only
+        let chunk = |parent: Value, kind: &str| json!({"type": "stream_event", "parent_tool_use_id": parent, "event": {"type": "content_block_delta", "index": 1, "delta": {"type": kind, "text": "Hel", "thinking": "x"}}});
+        assert!(matches!(p.line(&chunk(Value::Null, "text_delta")).as_slice(), [Out::Delta(t)] if t == "Hel"));
+        assert!(p.line(&chunk(json!("t9"), "text_delta")).is_empty());
+        assert!(p.line(&chunk(Value::Null, "thinking_delta")).is_empty());
         let sub = json!({"type": "assistant", "parent_tool_use_id": "t9", "message": {"content": [{"type": "text", "text": "sub agent"}]}});
         assert!(ev(p.line(&sub)).is_empty());
         let r = json!({"type": "user", "parent_tool_use_id": null, "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "a\nb"}]}]}});
         assert_eq!(ev(p.line(&r)), vec![Kind::ToolResult { id: "t1".into(), ok: true, output: "a\nb".into() }]);
         let end = |c: f64| json!({"type": "result", "subtype": "success", "total_cost_usd": c, "duration_ms": 5, "usage": {"input_tokens": 1, "output_tokens": 2}});
-        let Kind::TurnEnd { cost, ctx, .. } = ev(p.line(&end(0.5))).remove(0) else { panic!() };
-        assert_eq!((cost, ctx), (0.5, 103));
+        let Kind::TurnEnd { cost, ctx, window, .. } = ev(p.line(&end(0.5))).remove(0) else { panic!() };
+        assert_eq!((cost, ctx, window), (0.5, 103, 0));
+        // the window: the session model's `modelUsage` entry, not a subagent's
+        let mut e = end(0.5);
+        e["modelUsage"] = json!({"claude-haiku-5-5": {"contextWindow": 200000}, "claude-opus-5-5": {"contextWindow": 1000000}});
+        let Kind::TurnEnd { window, .. } = ev(p.line(&e)).remove(0) else { panic!() };
+        assert_eq!(window, 1_000_000);
         let Kind::TurnEnd { cost, .. } = ev(p.line(&end(0.75))).remove(0) else { panic!() };
         assert_eq!(cost, 0.25);
         let c = json!({"type": "control_request", "request_id": "r1", "request": {"subtype": "can_use_tool"}});

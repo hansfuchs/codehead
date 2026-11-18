@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use crate::engine::store::{Event, Kind};
+use crate::ask::Picker;
 use crate::render::{self, Row};
 use crate::theme;
 use unicode_width::UnicodeWidthStr;
@@ -356,6 +357,8 @@ pub struct Drawn {
     /// Where the view draws the working wave (3 cols): row, col, color (bubbles: the box of an
     /// agent at work).
     pub waves: Vec<(usize, u16, Color)>,
+    /// Per item: its 1st row (the scroll anchor of a view scrolled back).
+    pub starts: Vec<usize>,
 }
 
 /// How the stream draws messages (setting `messages`).
@@ -492,10 +495,76 @@ fn error_hint(agent: &str, text: &str, roster: &[(String, String)]) -> Vec<Strin
 
 /// Draw T at WIDTH in LOOK. FOLD: what is open (runs, thoughts). ASK_AT: the choice under the
 /// cursor of the 1st open ask; PICKS: its picked choices (multi).
-pub fn draw(t: &Thread, look: Look, width: u16, colors: &Colors, roster: &[(String, String)], fold: &Fold, ask_at: usize, picks: &HashSet<usize>, answered: &[String]) -> Drawn {
-    match look {
-        Look::Lines => draw_lines(t, width, colors, roster, fold, ask_at, picks, answered),
-        Look::Bubbles => draw_bubbles(t, width, colors, roster, fold, ask_at, picks, answered),
+pub fn draw(t: &Thread, look: Look, width: u16, colors: &Colors, roster: &[(String, String)], fold: &Fold, ask: &Picker) -> Drawn {
+    // `@name` of an agent: in its color, in every message and note of this draw
+    let mut marks: Vec<(String, Color)> = colors.iter().map(|(n, c)| (n.clone(), *c)).collect();
+    marks.sort_by(|a, b| a.0.cmp(&b.0));
+    render::set_marks(marks);
+    let d = match look {
+        Look::Lines => draw_lines(t, width, colors, roster, fold, ask),
+        Look::Bubbles => draw_bubbles(t, width, colors, roster, fold, ask),
+    };
+    memo::sweep();
+    d
+}
+
+/// Rows of the costly item bodies (markdown, open tool calls) of the last draw: a redraw (new
+/// event, fold, ask key, resize back) renders only bodies with new input. Key: a hash of the
+/// input, the width, the prefix spans and the palette. A body 0 draws used goes at the next sweep.
+mod memo {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::rc::Rc;
+
+    use ratatui::text::Span;
+
+    use crate::render::Row;
+
+    type Map = HashMap<u64, Rc<Vec<Row>>>;
+
+    thread_local! {
+        /// (used in this draw, used in the draw before).
+        static MEMO: RefCell<(Map, Map)> = RefCell::default();
+    }
+
+    fn get(key: u64, make: impl FnOnce() -> Vec<Row>) -> Vec<Row> {
+        let hit = MEMO.with_borrow_mut(|(cur, prev)| {
+            if let Some(r) = cur.get(&key) {
+                return Some(r.clone());
+            }
+            let r = prev.remove(&key)?;
+            cur.insert(key, r.clone());
+            Some(r)
+        });
+        let rows = hit.unwrap_or_else(|| {
+            let r = Rc::new(make());
+            MEMO.with_borrow_mut(|(cur, _)| cur.insert(key, r.clone()));
+            r
+        });
+        rows.as_ref().clone()
+    }
+
+    fn key(what: &str, width: usize, prefix: &[Span<'static>], input: impl FnOnce(&mut DefaultHasher)) -> u64 {
+        let mut h = DefaultHasher::new();
+        (what, width, prefix, crate::theme::pal(), crate::render::marks_hash()).hash(&mut h);
+        input(&mut h);
+        h.finish()
+    }
+
+    pub fn markdown(text: &str, width: usize, prefix: &[Span<'static>]) -> Vec<Row> {
+        get(key("md", width, prefix, |h| text.hash(h)), || crate::render::markdown(text, width, prefix))
+    }
+
+    pub fn call(c: &super::Call, width: usize, margin: &[Span<'static>]) -> Vec<Row> {
+        let k = key("call", width, margin, |h| (&c.id, &c.name, c.input.to_string(), &c.output).hash(h));
+        get(k, || super::call_rows(c, width, margin))
+    }
+
+    /// End of a draw: bodies this draw did not use go.
+    pub fn sweep() {
+        MEMO.with_borrow_mut(|(cur, prev)| *prev = std::mem::take(cur));
     }
 }
 
@@ -509,12 +578,13 @@ fn thought_count(thoughts: &[(usize, String)], fold: &Fold) -> String {
     }
 }
 
-fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)], fold: &Fold, ask_at: usize, picks: &HashSet<usize>, answered: &[String]) -> Drawn {
+fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)], fold: &Fold, ask: &Picker) -> Drawn {
     let w = usize::from(width.max(10));
     let mut d = Drawn::default();
     let blank = |d: &mut Drawn| d.rows.push(Row::plain(Line::raw("")));
     let mut last_agent: Option<String> = None;
     for item in &t.items {
+        d.starts.push(d.rows.len());
         match item {
             Item::Prompt { from, to, text, ts } if from == "owner" => {
                 // the owner's message: a bubble on the right, solid hover bg, the time on its left
@@ -571,7 +641,7 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                 }
                 let bar = [Span::styled("│ ", Style::default().fg(c))];
                 thought_rows(&mut d, thoughts, *key, fold, w, &bar);
-                d.rows.extend(render::markdown(text, w, &bar));
+                d.rows.extend(memo::markdown(text, w, &bar));
                 if let Some((h, what)) = needs_harness(text) {
                     let label = crate::engine::harnesses::get(&h).map_or(h.as_str(), |x| x.label);
                     let what = if what.is_empty() { String::new() } else { format!(" for {what}") };
@@ -622,7 +692,7 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                         let head = format!("{} {}", tool_label(&call.name), call_summary(&call.name, &call.input));
                         let bar = [Span::styled("│   ", Style::default().fg(c))];
                         d.rows.extend(render::plain(&head, w, theme::text(), &bar));
-                        d.rows.extend(call_rows(call, w, &[Span::styled("│     ", Style::default().fg(c))]));
+                        d.rows.extend(memo::call(call, w, &[Span::styled("│     ", Style::default().fg(c))]));
                     }
                     if think {
                         run_thought_rows(&mut d, thoughts, calls.len(), w, &tbar);
@@ -662,24 +732,39 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
         let more = if t.asks.len() > 1 { format!(" · {} more waiting", t.asks.len() - 1) } else { String::new() };
         let what = if a.questions().is_empty() { "asks to run" } else { "asks" };
         d.rows.push(Row::plain(Line::from(vec![Span::styled("┃ ", edge), Span::styled(a.agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD)), Span::styled(format!(" {what}{more}"), edge)])));
-        ask_rows(&mut d, a, w, &[Span::styled("┃ ", edge)], ask_at, picks, answered);
+        ask_rows(&mut d, a, w, &[Span::styled("┃ ", edge)], ask);
     }
     d
 }
 
-/// The rows of open ask A (the question, its choices: clickable), BAR before each.
-fn ask_rows(d: &mut Drawn, a: &Ask, w: usize, bar: &[Span<'static>], ask_at: usize, picks: &HashSet<usize>, answered: &[String]) {
+/// The rows of open ask A (answered questions, the shown one, its rows: clickable, the hint),
+/// BAR before each. ASK: the view's picker of A.
+fn ask_rows(d: &mut Drawn, a: &Ask, w: usize, bar: &[Span<'static>], ask: &Picker) {
     let qs = a.questions();
-    let choices: Vec<(String, String)> = match qs.get(answered.len()) {
-        Some((q, header, opts, multi)) => {
-            if !header.is_empty() {
+    let multi = qs.get(ask.q).is_some_and(|q| q.3);
+    match qs.get(ask.q) {
+        Some((q, header, _, _)) => {
+            // the questions before / after: answered ones with their answer
+            if qs.len() > 1 {
+                let answered = ask.answered(a);
+                let tabs: Vec<String> = qs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (qq, h, ..))| {
+                        let name = if h.is_empty() { format!("{}", i + 1) } else { h.clone() };
+                        let done = answered.iter().any(|(x, _)| x == qq);
+                        match (i == ask.q, done) {
+                            (true, _) => format!("[{name}]"),
+                            (false, true) => format!("{name} ✓"),
+                            (false, false) => name,
+                        }
+                    })
+                    .collect();
+                d.rows.extend(render::plain(&format!("{} · {}/{}", tabs.join(" · "), ask.q + 1, qs.len()), w, theme::muted(), bar));
+            } else if !header.is_empty() {
                 d.rows.extend(render::plain(header, w, theme::muted(), bar));
             }
             d.rows.extend(render::plain(q, w, theme::bold(), bar));
-            if *multi {
-                d.rows.extend(render::plain("space: pick · enter: answer", w, theme::muted(), bar));
-            }
-            opts.clone()
         }
         None => {
             d.rows.extend(render::plain(&a.summary(), w, theme::bold(), bar));
@@ -689,27 +774,37 @@ fn ask_rows(d: &mut Drawn, a: &Ask, w: usize, bar: &[Span<'static>], ask_at: usi
             if let Some(plan) = a.input["plan"].as_str() {
                 d.rows.extend(render::markdown(plan, w, bar));
             }
-            let own = a.options();
-            if own.is_empty() { vec![("allow".into(), String::new()), ("deny".into(), String::new())] } else { own.into_iter().map(|(_, n, _)| (n, String::new())).collect() }
         }
-    };
-    for (i, (label, desc)) in choices.iter().enumerate() {
-        let cur = i == ask_at;
-        let picked = picks.contains(&i);
-        let mark = if picked { "◉ " } else if cur { "› " } else { "  " };
+    }
+    for (i, r) in ask.rows(a).into_iter().enumerate() {
+        let cur = r.cursor && ask.focus;
+        // multi: a box per row; single: a dot on the answer given before (←)
+        let mark = match (multi, r.picked) {
+            (true, true) => "[x] ",
+            (true, false) => "[ ] ",
+            (false, true) => "● ",
+            (false, false) => "",
+        };
         let st = if cur { theme::accent_bold() } else { theme::text() };
-        let line = format!("{}. {label}", i + 1);
+        let line = if r.other {
+            let text = if r.label.is_empty() && !cur { "type an answer".to_string() } else { r.label.clone() };
+            format!("{mark}{}. Other: {text}{}", i + 1, if cur { "▏" } else { "" })
+        } else {
+            format!("{mark}{}. {}", i + 1, r.label)
+        };
         let at = d.rows.len();
-        let pre = [bar.to_vec(), vec![Span::styled(mark, theme::accent())]].concat();
-        let mut rows = render::plain(&line, w, st, &pre);
-        if !desc.is_empty() {
-            rows.extend(render::plain(&format!("     {desc}"), w, theme::muted(), bar));
+        let pre = [bar.to_vec(), vec![Span::styled(if cur { "› " } else { "  " }, theme::accent())]].concat();
+        let style = if r.other && r.label.is_empty() && !cur { theme::muted() } else { st };
+        let mut rows = render::plain(&line, w, style, &pre);
+        if !r.desc.is_empty() {
+            rows.extend(render::plain(&format!("     {}", r.desc), w, theme::muted(), bar));
         }
         for k in 0..rows.len() {
             d.hits.insert(at + k, Hit::Choice(i));
         }
         d.rows.extend(rows);
     }
+    d.rows.extend(render::plain(&ask.hint(a), w, theme::muted(), bar));
 }
 
 /// Most lines of a code block in an open run (the rest: `… n more lines`); of an output: the last ones.
@@ -906,7 +1001,7 @@ fn top_border(w: usize, border: Style, left: Vec<Span<'static>>, wave: bool, rig
     (Row::plain(Line::from(spans)), wave_at as u16)
 }
 
-fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)], fold: &Fold, ask_at: usize, picks: &HashSet<usize>, answered: &[String]) -> Drawn {
+fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String)], fold: &Fold, ask: &Picker) -> Drawn {
     let w = usize::from(width.max(12));
     // content width inside `│ ` … ` │`
     let inner = w - 2;
@@ -935,6 +1030,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
     let turn_at = t.items.iter().rposition(|it| matches!(it, Item::Prompt { .. } | Item::Settled { .. }));
     let last_of: HashMap<&str, usize> = last_of.into_iter().filter(|&(_, l)| turn_at.is_none_or(|p| l > p)).collect();
     for (idx, item) in t.items.iter().enumerate() {
+        d.starts.push(d.rows.len());
         match item {
             Item::Prompt { from, to, text, ts } if from == "owner" => {
                 close(&mut d, &mut cur);
@@ -1015,7 +1111,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                         // the thoughts before the message: a folded line on its top
                         thought_rows(&mut d, thoughts, *key, fold, inner, &bar);
                         if !text.trim().is_empty() {
-                            d.rows.extend(render::markdown(text, inner, &bar));
+                            d.rows.extend(memo::markdown(text, inner, &bar));
                         }
                         if let Some((h, what)) = needs_harness(text) {
                             let label = crate::engine::harnesses::get(&h).map_or(h.as_str(), |x| x.label);
@@ -1067,7 +1163,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                                 }
                                 let head = format!("{} {}", tool_label(&call.name), call_summary(&call.name, &call.input));
                                 d.rows.extend(render::plain(&head, inner, theme::text(), &[bar[0].clone(), Span::raw("  ")]));
-                                d.rows.extend(call_rows(call, inner, &[bar[0].clone(), Span::raw("    ")]));
+                                d.rows.extend(memo::call(call, inner, &[bar[0].clone(), Span::raw("    ")]));
                             }
                             if think {
                                 run_thought_rows(&mut d, thoughts, calls.len(), inner, &tbar);
@@ -1092,21 +1188,8 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
         }
     }
     close(&mut d, &mut cur);
-    // agents at work with 0 output in this turn yet: an empty box with the wave
-    let mut starting: Vec<&String> = t.busy.iter().filter(|a| !last_of.contains_key(a.as_str())).collect();
-    starting.sort();
-    for agent in starting {
-        gap(&mut d);
-        let c = color_of(colors, agent);
-        let border = Style::default().fg(theme::desaturate(c, 0.4));
-        let name = vec![Span::styled(agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD))];
-        let (top, wave_at) = top_border(w, border, name, true, "");
-        d.waves.push((d.rows.len(), wave_at, c));
-        cur = Some(Open { start: d.rows.len(), border, agent: Some(agent.clone()) });
-        d.rows.push(top);
-        d.rows.push(Row::plain(Line::from(vec![Span::styled("│ ", border)])));
-        close(&mut d, &mut cur);
-    }
+    // agents at work with 0 output in this turn yet: 0 box (their header card shows the work);
+    // the box comes with the 1st output (live text included)
     // the 1st open ask: a yellow box below everything, its choices clickable
     if let Some(a) = t.asks.first() {
         gap(&mut d);
@@ -1120,7 +1203,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
         d.rows.push(top);
         let bar = [Span::styled("│ ", border)];
         d.rows.push(Row::plain(Line::from(bar.to_vec())));
-        ask_rows(&mut d, a, inner, &bar, ask_at, picks, answered);
+        ask_rows(&mut d, a, inner, &bar, ask);
         close(&mut d, &mut cur);
     }
     d
@@ -1147,12 +1230,97 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The drawn rows on a test screen: (text per row, fg per cell).
+    fn cells(d: &Drawn, w: u16) -> Vec<(String, Vec<Option<Color>>)> {
+        use ratatui::widgets::Paragraph;
+        let h = d.rows.len() as u16;
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h.max(1))).unwrap();
+        term.draw(|f| f.render_widget(Paragraph::new(d.rows.iter().map(|r| r.line.clone()).collect::<Vec<_>>()), f.area())).unwrap();
+        let b = term.backend().buffer().clone();
+        (0..h).map(|y| ((0..w).map(|x| b[(x, y)].symbol().to_string()).collect(), (0..w).map(|x| Some(b[(x, y)].fg).filter(|c| *c != Color::Reset)).collect())).collect()
+    }
+
+    /// The fg of each cell of the 1st `@NAME` after row AFTER (0 match: panic).
+    fn mention_fg(rows: &[(String, Vec<Option<Color>>)], name: &str, after: usize) -> Vec<Option<Color>> {
+        let at = format!("@{name}");
+        for (text, fg) in &rows[after..] {
+            if let Some(byte) = text.find(&at) {
+                let x = text[..byte].chars().count();
+                return fg[x..x + at.chars().count()].to_vec();
+            }
+        }
+        panic!("0 {at}: {:?}", rows.iter().map(|r| &r.0).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn mentions_get_the_agent_color_in_every_message_and_both_looks() {
+        let mut t = Thread::default();
+        t.push(&ev(None, Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text: "@ada continue, cc @bob".into() }));
+        t.push(&ev(Some("ada"), Kind::Text { text: "asked **@bob** here; `@bob` in code stays; mail@bob too\n\n```\n@bob in a block\n```".into() }));
+        t.push(&ev(Some("ada"), Kind::Prompt { from: "ada".into(), to: vec!["bob".into()], text: "@bob take the build".into() }));
+        t.push(&ev(Some("bob"), Kind::Status { state: "blocked".into(), note: "waits on @ada".into() }));
+        let colors: Colors = [("ada".to_string(), Color::Rgb(200, 10, 10)), ("bob".to_string(), Color::Rgb(10, 10, 200))].into();
+        let none = HashSet::new();
+        let fold = Fold { runs: &none, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &none, all_thoughts: false };
+        let ada = Some(Color::Rgb(200, 10, 10));
+        let bob = Some(Color::Rgb(10, 10, 200));
+        for look in [Look::Bubbles, Look::Lines] {
+            let d = draw(&t, look, 70, &colors, &[], &fold, &Picker::default());
+            let rows = cells(&d, 70);
+            let all = |fg: Vec<Option<Color>>, c: Option<Color>| fg.iter().all(|x| *x == c);
+            // the owner's bubble
+            assert!(all(mention_fg(&rows, "ada", 0), ada), "{look:?} owner @ada");
+            let owner = rows.iter().position(|r| r.0.contains("@ada continue")).unwrap();
+            assert!(all(mention_fg(&rows, "bob", owner), bob), "{look:?} owner @bob");
+            // agent text: bold markdown too; inline code, a mail address, a code block: plain
+            let text = rows.iter().position(|r| r.0.contains("asked")).unwrap();
+            assert!(all(mention_fg(&rows, "bob", text), bob), "{look:?} text @bob");
+            let code_row = &rows[text..].iter().find(|r| r.0.contains("in code")).unwrap();
+            let x = code_row.0[..code_row.0.find("`@bob`").map_or_else(|| code_row.0.find("@bob in code").unwrap(), |b| b + 1)].chars().count();
+            assert_ne!(code_row.1[x], bob, "{look:?} inline code: 0 mention color");
+            let mail = rows.iter().find(|r| r.0.contains("mail@bob")).unwrap();
+            let x = mail.0[..mail.0.find("mail@bob").unwrap()].chars().count() + 4;
+            assert_ne!(mail.1[x], bob, "{look:?} mail@bob: 0 mention");
+            let block = rows.iter().find(|r| r.0.contains("@bob in a block")).unwrap();
+            let x = block.0[..block.0.find("@bob in a block").unwrap()].chars().count();
+            assert_ne!(block.1[x], bob, "{look:?} code block: 0 mention");
+            // agent → agent message, a status note
+            let send = rows.iter().position(|r| r.0.contains("take the build")).unwrap();
+            assert!(all(mention_fg(&rows, "bob", send), bob), "{look:?} agent message");
+            let note = rows.iter().position(|r| r.0.contains("waits on")).unwrap();
+            assert!(all(mention_fg(&rows, "ada", note), ada), "{look:?} note");
+        }
+        // an unknown name: 0 color
+        let spans = render::mention_spans("@zed and @ada", theme::text(), &[("ada".into(), Color::Red)]);
+        assert_eq!(spans.iter().filter(|s| s.style.fg == Some(Color::Red)).map(|s| s.content.as_ref()).collect::<Vec<_>>(), ["@ada"]);
+    }
+
     fn ev(agent: Option<&str>, kind: Kind) -> Event {
         Event { ts: 1_000_000, agent: agent.map(String::from), kind }
     }
 
     fn text(d: &Drawn) -> String {
         d.rows.iter().map(|r| r.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>().trim_end().to_string() + "\n").collect()
+    }
+
+    #[test]
+    fn memo_redraw_shows_new_tool_output_and_equals_a_cold_draw() {
+        let mut t = Thread::default();
+        t.push(&ev(Some("ada"), Kind::Tool { id: "1".into(), name: "Bash".into(), input: json!({"command": "ls"}) }));
+        let open: HashSet<usize> = [1].into();
+        let none = HashSet::new();
+        let fold = Fold { runs: &open, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &none, all_thoughts: false };
+        let first = text(&draw(&t, Look::Bubbles, 60, &Colors::new(), &[], &fold, &Picker::default()));
+        assert!(!first.contains("fresh-output"), "{first}");
+        t.push(&ev(Some("ada"), Kind::ToolResult { id: "1".into(), ok: true, output: "fresh-output".into() }));
+        t.push(&ev(Some("ada"), Kind::Text { text: "a **b**".into() }));
+        let warm = text(&draw(&t, Look::Bubbles, 60, &Colors::new(), &[], &fold, &Picker::default()));
+        assert!(warm.contains("fresh-output"), "{warm}");
+        let again = text(&draw(&t, Look::Bubbles, 60, &Colors::new(), &[], &fold, &Picker::default()));
+        assert_eq!(warm, again);
+        // a new width: new rows, 0 stale ones
+        let narrow = draw(&t, Look::Bubbles, 30, &Colors::new(), &[], &fold, &Picker::default());
+        assert!(widest(&narrow) <= 30);
     }
 
     #[test]
@@ -1167,7 +1335,10 @@ mod tests {
         t.push(&ev(Some("ada"), Kind::Ask { id: "q".into(), tool: "AskUserQuestion".into(), input: json!({"questions": [{"question": "color?", "header": "Color", "options": [{"label": "red", "description": ""}, {"label": "blue", "description": ""}], "multiSelect": false}]}) }));
         assert_eq!(t.items.len(), 3);
         assert!(t.busy.contains("ada"));
-        let d = draw(&t, Look::Lines, 60, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 1, &HashSet::new(), &[]);
+        let mut ask = Picker::default();
+        ask.sync(t.asks.first());
+        ask.at = 1;
+        let d = draw(&t, Look::Lines, 60, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, &ask);
         let s = text(&d);
         assert!(s.contains("  fix it"), "{s}");
         assert!(s.contains("📎 /tmp/a.png"), "{s}");
@@ -1177,12 +1348,12 @@ mod tests {
         assert!(d.hits.values().any(|h| *h == Hit::Run(1)));
         assert!(widest(&d) <= 60);
         let open: HashSet<usize> = [1].into();
-        let s = text(&draw(&t, Look::Lines, 60, &Colors::new(), &[], &Fold { runs: &open, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]));
+        let s = text(&draw(&t, Look::Lines, 60, &Colors::new(), &[], &Fold { runs: &open, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, &Picker::default()));
         assert!(s.contains("│      sh") && s.contains("│      ls") && s.contains("│      b"), "{s}");
         t.push(&ev(Some("ada"), Kind::Answer { id: "q".into(), allow: true, label: "blue".into() }));
-        t.push(&ev(Some("ada"), Kind::TurnEnd { cost: 0.1, input: 1, output: 1, cache_read: 0, cache_write: 0, ctx: 0, ms: 1, error: None }));
+        t.push(&ev(Some("ada"), Kind::TurnEnd { cost: 0.1, input: 1, output: 1, cache_read: 0, cache_write: 0, ctx: 0, window: 0, ms: 1, error: None }));
         assert!(t.asks.is_empty() && t.busy.is_empty());
-        assert!(text(&draw(&t, Look::Lines, 60, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[])).contains("answered: blue"));
+        assert!(text(&draw(&t, Look::Lines, 60, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, &Picker::default())).contains("answered: blue"));
         assert_eq!(t.sent().len(), 1);
     }
 
@@ -1194,7 +1365,7 @@ mod tests {
         t.push(&ev(Some("ada"), Kind::Tool { id: "1".into(), name: "Bash".into(), input: json!({"command": "ls", "description": "List files"}) }));
         t.push(&ev(Some("ada"), Kind::ToolResult { id: "1".into(), ok: true, output: "a".into() }));
         t.push(&ev(Some("ada"), Kind::Text { text: "※ SUMMARY\nDONE. it works.".into() }));
-        let d = draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]);
+        let d = draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, &Picker::default());
         let s = text(&d);
         let rows: Vec<&str> = s.lines().collect();
         // the owner's bubble: right, the time in its top border, the file name below it
@@ -1217,7 +1388,7 @@ mod tests {
         // an answered question: the agent's question in its box, the answer as the owner's bubble
         t.push(&ev(Some("ada"), Kind::Ask { id: "q".into(), tool: "AskUserQuestion".into(), input: json!({"questions": [{"question": "color?", "header": "Color", "options": [{"label": "red", "description": ""}], "multiSelect": false}]}) }));
         t.push(&ev(Some("ada"), Kind::Answer { id: "q".into(), allow: true, label: "red".into() }));
-        let s = text(&draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]));
+        let s = text(&draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, &Picker::default()));
         let rows: Vec<&str> = s.lines().collect();
         let q = rows.iter().position(|r| r.starts_with("╭─ ada asked")).expect(&s);
         assert!(rows[q + 2].starts_with("│ color?"), "{s}");
@@ -1225,33 +1396,33 @@ mod tests {
         // declined: 0 answer bubble
         t.push(&ev(Some("ada"), Kind::Ask { id: "p".into(), tool: "Bash".into(), input: json!({"command": "rm x"}) }));
         t.push(&ev(Some("ada"), Kind::Answer { id: "p".into(), allow: false, label: "deny".into() }));
-        let s = text(&draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]));
-        // ada still at work: its wave box below the declined ask
+        let s = text(&draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, &Picker::default()));
+        // ada still at work, 0 output since: 0 empty box below the declined ask
         let tail: Vec<&str> = s.lines().rev().take(8).collect();
-        assert!(tail.iter().any(|r| r.starts_with("│ denied")) && tail[0].starts_with('╰') && tail[2].starts_with("╭─ ada "), "{s}");
+        assert!(tail.iter().any(|r| r.starts_with("│ denied")) && tail[0].starts_with('╰'), "{s}");
+        assert!(!tail.iter().take_while(|r| !r.starts_with("│ denied")).any(|r| r.starts_with("╭─ ada")), "{s}");
     }
 
     #[test]
-    fn a_new_turn_waves_below_the_message_not_on_the_last_box() {
+    fn a_new_turn_shows_no_box_until_its_1st_output() {
         let mut t = Thread::default();
         t.push(&ev(Some("ada"), Kind::TurnStart));
         t.push(&ev(Some("ada"), Kind::Text { text: "first answer".into() }));
-        t.push(&ev(Some("ada"), Kind::TurnEnd { cost: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0, ctx: 0, ms: 1, error: None }));
+        t.push(&ev(Some("ada"), Kind::TurnEnd { cost: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0, ctx: 0, window: 0, ms: 1, error: None }));
         t.push(&ev(None, Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text: "next".into() }));
         t.push(&ev(Some("ada"), Kind::TurnStart));
         let fold = Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false };
-        let d = draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &fold, 0, &HashSet::new(), &[]);
+        let d = draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &fold, &Picker::default());
         let s = text(&d);
         let rows: Vec<&str> = s.lines().collect();
-        let first = rows.iter().position(|r| r.starts_with("╭─ ada")).unwrap();
         let bubble = rows.iter().position(|r| r.contains("next")).unwrap();
-        // 1 wave: in a box below the owner's message, 0 on the answer above it
-        assert_eq!(d.waves.len(), 1, "{s}");
-        assert!(d.waves[0].0 > bubble && d.waves[0].0 != first, "{s}");
-        assert!(rows[d.waves[0].0].starts_with("╭─ ada"), "{s}");
+        // 0 output yet: 0 empty box below the owner's message, 0 wave on the answer above it
+        assert!(d.waves.is_empty(), "{s}");
+        assert!(!rows[bubble..].iter().any(|r| r.starts_with("╭─ ada")), "{s}");
+        assert_eq!(rows.iter().filter(|r| r.starts_with("╭─ ada")).count(), 1, "{s}");
         // the 1st output of the turn: the wave moves into its box, 0 empty box
         t.push(&ev(Some("ada"), Kind::Text { text: "second".into() }));
-        let d = draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &fold, 0, &HashSet::new(), &[]);
+        let d = draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &fold, &Picker::default());
         let s = text(&d);
         let rows: Vec<&str> = s.lines().collect();
         assert_eq!(d.waves.len(), 1, "{s}");
@@ -1261,7 +1432,7 @@ mod tests {
     #[test]
     fn interrupted_turns_are_no_errors() {
         let mut t = Thread::default();
-        let end = |error: &str| Kind::TurnEnd { cost: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0, ctx: 0, ms: 1, error: Some(error.into()) };
+        let end = |error: &str| Kind::TurnEnd { cost: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0, ctx: 0, window: 0, ms: 1, error: Some(error.into()) };
         t.push(&ev(Some("ada"), Kind::TurnStart));
         t.push(&ev(Some("ada"), end(crate::engine::host::INTERRUPTED)));
         assert!(matches!(t.items.last(), Some(Item::Note { text, color, .. }) if text == "interrupted" && *color == theme::pal().muted));
@@ -1281,7 +1452,7 @@ mod tests {
         t.push(&ev(Some("ada"), Kind::ToolResult { id: "2".into(), ok: false, output: "no match".into() }));
         let open: HashSet<usize> = [1].into();
         for look in [Look::Bubbles, Look::Lines] {
-            let d = draw(&t, look, 60, &Colors::new(), &[], &Fold { runs: &open, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, 0, &HashSet::new(), &[]);
+            let d = draw(&t, look, 60, &Colors::new(), &[], &Fold { runs: &open, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, &Picker::default());
             let s = text(&d);
             if std::env::var_os("SHOW").is_some() {
                 eprintln!("{s}");
@@ -1312,7 +1483,7 @@ mod tests {
         let none = HashSet::new();
         let fold = |t: &Thread, mode: Thoughts, open: &HashSet<usize>| -> String {
             let f = Fold { runs: &none, all_runs: false, thoughts: mode, open_thoughts: open, all_thoughts: false };
-            text(&draw(t, Look::Bubbles, 50, &Colors::new(), &[], &f, 0, &HashSet::new(), &[]))
+            text(&draw(t, Look::Bubbles, 50, &Colors::new(), &[], &f, &Picker::default()))
         };
         // hidden: 0 thought rows, 0 count
         let s = fold(&t, Thoughts::Hidden, &none);
@@ -1332,9 +1503,41 @@ mod tests {
         assert!(s.contains("∴ Look at the logs first.") && s.contains("now."), "{s}");
         // a turn that ends on a thought, 0 text: a message of its own; hidden: 0 rows
         t.push(&ev(Some("ada"), Kind::Thought { text: "Nothing left.".into() }));
-        t.push(&ev(Some("ada"), Kind::TurnEnd { cost: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0, ctx: 0, ms: 1, error: None }));
+        t.push(&ev(Some("ada"), Kind::TurnEnd { cost: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0, ctx: 0, window: 0, ms: 1, error: None }));
         assert!(matches!(&t.items[2], Item::Text { text, .. } if text.is_empty()));
         assert!(!fold(&t, Thoughts::Hidden, &none).contains("Nothing left"));
         assert!(fold(&t, Thoughts::Folded, &none).contains("▸ ∴ Nothing left."));
+    }
+}
+
+/// Draw time of a thread on disk: `CODEHEAD_BENCH=<thread id> cargo test --release bench_draw -- --ignored --nocapture`.
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn bench_draw() {
+        let Ok(id) = std::env::var("CODEHEAD_BENCH") else { return };
+        let mut t = Thread::default();
+        for e in crate::engine::store::events(&id) {
+            t.push(&e);
+        }
+        let all: HashSet<usize> = (0..=t.runs).collect();
+        let none = HashSet::new();
+        for (name, runs) in [("folded", &none), ("open runs", &all)] {
+            for look in [Look::Bubbles, Look::Lines] {
+                let fold = Fold { runs, all_runs: false, thoughts: Thoughts::Folded, open_thoughts: &none, all_thoughts: false };
+                let mut ms = Vec::new();
+                let mut rows = 0;
+                for _ in 0..3 {
+                    let at = std::time::Instant::now();
+                    let d = draw(&t, look, 120, &Colors::new(), &[], &fold, &Picker::default());
+                    ms.push(at.elapsed().as_secs_f64() * 1000.0);
+                    rows = d.rows.len();
+                }
+                eprintln!("{look:?} {name}: {} items, {rows} rows, ms per draw: {:.1} / {:.1} / {:.1}", t.items.len(), ms[0], ms[1], ms[2]);
+            }
+        }
     }
 }

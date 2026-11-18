@@ -44,7 +44,7 @@ pub fn reset_nav() {
     NAV_ON.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// 2 Esc presses within this time: back to the start screen (the 1st one interrupts).
+/// 2 Esc presses within this time: back to the start screen. A single Esc interrupts once this time ends without a 2nd one.
 const DOUBLE_ESC: Duration = Duration::from_millis(500);
 /// Most rows the prompt grows to; longer text scrolls.
 const INPUT_ROWS: u16 = 8;
@@ -67,6 +67,14 @@ enum Msg {
     /// A command to the host ended: what it was, Err(why).
     Done(&'static str, Result<Value, String>),
     Cost(Box<crate::cost::Snap>),
+    /// The host logged events: read the tail.
+    Wake,
+    /// Live text of an agent (token chunk): (agent, text).
+    Delta(String, String),
+    /// A (new) subscription: the live text comes again from the host.
+    Subscribed,
+    /// All live text of an agent so far: (agent, text).
+    Live(String, String),
 }
 
 struct View {
@@ -81,6 +89,8 @@ struct View {
     names: Vec<(String, Color)>,
     /// Agents of the roster: (name, harness), for the hints of the stream.
     harness_of: Vec<(String, String)>,
+    /// Per roster agent: sprite, effort label of its card (read on roster change, not per frame).
+    profiles: HashMap<String, (crate::sprites::Sprite, String)>,
     // stream
     drawn: stream::Drawn,
     dirty: bool,
@@ -102,10 +112,11 @@ struct View {
     /// Mouse position: the clickable row under it gets the hover bg.
     hover: Option<Position>,
     // ask
-    ask_at: usize,
-    picks: HashSet<usize>,
-    /// Answers so far of a multi-question ask: question → label.
-    answers: Vec<(String, String)>,
+    /// The 1st open ask: cursor, picks, answers so far, focus.
+    ask: crate::ask::Picker,
+    /// Tests: the host commands, recorded (0 host process).
+    #[cfg(test)]
+    ops: std::cell::RefCell<Vec<Value>>,
     // prompt
     input: TextArea,
     input_rect: Rect,
@@ -123,6 +134,8 @@ struct View {
     queued: Option<(String, String, String)>,
     /// Sent messages the log does not show yet: text, sent at, error.
     pending: Vec<(String, Instant, Option<String>)>,
+    /// Per agent: live text not logged yet (token chunks), shown at the end of the stream.
+    live: Vec<(String, String)>,
     // thread header: cards of the open threads (tab)
     nav_on: bool,
     nav_cards: Vec<crate::nav::Card>,
@@ -138,6 +151,8 @@ struct View {
     toast: Option<(String, Instant)>,
     started: Instant,
     last_esc: Option<Instant>,
+    /// A 1st Esc armed an interrupt: it fires after DOUBLE_ESC unless a 2nd Esc means back.
+    esc_interrupt: Option<Instant>,
     last_ctrl_c: Option<Instant>,
     exit: Exit,
     /// The header switched threads: the view ends with EXIT.
@@ -170,6 +185,7 @@ impl View {
             colors: HashMap::new(),
             names: Vec::new(),
             harness_of: Vec::new(),
+            profiles: HashMap::new(),
             drawn: stream::Drawn::default(),
             dirty: true,
             width: 0,
@@ -184,9 +200,9 @@ impl View {
             dragging: false,
             clicks: None,
             hover: None,
-            ask_at: 0,
-            picks: HashSet::new(),
-            answers: Vec::new(),
+            ask: crate::ask::Picker::default(),
+            #[cfg(test)]
+            ops: Default::default(),
             input,
             input_rect: Rect::default(),
             mention: Mention::default(),
@@ -200,6 +216,7 @@ impl View {
             replace: None,
             queued: None,
             pending: Vec::new(),
+            live: Vec::new(),
             nav_on: NAV_ON.load(std::sync::atomic::Ordering::Relaxed),
             nav_cards: Vec::new(),
             nav_at: 0,
@@ -213,6 +230,7 @@ impl View {
             toast: None,
             started: Instant::now(),
             last_esc: None,
+            esc_interrupt: None,
             last_ctrl_c: None,
             exit: Exit::Back,
             nav_switch: false,
@@ -226,15 +244,28 @@ impl View {
         v
     }
 
+    /// The agents (each 5 s, join, leave): the stream redraws only when its inputs changed.
     fn set_roster(&mut self, roster: Vec<crate::agents::Agent>) {
-        self.colors = roster.iter().map(|a| (a.name.clone(), crate::agents::color(a.color.as_deref()))).collect();
+        let colors: stream::Colors = roster.iter().map(|a| (a.name.clone(), crate::agents::color(a.color.as_deref()))).collect();
+        let harness_of: Vec<(String, String)> = roster.iter().map(|a| (a.name.clone(), a.harness.clone())).collect();
+        if colors != self.colors || harness_of != self.harness_of {
+            self.dirty = true;
+        }
+        self.colors = colors;
+        self.harness_of = harness_of;
         self.names = roster.iter().map(|a| (a.name.clone(), crate::agents::color(a.color.as_deref()))).collect();
-        self.harness_of = roster.iter().map(|a| (a.name.clone(), a.harness.clone())).collect();
         self.input.marks = self.names.clone();
+        let global = crate::agents::effort_name();
+        self.profiles = roster
+            .iter()
+            .map(|a| {
+                let effort = crate::engine::roster::get(&a.name).and_then(|r| r.effort).or_else(|| (a.harness == "claude").then(|| global.clone())).filter(|e| e != "default").map(|e| effort_label(&e)).unwrap_or_default();
+                (a.name.clone(), (crate::agents::sprite(a), effort))
+            })
+            .collect();
         self.roster = roster;
         self.members = store::load(&self.id).map(|t| t.agents).unwrap_or_default();
         self.mention.replaceable = self.members.clone();
-        self.dirty = true;
     }
 
     /// New events of the log. True: some came.
@@ -246,6 +277,12 @@ impl View {
         let asks = self.thread.asks.first().map(|a| a.id.clone());
         for e in &evs {
             self.thread.push(e);
+            // the logged text (or the turn's end) replaces the live chunks of its agent
+            if matches!(e.kind, store::Kind::Text { .. } | store::Kind::Tool { .. } | store::Kind::TurnEnd { .. })
+                && let Some(a) = &e.agent
+            {
+                self.live.retain(|(n, _)| n != a);
+            }
             if let store::Kind::Prompt { from, text, .. } = &e.kind
                 && from == "owner"
             {
@@ -263,9 +300,7 @@ impl View {
             }
         }
         if self.thread.asks.first().map(|a| a.id.clone()) != asks {
-            self.ask_at = 0;
-            self.picks.clear();
-            self.answers.clear();
+            self.ask.sync(self.thread.asks.first());
         }
         self.history = self.thread.sent();
         self.dirty = true;
@@ -278,7 +313,14 @@ impl View {
 
     /// Command C to the host, off the UI thread; the reply comes back as Msg::Done(WHAT).
     fn host(&self, what: &'static str, c: Value) {
+        #[cfg(test)]
+        {
+            let _ = what;
+            self.ops.borrow_mut().push(c);
+        }
+        #[cfg(not(test))]
         let (id, tx) = (self.id.clone(), self.tx.clone());
+        #[cfg(not(test))]
         std::thread::spawn(move || {
             let _ = tx.send(Msg::Done(what, client::call(&id, &c)));
         });
@@ -366,6 +408,21 @@ impl View {
         self.toast(if ok { format!("copied {} chars", text.chars().count()) } else { "0 clipboard tools found (wl-copy, xclip, xsel)".into() });
     }
 
+    /// Something on screen moves: an agent at work (wave), monitors, the threads row, a toast.
+    fn animating(&self) -> bool {
+        !self.thread.busy.is_empty() || self.monitors.active() || self.nav_on || self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(4))
+    }
+
+    /// Fire an interrupt armed by a single Esc once DOUBLE_ESC ends. True: state changed.
+    fn tick_esc(&mut self) -> bool {
+        if self.esc_interrupt.is_some_and(|t| t.elapsed() >= DOUBLE_ESC) {
+            self.esc_interrupt = None;
+            self.interrupt();
+            return true;
+        }
+        false
+    }
+
     fn interrupt(&mut self) {
         if self.thread.busy.is_empty() && self.queued.is_none() {
             return;
@@ -377,53 +434,21 @@ impl View {
         self.toast("interrupt…");
     }
 
-    /// Answer the open ask with choice I (multi: the picks).
-    fn answer(&mut self, i: Option<usize>) {
-        let Some(a) = self.thread.asks.first().cloned() else { return };
-        let qs = a.questions();
-        let own = a.options();
-        let c = if qs.is_empty() && !own.is_empty() {
-            let Some((id, name, kind)) = own.get(i.unwrap_or(self.ask_at)).cloned() else { return };
-            json!({"op": "answer", "id": a.id, "allow": kind.starts_with("allow"), "option": id, "label": name})
-        } else if qs.is_empty() {
-            let allow = i.unwrap_or(self.ask_at) == 0;
-            json!({"op": "answer", "id": a.id, "allow": allow, "label": if allow { "allow" } else { "deny" }})
-        } else {
-            let Some((q, _, opts, multi)) = qs.get(self.answers.len()) else { return };
-            let label = if *multi && i.is_none() && !self.picks.is_empty() {
-                let mut p: Vec<usize> = self.picks.iter().copied().collect();
-                p.sort();
-                p.iter().filter_map(|&k| opts.get(k).map(|o| o.0.clone())).collect::<Vec<_>>().join(", ")
-            } else {
-                match opts.get(i.unwrap_or(self.ask_at)) {
-                    Some(o) => o.0.clone(),
-                    None => return,
-                }
-            };
-            self.answers.push((q.clone(), label));
-            self.ask_at = 0;
-            self.picks.clear();
-            self.dirty = true;
-            if self.answers.len() < qs.len() {
-                return;
+    /// A picker result: redraw, or the answer to the host. True: the picker took the key.
+    fn ask_act(&mut self, act: crate::ask::Act) -> bool {
+        match act {
+            crate::ask::Act::Pass => false,
+            crate::ask::Act::Changed => {
+                self.dirty = true;
+                true
             }
-            let answers: serde_json::Map<String, Value> = self.answers.iter().map(|(q, l)| (q.clone(), Value::String(l.clone()))).collect();
-            let label = self.answers.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join(" · ");
-            json!({"op": "answer", "id": a.id, "allow": true, "answers": answers, "label": label})
-        };
-        self.host("answer", c);
-    }
-
-    fn choices(&self) -> usize {
-        let Some(a) = self.thread.asks.first() else { return 0 };
-        match a.questions().get(self.answers.len()) {
-            Some((_, _, o, _)) => o.len(),
-            None => a.options().len().max(2),
+            crate::ask::Act::Answer(c) => {
+                self.ask.sent = true;
+                self.dirty = true;
+                self.host("answer", c);
+                true
+            }
         }
-    }
-
-    fn multi(&self) -> bool {
-        self.thread.asks.first().and_then(|a| a.questions().get(self.answers.len()).map(|q| q.3)).unwrap_or(false)
     }
 
     /// `> branch`: a copy of the thread, its view next.
@@ -494,6 +519,13 @@ impl View {
         if self.nav_on && self.nav_key(k) {
             return self.nav_switch || (k.code == KeyCode::Enter && !self.nav_on);
         }
+        // an open ask with the focus: its keys before the prompt's (text in the prompt or not)
+        if let Some(a) = self.thread.asks.first().cloned() {
+            let act = self.ask.key(&a, k);
+            if self.ask_act(act) {
+                return false;
+            }
+        }
         // dropdowns first: they own ↑↓, tab, enter, esc while open
         if self.mention.key(k, &mut self.input, &self.roster) {
             if let Some((new, Some(old))) = self.mention.picked.take() {
@@ -512,7 +544,6 @@ impl View {
             return false;
         }
         let empty = self.input.is_empty();
-        let asking = !self.thread.asks.is_empty();
         match k.code {
             _ if crate::config::menu_key().matches(&k) => {
                 self.open_menu();
@@ -520,6 +551,7 @@ impl View {
             }
             KeyCode::Esc => {
                 if self.last_esc.is_some_and(|t| t.elapsed() < DOUBLE_ESC) {
+                    self.esc_interrupt = None;
                     self.exit = Exit::Back;
                     return true;
                 }
@@ -527,8 +559,9 @@ impl View {
                 if self.sel.take().is_some() {
                 } else if self.back > 0 {
                     self.back = 0;
-                } else {
-                    self.interrupt();
+                } else if !self.thread.busy.is_empty() || self.queued.is_some() {
+                    // a 2nd Esc within DOUBLE_ESC means back: the interrupt waits for it
+                    self.esc_interrupt = Some(Instant::now());
                 }
                 return false;
             }
@@ -586,8 +619,9 @@ impl View {
                 self.submit();
                 return false;
             }
+            // ctrl+s: save only (the thread view keeps the prompt by itself), never send
             KeyCode::Char('s') if ctrl => {
-                self.submit();
+                self.toast("send: ctrl+enter (⌘enter, alt+enter) · the prompt stays as a draft");
                 return false;
             }
             KeyCode::PageUp => {
@@ -600,43 +634,6 @@ impl View {
             }
             KeyCode::Up | KeyCode::Down if k.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.scroll(if k.code == KeyCode::Up { 3 } else { -3 });
-                return false;
-            }
-            // an open ask: an empty prompt's ↑↓ / digits / space / enter answer it
-            KeyCode::Up if asking && empty => {
-                self.ask_at = self.ask_at.saturating_sub(1);
-                self.dirty = true;
-                return false;
-            }
-            KeyCode::Down if asking && empty => {
-                self.ask_at = (self.ask_at + 1).min(self.choices().saturating_sub(1));
-                self.dirty = true;
-                return false;
-            }
-            KeyCode::Char(' ') if asking && empty && self.multi() => {
-                if !self.picks.remove(&self.ask_at) {
-                    self.picks.insert(self.ask_at);
-                }
-                self.dirty = true;
-                return false;
-            }
-            KeyCode::Char(c @ '1'..='9') if asking && empty => {
-                let i = c as usize - '1' as usize;
-                if i < self.choices() {
-                    self.ask_at = i;
-                    if self.multi() {
-                        if !self.picks.remove(&i) {
-                            self.picks.insert(i);
-                        }
-                        self.dirty = true;
-                    } else {
-                        self.answer(Some(i));
-                    }
-                }
-                return false;
-            }
-            KeyCode::Enter if asking && empty => {
-                self.answer(None);
                 return false;
             }
             KeyCode::Up if self.input.on_first_row() && (empty || self.hist_at.is_some()) => {
@@ -910,14 +907,11 @@ impl View {
                         return;
                     }
                     Some(Hit::Choice(i)) => {
-                        self.ask_at = i;
-                        if self.multi() {
-                            if !self.picks.remove(&i) {
-                                self.picks.insert(i);
-                            }
-                            self.dirty = true;
-                        } else {
-                            self.answer(Some(i));
+                        if let Some(a) = self.thread.asks.first().cloned()
+                            && !self.ask.sent
+                        {
+                            let act = self.ask.click(&a, i);
+                            self.ask_act(act);
                         }
                         return;
                     }
@@ -966,6 +960,11 @@ impl View {
             }
             _ => {
                 if self.input_rect.contains(at) || self.input.area().contains(at) {
+                    // a click in the prompt: the keys go to it (tab: back to the ask)
+                    if matches!(m.kind, MouseEventKind::Down(_)) && self.ask.focus {
+                        self.ask.focus = false;
+                        self.dirty = true;
+                    }
                     self.input.mouse(m);
                     if let Some(n) = self.input.copied.take() {
                         self.toast(format!("copied {n} chars"));
@@ -1003,11 +1002,10 @@ impl View {
         let tick = self.tick();
         let a = self.roster.iter().find(|a| a.name == name);
         let color = self.colors.get(name).copied().unwrap_or(theme::pal().accent);
-        let sprite = a.map(crate::agents::sprite).unwrap_or_else(|| crate::sprites::default_for(name));
+        let (sprite, effort) = self.profiles.get(name).cloned().unwrap_or_else(|| (crate::sprites::default_for(name), String::new()));
         let model = self.thread.models.get(name).filter(|m| !m.is_empty()).map(|m| crate::agents::model_name(m)).or_else(|| a.map(crate::agents::model_of)).unwrap_or_default();
         let harness = a.map(|a| title_case(&a.harness)).unwrap_or_default();
         let tech = [harness, model].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
-        let effort = crate::engine::roster::get(name).and_then(|r| r.effort).or_else(|| a.filter(|a| a.harness == "claude").map(|_| crate::agents::effort_name())).filter(|e| e != "default").map(|e| effort_label(&e)).unwrap_or_default();
         let frame = WAVE[tick % WAVE.len()];
         let status = if self.thread.asks.iter().any(|q| q.agent == name) {
             vec![Span::styled("  ● ", Style::default().fg(theme::pal().warn)), Span::styled("waits on you", theme::muted())]
@@ -1106,10 +1104,23 @@ impl View {
 
         // stream
         if self.dirty || self.width != st.width {
+            // scrolled back: the top row stays where it is (new events, folds, a resize)
+            let h = usize::from(st.height);
+            let anchor = (self.back > 0).then(|| top_anchor(&self.drawn.starts, self.drawn.rows.len(), self.back, h)).flatten();
             self.width = st.width;
             let fold = stream::Fold { runs: &self.open, all_runs: self.all_runs, thoughts: self.thoughts, open_thoughts: &self.open_thoughts, all_thoughts: self.all_thoughts };
-            self.drawn = stream::draw(&self.thread, self.look, st.width, &self.colors, &self.harness_of, &fold, self.ask_at, &self.picks, &self.answers.iter().map(|a| a.0.clone()).collect::<Vec<_>>());
+            // live text: messages at the end for this draw only (the log brings the final ones)
+            let logged = self.thread.items.len();
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+            for (agent, text) in &self.live {
+                self.thread.items.push(stream::Item::Text { agent: agent.clone(), text: text.clone(), ts: now, thoughts: Vec::new(), key: 0 });
+            }
+            self.drawn = stream::draw(&self.thread, self.look, st.width, &self.colors, &self.harness_of, &fold, &self.ask);
+            self.thread.items.truncate(logged);
             self.dirty = false;
+            if let Some(a) = anchor {
+                self.back = back_for(&self.drawn.starts, self.drawn.rows.len(), a, h);
+            }
         }
         // sends the log does not show yet, a queued replace: below the stream
         let mut extra: Vec<Line<'static>> = Vec::new();
@@ -1117,7 +1128,15 @@ impl View {
         for (text, at, err) in &self.pending {
             extra.push(Line::raw(""));
             for l in text.lines().take(6) {
-                let l = if right { Line::styled(format!("{l} ▐"), theme::muted()).right_aligned() } else { Line::from(vec![Span::styled("▌ ", theme::muted()), Span::styled(l.to_string(), theme::muted())]) };
+                // `@name`: in the agent's color, as in the stream
+                let mut spans = crate::render::mention_spans(l, theme::muted(), &self.names);
+                let l = if right {
+                    spans.push(Span::styled(" ▐", theme::muted()));
+                    Line::from(spans).right_aligned()
+                } else {
+                    spans.insert(0, Span::styled("▌ ", theme::muted()));
+                    Line::from(spans)
+                };
                 extra.push(l);
             }
             let status = match err {
@@ -1278,7 +1297,9 @@ impl View {
         }
         self.input_rect = Rect { x: area.x + 2, y: in_top, width: in_w, height: n };
         let menu_open = self.menu.is_some();
-        self.input.render(f, self.input_rect, !menu_open);
+        // an open ask with the focus: 0 cursor in the prompt (its keys go to the ask)
+        let ask_keys = !self.thread.asks.is_empty() && self.ask.focus && !self.ask.sent;
+        self.input.render(f, self.input_rect, !menu_open && !ask_keys);
 
         // hint row: who gets the message, the send keys
         let mut to = vec![Span::styled("  → ", theme::muted())];
@@ -1318,6 +1339,23 @@ impl View {
 
 /// Header card: sprite, color, the lines right of the sprite, width.
 type Card = (crate::sprites::Sprite, Color, Vec<Vec<Span<'static>>>, u16);
+
+/// The top row of a stream of TOTAL rows, BACK rows scrolled back, H rows high, as (item, row in
+/// the item). STARTS: the 1st row of each item.
+fn top_anchor(starts: &[usize], total: usize, back: usize, h: usize) -> Option<(usize, usize)> {
+    let top = total.saturating_sub(back).saturating_sub(h);
+    let item = starts.partition_point(|&s| s <= top).checked_sub(1)?;
+    Some((item, top - starts[item]))
+}
+
+/// `back` that puts ANCHOR (item, row in the item) on the top row again: 0 at the bottom.
+fn back_for(starts: &[usize], total: usize, (item, off): (usize, usize), h: usize) -> usize {
+    let Some(&start) = starts.get(item) else { return 0 };
+    // a folded item: its last row
+    let next = starts.get(item + 1).copied().unwrap_or(total);
+    let top = (start + off).min(next.saturating_sub(1).max(start));
+    total.saturating_sub(top + h)
+}
 
 /// Agents box of CARDS: left border + 1 space, the cards, 2 spaces + right border (the last card's
 /// 4 gap columns hold 3 of those). 0 cards: 0.
@@ -1394,11 +1432,70 @@ fn open_url(url: &str) {
 }
 
 /// The view of thread ID until it ends. NOTE: a toast at the start (why the view opened).
+/// Ends the subscriber thread of a view when the view ends.
+struct Unsub(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for Unsub {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Lines of the host of thread ID (`live`, `delta`, `wake`) → TX. 0 host: a retry each second.
+/// Never starts a host.
+fn subscribe(id: &str, tx: Sender<Msg>) -> Unsub {
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::atomic::Ordering;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done = stop.clone();
+    let path = crate::engine::host::socket(id);
+    std::thread::spawn(move || {
+        while !done.load(Ordering::Relaxed) {
+            if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&path)
+                && s.set_read_timeout(Some(Duration::from_secs(1))).is_ok()
+                && writeln!(s, "{}", json!({"op": "subscribe"})).is_ok()
+            {
+                // events before the subscription: read them
+                if tx.send(Msg::Subscribed).is_err() {
+                    return;
+                }
+                let mut r = BufReader::new(s);
+                let mut line = String::new();
+                while !done.load(Ordering::Relaxed) {
+                    match r.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            let v: Value = serde_json::from_str(line.trim()).unwrap_or_default();
+                            line.clear();
+                            let m = match v["op"].as_str() {
+                                Some("wake") => Msg::Wake,
+                                Some("delta") => Msg::Delta(v["agent"].as_str().unwrap_or_default().into(), v["text"].as_str().unwrap_or_default().into()),
+                                Some("live") => Msg::Live(v["agent"].as_str().unwrap_or_default().into(), v["text"].as_str().unwrap_or_default().into()),
+                                _ => continue,
+                            };
+                            if tx.send(m).is_err() {
+                                return;
+                            }
+                        }
+                        // the read timeout: a check of `done`, the partial line stays in LINE
+                        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                        Err(_) => break,
+                    }
+                }
+                continue;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+    Unsub(stop)
+}
+
 pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str, note: Option<&str>, _first: &str) -> Result<Exit, String> {
     if store::load(id).is_none() {
         return Err(format!("no thread {id}"));
     }
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
+    let _sub = subscribe(id, tx.clone());
     let mut v = View::new(id, cwd, title, tx);
     if let Some(n) = note.filter(|n| !n.is_empty()) {
         v.toast(n.to_string());
@@ -1407,8 +1504,14 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     let mut roster_at = Instant::now();
     let mut drawn = Instant::now() - Duration::from_secs(1);
     let mut dirty = true;
+    // the tail: on a `wake` of the host; each second as a fallback (0 host, a lost line)
+    let mut wake = true;
+    let mut read_at = Instant::now();
     loop {
-        if dirty || drawn.elapsed() >= Duration::from_millis(150) {
+        // a frame on change; animations (wave, spinners, toast) at 150 ms; else 1 per second
+        // (clock, cost box, sending timer)
+        let every = if v.animating() { Duration::from_millis(150) } else { Duration::from_secs(1) };
+        if dirty || drawn.elapsed() >= every {
             term.draw(|f| v.draw(f)).map_err(|e| e.to_string())?;
             drawn = Instant::now();
             dirty = false;
@@ -1442,6 +1545,11 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
                         p.2 = Some(e.lines().next().unwrap_or_default().to_string());
                     }
                 }
+                // the answer failed: the picker takes keys again
+                Msg::Done("answer", Err(e)) => {
+                    v.ask.sent = false;
+                    v.toast(format!("answer: {e}"));
+                }
                 Msg::Done(what, Err(e)) => v.toast(format!("{what}: {e}")),
                 Msg::Done("join" | "leave" | "replace", Ok(_)) => {
                     let r = v.roster.clone();
@@ -1449,14 +1557,197 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
                 }
                 Msg::Done(..) => {}
                 Msg::Cost(s) => v.cost = Some(*s),
+                Msg::Wake => wake = true,
+                Msg::Subscribed => {
+                    v.live.clear();
+                    v.dirty = true;
+                    wake = true;
+                }
+                Msg::Live(agent, text) => {
+                    v.live.retain(|(a, _)| *a != agent);
+                    v.live.push((agent, text));
+                    v.dirty = true;
+                }
+                Msg::Delta(agent, text) => {
+                    match v.live.iter_mut().find(|(a, _)| *a == agent) {
+                        Some((_, t)) => t.push_str(&text),
+                        None => v.live.push((agent, text)),
+                    }
+                    v.dirty = true;
+                }
             }
         }
-        dirty |= v.read();
+        dirty |= v.tick_esc();
+        if wake || read_at.elapsed() >= Duration::from_secs(1) {
+            wake = false;
+            read_at = Instant::now();
+            dirty |= v.read();
+        }
         dirty |= v.monitors.tick(id);
         if roster_at.elapsed() > Duration::from_secs(5) {
             roster_at = Instant::now();
             v.set_roster(crate::agents::load());
             crate::nav::mark_seen(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrolled_back_keeps_the_top_row_on_new_rows_and_folds() {
+        // 3 items of 10 rows; 30 rows, 5 high, 12 back: top row 13 = item 1, row 3
+        let starts = [0, 10, 20];
+        let a = top_anchor(&starts, 30, 12, 5).unwrap();
+        assert_eq!(a, (1, 3));
+        // 8 new rows at the end: back grows by 8
+        assert_eq!(back_for(&starts, 38, a, 5), 20);
+        // item 0 opened (+6 rows): the anchor moves with item 1
+        assert_eq!(back_for(&[0, 16, 26], 36, a, 5), 12);
+        // item 1 folded to 2 rows: its last row on top
+        assert_eq!(back_for(&[0, 10, 12], 22, a, 5), 6);
+        // the anchor near the end: 0 = follow the bottom
+        assert_eq!(back_for(&starts, 30, (2, 9), 5), 0);
+        assert_eq!(top_anchor(&[], 0, 3, 5), None);
+    }
+}
+
+
+/// The open ask in the view: key routing (prompt text or not), drawing, clicks.
+#[cfg(test)]
+mod ask_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn view(multi: bool) -> View {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("asktest-0000", Path::new("/tmp"), "t", tx);
+        let input = json!({"questions": [{"question": "Which keys?", "header": "Keys", "multiSelect": multi, "options": [
+            {"label": "alpha", "description": "1st"}, {"label": "beta", "description": "2nd"}, {"label": "gamma", "description": "3rd"}]}]});
+        v.thread.push(&store::Event { ts: 1, agent: Some("ada".into()), kind: store::Kind::Ask { id: "q1".into(), tool: "AskUserQuestion".into(), input } });
+        v.ask.sync(v.thread.asks.first());
+        v
+    }
+
+    fn press(v: &mut View, codes: &[KeyCode]) {
+        for &c in codes {
+            v.key(KeyEvent::new(c, KeyModifiers::NONE));
+        }
+    }
+
+    fn screen(v: &mut View) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(90, 40)).unwrap();
+        term.draw(|f| v.draw(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height).map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect()
+    }
+
+    fn answers(v: &View) -> Vec<Value> {
+        v.ops.borrow().iter().filter(|o| o["op"] == "answer").cloned().collect()
+    }
+
+    #[test]
+    fn text_in_the_prompt_does_not_block_the_ask() {
+        let mut v = view(true);
+        v.input.set_text("a kept draft");
+        press(&mut v, &[KeyCode::Down, KeyCode::Char(' '), KeyCode::Down, KeyCode::Char(' '), KeyCode::Enter]);
+        let a = answers(&v);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0]["answers"]["Which keys?"], "beta, gamma");
+        // the draft: untouched
+        assert_eq!(v.input.text(), "a kept draft");
+        // sent: the next keys go to the prompt, 0 2nd answer
+        press(&mut v, &[KeyCode::Enter, KeyCode::Char('!')]);
+        assert_eq!(answers(&v).len(), 1);
+        assert!(v.input.text().ends_with('!'));
+    }
+
+    #[test]
+    fn tab_gives_the_keys_to_the_prompt_and_back() {
+        let mut v = view(true);
+        press(&mut v, &[KeyCode::Tab, KeyCode::Char('h'), KeyCode::Char('i'), KeyCode::Char(' ')]);
+        assert_eq!(v.input.text(), "hi ");
+        assert!(v.ask.rows(v.thread.asks.first().unwrap()).iter().all(|r| !r.picked));
+        // tab: back to the ask (prompt text or not); space picks there
+        press(&mut v, &[KeyCode::Tab, KeyCode::Char(' ')]);
+        assert!(v.ask.rows(v.thread.asks.first().unwrap())[0].picked);
+        assert_eq!(v.input.text(), "hi ");
+        assert!(!v.nav_on, "tab with an open ask: 0 thread header");
+    }
+
+    #[test]
+    fn the_ask_box_shows_boxes_cursor_other_and_hint() {
+        let mut v = view(true);
+        v.input.set_text("draft");
+        press(&mut v, &[KeyCode::Down, KeyCode::Char(' ')]);
+        let s = screen(&mut v).join("\n");
+        assert!(s.contains("[ ] 1. alpha"), "{s}");
+        assert!(s.contains("› [x] 2. beta"), "{s}");
+        assert!(s.contains("[ ] 4. Other: type an answer"), "{s}");
+        assert!(s.contains("space: pick · enter: answer · type: other · tab: prompt"), "{s}");
+        // letters: into Other, the cursor there
+        press(&mut v, &[KeyCode::Char('z'), KeyCode::Char('z')]);
+        let s = screen(&mut v).join("\n");
+        assert!(s.contains("› [x] 4. Other: zz▏"), "{s}");
+        // focus on the prompt: 0 cursor row, the hint says how back
+        press(&mut v, &[KeyCode::Tab]);
+        let s = screen(&mut v).join("\n");
+        assert!(!s.contains("› [x]") && s.contains("tab: back to the question"), "{s}");
+    }
+
+    #[test]
+    fn single_pick_answers_with_space_enter_digits_or_a_click() {
+        let mut v = view(false);
+        press(&mut v, &[KeyCode::Down, KeyCode::Down, KeyCode::Char(' ')]);
+        assert_eq!(answers(&v)[0]["answers"]["Which keys?"], "gamma");
+        let mut v = view(false);
+        press(&mut v, &[KeyCode::Char('2')]);
+        assert_eq!(answers(&v)[0]["answers"]["Which keys?"], "beta");
+        // a click on the row of "alpha"
+        let mut v = view(false);
+        let rows = screen(&mut v);
+        let y = rows.iter().position(|r| r.contains("1. alpha")).unwrap() as u16;
+        v.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 10, row: y, modifiers: KeyModifiers::NONE });
+        assert_eq!(answers(&v)[0]["answers"]["Which keys?"], "alpha");
+    }
+
+    #[test]
+    fn a_pending_send_colors_its_mentions() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("asktest-0002", Path::new("/tmp"), "t", tx);
+        v.names = vec![("ada".into(), Color::Rgb(200, 10, 10))];
+        v.pending.push(("@ada go on".into(), Instant::now(), None));
+        let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        term.draw(|f| v.draw(f)).unwrap();
+        let b = term.backend().buffer().clone();
+        let (x, y) = (0..20u16).find_map(|y| (0..60u16).find(|&x| b[(x, y)].symbol() == "@" && b[(x + 1, y)].symbol() == "a").map(|x| (x, y))).expect("0 @ada on screen");
+        assert!((x..x + 4).all(|x| b[(x, y)].fg == Color::Rgb(200, 10, 10)));
+        assert_ne!(b[(x + 5, y)].fg, Color::Rgb(200, 10, 10));
+    }
+
+    #[test]
+    fn ctrl_s_never_sends_ctrl_enter_does() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("asktest-0001", Path::new("/tmp"), "t", tx);
+        v.input.set_text("hello agents");
+        v.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(v.ops.borrow().is_empty());
+        assert_eq!(v.input.text(), "hello agents");
+        assert!(v.toast.as_ref().is_some_and(|(m, _)| m.contains("ctrl+enter")));
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(v.ops.borrow().iter().any(|o| o["op"] == "prompt" && o["text"].as_str().is_some_and(|t| t.contains("hello agents"))), "{:?}", v.ops.borrow());
+    }
+
+    #[test]
+    fn esc_and_the_menu_key_stay_the_views() {
+        let mut v = view(false);
+        press(&mut v, &[KeyCode::Esc]);
+        assert!(v.last_esc.is_some());
+        assert!(answers(&v).is_empty());
+        // ctrl+c on an empty prompt: the quit arm, 0 ask key
+        v.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(v.last_ctrl_c.is_some());
     }
 }
