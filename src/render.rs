@@ -584,7 +584,7 @@ pub fn code_rows(text: &str, lang: &str, width: usize, margin: &[Span<'static>],
             (None, Some(c)) => c.clone(),
             (None, None) => l.chars().map(|c| (theme::pal().text, c)).collect(),
         };
-        let segments = if wrap { wrap_code(&chars, room) } else { vec![0..cut_at(&chars, room)] };
+        let segments: Vec<std::ops::Range<usize>> = if wrap { wrap_code(&chars, room) } else { std::iter::once(0..cut_at(&chars, room)).collect() };
         for (k, seg) in segments.into_iter().enumerate() {
             let mut spans = margin.to_vec();
             spans.push(Span::styled(" ", bg));
