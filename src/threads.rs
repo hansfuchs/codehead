@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 
 use crate::theme;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Thread {
     pub id: String,
     pub title: String,
@@ -23,6 +23,70 @@ pub struct Thread {
     pub branch: Option<String>,
     /// project dir (path_hint) of a thread that works in place
     pub dir: Option<String>,
+    /// An agent works now.
+    #[serde(default)]
+    pub busy: bool,
+    /// Why the owner is needed: `question`, `error: …`, `setup failed`.
+    #[serde(default)]
+    pub needs: Option<String>,
+    /// Changes against the base: files, lines added, removed.
+    #[serde(default)]
+    pub stat: Option<(usize, usize, usize)>,
+    #[serde(default)]
+    pub agents: Vec<String>,
+    /// Last status per agent: (agent, state, note).
+    #[serde(default)]
+    pub notes: Vec<(String, String, String)>,
+    #[serde(default)]
+    pub task: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub setup: Option<String>,
+    #[serde(default)]
+    pub parent: Option<String>,
+}
+
+/// From the tail of thread ID's log: an open question, the last error (a turn that ended in
+/// one, after the last owner message), the last status per agent.
+fn activity(id: &str) -> (bool, Option<String>, Vec<(String, String, String)>) {
+    use crate::engine::store::Kind;
+    let mut open: Vec<(String, String)> = Vec::new();
+    let mut error: Option<String> = None;
+    let mut notes: Vec<(String, String, String)> = Vec::new();
+    for e in crate::engine::store::events(id).into_iter().rev().take(400).collect::<Vec<_>>().into_iter().rev() {
+        let a = e.agent.clone().unwrap_or_default();
+        match e.kind {
+            Kind::Ask { id, .. } => open.push((a, id)),
+            Kind::Answer { id, .. } => open.retain(|x| x.1 != id),
+            Kind::TurnEnd { error: err, .. } => {
+                open.retain(|x| x.0 != a);
+                error = err.filter(|m| m != crate::engine::host::INTERRUPTED && m != "session ended").map(|m| format!("{a}: {}", m.lines().next().unwrap_or_default()));
+            }
+            Kind::Error { message } => error = Some(format!("{a}: {}", message.lines().next().unwrap_or_default())),
+            Kind::Prompt { from, .. } if from == "owner" => error = None,
+            Kind::Status { state, note } => {
+                notes.retain(|x| x.0 != a);
+                notes.push((a, state, note));
+            }
+            _ => {}
+        }
+    }
+    (!open.is_empty(), error, notes)
+}
+
+/// Changes of DIR against its merge-base with origin/<default> (else HEAD), untracked files
+/// counted as files: (files, added, removed). None: 0 git.
+fn shortstat(dir: &Path) -> Option<(usize, usize, usize)> {
+    if !git(dir, &["rev-parse", "--is-inside-work-tree"]).0 {
+        return None;
+    }
+    let def = ["origin/HEAD", "origin/main", "origin/master"].into_iter().find(|r| git(dir, &["rev-parse", "--verify", "--quiet", r]).0);
+    let base = def.and_then(|d| Some(git(dir, &["merge-base", "HEAD", d]).1.trim().to_string()).filter(|s| !s.is_empty())).unwrap_or_else(|| "HEAD".into());
+    let s = git(dir, &["diff", "--shortstat", &base]).1;
+    let num = |key: &str| s.split(',').find(|p| p.contains(key)).and_then(|p| p.split_whitespace().next()).and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+    let untracked = git(dir, &["ls-files", "--others", "--exclude-standard"]).1.lines().count();
+    Some((num("file") + untracked, num("insertion"), num("deletion")))
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -129,15 +193,35 @@ pub fn checkouts(repo: &Path) -> std::collections::HashMap<String, String> {
 pub fn all_threads() -> Vec<Thread> {
     crate::engine::store::all()
         .into_iter()
-        .map(|t| Thread {
-            live: if crate::engine::client::alive(&t.id) { crate::engine::client::state(&t.id).0.len() } else { 0 },
-            updated: t.updated / 1000,
-            worktree: t.worktree.clone(),
-            branch: t.branch.clone(),
-            dir: Some(t.dir.clone()),
-            title: t.title,
-            state: t.state,
-            id: t.id,
+        .map(|t| {
+            let (live, busy) = if crate::engine::client::alive(&t.id) { crate::engine::client::state(&t.id) } else { (Vec::new(), Vec::new()) };
+            let (ask, error, notes) = activity(&t.id);
+            let needs = if ask {
+                Some("question".to_string())
+            } else if t.setup.as_deref() == Some("failed") {
+                Some("setup failed".to_string())
+            } else {
+                error.map(|e| format!("error: {e}"))
+            };
+            Thread {
+                live: live.len(),
+                busy: !busy.is_empty(),
+                needs,
+                stat: shortstat(&t.work_dir()),
+                agents: t.agents.clone(),
+                notes,
+                task: t.task.clone(),
+                port: t.port,
+                setup: t.setup.clone(),
+                parent: t.parent.clone(),
+                updated: t.updated / 1000,
+                worktree: t.worktree.clone(),
+                branch: t.branch.clone(),
+                dir: Some(t.dir.clone()),
+                title: t.title,
+                state: t.state,
+                id: t.id,
+            }
         })
         .collect()
 }
@@ -221,6 +305,41 @@ pub fn preview_header(w: &Worktree) -> Vec<Line<'static>> {
             ]));
             for l in t.title.lines() {
                 out.push(Line::raw(l.to_string()));
+            }
+            if let Some(n) = &t.needs {
+                out.push(Line::styled(format!("needs you: {n}"), Style::default().fg(theme::pal().warn)));
+            }
+            // agents: the last status each reported
+            if !t.agents.is_empty() {
+                out.push(Line::raw(""));
+                for a in &t.agents {
+                    let note = t.notes.iter().find(|x| x.0 == *a).map(|x| if x.2.is_empty() { x.1.clone() } else { format!("{} · {}", x.1, x.2) }).unwrap_or_default();
+                    out.push(Line::from(vec![Span::styled(format!("{a:<10}"), theme::bold()), Span::styled(note, theme::muted())]));
+                }
+            }
+            let mut facts: Vec<String> = Vec::new();
+            if let Some((files, add, del)) = t.stat.filter(|s| s.0 > 0) {
+                facts.push(format!("changes {files} files +{add} −{del}"));
+            }
+            if let Some(p) = t.port {
+                facts.push(format!("ports {p}-{}", p + crate::setup::PORTS - 1));
+            }
+            if let Some(s) = &t.setup {
+                facts.push(format!("setup {s}"));
+            }
+            if let Some(p) = &t.parent {
+                facts.push(format!("continues {}", p.chars().take(12).collect::<String>()));
+            }
+            if !facts.is_empty() {
+                out.push(Line::raw(""));
+                out.push(Line::styled(facts.join(" · "), theme::muted()));
+            }
+            // the task: its 1st lines
+            let task: Vec<&str> = t.task.lines().filter(|l| !l.trim().is_empty()).take(5).collect();
+            if !task.is_empty() {
+                out.push(Line::raw(""));
+                out.push(Line::styled("task", theme::muted()));
+                out.extend(task.iter().map(|l| Line::raw(l.chars().take(200).collect::<String>())));
             }
         }
         None => out.push(Line::styled("thread: none", theme::muted())),

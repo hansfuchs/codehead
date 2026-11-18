@@ -73,7 +73,7 @@ pub enum Outcome {
     Copy(Vec<PathBuf>),
     /// AGENTS: first starts the thread, the others join it.
     New { message: String, target: Target, agents: Vec<String> },
-    Resume(Worktree),
+    Resume(Box<Worktree>),
 }
 
 /// $EDITOR on: a note, the compose prompt, the sprite of the open agent form.
@@ -603,6 +603,8 @@ fn worktree_of(c: &crate::nav::Card) -> Worktree {
         worktree: None,
         branch: (!c.branch.is_empty()).then(|| c.branch.clone()),
         dir: Some(path.clone()),
+        busy: c.busy,
+        ..Default::default()
     };
     Worktree { path, branch: if c.branch.is_empty() { "in place".into() } else { c.branch.clone() }, thread: Some(thread), unpushed: 0, when: String::new(), linked: !c.branch.is_empty() }
 }
@@ -933,13 +935,7 @@ impl App {
                 format!("{} {}", c.title, c.place())
             }
         };
-        let section = |i: usize| -> u8 {
-            match wts.get(i) {
-                Some(w) if w.thread.is_some() => 0,
-                Some(_) => 1,
-                None => 2,
-            }
-        };
+        let section = |i: usize| self.tsection(i);
         let mut v: Vec<(u8, i64, usize)> = (0..nw + self.sessions.len())
             .filter_map(|i| if q.is_empty() { Some((section(i), 0, i)) } else { fuzzy(&q, &name(i)).map(|sc| (section(i), -sc, i)) })
             .collect();
@@ -948,15 +944,24 @@ impl App {
     }
 
     /// Rows of the threads list: a label above each non-empty section, then its items (positions in tvisible).
-    fn trows(&self, vis: &[usize]) -> Vec<TRow> {
+    /// Section of threads tab item I: 0 needs you, 1 working, 2 ready (changes or unpushed
+    /// commits), 3 settled threads, 4 worktrees without thread, 5 Claude Code sessions.
+    fn tsection(&self, i: usize) -> u8 {
         let wts = self.worktrees.as_deref().unwrap_or(&[]);
-        let sec = |i: usize| -> u8 {
-            match wts.get(i) {
-                Some(w) if w.thread.is_some() => 0,
-                Some(_) => 1,
-                None => 2,
-            }
-        };
+        match wts.get(i) {
+            Some(w) => match &w.thread {
+                Some(t) if t.needs.is_some() => 0,
+                Some(t) if t.busy => 1,
+                Some(t) if t.stat.is_some_and(|s| s.0 > 0) || w.unpushed > 0 => 2,
+                Some(_) => 3,
+                None => 4,
+            },
+            None => 5,
+        }
+    }
+
+    fn trows(&self, vis: &[usize]) -> Vec<TRow> {
+        let sec = |i: usize| self.tsection(i);
         let mut rows = Vec::new();
         let mut last = None;
         for (pos, &i) in vis.iter().enumerate() {
@@ -965,8 +970,11 @@ impl App {
                 if last.is_some() { rows.push(TRow::Gap); }
                 let n = vis.iter().filter(|&&j| sec(j) == s).count();
                 rows.push(TRow::Label(match s {
-                    0 => format!("threads · {n}"),
-                    1 => format!("worktrees without thread · {n}"),
+                    0 => format!("needs you · {n}"),
+                    1 => format!("working · {n}"),
+                    2 => format!("ready: changes or unpushed commits · {n}"),
+                    3 => format!("threads · {n}"),
+                    4 => format!("worktrees without thread · {n}"),
                     _ => format!("claude code sessions · {n} · enter: new thread, last response as context"),
                 }));
                 last = Some(s);
@@ -1182,7 +1190,7 @@ impl App {
         }
         let Some(w) = self.current_wt().cloned() else { return };
         if w.thread.is_some() {
-            self.outcome = Some(Outcome::Resume(w));
+            self.outcome = Some(Outcome::Resume(Box::new(w)));
         } else {
             self.target = Some(Target::Worktree { path: w.path, branch: w.branch });
             self.open_compose();
@@ -1720,7 +1728,7 @@ impl App {
             Action::None => return,
             Action::Close | Action::Remove(_) | Action::Add(_) => {}
             Action::Home(h) => self.go_home(h),
-            Action::Open(c) => self.outcome = Some(Outcome::Resume(worktree_of(&c))),
+            Action::Open(c) => self.outcome = Some(Outcome::Resume(Box::new(worktree_of(&c)))),
             Action::Command(KEYS_ITEM) => {
                 let kw = self.menu_help.iter().map(|(k, _)| k.width()).max().unwrap_or(0);
                 let lines = self.menu_help.iter().map(|(k, l)| Line::from(vec![Span::styled(format!("{k:<kw$}  "), theme::accent()), Span::styled(*l, theme::muted())])).collect();
@@ -3339,8 +3347,22 @@ impl App {
                 ];
                 match &w.thread {
                     Some(t) => {
+                        // state: ? / ✗ needs you, the wave while an agent works
+                        let tick = (crate::engine::now_ms() as u128 / crate::nav::WAVE_MS) as usize;
+                        let glyph = match (&t.needs, t.busy) {
+                            (Some(n), _) if n == "question" => Span::styled("? ", fg(Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD))),
+                            (Some(_), _) => Span::styled("✗ ", fg(Style::default().fg(theme::pal().danger).add_modifier(Modifier::BOLD))),
+                            (None, true) => Span::styled(format!("{} ", crate::nav::WAVE[tick % crate::nav::WAVE.len()]), fg(theme::accent())),
+                            _ => Span::raw(""),
+                        };
+                        spans.push(glyph);
                         spans.push(Span::styled(t.title.lines().next().unwrap_or_default().chars().take(60).collect::<String>(), fg(theme::bold())));
                         spans.push(Span::styled(format!("  {}", w.label()), muted));
+                        if let Some((files, add, del)) = t.stat.filter(|s| s.0 > 0) {
+                            spans.push(Span::styled(format!("  +{add}"), fg(Style::default().fg(theme::pal().ok))));
+                            spans.push(Span::styled(format!(" −{del}"), fg(Style::default().fg(theme::pal().danger))));
+                            spans.push(Span::styled(format!(" {files}f"), muted));
+                        }
                         if t.live > 0 {
                             spans.push(Span::styled(" live", fg(theme::accent_bold())));
                         }
@@ -4838,6 +4860,29 @@ mod render_tests {
     }
 
     #[test]
+    fn threads_group_by_what_they_need_and_show_state_and_changes() {
+        let mut a = app();
+        let w = |id: &str, f: &dyn Fn(&mut threads::Thread)| {
+            let mut t = threads::Thread { id: id.into(), title: format!("thread {id}"), state: "open".into(), ..Default::default() };
+            f(&mut t);
+            Worktree { path: format!("/p/{id}"), branch: "b".into(), linked: true, unpushed: 0, when: "1m".into(), thread: Some(t) }
+        };
+        a.worktrees = Some(vec![
+            w("settled", &|_| {}),
+            w("asking", &|t| t.needs = Some("question".into())),
+            w("working", &|t| t.busy = true),
+            w("ready", &|t| t.stat = Some((3, 40, 2))),
+        ]);
+        a.sessions = vec![];
+        a.switch_tab(Tab::Threads);
+        let labels: Vec<String> = a.trows(&a.tvisible()).into_iter().filter_map(|r| if let TRow::Label(l) = r { Some(l) } else { None }).collect();
+        assert_eq!(labels, ["needs you · 1", "working · 1", "ready: changes or unpushed commits · 1", "threads · 1"]);
+        let s = dump(&mut a, 120, 20);
+        assert!(s.contains("? thread asking"), "{s}");
+        assert!(s.contains("thread ready  b  +40 −2 3f"), "{s}");
+    }
+
+    #[test]
     fn thread_sections_have_gaps_and_preview_uses_title() {
         let mut a = app();
         let w = Worktree {
@@ -4845,7 +4890,7 @@ mod render_tests {
             unpushed: 0, when: "1m".into(),
             thread: Some(threads::Thread {
                 id: "a1".into(), title: "fix latency".into(), state: "open".into(),
-                live: 1, updated: 0, worktree: None, branch: None, dir: Some("/project".into()),
+                live: 1, updated: 0, worktree: None, branch: None, dir: Some("/project".into()), ..Default::default()
             }),
         };
         a.tpreview.insert(w.key(), threads::preview_header(&w));
