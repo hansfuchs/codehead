@@ -22,6 +22,8 @@ pub struct File {
     /// What an agent learns of edits in its worktree since its last turn, not its own: `off`,
     /// `files` or `diff` (default).
     pub edits: Option<String>,
+    /// Changes view order: `claude:<model>` (default `claude:haiku`) ranks the files, `off`: path rules.
+    pub rank: Option<String>,
     /// `[keys] menu`: the menu key (F2).
     pub menu_key: Option<String>,
     /// `[keys] command`: the char that opens the command dropdown (`>`).
@@ -121,6 +123,10 @@ fn parse(text: &str) -> Result<File, String> {
                 validate("edits".into(), &s)?;
                 f.edits = Some(s);
             }
+            "rank" => {
+                validate("rank".into(), &s)?;
+                f.rank = Some(s);
+            }
             _ => return Err(format!("unknown key {k}")),
         }
     }
@@ -156,6 +162,7 @@ pub fn validate(key: String, v: &str) -> Result<(), String> {
         "messages" if crate::stream::Look::parse(v).is_none() => Err(format!("messages: bubbles or lines, not {v}")),
         "thoughts" if crate::stream::Thoughts::parse(v).is_none() => Err(format!("thoughts: hidden, folded or open, not {v}")),
         "edits" if crate::engine::edits::Mode::parse(v).is_none() => Err(format!("edits: off, files or diff, not {v}")),
+        "rank" if v != "off" && !v.strip_prefix("claude:").is_some_and(|m| !m.is_empty()) => Err(format!("rank: off or claude:<model>, not {v}")),
         "keys.menu" => Bind::parse(v).map(|_| ()).ok_or_else(|| format!("keys.menu: F1-F12, ctrl+<letter> or alt+<letter>, not {v}")),
         "keys.command" => command_char(v).map(|_| ()).ok_or_else(|| format!("keys.command: 1 symbol (not a letter, digit, space or @), not {v}")),
         "colors.scheme" if crate::theme::Palette::preset(v).is_none() => {
@@ -256,6 +263,7 @@ fn document(base: &str, file: &File) -> Result<String, String> {
         ("messages", &file.messages),
         ("thoughts", &file.thoughts),
         ("edits", &file.edits),
+        ("rank", &file.rank),
     ] {
         if let Some(value) = value {
             if doc.get(key).and_then(|v| v.as_str()) != Some(value) {
@@ -382,6 +390,7 @@ impl File {
             "messages" => self.messages.clone(),
             "thoughts" => self.thoughts.clone(),
             "edits" => self.edits.clone(),
+            "rank" => self.rank.clone(),
             "keys.menu" => self.menu_key.clone(),
             "keys.command" => self.command_key.clone(),
             "colors.scheme" => self.scheme.clone(),
@@ -400,6 +409,7 @@ impl File {
             "messages" => self.messages = v,
             "thoughts" => self.thoughts = v,
             "edits" => self.edits = v,
+            "rank" => self.rank = v,
             "keys.menu" => self.menu_key = v,
             "keys.command" => self.command_key = v,
             "colors.scheme" => self.scheme = v,
@@ -498,6 +508,7 @@ pub fn defaults() -> File {
         messages: Some("bubbles".into()),
         thoughts: Some("hidden".into()),
         edits: Some("diff".into()),
+        rank: Some("claude:haiku".into()),
         menu_key: Some("F2".into()),
         command_key: Some(">".into()),
         scheme: Some(crate::theme::PRESETS[0].0.into()),
@@ -566,6 +577,13 @@ pub fn edits() -> crate::engine::edits::Mode {
         .or_else(|| get().edits.clone())
         .and_then(|m| crate::engine::edits::Mode::parse(&m))
         .unwrap_or_default()
+}
+
+/// The model that ranks the changes view: $CODEHEAD_RANK, else `rank`, else claude:haiku.
+/// None: `off` (path rules only).
+pub fn rank_model() -> Option<String> {
+    let v = env("CODEHEAD_RANK").or_else(|| get().rank.clone()).unwrap_or_else(|| "claude:haiku".into());
+    v.strip_prefix("claude:").filter(|m| !m.is_empty()).map(str::to_string)
 }
 
 /// How the thread view draws messages: $CODEHEAD_MESSAGES, else `messages`, else bubbles.

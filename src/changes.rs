@@ -610,6 +610,12 @@ pub struct View {
     area: Rect,
     /// After a re-read: the file the cursor was on.
     pending_cursor: Option<String>,
+    /// The model's order (groups, whys) of the current set of paths; a call on its way; why 0.
+    rank: Option<crate::rank::Rank>,
+    ranking: Option<Receiver<Result<crate::rank::Rank, String>>>,
+    rank_error: Option<String>,
+    /// The rank model (setting `rank`), None: path rules.
+    rank_model: Option<String>,
 }
 
 impl View {
@@ -630,7 +636,80 @@ impl View {
             error: None,
             area: Rect::default(),
             pending_cursor: None,
+            rank: crate::rank::cached(id),
+            ranking: None,
+            rank_error: None,
+            rank_model: if cfg!(test) { None } else { crate::config::rank_model() },
         }
+    }
+
+    /// The files in the model's order (its groups first, the rest after in path-rule order);
+    /// a rank of another set of paths: a new call.
+    fn apply_rank(&mut self, force: bool) {
+        let key = crate::rank::key(&self.changes.files);
+        let fresh = self.rank.as_ref().is_some_and(|r| r.key == key);
+        if (force || !fresh) && self.ranking.is_none() && !self.changes.files.is_empty()
+            && let Some(model) = self.rank_model.clone()
+        {
+            let (tx, rx) = mpsc::channel();
+            let (id, dir, files) = (self.id.clone(), self.dir.clone(), self.changes.files.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::rank::run(&id, &dir, &files, &model));
+            });
+            self.ranking = Some(rx);
+            self.rank_error = None;
+        }
+        let Some(r) = self.rank.as_ref().filter(|r| r.key == key) else { return };
+        let pos: HashMap<&str, (usize, usize)> = r.groups.iter().enumerate().flat_map(|(g, gr)| gr.files.iter().enumerate().map(move |(k, f)| (f.path.as_str(), (g, k)))).collect();
+        let pos: HashMap<String, (usize, usize)> = pos.into_iter().map(|(p, v)| (p.to_string(), v)).collect();
+        // a stable sort: unranked files keep the path-rule order, after the groups
+        self.changes.files.sort_by_key(|f| pos.get(&f.path).copied().unwrap_or((usize::MAX, 0)));
+        self.built = None;
+    }
+
+    /// The model's group of PATH and the why of PATH, if the rank is current.
+    fn ranked(&self, path: &str) -> Option<(usize, &crate::rank::Group, &str)> {
+        let key = crate::rank::key(&self.changes.files);
+        let r = self.rank.as_ref().filter(|r| r.key == key)?;
+        r.groups.iter().enumerate().find_map(|(g, gr)| gr.files.iter().find(|f| f.path == path).map(|f| (g, gr, f.why.as_str())))
+    }
+
+    /// A finished rank call applies. True: the order changed.
+    fn poll_rank(&mut self) -> bool {
+        let Some(rx) = &self.ranking else { return false };
+        let Ok(r) = rx.try_recv() else { return false };
+        self.ranking = None;
+        match r {
+            Ok(r) => {
+                let cur = self.rows.get(self.at).and_then(|r| self.changes.files.get(r.file)).map(|f| f.path.clone());
+                self.rank = Some(r);
+                self.apply_rank(false);
+                self.pending_cursor = cur;
+            }
+            Err(e) => self.rank_error = Some(e),
+        }
+        true
+    }
+
+    /// The row above the boxes: files, lines, base, the order's source.
+    fn summary(&self) -> Line<'static> {
+        let (add, del) = self.changes.files.iter().fold((0, 0), |(a, d), f| (a + f.add, d + f.del));
+        let (done, all) = self.progress();
+        let order = if self.ranking.is_some() {
+            "ranking…".to_string()
+        } else if let Some(e) = &self.rank_error {
+            format!("path order · {e}")
+        } else if let Some(r) = self.rank.as_ref().filter(|r| r.key == crate::rank::key(&self.changes.files)) {
+            format!("order: {}", r.model)
+        } else {
+            "path order".to_string()
+        };
+        Line::from(vec![
+            Span::styled(format!(" {all} files · "), theme::muted()),
+            Span::styled(format!("+{add}"), Style::default().fg(theme::pal().ok)),
+            Span::styled(format!(" −{del}"), Style::default().fg(theme::pal().danger)),
+            Span::styled(format!(" · {done}/{all} reviewed · against {} · {order}", self.changes.base), theme::muted()),
+        ])
     }
 
     /// Read git in the background (NOW: even if the last read is fresh).
@@ -663,6 +742,7 @@ impl View {
                 self.changes = c;
                 self.error = None;
                 self.built = None;
+                self.apply_rank(false);
                 self.pending_cursor = cur;
                 true
             }
@@ -698,11 +778,29 @@ impl View {
             return;
         }
         let w = usize::from(width);
-        let mut rows: Vec<Row> = Vec::new();
+        let mut rows: Vec<Row> = vec![Row { line: self.summary(), file: 0, at: None, head: false, hunk: false }];
+        // group heads: the model's groups (title, why), else the path-rule categories
+        let mut last: Option<(Option<usize>, Cat)> = None;
         for (i, f) in self.changes.files.iter().enumerate() {
-            if i > 0 && self.changes.files[i - 1].cat != f.cat {
-                rows.push(Row { line: Line::styled(format!(" {}", f.cat.label()), theme::muted().add_modifier(Modifier::BOLD)), file: i, at: None, head: false, hunk: false });
+            let g = self.ranked(&f.path);
+            let here = (g.map(|x| x.0), f.cat);
+            let new_group = match (last, g) {
+                (None, _) => true,
+                (Some((pg, _)), Some((gi, _, _))) => pg != Some(gi),
+                (Some((pg, pc)), None) => pg.is_some() || pc != f.cat,
+            };
+            if new_group {
+                let line = match g {
+                    Some((gi, gr, _)) => Line::from(vec![
+                        Span::styled(format!(" {} · {}", gi + 1, gr.title), theme::accent_bold()),
+                        Span::styled(crate::nav::fit(&format!("  {}", gr.why), w.saturating_sub(gr.title.width() + 8)), theme::muted()),
+                    ]),
+                    None => Line::styled(format!(" {}", f.cat.label()), theme::muted().add_modifier(Modifier::BOLD)),
+                };
+                rows.push(Row { line: Line::raw(""), file: i, at: None, head: false, hunk: false });
+                rows.push(Row { line, file: i, at: None, head: false, hunk: false });
             }
+            last = Some(here);
             self.file_rows(&mut rows, i, f, w, side);
         }
         self.rows = rows;
@@ -714,6 +812,10 @@ impl View {
             self.at = r;
         }
         self.at = self.at.min(self.rows.len().saturating_sub(1));
+        // the summary or a group head under the cursor: the 1st box
+        if !self.rows.get(self.at).is_some_and(|r| r.head || r.at.is_some()) && let Some(h) = self.rows.iter().position(|r| r.head) {
+            self.at = h;
+        }
     }
 
     fn file_rows(&self, rows: &mut Vec<Row>, i: usize, f: &FileDiff, w: usize, side: bool) {
@@ -757,6 +859,11 @@ impl View {
             v.push(Span::styled(" │", border));
             Line::from(v)
         };
+        // the model's why of the file: the box's 1st row
+        if let Some((_, _, why)) = self.ranked(&f.path).filter(|x| !x.2.is_empty()) {
+            let st = theme::muted().add_modifier(Modifier::ITALIC);
+            rows.push(Row { line: bar(vec![Span::styled(crate::nav::fit(why, inner), st)]), file: i, at: Some(first), head: false, hunk: false });
+        }
         if f.binary || f.hunks.is_empty() {
             let note = if f.binary { "binary file" } else { "0 line changes (mode or rename)" };
             rows.push(Row { line: bar(vec![Span::styled(note.to_string(), theme::muted())]), file: i, at: Some(first), head: false, hunk: false });
@@ -826,6 +933,9 @@ impl View {
 
     pub fn draw(&mut self, f: &mut Frame, area: Rect) {
         self.area = area;
+        if self.poll_rank() {
+            self.built = None;
+        }
         if self.poll() {
             self.built = None;
         }
@@ -903,6 +1013,14 @@ impl View {
                 self.side = Some(!now);
                 self.rebuild_on_file();
                 return Act::Toast(if now { "unified".into() } else { "side by side".into() });
+            }
+            KeyCode::Char('R') => {
+                if self.rank_model.is_none() {
+                    return Act::Toast("rank: off (setting rank)".into());
+                }
+                self.apply_rank(true);
+                self.built = None;
+                return Act::Toast("ranking again…".into());
             }
             KeyCode::Char('r') => {
                 self.refresh(true);
@@ -1050,11 +1168,12 @@ Binary files a/img.png and b/img.png differ
         let mut v = view(parse(DIFF));
         v.build(120);
         let t = text(&v);
-        assert!(t[0].starts_with("╭─ ☐ src/a.rs") && t[0].ends_with("logic · +2 −1 ─╮"), "{t:#?}");
+        let h = t.iter().position(|l| l.starts_with("╭─ ☐ src/a.rs")).unwrap();
+        assert!(t[h].ends_with("logic · +2 −1 ─╮") && t[0].contains("4 files"), "{t:#?}");
         assert!(t.iter().any(|l| l.contains("⋯ fn run() {")), "{t:#?}");
         assert!(t.iter().any(|l| l.contains(" 11     - let b = 2;")), "{t:#?}");
         assert!(t.iter().any(|l| l.contains("     11 + let b = 3;")), "{t:#?}");
-        assert!(t.iter().filter(|l| !l.starts_with(' ')).all(|l| l.width() == 120), "every box row 120 wide: {t:#?}");
+        assert!(t.iter().filter(|l| l.starts_with(['╭', '│', '╰'])).all(|l| l.width() == 120), "every box row 120 wide: {t:#?}");
         // binary: folded
         assert!(!t.iter().any(|l| l.contains("binary file")));
         v.build(SIDE_MIN);
@@ -1065,6 +1184,35 @@ Binary files a/img.png and b/img.png differ
         // a new file stays unified: 0 empty left half
         let new = t.iter().find(|l| l.contains("fn t() {}")).unwrap();
         assert!(!new.contains(" │ "), "{new}");
+    }
+
+    #[test]
+    fn a_rank_orders_groups_and_shows_whys() {
+        use crate::rank::{Group, RFile, Rank};
+        let mut v = view(parse(DIFF));
+        let key = crate::rank::key(&v.changes.files);
+        let f = |p: &str, w: &str| RFile { path: p.into(), why: w.into() };
+        v.rank = Some(Rank { key, model: "haiku".into(), groups: vec![
+            Group { title: "Test first".into(), why: "the test drives it".into(), files: vec![f("tests/a_test.rs", "adds the test")] },
+            Group { title: "Core".into(), why: "b becomes 3".into(), files: vec![f("src/a.rs", "changes b"), f("new.rs", "")] },
+        ] });
+        v.apply_rank(false);
+        let paths: Vec<&str> = v.changes.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["tests/a_test.rs", "src/a.rs", "new.rs", "img.png"], "unranked files after the groups");
+        v.build(100);
+        let t = text(&v);
+        assert!(t[0].ends_with("order: haiku"), "{t:#?}");
+        let g1 = t.iter().position(|l| l.starts_with(" 1 · Test first  the test drives it")).unwrap();
+        assert!(t[g1 + 1].contains("☐ tests/a_test.rs") && t[g1 + 2].contains("adds the test"), "{t:#?}");
+        assert!(t.iter().any(|l| l.starts_with(" 2 · Core")), "{t:#?}");
+        // img.png: unranked, under its category
+        let img = t.iter().position(|l| l.contains("img.png")).unwrap();
+        assert_eq!(t[img - 1], " logic", "{t:#?}");
+        // a new set of paths: the rank no longer applies
+        v.changes.files.pop();
+        v.built = None;
+        v.build(100);
+        assert!(text(&v)[0].ends_with("path order"));
     }
 
     #[test]
@@ -1101,11 +1249,12 @@ Binary files a/img.png and b/img.png differ
     fn space_marks_reviewed_folds_and_a_changed_diff_shows_updated() {
         let mut v = view(parse(DIFF));
         v.build(100);
-        v.at = 0;
+        v.at = v.rows.iter().position(|r| r.head).unwrap();
         v.toggle_reviewed();
         assert_eq!(v.progress(), (1, 4));
         let t = text(&v);
-        assert!(t[0].contains("☑ src/a.rs") && t[1].starts_with('╰'), "folded: {t:#?}");
+        let h = t.iter().position(|l| l.contains("☑ src/a.rs")).unwrap();
+        assert!(t[h + 1].starts_with('╰'), "folded: {t:#?}");
         // the cursor went to the next box
         assert!(v.rows[v.at].head && v.rows[v.at].file == 1);
         // the file changes: the mark goes, `updated` shows
@@ -1129,7 +1278,7 @@ Binary files a/img.png and b/img.png differ
         v.at = i;
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)), Act::Open("src/a.rs".into(), 12));
         // j / k: box headers
-        v.at = 0;
+        v.at = v.rows.iter().position(|r| r.head).unwrap();
         v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert!(v.rows[v.at].head && v.rows[v.at].file == 1);
     }

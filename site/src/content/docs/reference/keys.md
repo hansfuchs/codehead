@@ -55,6 +55,8 @@ description: Every key, per screen.
 
 ## Changes view
 
+The `rank` model (default `claude:haiku`) groups the files that do 1 thing, in reading order, with a title + why per group and a why per file; without it (or while it runs): path rules.
+
 The branch's changes against its base (merge-base with `origin/<default>`; on the default
 branch: uncommitted only), 1 box per file, in review order: schema / API, logic, config, UI,
 docs, tests, generated (folded). Side by side from 170 columns. A reviewed box folds; if its
@@ -70,4 +72,5 @@ diff changes later, it shows `updated`.
 | `o` | VS Code at the line under the cursor (the window that has the worktree open) |
 | `s` | side by side / unified |
 | `r` | read git again (it also does every 4 s) |
+| `R` | rank again (setting `rank`) |
 | `i` | the prompt gets the keys; `esc` gives them back |

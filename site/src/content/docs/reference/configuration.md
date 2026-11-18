@@ -18,6 +18,7 @@ models = "fable,opus,sonnet,haiku"    # $CODEHEAD_MODELS
 messages = "bubbles"                  # $CODEHEAD_MESSAGES
 thoughts = "hidden"                   # $CODEHEAD_THOUGHTS
 edits = "diff"                       # $CODEHEAD_EDITS
+rank = "claude:haiku"                # $CODEHEAD_RANK
 
 [keys]
 menu    = "F2"                        # $CODEHEAD_MENU_KEY
@@ -42,6 +43,7 @@ accent = "#FF7565"                    # overrides 1 color of the scheme
 | `messages` | `bubbles` | Thread view messages: `bubbles` (boxes, your messages on the right) or `lines` (name badge, a bar in the agent's color) |
 | `thoughts` | `hidden` | Agent thoughts in the thread view: `hidden`, `folded` (a click opens them) or `open` |
 | `edits` | `diff` | What an agent gets told, before its next turn, of edits in its worktree it did not make: `off`, `files` (files and line ranges) or `diff` (also your diff, max. 150 lines) |
+| `rank` | `claude:haiku` | Changes view order: `claude:<model>` groups the changed files (1 call per set of paths, about 1 cent with haiku; cached in `threads/<id>/rank.json`), `off`: path rules only |
 | `[keys] menu` | `F2` | the menu key: `F1`-`F12`, `ctrl+<letter>`, `alt+<letter>` |
 | `[keys] command` | `>` | the char that opens the command dropdown in a prompt: 1 symbol |
 | `[colors] scheme` | `coral` | color preset: `coral` (cool grays, coral accent) or `amber` (warm paper, amber accent) |
