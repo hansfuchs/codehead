@@ -590,6 +590,29 @@ impl View {
 
     /// `> handoff`: the review model writes the handoff document (on a thread); its end opens
     /// the new thread with the document as its prompt draft.
+    /// `>reload`: the idle sessions of the thread's agents end; each agent's next message starts
+    /// a new harness process (resumed: the conversation stays) with the MCP servers and settings
+    /// of now. A busy agent: after its turn.
+    fn reload_sessions(&mut self) {
+        let Some(t) = store::load(&self.id) else { return };
+        let (mut done, mut busy) = (Vec::new(), Vec::new());
+        for a in &t.agents {
+            if self.thread.busy.contains(a) {
+                busy.push(a.clone());
+                continue;
+            }
+            // 0 host: 0 session runs, the next message starts a new one anyway
+            if crate::engine::client::send_within(&self.id, &serde_json::json!({"op": "reload", "agent": a}), Duration::from_secs(5)).is_ok() {
+                done.push(a.clone());
+            }
+        }
+        let mut msg = if done.is_empty() { "reload: 0 sessions ran · the next message starts new ones".to_string() } else { format!("reload: {} · the next message starts a new session", done.join(", ")) };
+        if !busy.is_empty() {
+            msg.push_str(&format!(" · mid-turn: {} (>reload after the turn)", busy.join(", ")));
+        }
+        self.toast(msg);
+    }
+
     fn handoff(&mut self) {
         if !self.thread.busy.is_empty() {
             self.toast("handoff: wait for the turn to end");
@@ -748,6 +771,7 @@ impl View {
             match self.command.action.take() {
                 Some(crate::command::Action::Branch) => return self.branch(),
                 Some(crate::command::Action::Handoff) => self.handoff(),
+                Some(crate::command::Action::Reload) => self.reload_sessions(),
                 None => {}
             }
             return false;
