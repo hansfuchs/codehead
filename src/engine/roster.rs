@@ -10,7 +10,7 @@
 //! style = "mecha"
 //! voice = "…"
 //! prompt = """…"""        # instructions
-//! sprite = { id = "regi-008", rows = ["╭─────╮", "│⢀⢀⢐⢀⢀│", "│  ⢐  │", "╰─────╯"] }
+//! sprite = { id = "regi:31 eyes=3", rows = [...] }
 //! ```
 
 use std::path::PathBuf;
@@ -43,7 +43,7 @@ pub struct Agent {
     /// Instructions: the agent's own system prompt part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    /// Avatar: a pool sprite id, its 4 rows of 7 glyphs.
+    /// Avatar: its id (`regi:31 eyes=3 speed=0.5`), the 4 rows of its rest frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sprite: Option<SpriteRec>,
     /// The ACP command for this agent (any harness but claude), instead of the harness's own.

@@ -233,12 +233,12 @@ fn draw_at(f: &mut Frame, area: Rect, s: &Snap, age: Duration, now: u64) {
     let compact = area.height < 12;
     let shown: Vec<&AgentRow> = if compact { Vec::new() } else { by_live.into_iter().take(fit).collect() };
     let rows = if compact { 0 } else if shown.is_empty() { 1 } else { crate::sprites::H };
+    let frames: Vec<[String; crate::sprites::H]> = shown.iter().map(|a| a.sprite.as_ref().expect("filtered above").frame(crate::avatar::Status::Idle)).collect();
     for r in 0..rows {
         let mut spans = Vec::new();
         for (i, a) in shown.iter().enumerate() {
-            let sp = a.sprite.as_ref().expect("filtered above");
             let dim = if a.live { Style::default() } else { Style::default().add_modifier(ratatui::style::Modifier::DIM) };
-            spans.push(Span::styled(format!("{}{}", if i > 0 { "  " } else { "" }, sp.rows[r]), dim.fg(agents::color(a.color.as_deref()))));
+            spans.push(Span::styled(format!("{}{}", if i > 0 { "  " } else { "" }, frames[i][r]), dim.fg(agents::color(a.color.as_deref()))));
         }
         if r == 0 {
             let used: usize = spans.iter().map(|sp| sp.width()).sum();
@@ -436,7 +436,7 @@ mod tests {
             cache_write: 534_032,
             turns: 9,
             agents: vec![
-                AgentRow { name: "amon".into(), color: Some("orange".into()), tokens: 98_000, usd: 26.87, ctx: Some(19), samples: vec![(now - 60, 500)], live: true, sprite: Some(crate::sprites::pool()[0].clone()) },
+                AgentRow { name: "amon".into(), color: Some("orange".into()), tokens: 98_000, usd: 26.87, ctx: Some(19), samples: vec![(now - 60, 500)], live: true, sprite: Some(crate::sprites::default_for("amon")) },
                 AgentRow { name: "lilith".into(), tokens: 92, usd: 1.6, ..Default::default() },
             ],
             limits: vec![Limit { harness: "claude".into(), window: "five_hour".into(), pct: 13.0, resets: Some(now + 7200) }],
@@ -448,7 +448,7 @@ mod tests {
         let text: String = (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string() + "\n").collect();
         println!("{text}");
         assert!(text.contains("$28.47 thread"));
-        assert!(text.contains(" ◆─┼─◆"), "sprite row");
+        assert!(text.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)), "sprite row");
         assert!(text.contains("$26.87"));
         assert!(text.contains("19%"));
         assert!(text.contains("5h 13% (2h)"));

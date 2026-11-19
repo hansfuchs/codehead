@@ -1,5 +1,6 @@
 //! codehead: pick notes, write the task, then work the thread with its agents in this terminal.
 
+mod avatar;
 mod agents;
 mod ansi;
 mod app;
@@ -32,6 +33,7 @@ mod mcptab;
 mod menu;
 mod notes;
 mod paths;
+mod picker;
 mod portless;
 mod preview;
 mod rank;
@@ -549,16 +551,6 @@ fn start(args: Args) {
                 Suspend::Note(p) => {
                     editor(&p);
                     app.reload_notes();
-                }
-                Suspend::Sprite => {
-                    let f = std::env::temp_dir().join(format!("codehead-sprite-{}.txt", std::process::id()));
-                    if std::fs::write(&f, app.sprite_text()).is_ok() {
-                        editor(&f);
-                        if let Ok(t) = std::fs::read_to_string(&f) {
-                            app.set_sprite(&t);
-                        }
-                        let _ = std::fs::remove_file(&f);
-                    }
                 }
                 Suspend::Prompt => {
                     let f = std::env::temp_dir().join(format!("codehead-prompt-{}.md", std::process::id()));

@@ -99,6 +99,14 @@ struct View {
     harness_of: Vec<(String, String)>,
     /// Per roster agent: sprite, effort label of its card (read on roster change, not per frame).
     profiles: HashMap<String, (crate::sprites::Sprite, String)>,
+    /// Agents box order: members, the last @named first (members[0] stays the lead).
+    order: Vec<String>,
+    /// Agents @named before they joined: they join at the front.
+    front: Vec<String>,
+    /// Spawns under way, by agent.
+    spawns: HashMap<String, crate::avatar::Spawn>,
+    /// The sprite slots of the last draw (agent, its 7x4 rect): who is in view, where a spawn goes.
+    slots: std::cell::RefCell<Vec<(String, Rect)>>,
     // stream
     drawn: stream::Drawn,
     dirty: bool,
@@ -212,6 +220,10 @@ impl View {
             names: Vec::new(),
             harness_of: Vec::new(),
             profiles: HashMap::new(),
+            order: Vec::new(),
+            front: Vec::new(),
+            spawns: HashMap::new(),
+            slots: std::cell::RefCell::new(Vec::new()),
             drawn: stream::Drawn::default(),
             dirty: true,
             width: 0,
@@ -304,6 +316,99 @@ impl View {
         self.roster = roster;
         self.members = store::load(&self.id).map(|t| t.agents).unwrap_or_default();
         self.mention.replaceable = self.members.clone();
+        self.sync_order();
+    }
+
+    /// The box order after a change of the members: gone ones out, new ones in (at the front
+    /// when @named, else at the end), each new one spawns. The 1st load: all spawn (the thread
+    /// opens).
+    fn sync_order(&mut self) {
+        let first = self.order.is_empty();
+        self.order.retain(|n| self.members.contains(n));
+        for n in self.members.clone() {
+            if self.order.contains(&n) {
+                continue;
+            }
+            if self.front.contains(&n) {
+                self.order.insert(0, n.clone());
+            } else {
+                self.order.push(n.clone());
+            }
+            let sp = self.new_spawn();
+            self.spawns.insert(n, sp);
+        }
+        self.front.retain(|n| !self.members.contains(n));
+        if first {
+            self.dirty = true;
+        }
+    }
+
+    /// NAMED were addressed: to the front of the box; one out of view spawns.
+    fn bring_front(&mut self, named: &[String]) {
+        let shown: HashSet<String> = self.slots.borrow().iter().map(|(n, _)| n.clone()).collect();
+        for n in named.iter().rev() {
+            match self.order.iter().position(|x| x == n) {
+                Some(i) => {
+                    let n = self.order.remove(i);
+                    if !shown.contains(&n) {
+                        let sp = self.new_spawn();
+                        self.spawns.insert(n.clone(), sp);
+                    }
+                    self.order.insert(0, n);
+                }
+                None if !self.front.contains(n) => self.front.push(n.clone()),
+                None => {}
+            }
+        }
+    }
+
+    /// A spawn for 1 agent: an animation no other agent of the thread plays now.
+    fn new_spawn(&self) -> crate::avatar::Spawn {
+        let taken: Vec<usize> = self.spawns.values().filter(|s| !s.done()).map(|s| s.anim).collect();
+        crate::avatar::Spawn::random_except(&taken)
+    }
+
+    /// A spawn runs: frames at 30 per second.
+    fn spawning(&self) -> bool {
+        self.spawns.values().any(|s| !s.done())
+    }
+
+    /// The avatar status of agent NAME.
+    fn avatar_status(&self, name: &str) -> crate::avatar::Status {
+        use crate::avatar::Status;
+        if self.thread.asks.iter().any(|q| q.agent == name) {
+            Status::Blocked
+        } else if self.thread.busy.contains(name) || self.thread.working(name) {
+            Status::Working
+        } else if self.monitors.watches.iter().any(|w| w.agent == name) {
+            Status::Thinking
+        } else {
+            Status::Idle
+        }
+    }
+
+    /// The spawns over the header (and what is below it), in the agent colors.
+    fn draw_spawns(&mut self, f: &mut Frame) {
+        self.spawns.retain(|_, s| !s.done());
+        let area = f.area();
+        for (name, slot) in self.slots.borrow().iter() {
+            let Some(sp) = self.spawns.get(name) else { continue };
+            let sprite = self.profiles.get(name).map(|p| p.0.clone()).unwrap_or_else(|| crate::sprites::default_for(name));
+            let Some(rows) = sp.rows(&sprite.avatar, self.avatar_status(name)) else { continue };
+            let color = self.colors.get(name).copied().unwrap_or(theme::pal().accent);
+            let (ax, ay) = crate::avatar::SPAWN_AT;
+            let (x0, y0) = (slot.x as i32 - ax as i32, slot.y as i32 - ay as i32);
+            let buf = f.buffer_mut();
+            for (r, row) in rows.iter().enumerate() {
+                for (c, ch) in row.chars().enumerate() {
+                    let (x, y) = (x0 + c as i32, y0 + r as i32);
+                    if x < area.x as i32 || y < area.y as i32 || x >= area.right() as i32 || y >= area.bottom() as i32 {
+                        continue;
+                    }
+                    buf[(x as u16, y as u16)].set_char(ch).set_style(theme::text().fg(color));
+                }
+            }
+        }
     }
 
     /// New events of the log. True: some came.
@@ -335,6 +440,7 @@ impl View {
             if matches!(e.kind, store::Kind::Join | store::Kind::Leave) {
                 self.members = store::load(&self.id).map(|t| t.agents).unwrap_or_default();
                 self.mention.replaceable = self.members.clone();
+                self.sync_order();
             }
         }
         if self.thread.asks.first().map(|a| a.id.clone()) != asks {
@@ -425,6 +531,7 @@ impl View {
         // @name of any agent: the host routes (and brings a new one in); else the default
         let names: Vec<String> = self.names.iter().map(|n| n.0.clone()).chain(self.members.iter().cloned()).collect();
         let named = crate::engine::host::mentions(&text, &names);
+        self.bring_front(&named);
         self.pending.push((text.clone(), Instant::now(), None));
         if named.is_empty() {
             self.host("send", json!({"op": "prompt", "text": text, "to": self.default_to()}));
@@ -529,7 +636,8 @@ impl View {
 
     /// Something on screen moves: an agent at work (wave), monitors, the threads row, a toast.
     fn animating(&self) -> bool {
-        !self.thread.busy.is_empty() || self.monitors.active() || crate::subagents::Subagents::active(&self.thread.subs) || self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(4))
+        // the avatars of the agents box move
+        !self.members.is_empty() || !self.thread.busy.is_empty() || self.monitors.active() || crate::subagents::Subagents::active(&self.thread.subs) || self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(4))
     }
 
     /// Fire an interrupt armed by a single Esc once DOUBLE_ESC ends. True: state changed.
@@ -1379,7 +1487,7 @@ impl View {
         if area.height == 0 {
             return;
         }
-        let cards: Vec<Card> = self.members.iter().map(|n| self.card(n)).collect();
+        let cards: Vec<Card> = self.order.iter().map(|n| self.card(n)).collect();
         let token_left = cost.x.saturating_sub(2);
         let fit = if cost.width > 0 { token_left + 1 } else { area.right() }.saturating_sub(area.x);
         let outer = if cost.width == 0 { area } else { Rect { width: cards_w(&cards).min(fit), ..area } };
@@ -1399,13 +1507,17 @@ impl View {
         }
         let rows = Rect { y: area.y + 1, height: area.height.saturating_sub(2), ..area };
         let mut x = area.x + 2;
-        for (sprite, color, side, w) in cards {
+        let mut slots = Vec::new();
+        for ((sprite, color, side, w), name) in cards.into_iter().zip(&self.order) {
             if x + w - 1 > outer.right() {
                 break;
             }
-            f.render_widget(Paragraph::new(crate::sprites::lines(&sprite, color, side)), Rect { x, width: w - 4, ..rows });
+            let st = self.avatar_status(name);
+            f.render_widget(Paragraph::new(crate::sprites::lines_as(&sprite, color, st, side)), Rect { x, width: w - 4, ..rows });
+            slots.push((name.clone(), Rect { x, y: rows.y, width: crate::sprites::W as u16, height: crate::sprites::H as u16 }));
             x += w;
         }
+        *self.slots.borrow_mut() = slots;
     }
 
     /// Who gets a message now: the @named agents of the input, else the lead.
@@ -1562,6 +1674,10 @@ impl View {
     }
 
     fn draw(&mut self, f: &mut Frame) {
+        // members set elsewhere (a reload, tests): the box order follows
+        if self.order.len() != self.members.len() || !self.members.iter().all(|m| self.order.contains(m)) {
+            self.sync_order();
+        }
         let full = f.area();
         f.render_widget(Paragraph::new("").style(theme::text()), full);
         // row 0: the view bar (views of the thread, the title)
@@ -1710,7 +1826,7 @@ impl View {
         // header: agents box + tokens box (the cost pane inside)
         let show_cost = head_h > 0 && area.width >= MIN_COST_WIDTH;
         let cost = if show_cost {
-            let cards: Vec<Card> = self.members.iter().map(|n| self.card(n)).collect();
+            let cards: Vec<Card> = self.order.iter().map(|n| self.card(n)).collect();
             let (all, first) = (cards_w(&cards), cards_w(&cards[..cards.len().min(1)]));
             let room = (header.width + 1).saturating_sub(all);
             let min = MIN_COST_BOX.min((header.width + 1).saturating_sub(first)).max(SQUEEZED_COST_BOX);
@@ -1814,6 +1930,8 @@ impl View {
             self.command.render(f, &self.input, area, self.input_rect);
             self.paths.render(f, &self.input, area, self.input_rect);
         }
+        // spawns over the header, under the menu
+        self.draw_spawns(f);
         if let Some(m) = self.menu.as_mut() {
             f.render_widget(Clear, Rect::default());
             // centered on the chat history (the stream), not the whole terminal
@@ -2031,7 +2149,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     loop {
         // a frame on change; animations (wave, spinners, toast) at 150 ms; else 1 per second
         // (clock, cost box, sending timer)
-        let every = if v.animating() { Duration::from_millis(150) } else { Duration::from_secs(1) };
+        let every = if v.spawning() { Duration::from_millis(33) } else if v.animating() { Duration::from_millis(150) } else { Duration::from_secs(1) };
         if dirty || drawn.elapsed() >= every {
             term.draw(|f| v.draw(f)).map_err(|e| e.to_string())?;
             crate::engine::trace("view draw");

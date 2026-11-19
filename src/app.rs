@@ -81,7 +81,6 @@ pub enum Outcome {
 pub enum Suspend {
     Note(PathBuf),
     Prompt,
-    Sprite,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -239,9 +238,9 @@ struct AgentForm {
     /// Index into `styles`; 0 = none.
     style: usize,
     styles: Vec<(Option<String>, String)>,
-    /// Index into sprites::sets(). ←→ on the sprite field + r stay in this set.
-    set: usize,
     sprite: Sprite,
+    /// The avatar picker, open over the form (enter on the avatar rows).
+    picker: Option<crate::picker::Picker>,
     field: usize,
     save: bool,
     error: Option<String>,
@@ -316,12 +315,11 @@ impl AgentForm {
         voice.set_text(&profile.voice);
         prompt.set_text(&profile.prompt);
         let style = opts.iter().position(|(id, _)| *id == profile.style).unwrap_or(0);
-        // saved, else what the agent tab shows (stable pick), else (new agent) random of DEFAULT_SET
+        // saved, else what the agent tab shows (stable pick), else (new agent) a random regi
         let sprite = profile.sprite.clone().unwrap_or_else(|| match &edit {
             Some(a) => sprites::default_for(&a.name),
-            None => sprites::pool()[sprites::random(Some(sprites::DEFAULT_SET), None)].clone(),
+            None => sprites::random(crate::avatar::Cat::Regi),
         });
-        let set = sprites::set_of(&sprite.id).and_then(|s| sprites::sets().iter().position(|x| x == s)).unwrap_or(0);
         let mut f = AgentForm {
             edit,
             name,
@@ -335,7 +333,7 @@ impl AgentForm {
             mode,
             style,
             styles: opts,
-            set,
+            picker: None,
             sprite,
             field: 0,
             save: true,
@@ -366,7 +364,7 @@ impl AgentForm {
             self.color,
             self.mode,
             self.style,
-            self.sprite.rows.join("\n"),
+            self.sprite.id,
             self.mcp
         )
     }
@@ -457,35 +455,11 @@ impl AgentForm {
         Some(agents::EFFORTS[self.effort]).filter(|e| *e != "default")
     }
 
-    fn set_name(&self) -> &'static str {
-        sprites::sets().get(self.set).map_or("", |s| s.as_str())
-    }
-
-    /// ←→ on the set field: next / previous set, its 1st sprite.
-    fn step_set(&mut self, d: isize) {
-        let n = sprites::sets().len().max(1) as isize;
-        self.set = (self.set as isize + d).rem_euclid(n) as usize;
-        if let Some(&i) = sprites::members(self.set_name()).first() {
-            self.sprite = sprites::pool()[i].clone();
-        }
-    }
-
-    /// ←→ on the sprite field: next / previous sprite of the set (a custom one or 1 of another set: the set start).
-    fn step_sprite(&mut self, d: isize) {
-        let m = sprites::members(self.set_name());
-        if m.is_empty() {
-            return;
-        }
-        let k = match sprites::index_of(&self.sprite.id).and_then(|i| m.iter().position(|&x| x == i)) {
-            Some(k) => (k as isize + d).rem_euclid(m.len() as isize) as usize,
-            None => 0,
-        };
-        self.sprite = sprites::pool()[m[k]].clone();
-    }
-
-    /// r: random sprite of the set.
+    /// r: a random avatar of the category, the speed and eyes kept.
     fn random_sprite(&mut self) {
-        self.sprite = sprites::pool()[sprites::random(Some(self.set_name()), sprites::index_of(&self.sprite.id))].clone();
+        let a = self.sprite.avatar;
+        let r = sprites::random(a.cat).avatar;
+        self.sprite = Sprite::of(crate::avatar::Avatar { idx: r.idx, ..a });
     }
 
     fn profile(&self) -> agents::Profile {
@@ -1179,6 +1153,16 @@ impl App {
     /// Background reads in. True: something on screen may change (a redraw is due).
     pub fn tick(&mut self) -> bool {
         let mut dirty = self.previews.poll();
+        // avatars on screen (agents tab, agent form, picker, menu): a frame every 150 ms
+        if matches!(self.modal, Some(Modal::Agent(_))) || self.cur_tab() == Tab::Agents || self.menu.is_some() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LAST: AtomicU64 = AtomicU64::new(0);
+            let ms = (crate::avatar::now() * 1000.0) as u64;
+            if ms.saturating_sub(LAST.load(Ordering::Relaxed)) >= 150 {
+                LAST.store(ms, Ordering::Relaxed);
+                dirty = true;
+            }
+        }
         // the settings' MCP tab: harness lists, probes, sign-ins in the background
         if let Some(s) = self.settings.as_mut() {
             dirty |= s.poll();
@@ -2041,22 +2025,6 @@ impl App {
     pub fn set_prompt(&mut self, text: &str) {
         self.prompt.set_text(text);
         self.backup();
-    }
-
-    /// Sprite rows of the open agent form (for $EDITOR).
-    pub fn sprite_text(&self) -> String {
-        match &self.modal {
-            Some(Modal::Agent(form)) => form.sprite.rows.iter().map(|r| r.trim_end()).collect::<Vec<_>>().join("\n") + "\n",
-            _ => String::new(),
-        }
-    }
-
-    /// Edited sprite back from $EDITOR: first 4 lines, each cut / padded to 7 cells.
-    pub fn set_sprite(&mut self, text: &str) {
-        if let Some(Modal::Agent(form)) = &mut self.modal {
-            let s = sprites::from_text("custom", text);
-            form.sprite = sprites::pool().iter().find(|p| p.rows == s.rows).cloned().unwrap_or(s);
-        }
     }
 
     pub fn prompt_text(&self) -> String {
@@ -3124,6 +3092,19 @@ impl App {
             Modal::Agent(mut form) => {
                 let next = |f: usize| (f + 1) % FORM_FIELDS;
                 let prev = |f: usize| (f + FORM_FIELDS - 1) % FORM_FIELDS;
+                // the avatar picker: its keys first
+                if let Some(p) = form.picker.as_mut() {
+                    match p.key(k) {
+                        crate::picker::Act::None => {}
+                        crate::picker::Act::Close => form.picker = None,
+                        crate::picker::Act::Take(s) => {
+                            form.sprite = s;
+                            form.picker = None;
+                        }
+                    }
+                    self.modal = Some(Modal::Agent(form));
+                    return;
+                }
                 // harness / model dropdown: its keys first
                 if form.pick.is_some() {
                     self.form_pick_key(&mut form, k);
@@ -3148,11 +3129,7 @@ impl App {
                     KeyCode::Down if k.modifiers.is_empty() && form.text().is_some_and(|t| t.on_last_row()) => form.field = next(form.field),
                     KeyCode::Up if k.modifiers.is_empty() && form.text().is_some_and(|t| t.on_first_row()) => form.field = prev(form.field),
                     KeyCode::Char('r') if ctrl || matches!(form.field, F_SET | F_SPRITE) => form.random_sprite(),
-                    KeyCode::Char('e') if form.field == F_SPRITE && !ctrl => {
-                        self.modal = Some(Modal::Agent(form));
-                        self.suspend = Some(Suspend::Sprite);
-                        return;
-                    }
+                    KeyCode::Enter if matches!(form.field, F_SET | F_SPRITE) => form.picker = Some(crate::picker::Picker::new(&form.sprite)),
                     KeyCode::Enter if form.field == F_BUTTONS => {
                         if form.save {
                             self.save_agent(form);
@@ -3175,7 +3152,7 @@ impl App {
                         }
                     }
                     KeyCode::Enter if !form.multiline() => form.field = next(form.field),
-                    KeyCode::Left | KeyCode::Right if matches!(form.field, F_MODEL | F_EFFORT | F_COLOR | F_MODE | F_STYLE | F_SET | F_SPRITE | F_BUTTONS) => {
+                    KeyCode::Left | KeyCode::Right if matches!(form.field, F_MODEL | F_EFFORT | F_COLOR | F_MODE | F_STYLE | F_BUTTONS) => {
                         let d = if k.code == KeyCode::Left { -1 } else { 1 };
                         let cycle = |i: usize, n: usize| ((i as isize + d).rem_euclid(n as isize)) as usize;
                         match form.field {
@@ -3185,8 +3162,6 @@ impl App {
                             F_COLOR => form.color = cycle(form.color, agents::COLORS.len()),
                             F_MODE => form.mode = cycle(form.mode, agents::MODES.len()),
                             F_STYLE => form.style = cycle(form.style, form.styles.len()),
-                            F_SET => form.step_set(d),
-                            F_SPRITE => form.step_sprite(d),
                             _ => form.save = !form.save,
                         }
                     }
@@ -4385,36 +4360,28 @@ impl App {
         }
         spans.push(Span::styled(if on { "›  space: on / off" } else { "" }, theme::accent()));
         f.render_widget(Paragraph::new(Line::from(spans)), mr);
-        // sprite set: 1st the set, then a sprite of it
+        // avatar: the category, then the live avatar; enter opens the picker
         let on = form.field == F_SET;
         let tr = rows[10];
         form.areas[F_SET] = tr;
-        let mut spans = vec![lab("sprites", on), Span::styled(if on { "‹" } else { " " }, theme::accent())];
-        for (j, name) in sprites::sets().iter().enumerate() {
-            let st = if j == form.set { if on { theme::bold().bg(theme::pal().panel) } else { theme::bold() } } else { theme::muted() };
-            spans.push(Span::styled(format!(" {name} "), st));
+        let cat = form.sprite.avatar.cat;
+        let mut spans = vec![lab("avatars", on), Span::raw(" ")];
+        for c in crate::avatar::CATS {
+            let st = if c == cat { if on { theme::bold().bg(theme::pal().panel) } else { theme::bold() } } else { theme::muted() };
+            spans.push(Span::styled(format!(" {} ", c.name()), st));
         }
-        spans.push(Span::styled(if on { "›" } else { "" }, theme::accent()));
         f.render_widget(Paragraph::new(Line::from(spans)), tr);
-        // sprite: label, portrait in the agent color, id + keys
         let on = form.field == F_SPRITE;
         let sr = rows[11];
         form.areas[F_SPRITE] = sr;
-        f.render_widget(Paragraph::new(Line::from(lab("sprite", on))), sr);
+        f.render_widget(Paragraph::new(Line::from(lab("avatar", on))), sr);
         let color = agents::color(Some(agents::COLORS[form.color]));
-        let arrow = |t: &'static str| Span::styled(if on { t } else { " " }, theme::accent());
-        let id = Span::styled(format!(" {} ", form.sprite.id), if on { theme::bold().bg(theme::pal().panel) } else { theme::muted() });
-        let members = sprites::members(form.set_name());
-        let at = sprites::index_of(&form.sprite.id).and_then(|i| members.iter().position(|&x| x == i));
-        let count = match at {
-            Some(k) => format!("   {}/{} in {}", k + 1, members.len(), form.set_name()),
-            None => format!("   {} in {}", members.len(), form.set_name()),
-        };
+        let a = form.sprite.avatar;
         let side = vec![
-            vec![Span::raw("   "), arrow("‹"), id, arrow("›")],
-            vec![Span::styled(count, theme::muted())],
+            vec![Span::styled(format!("   {}", a.name()), if on { theme::bold() } else { theme::muted() })],
+            vec![Span::styled(format!("   {} {}/{} · float {}x", cat.name(), a.idx + 1, cat.count(), a.speed), theme::muted())],
             vec![],
-            vec![Span::styled("   ←→ browse · r random in set · e edit in $EDITOR", if on || form.field == F_SET { theme::muted() } else { Style::default().fg(theme::pal().line) })],
+            vec![Span::styled("   enter: pick · r random", if on || form.field == F_SET { theme::muted() } else { Style::default().fg(theme::pal().line) })],
         ];
         f.render_widget(Paragraph::new(sprites::lines(&form.sprite, color, side)), Rect { x: sr.x + 11, width: sr.width.saturating_sub(11), ..sr });
         for (field, label_row, box_row, head) in [(F_VOICE, rows[13], rows[14], "voice · own tone on top of the style"), (F_PROMPT, rows[16], rows[17], "system prompt · standing instructions")] {
@@ -4442,6 +4409,13 @@ impl App {
             x += r.width + 2;
         }
         self.regions.buttons = buttons;
+        // the avatar picker over the form
+        if let Some(Modal::Agent(form)) = &mut self.modal {
+            let color = agents::color(Some(agents::COLORS[form.color]));
+            if let Some(p) = form.picker.as_mut() {
+                p.render(f, inner, color);
+            }
+        }
     }
 }
 
@@ -5271,30 +5245,36 @@ mod render_tests {
     }
 
     #[test]
-    fn agent_form_sprite_set_then_sprite() {
+    fn agent_form_enter_opens_the_avatar_picker() {
         let mut a = app();
         a.run(Act::NewAgent);
         let form = |a: &App| match &a.modal {
-            Some(Modal::Agent(f)) => (f.field, f.set_name().to_string(), f.sprite.id.clone()),
+            Some(Modal::Agent(f)) => (f.picker.is_some(), f.sprite.avatar),
             _ => panic!("agent form closed"),
         };
         if let Some(Modal::Agent(f)) = &mut a.modal {
-            f.field = F_SET;
-            f.set = 0;
+            f.field = F_SPRITE;
+            f.sprite = sprites::Sprite::of(crate::avatar::Avatar::default());
         }
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(form(&a).0, "enter: the picker");
+        dump(&mut a, 120, 42);
+        // tab: geo; → : the 2nd; f: half speed; enter: taken
+        key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
         key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('f'), KeyModifiers::NONE);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let (open, av) = form(&a);
+        assert!(!open);
+        assert_eq!((av.cat, av.idx, av.speed), (crate::avatar::Cat::Geo, 1, 0.5));
+        // esc in the picker: the avatar stays
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         key(&mut a, KeyCode::Right, KeyModifiers::NONE);
-        let (_, set, id) = form(&a);
-        assert_eq!((set.as_str(), id.as_str()), ("regi", "regi-000"), "set ←→: 1st sprite of the set");
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
-        assert_eq!(form(&a), (F_SPRITE, "regi".into(), "regi-001".into()));
-        key(&mut a, KeyCode::Left, KeyModifiers::NONE);
-        key(&mut a, KeyCode::Left, KeyModifiers::NONE);
-        assert_eq!(form(&a).2, "regi-099", "sprite ←→ wraps inside the set");
-        for _ in 0..30 {
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(form(&a), (false, av));
+        for _ in 0..10 {
             key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
-            assert!(form(&a).2.starts_with("regi-"), "r: random in the set");
+            assert_eq!(form(&a).1.cat, crate::avatar::Cat::Geo, "r: random in the category");
         }
     }
 
@@ -5856,7 +5836,7 @@ mod render_tests {
         for _ in 0..F_SPRITE {
             key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
         }
-        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
         println!("--- sprite field\n{}", dump(&mut a, 120, 42));
         // an edited form: esc asks first
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);

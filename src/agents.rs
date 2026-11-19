@@ -173,7 +173,7 @@ fn from_roster(r: &roster::Agent, seen: &HashMap<String, i64>) -> Agent {
         style: r.style.clone(),
         voice: r.voice.clone().unwrap_or_default(),
         prompt: r.prompt.clone().unwrap_or_default(),
-        sprite: r.sprite.as_ref().map(|s| crate::sprites::from_text(&s.id, &s.rows.join("\n"))),
+        sprite: r.sprite.as_ref().and_then(|s| crate::sprites::from_id(&s.id)),
     };
     let text = compose(&profile, &[], &r.harness, None);
     Agent {
@@ -397,7 +397,7 @@ pub fn session_prompt(r: &roster::Agent) -> String {
         style: r.style.clone(),
         voice: r.voice.clone().unwrap_or_default(),
         prompt: r.prompt.clone().unwrap_or_default(),
-        sprite: r.sprite.as_ref().map(|s| crate::sprites::from_text(&s.id, &s.rows.join("\n"))),
+        sprite: r.sprite.as_ref().and_then(|s| crate::sprites::from_id(&s.id)),
     };
     let styles = crate::styles::load(&crate::styles::dir());
     let global = crate::styles::global_name();
@@ -465,11 +465,8 @@ pub fn parse_profile(raw: Option<&str>, default_style: Option<&str>) -> Profile 
         style: (id != "none").then(|| id.to_string()),
         voice: section(raw, "<!-- codehead:voice -->").map(|t| strip(t, &[VOICE_HEAD, VOICE_INTRO])).unwrap_or_default(),
         prompt: section(raw, "<!-- codehead:prompt -->").map(|t| strip(t, &[PROMPT_HEAD])).unwrap_or_default(),
-        sprite: section(raw, "<!-- codehead:sprite ").and_then(|t| {
-            let (id, body) = t.split_once(" -->")?;
-            let fenced = body.split("```").nth(1)?;
-            Some(crate::sprites::from_text(id.trim(), fenced.strip_prefix('\n').unwrap_or(fenced)))
-        }),
+        // an old text sprite (`pcb-042`): None, the agent gets its default avatar
+        sprite: section(raw, "<!-- codehead:sprite ").and_then(|t| crate::sprites::from_id(t.split_once(" -->")?.0.trim())),
     }
 }
 
@@ -542,7 +539,7 @@ mod tests {
 
     #[test]
     fn compose_parse_round_trip() {
-        let sprite = Some(crate::sprites::from_text("pcb-007", "╮     ╭\n╰┬───┬╯\n ◆─┼─◆\n ╰┴┴┴╯"));
+        let sprite = crate::sprites::from_id("regi:7 eyes=3 speed=0.5");
         let p = Profile { style: Some("mecha".into()), voice: "dry.\ncalls the owner boss.".into(), prompt: "you review rust.".into(), sprite };
         for (harness, global, embedded) in [("claude", Some("MECHA"), false), ("claude", None, true), ("codex", Some("MECHA"), true)] {
             let raw = compose(&p, &styles(), harness, global);
