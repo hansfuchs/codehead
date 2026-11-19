@@ -252,6 +252,9 @@ struct AgentForm {
     harnesses: Vec<(String, String, String)>,
     /// Open dropdown of the harness / model field.
     pick: Option<FormPick>,
+    /// codehead's MCP servers (settings › mcp servers): name, on for this agent; the cursor.
+    mcp: Vec<(String, bool)>,
+    mcp_cur: usize,
 }
 
 /// The open dropdown of the agent form: harness list, or the model list of HARNESS; cursor,
@@ -271,12 +274,13 @@ const F_EFFORT: usize = 3;
 const F_COLOR: usize = 4;
 const F_MODE: usize = 5;
 const F_STYLE: usize = 6;
-const F_SET: usize = 7;
-const F_SPRITE: usize = 8;
-const F_VOICE: usize = 9;
-const F_PROMPT: usize = 10;
-const F_BUTTONS: usize = 11;
-const FORM_FIELDS: usize = 12;
+const F_MCP: usize = 7;
+const F_SET: usize = 8;
+const F_SPRITE: usize = 9;
+const F_VOICE: usize = 10;
+const F_PROMPT: usize = 11;
+const F_BUTTONS: usize = 12;
+const FORM_FIELDS: usize = 13;
 
 impl AgentForm {
     fn new(edit: Option<Agent>, styles: &[OutStyle], default_style: Option<&str>) -> AgentForm {
@@ -340,7 +344,11 @@ impl AgentForm {
             orig: String::new(),
             harnesses: crate::engine::harnesses::installed().into_iter().map(|h| (h.name.to_string(), h.label.to_string(), h.bin.to_string())).collect(),
             pick: None,
+            mcp: Vec::new(),
+            mcp_cur: 0,
         };
+        let own: Vec<String> = f.edit.as_ref().and_then(|a| crate::engine::roster::get(&a.name)).map(|a| a.mcp).unwrap_or_default();
+        f.mcp = crate::engine::servers::all().into_iter().map(|s| (s.name.clone(), own.contains(&s.name))).collect();
         f.orig = f.fingerprint();
         f
     }
@@ -348,7 +356,7 @@ impl AgentForm {
     /// The form's values in 1 string: Esc asks before it drops a form that differs from `orig`.
     fn fingerprint(&self) -> String {
         format!(
-            "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
+            "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{:?}",
             self.name.text(),
             self.harness.text(),
             self.model,
@@ -358,7 +366,8 @@ impl AgentForm {
             self.color,
             self.mode,
             self.style,
-            self.sprite.rows.join("\n")
+            self.sprite.rows.join("\n"),
+            self.mcp
         )
     }
 
@@ -496,6 +505,7 @@ impl AgentForm {
             harness,
             color: Some(agents::COLORS[self.color].to_string()),
             mode: agents::MODES[self.mode].to_string(),
+            mcp: self.mcp.iter().filter(|(_, on)| *on).map(|(n, _)| n.clone()).collect(),
         }
     }
 
@@ -3153,6 +3163,17 @@ impl App {
                         let model = form.field == F_MODEL;
                         self.open_form_pick(&mut form, model);
                     }
+                    // MCP servers: ←→ pick 1, space: on / off
+                    KeyCode::Left | KeyCode::Right if form.field == F_MCP => {
+                        let n = form.mcp.len().max(1);
+                        form.mcp_cur = if k.code == KeyCode::Left { (form.mcp_cur + n - 1) % n } else { (form.mcp_cur + 1) % n };
+                    }
+                    KeyCode::Char(' ') if form.field == F_MCP => {
+                        let i = form.mcp_cur;
+                        if let Some(m) = form.mcp.get_mut(i) {
+                            m.1 = !m.1;
+                        }
+                    }
                     KeyCode::Enter if !form.multiline() => form.field = next(form.field),
                     KeyCode::Left | KeyCode::Right if matches!(form.field, F_MODEL | F_EFFORT | F_COLOR | F_MODE | F_STYLE | F_SET | F_SPRITE | F_BUTTONS) => {
                         let d = if k.code == KeyCode::Left { -1 } else { 1 };
@@ -4264,9 +4285,11 @@ impl App {
         let global = self.global_style.clone();
         let Some(Modal::Agent(form)) = &mut self.modal else { return };
         let title = if form.edit.is_some() { "edit agent" } else { "new agent" };
-        let inner = Self::frame(f, area, title, 90, area.height.saturating_sub(2).min(41));
-        // 0-6 single-line fields, 7 note, 9 sprite set, 10 sprite, 12-13 voice, 15-16 system prompt, 18 error, 19 buttons
+        let inner = Self::frame(f, area, title, 90, area.height.saturating_sub(2).min(42));
+        // 0-6 single-line fields, 7 note, 8 MCP servers, 10 sprite set, 11 sprite, 13-14 voice,
+        // 16-17 system prompt, 19 error, 20 buttons
         let rows = Layout::vertical([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -4344,9 +4367,27 @@ impl App {
             form.style_note(global.as_deref())
         };
         f.render_widget(Paragraph::new(Line::styled(note_text, theme::muted())), Rect { x: note.x + 11, width: note.width.saturating_sub(11), ..note });
+        // MCP servers: codehead's, ←→ pick, space on / off
+        let on = form.field == F_MCP;
+        let mr = rows[8];
+        form.areas[F_MCP] = mr;
+        let mut spans = vec![lab("mcp", on), Span::styled(if on { "‹" } else { " " }, theme::accent())];
+        if form.mcp.is_empty() {
+            spans.push(Span::styled(" 0 servers · settings › mcp servers: add one", theme::muted()));
+        }
+        for (j, (name, sel)) in form.mcp.iter().enumerate() {
+            let st = match (on && j == form.mcp_cur, *sel) {
+                (true, _) => theme::bold().bg(theme::pal().panel),
+                (false, true) => theme::bold(),
+                _ => theme::muted(),
+            };
+            spans.push(Span::styled(format!(" {} {name} ", if *sel { "☑" } else { "☐" }), st));
+        }
+        spans.push(Span::styled(if on { "›  space: on / off" } else { "" }, theme::accent()));
+        f.render_widget(Paragraph::new(Line::from(spans)), mr);
         // sprite set: 1st the set, then a sprite of it
         let on = form.field == F_SET;
-        let tr = rows[9];
+        let tr = rows[10];
         form.areas[F_SET] = tr;
         let mut spans = vec![lab("sprites", on), Span::styled(if on { "‹" } else { " " }, theme::accent())];
         for (j, name) in sprites::sets().iter().enumerate() {
@@ -4357,7 +4398,7 @@ impl App {
         f.render_widget(Paragraph::new(Line::from(spans)), tr);
         // sprite: label, portrait in the agent color, id + keys
         let on = form.field == F_SPRITE;
-        let sr = rows[10];
+        let sr = rows[11];
         form.areas[F_SPRITE] = sr;
         f.render_widget(Paragraph::new(Line::from(lab("sprite", on))), sr);
         let color = agents::color(Some(agents::COLORS[form.color]));
@@ -4376,7 +4417,7 @@ impl App {
             vec![Span::styled("   ←→ browse · r random in set · e edit in $EDITOR", if on || form.field == F_SET { theme::muted() } else { Style::default().fg(theme::pal().line) })],
         ];
         f.render_widget(Paragraph::new(sprites::lines(&form.sprite, color, side)), Rect { x: sr.x + 11, width: sr.width.saturating_sub(11), ..sr });
-        for (field, label_row, box_row, head) in [(F_VOICE, rows[12], rows[13], "voice · own tone on top of the style"), (F_PROMPT, rows[15], rows[16], "system prompt · standing instructions")] {
+        for (field, label_row, box_row, head) in [(F_VOICE, rows[13], rows[14], "voice · own tone on top of the style"), (F_PROMPT, rows[16], rows[17], "system prompt · standing instructions")] {
             let on = form.field == field;
             f.render_widget(Paragraph::new(Line::styled(head, if on { theme::accent_bold() } else { theme::muted() })), label_row);
             f.render_widget(Paragraph::new("").style(theme::panel()), box_row);
@@ -4385,9 +4426,9 @@ impl App {
             ta.render(f, Rect { x: box_row.x + 1, width: box_row.width.saturating_sub(2), ..box_row }, on);
         }
         if let Some(e) = &form.error {
-            f.render_widget(Paragraph::new(Line::styled(e.clone(), Style::default().fg(theme::pal().danger))), rows[18]);
+            f.render_widget(Paragraph::new(Line::styled(e.clone(), Style::default().fg(theme::pal().danger))), rows[19]);
         }
-        let b = rows[19];
+        let b = rows[20];
         let labels = [(true, if form.edit.is_some() { "  save (ctrl+s)  " } else { "  create (ctrl+s)  " }), (false, "  cancel (esc)  ")];
         let total: u16 = labels.iter().map(|(_, l)| l.width() as u16).sum::<u16>() + 2;
         let mut x = b.x + b.width.saturating_sub(total) / 2;

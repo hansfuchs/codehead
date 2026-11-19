@@ -259,6 +259,8 @@ pub struct Spec {
     pub color: Option<String>,
     pub mode: String,
     pub prompt: String,
+    /// codehead MCP servers of the agent (settings › mcp servers).
+    pub mcp: Vec<String>,
 }
 
 /// `claude/opus` → (claude, Some(opus)).
@@ -293,7 +295,7 @@ pub fn create(s: &Spec) -> Result<(), String> {
     }
     let (harness, model) = split_harness(&s.harness);
     known(&harness)?;
-    let mut r = roster::Agent { name: s.name.clone(), harness, model, mode: s.mode.clone(), color: s.color.clone(), ..Default::default() };
+    let mut r = roster::Agent { name: s.name.clone(), harness, model, mode: s.mode.clone(), color: s.color.clone(), mcp: s.mcp.clone(), ..Default::default() };
     set_profile(&mut r, &s.prompt);
     roster::save(&r)
 }
@@ -310,6 +312,7 @@ pub fn edit(old: &Agent, s: &Spec) -> Result<(), String> {
         (r.harness, r.model) = (h, m);
     }
     r.mode = s.mode.clone();
+    r.mcp = s.mcp.clone();
     if s.color.is_some() {
         r.color = s.color.clone();
     }
