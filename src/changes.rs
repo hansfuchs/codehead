@@ -21,6 +21,10 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::theme;
 
+mod patch;
+mod scm;
+pub mod stash;
+
 /// Side by side from this many columns.
 pub const SIDE_MIN: u16 = 170;
 /// Untracked files read as new-file diffs, at most.
@@ -323,6 +327,10 @@ fn untracked(dir: &Path, path: &str) -> FileDiff {
 #[derive(Clone, Debug, Default)]
 pub struct Changes {
     pub base: String,
+    /// The base's commit (HEAD on the default branch).
+    pub rev: String,
+    /// Untracked paths (shown as new files).
+    pub untracked: HashSet<String>,
     pub files: Vec<FileDiff>,
     /// Staged paths: true all of the file's uncommitted change, false a part.
     pub staged: HashMap<String, bool>,
@@ -343,8 +351,10 @@ pub fn load(dir: &Path) -> Result<Changes, String> {
     let diff = git(dir, &["diff", "-M", "--no-color", "--no-ext-diff", "-U3", &rev])?;
     let mut files = parse(&diff);
     let others = git(dir, &["ls-files", "--others", "--exclude-standard", "-z"]).unwrap_or_default();
+    let mut fresh = HashSet::new();
     for p in others.split('\0').filter(|p| !p.is_empty()).take(MAX_UNTRACKED) {
         files.push(untracked(dir, p));
+        fresh.insert(p.to_string());
     }
     order(&mut files);
     // staged: in the index diff; a part: also in the worktree diff
@@ -363,7 +373,7 @@ pub fn load(dir: &Path) -> Result<Changes, String> {
         let mut it = lr.split_whitespace().map(|x| x.parse::<usize>().unwrap_or(0));
         (it.next().unwrap_or(0), it.next().unwrap_or(0))
     };
-    Ok(Changes { base: label, files, staged, stopped, ahead, behind })
+    Ok(Changes { base: label, rev, untracked: fresh, files, staged, stopped, ahead, behind })
 }
 
 /// The branch's pull request (gh): number, url, state, checks passed / failed / pending.
@@ -476,6 +486,14 @@ pub enum Op {
     OpenPr,
     /// `gh pr merge --squash --auto` (merges when the checks pass).
     Merge,
+    /// Stage / unstage these files.
+    StageFiles(Vec<String>),
+    UnstageFiles(Vec<String>),
+    /// Stage the picked lines of each file (a part of its change).
+    StageLines(Vec<(String, patch::Pick)>),
+    /// Take the picked lines of each file out of the worktree into the stash of thread
+    /// THREAD: (path, lines label, pick); the diff against REV.
+    Stash { thread: String, rev: String, items: Vec<(String, String, patch::Pick)> },
 }
 
 impl Op {
@@ -492,13 +510,149 @@ impl Op {
             Op::UnstageHunk(p, l) => format!("unstaged the hunk at {p}:{l}"),
             Op::OpenPr => "pull request opened".into(),
             Op::Merge => "merge on green set".into(),
+            Op::StageFiles(p) => format!("staged {}", files_label(p)),
+            Op::UnstageFiles(p) => format!("unstaged {}", files_label(p)),
+            Op::StageLines(v) => format!("staged the selected lines of {}", files_label(&v.iter().map(|x| x.0.clone()).collect::<Vec<_>>())),
+            Op::Stash { items, .. } => format!("stashed {}", files_label(&items.iter().map(|x| x.0.clone()).collect::<Vec<_>>())),
         }
     }
+}
+
+/// `src/a.rs` / `3 files`.
+fn files_label(p: &[String]) -> String {
+    if p.len() == 1 { p[0].clone() } else { format!("{} files", p.len()) }
+}
+
+/// `git ARGS` in DIR with STDIN as its input.
+fn git_in(dir: &Path, args: &[&str], stdin: &str) -> Result<String, String> {
+    use std::io::Write;
+    let mut c = Command::new("git").arg("-C").arg(dir).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("git: {e}"))?;
+    if let Some(mut i) = c.stdin.take() {
+        let _ = i.write_all(stdin.as_bytes());
+    }
+    let out = c.wait_with_output().map_err(|e| format!("git: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("git failed").to_string())
+    }
+}
+
+/// The diff of PATH in DIR: against REV (None: the index) to the worktree. A file outside the
+/// index (and outside REV): a new-file diff.
+fn file_diff(dir: &Path, rev: Option<&str>, path: &str) -> Result<String, String> {
+    let in_index = git(dir, &["ls-files", "--error-unmatch", "--", path]).is_ok();
+    let in_rev = rev.is_some_and(|r| git(dir, &["cat-file", "-e", &format!("{r}:{path}")]).is_ok());
+    if in_index || in_rev {
+        let mut args = vec!["diff", "--no-color", "--no-ext-diff", "-U3"];
+        args.extend(rev);
+        args.extend(["--", path]);
+        return git(dir, &args);
+    }
+    // `--no-index` exits 1 on a difference
+    let out = Command::new("git").arg("-C").arg(dir).args(["diff", "--no-index", "--no-color", "--no-ext-diff", "--", "/dev/null", path]).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// PICK (on the worktree's DIFF) on the index's diff CACHED: the picked lines that are staged, by
+/// text, in order. None: 0 of them.
+fn index_pick(diff: &str, cached: &str, pick: &patch::Pick) -> Option<patch::Pick> {
+    let (Some(wt), Some(ix)) = (parse(diff).into_iter().next(), parse(cached).into_iter().next()) else { return None };
+    if pick.all {
+        return Some(patch::Pick { all: true, ..Default::default() });
+    }
+    // each change as (an add, new-side number at it, text), as `pick_of` numbers them
+    let changes = |f: &FileDiff| -> Vec<(bool, u32, String)> {
+        let mut v = Vec::new();
+        for h in &f.hunks {
+            let mut n = h.new;
+            for l in &h.lines {
+                match l.kind {
+                    Kind::Add => {
+                        v.push((true, n, l.text.clone()));
+                        n += 1;
+                    }
+                    Kind::Ctx => n += 1,
+                    Kind::Del => v.push((false, n, l.text.clone())),
+                }
+            }
+        }
+        v
+    };
+    let picked: Vec<(bool, String)> = changes(&wt).into_iter().filter(|(add, n, t)| if *add { pick.adds.contains(n) } else { pick.dels.contains(&(*n, t.clone())) }).map(|(a, _, t)| (a, t)).collect();
+    let mut out = patch::Pick::default();
+    let mut j = 0;
+    for (add, n, t) in changes(&ix) {
+        if let Some(k) = picked[j..].iter().position(|(a, x)| *a == add && *x == t) {
+            j += k + 1;
+            if add {
+                out.adds.insert(n);
+            } else {
+                out.dels.insert((n, t));
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Stash ITEMS of DIR (diffs against REV) in THREAD's stash: each picked part out of the worktree
+/// (and out of the index, where it is staged), its patch in a new entry. Ok: the entries' count.
+fn stash_items(dir: &Path, thread: &str, rev: &str, items: &[(String, String, patch::Pick)]) -> Result<usize, String> {
+    let mut made = Vec::new();
+    for (path, lines, pick) in items {
+        let diff = file_diff(dir, Some(rev), path)?;
+        let Some(p) = patch::pick(&diff, pick, patch::Dir::Reverse) else { continue };
+        // staged too: out of the index. The index has its own lines (0 unstaged one): the same
+        // picks on its diff, else 0 match there
+        let cached = git(dir, &["diff", "--cached", "--no-color", "--no-ext-diff", "-U3", rev, "--", path]).unwrap_or_default();
+        let staged = index_pick(&diff, &cached, pick).and_then(|ip| patch::pick(&cached, &ip, patch::Dir::Reverse));
+        git_in(dir, &["apply", "-R", "-"], &p).map_err(|e| format!("{path}: {e}"))?;
+        if let Some(sp) = staged {
+            git_in(dir, &["apply", "-R", "--cached", "-"], &sp).map_err(|e| format!("{path} (index): {e}"))?;
+        }
+        let agent = crate::engine::edits::writer(thread, dir, path);
+        let id = format!("{}{}", stash::new_id(), made.len());
+        made.push(stash::Entry { id, path: path.clone(), lines: lines.clone(), patch: p, agent, ts: crate::engine::now_ms(), ..Default::default() });
+    }
+    if made.is_empty() {
+        return Err("0 changes to stash".into());
+    }
+    let n = made.len();
+    let mut all = stash::read(thread);
+    all.extend(made);
+    stash::write(thread, &all);
+    Ok(n)
 }
 
 /// Run OP in DIR: Ok(what happened) / Err(git's 1st error line).
 pub fn run_op(dir: &Path, op: &Op) -> Result<String, String> {
     match op {
+        Op::StageFiles(ps) => {
+            let mut args = vec!["add", "-A", "--"];
+            args.extend(ps.iter().map(String::as_str));
+            git(dir, &args)
+        }
+        Op::UnstageFiles(ps) => {
+            let mut args = vec!["restore", "--staged", "--"];
+            args.extend(ps.iter().map(String::as_str));
+            git(dir, &args).or_else(|_| {
+                let mut args = vec!["rm", "--cached", "-q", "--"];
+                args.extend(ps.iter().map(String::as_str));
+                git(dir, &args)
+            })
+        }
+        Op::StageLines(items) => {
+            let mut n = 0;
+            for (path, pick) in items {
+                let diff = file_diff(dir, None, path)?;
+                if let Some(p) = patch::pick(&diff, pick, patch::Dir::Forward) {
+                    git_in(dir, &["apply", "--cached", "-"], &p).map_err(|e| format!("{path}: {e}"))?;
+                    n += 1;
+                }
+            }
+            if n == 0 { Err("0 unstaged changes in the selected lines".into()) } else { Ok(String::new()) }
+        }
+        Op::Stash { thread, rev, items } => stash_items(dir, thread, rev, items).map(|_| String::new()),
         Op::Stage(p) => git(dir, &["add", "-A", "--", p]),
         Op::Unstage(p) => git(dir, &["restore", "--staged", "--", p]).or_else(|_| git(dir, &["rm", "--cached", "-q", "--", p])),
         Op::Commit(msg) => {
@@ -850,13 +1004,10 @@ pub enum Act {
     /// Open FILE (relative to the worktree) at LINE in the IDE.
     Open(String, u32),
     Toast(String),
-    /// Write a comment on these lines (the selection, else the cursor's line; the prompt takes
-    /// the text).
-    Comment(Vec<Spot>),
     /// Send this text to the thread (the review comments batch).
     Send(String),
-    /// Write the commit message of the staged files (the prompt takes it).
-    CommitMessage,
+    /// The chat above the prompt: open / folded.
+    ToggleChat,
 }
 
 /// Lines of 1 file a comment is on: LINE (new side) shows it; LINES (`11-13, 15 · removed 14`)
@@ -878,7 +1029,6 @@ impl Spot {
 /// What a row shows; its line is made when it comes into view.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Body {
-    Summary,
     Conflict,
     Blank,
     /// A group head: the model's group, else the category.
@@ -971,6 +1121,9 @@ pub struct Comment {
     pub text: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub lines: String,
+    /// The diff lines it is on, as the modal showed them (`+ let b = 3;`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub quote: String,
 }
 
 impl Comment {
@@ -1011,6 +1164,8 @@ pub fn batch(comments: &[Comment]) -> Option<String> {
 }
 
 pub struct View {
+    /// An alt press with 0 key after it yet: its release toggles the focus.
+    alt_tap: bool,
     id: String,
     dir: PathBuf,
     pub changes: Changes,
@@ -1032,12 +1187,10 @@ pub struct View {
     loading: Option<Receiver<Result<Changes, String>>>,
     loaded: Option<Instant>,
     pub error: Option<String>,
-    /// The rows' area; the tab bar and the filter row above it (0 height: too little room).
+    /// The rows' area; the summary row and the filter row above it (0 height: too little room).
     area: Rect,
-    tabs_rect: Rect,
+    summary_rect: Rect,
     filter_rect: Rect,
-    /// The tabs' click targets.
-    tab_hits: Vec<(Rect, crate::rank::Level)>,
     /// After a re-read: the file the cursor was on, its row in the file's rows.
     pending_cursor: Option<(String, usize)>,
     /// The agent's order (groups, whys, levels) of the current set of paths; a call on its way;
@@ -1048,10 +1201,8 @@ pub struct View {
     fresh_rank: bool,
     /// The classifier (setting `classify`), None: path rules.
     classifier: Option<crate::rank::Runner>,
-    /// The tab: the files of this level; picked by hand (else the 1st one with files).
-    tab: crate::rank::Level,
-    tab_by_hand: bool,
-    /// Reviewed / all files per level (by `build`).
+    /// The level of each file (by index), reviewed / all files per level (by `build`).
+    lv: Vec<crate::rank::Level>,
     counts: [(usize, usize); 4],
     /// The filter: its text, it has the keys, its hits (file index, name marks; by `build`).
     filter: String,
@@ -1059,8 +1210,25 @@ pub struct View {
     hits: HashMap<usize, Vec<usize>>,
     /// The selected diff lines per path (space, a mouse drag): a comment goes on them.
     sel: HashMap<String, std::collections::BTreeSet<LKey>>,
-    /// A mouse drag: its 1st row and the selection before it.
-    drag: Option<(usize, HashMap<String, std::collections::BTreeSet<LKey>>)>,
+    /// A mouse drag: its 1st row, the selection before it, adds (left button) or takes out
+    /// (right button).
+    drag: Option<(usize, HashMap<String, std::collections::BTreeSet<LKey>>, bool)>,
+    /// The last right click (a 2nd one soon after: the selection clears); the last left click's
+    /// row (shift+click: the rows from it).
+    right_at: Option<Instant>,
+    anchor: Option<usize>,
+    /// The source control panel (ctrl+b).
+    scm: scm::Panel,
+    /// A modal over the view: a comment, a question; its buttons (yes / save: true).
+    modal: Option<Modal>,
+    modal_btns: Vec<(Rect, bool)>,
+    /// The comment modal's selected lines on screen: the wheel scrolls them.
+    modal_quote: Rect,
+    /// The row index on each screen row of the rows' area (pinned rows included).
+    shown_rows: Vec<usize>,
+    /// The stash (read again when its file changes: an agent named an entry).
+    stash: Vec<stash::Entry>,
+    stash_at: Option<std::time::SystemTime>,
     /// Review comments, for 1 batch message (`C`).
     comments: Vec<Comment>,
     /// The reviewer's findings, a review on its way, why 0, the model (None: `off`).
@@ -1072,9 +1240,10 @@ pub struct View {
     pr: Option<Pr>,
     pr_read: Option<Receiver<Option<Pr>>>,
     pr_at: Option<Instant>,
-    /// The CI fix message on its way; a message for the thread (the view sends it).
+    /// The CI fix message on its way; messages for the thread (the view sends them; `@name`
+    /// first: to that agent).
     ci: Option<Receiver<Result<String, String>>>,
-    outbox: Option<String>,
+    outbox: Vec<String>,
     /// A git step on its way, and what the last one did (the thread view shows it).
     op: Option<Receiver<Result<String, String>>>,
     note: Option<String>,
@@ -1099,23 +1268,31 @@ impl View {
             loaded: None,
             error: None,
             area: Rect::default(),
-            tabs_rect: Rect::default(),
+            summary_rect: Rect::default(),
             filter_rect: Rect::default(),
-            tab_hits: Vec::new(),
             pending_cursor: None,
             rank: crate::rank::cached(id),
             ranking: None,
             rank_error: None,
             fresh_rank: false,
             classifier: if cfg!(test) { None } else { crate::rank::runner() },
-            tab: crate::rank::Level::Critical,
-            tab_by_hand: false,
+            lv: Vec::new(),
             counts: [(0, 0); 4],
             filter: String::new(),
             filtering: false,
             hits: HashMap::new(),
             sel: HashMap::new(),
             drag: None,
+            right_at: None,
+            anchor: None,
+            scm: scm::Panel::new(),
+            modal: None,
+            alt_tap: false,
+            modal_btns: Vec::new(),
+            modal_quote: Rect::default(),
+            shown_rows: Vec::new(),
+            stash: stash::read(id),
+            stash_at: stash::stamp(id),
             comments: read_comments(id),
             review: crate::review::cached(id),
             reviewing: None,
@@ -1125,7 +1302,7 @@ impl View {
             pr_read: None,
             pr_at: None,
             ci: None,
-            outbox: None,
+            outbox: Vec::new(),
             op: None,
             note: None,
         }
@@ -1308,7 +1485,7 @@ impl View {
 
     /// A message for the thread, once (the CI fix; the thread view sends it).
     pub fn take_send(&mut self) -> Option<String> {
-        self.outbox.take()
+        (!self.outbox.is_empty()).then(|| self.outbox.remove(0))
     }
 
     /// The PR read (30 s) and the CI fix message: finished ones apply. True: something changed.
@@ -1336,7 +1513,7 @@ impl View {
         {
             self.ci = None;
             match r {
-                Ok(m) => self.outbox = Some(m),
+                Ok(m) => self.outbox.push(m),
                 Err(e) => self.note = Some(format!("CI: {e}")),
             }
             changed = true;
@@ -1353,6 +1530,29 @@ impl View {
             Err(e) => format!("git: {e}"),
         });
         self.refresh(true);
+        self.sync_stash(true);
+        true
+    }
+
+    /// The stash file changed (an agent named an entry, a stash ended): read it again; new
+    /// entries: their agent gets asked for a name (NOW: read even with 0 change seen).
+    fn sync_stash(&mut self, now: bool) -> bool {
+        let at = stash::stamp(&self.id);
+        if !now && at == self.stash_at {
+            return false;
+        }
+        self.stash_at = at;
+        self.stash = stash::read(&self.id);
+        let mut asked = false;
+        for e in self.stash.iter_mut().filter(|e| !e.asked && e.name.is_empty()) {
+            e.asked = true;
+            asked = true;
+            self.outbox.push(stash::name_ask(e));
+        }
+        if asked {
+            stash::write(&self.id, &self.stash);
+            self.stash_at = stash::stamp(&self.id);
+        }
         true
     }
 
@@ -1447,7 +1647,7 @@ impl View {
             return;
         }
         self.fresh_rank = self.rank.as_ref().is_some_and(|r| r.key == crate::rank::key(&self.changes.files));
-        // the tabs: reviewed / all per level; an empty tab not picked by hand: the 1st with files
+        // reviewed / all per level
         let levels = self.levels();
         let mut counts = [(0, 0); 4];
         for (f, l) in self.changes.files.iter().zip(&levels) {
@@ -1455,21 +1655,19 @@ impl View {
             counts[*l as usize].0 += usize::from(self.is_reviewed(f));
         }
         self.counts = counts;
-        if !self.tab_by_hand && self.counts[self.tab as usize].1 == 0
-            && let Some(l) = crate::rank::Level::ALL.into_iter().find(|l| self.counts[*l as usize].1 > 0)
-        {
-            self.tab = l;
-        }
-        // the shown files: the filter's hits (by relevance, every level), else the tab's
+        // the shown files: the filter's hits (by relevance), else all by level (the panel's order)
         let shown: Vec<usize> = if self.filter.trim().is_empty() {
             self.hits.clear();
-            (0..self.changes.files.len()).filter(|&i| levels[i] == self.tab).collect()
+            let mut v: Vec<usize> = (0..self.changes.files.len()).collect();
+            v.sort_by_key(|&i| levels[i] as usize);
+            v
         } else {
             let hits = crate::fuzzy::rank(&self.changes.files, &self.filter, |f| f.path.clone(), body_text);
             self.hits = hits.iter().cloned().collect();
             hits.into_iter().map(|h| h.0).collect()
         };
-        let mut rows: Vec<Row> = vec![Row::new(Body::Summary, 0, None)];
+        self.lv = levels;
+        let mut rows: Vec<Row> = Vec::new();
         if self.changes.stopped.is_some() {
             rows.push(Row::new(Body::Conflict, 0, None));
         }
@@ -1512,7 +1710,7 @@ impl View {
             self.at = r + off.min(n.saturating_sub(1));
         }
         self.at = self.at.min(self.rows.len().saturating_sub(1));
-        // the summary or a group head under the cursor: the 1st box
+        // a group head under the cursor: the 1st box
         if !self.rows.get(self.at).is_some_and(|r| r.head || r.at.is_some()) && let Some(h) = self.rows.iter().position(|r| r.head) {
             self.at = h;
         }
@@ -1524,7 +1722,6 @@ impl View {
         let first = f.first_line();
         rows.push(Row::new(Body::Head, i, Some(first)));
         if self.folded(f) {
-            rows.push(Row::new(Body::Foot, i, Some(first)));
             return;
         }
         if self.ranked(&f.path).is_some_and(|x| !x.2.is_empty()) {
@@ -1601,7 +1798,7 @@ impl View {
         let Some(r) = self.rows.get(i) else { return Line::raw("") };
         let w = usize::from(self.built.map_or(80, |b| b.0));
         let inner = w.saturating_sub(4);
-        let border = theme::line();
+        let border = self.border(r.file);
         let bar = |mut spans: Vec<Span<'static>>| -> Line<'static> {
             let used: usize = spans.iter().map(|s| s.content.width()).sum();
             let mut v = vec![Span::styled("│ ", border)];
@@ -1612,7 +1809,6 @@ impl View {
         };
         let Some(f) = self.changes.files.get(r.file) else { return Line::raw("") };
         match r.body {
-            Body::Summary => self.summary(),
             Body::Conflict => {
                 let c = self.changes.stopped.clone().unwrap_or_default();
                 let files = if c.is_empty() { "0 conflicts".to_string() } else { format!("{} conflicts: {}", c.len(), c.join(", ")) };
@@ -1703,12 +1899,22 @@ impl View {
         }
     }
 
+    /// The border style of file I's box: accent on the file of the cursor.
+    /// The panel's keys on a file row: that file.
+    fn border(&self, i: usize) -> Style {
+        let on = match self.scm.file_at() {
+            Some(f) => f == i,
+            None => self.rows.get(self.at).is_some_and(|r| r.file == i && !matches!(r.body, Body::Blank | Body::Group(..) | Body::Hits(_) | Body::Conflict)),
+        };
+        if on { theme::accent() } else { theme::line() }
+    }
+
     /// The head row of file I (F): reviewed mark, staged mark, path (filter hits marked), level,
     /// category, size.
     fn head_line(&self, i: usize, f: &FileDiff, w: usize) -> Line<'static> {
         let reviewed = self.is_reviewed(f);
         let updated = !reviewed && self.marks.contains_key(&f.path);
-        let border = theme::line();
+        let border = self.border(i);
         let mark = if reviewed { Span::styled("☑ ", Style::default().fg(theme::pal().ok)) } else { Span::styled("☐ ", theme::muted()) };
         let (name, skip) = match &f.old_path {
             Some(o) => (format!("{o} → {}", f.path), o.chars().count() + 3),
@@ -1727,7 +1933,9 @@ impl View {
             Some(false) => Span::styled("◐ ", Style::default().fg(theme::pal().warn)),
             None => Span::raw(""),
         };
-        let mut head = vec![Span::styled("┌─ ", border), mark, stage];
+        // a folded box: 1 line, 0 corners
+        let (open, close) = if self.folded(f) { ("── ", "──") } else { ("┌─ ", "─┐") };
+        let mut head = vec![Span::styled(open, border), mark, stage];
         let fitted = crate::nav::fit(&name, room);
         let marks: Vec<usize> = self.hits.get(&i).map(|m| m.iter().map(|x| x + skip).filter(|&x| x < fitted.chars().count()).collect()).unwrap_or_default();
         head.extend(crate::fuzzy::spans(&fitted, &marks, theme::bold(), theme::accent_bold().add_modifier(Modifier::UNDERLINED)));
@@ -1738,7 +1946,7 @@ impl View {
         let fill = w.saturating_sub(used + right.width() + 3);
         head.push(Span::styled(format!(" {}", "─".repeat(fill)), border));
         head.push(Span::styled(right, theme::muted()));
-        head.push(Span::styled("─┐", border));
+        head.push(Span::styled(close, border));
         Line::from(head)
     }
 
@@ -1821,11 +2029,271 @@ impl View {
             return;
         }
         for s in spots {
-            self.comments.push(Comment { path: s.path.clone(), line: s.line, text: text.to_string(), lines: s.lines.clone() });
+            let quote = self.quote(s);
+            self.comments.push(Comment { path: s.path.clone(), line: s.line, text: text.to_string(), lines: s.lines.clone(), quote });
         }
         write_comments(&self.id, &self.comments);
         self.sel.clear();
         self.rebuild_here();
+    }
+
+    /// The diff lines of S (`+ let b = 3;`): the selected lines of its file, else its line.
+    fn quote(&self, s: &Spot) -> String {
+        let Some(f) = self.changes.files.iter().find(|f| f.path == s.path) else { return String::new() };
+        let sign = |k: Kind| match k {
+            Kind::Add => '+',
+            Kind::Del => '-',
+            Kind::Ctx => ' ',
+        };
+        let all = f.hunks.iter().flat_map(|h| &h.lines);
+        let lines: Vec<&DLine> = match self.sel.get(&s.path) {
+            Some(set) => all.filter(|l| lkey(l).is_some_and(|k| set.contains(&k))).take(40).collect(),
+            None => all.clone().find(|l| l.new == Some(s.line)).or_else(|| all.clone().find(|l| l.kind == Kind::Del && l.old == Some(s.line))).into_iter().collect(),
+        };
+        lines.iter().map(|l| format!("{} {}", sign(l.kind), l.text)).collect::<Vec<_>>().join("\n")
+    }
+
+    /// The comment modal on SPOTS (the selection, else the cursor's line).
+    fn open_comment(&mut self, spots: Vec<Spot>) {
+        let mut quote = Vec::new();
+        for (i, s) in spots.iter().enumerate() {
+            if spots.len() > 1 {
+                if i > 0 {
+                    quote.push(QLine::Gap);
+                }
+                quote.push(QLine::Path(s.label()));
+            }
+            quote.extend(self.quote(s).lines().map(|l| QLine::Code(l.to_string())));
+        }
+        let title = spots.iter().map(Spot::label).collect::<Vec<_>>().join(", ");
+        self.modal = Some(Modal::Comment { title, quote, scroll: 0, edit: None, spots, text: comment_area("") });
+    }
+
+    /// The comment modal on comment CI: its text to edit (0 text: it goes).
+    pub(super) fn edit_comment(&mut self, ci: usize) {
+        let Some(c) = self.comments.get(ci) else { return };
+        let title = format!("{}:{}", c.path, c.at());
+        let quote = c.quote.lines().map(|l| QLine::Code(l.to_string())).collect();
+        self.modal = Some(Modal::Comment { title, quote, scroll: 0, edit: Some(ci), spots: Vec::new(), text: comment_area(&c.text) });
+    }
+
+    /// The modal's save: a new comment, an edit (0 text: deleted).
+    fn save_comment(&mut self) -> Act {
+        let Some(Modal::Comment { spots, edit, text, .. }) = self.modal.take() else { return Act::None };
+        let t = text.text().trim().to_string();
+        match edit {
+            Some(ci) if ci < self.comments.len() => {
+                if t.is_empty() {
+                    self.comments.remove(ci);
+                } else {
+                    self.comments[ci].text = t;
+                }
+                write_comments(&self.id, &self.comments);
+                self.rebuild_here();
+                Act::Toast(format!("comment saved · {} in the batch", self.comments.len()))
+            }
+            Some(_) => Act::None,
+            None if t.is_empty() => Act::Toast("0 text: 0 comment".into()),
+            None => {
+                self.add_comment(&spots, &t);
+                let on = spots.iter().map(Spot::label).collect::<Vec<_>>().join(", ");
+                Act::Toast(format!("comment on {on} · {} in the batch · ctrl+enter: send", self.comments.len()))
+            }
+        }
+    }
+
+    /// A key while a modal is open.
+    fn modal_key(&mut self, k: KeyEvent) -> Act {
+        let send = k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        match self.modal.as_mut() {
+            Some(Modal::Comment { text, scroll, .. }) => match k.code {
+                KeyCode::Esc => self.modal = None,
+                KeyCode::Enter if send => return self.save_comment(),
+                // alt+↑↓: the selected lines scroll
+                KeyCode::Up if k.modifiers.contains(KeyModifiers::ALT) => *scroll = scroll.saturating_sub(1),
+                KeyCode::Down if k.modifiers.contains(KeyModifiers::ALT) => *scroll += 1,
+                _ => {
+                    if !matches!(text.key(k), crate::textarea::Outcome::Handled) && k.code == KeyCode::Enter {
+                        text.newline();
+                    }
+                }
+            },
+            Some(Modal::Confirm { yes, .. }) => match k.code {
+                KeyCode::Esc | KeyCode::Char('n') => self.modal = None,
+                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::Char('h') | KeyCode::Char('l') => *yes = !*yes,
+                KeyCode::Char('y') => return self.confirm(true),
+                KeyCode::Enter => {
+                    let y = *yes;
+                    return self.confirm(y);
+                }
+                _ => {}
+            },
+            None => {}
+        }
+        Act::None
+    }
+
+    /// The question's answer YES: its step runs.
+    fn confirm(&mut self, yes: bool) -> Act {
+        let Some(Modal::Confirm { then, .. }) = self.modal.take() else { return Act::None };
+        if !yes {
+            return Act::None;
+        }
+        self.stash = stash::read(&self.id);
+        let n = self.stash.len();
+        match then {
+            Then::DropStash(id) => self.stash.retain(|e| e.id != id),
+            Then::ClearStash => self.stash.clear(),
+        }
+        stash::write(&self.id, &self.stash);
+        self.stash_at = stash::stamp(&self.id);
+        Act::Toast(format!("stash: {} removed · {} left", n - self.stash.len(), self.stash.len()))
+    }
+
+    /// A mouse event while a modal is open: the text takes it, a click on a button answers.
+    fn modal_mouse(&mut self, m: MouseEvent) -> Act {
+        let at = ratatui::layout::Position { x: m.column, y: m.row };
+        let click = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
+        if click && let Some(&(_, yes)) = self.modal_btns.iter().find(|(r, _)| r.contains(at)) {
+            return if let Some(Modal::Comment { .. }) = self.modal { if yes { self.save_comment() } else { self.modal = None; Act::None } } else { self.confirm(yes) };
+        }
+        let in_quote = self.modal_quote.contains(at);
+        if let Some(Modal::Comment { text, scroll, .. }) = self.modal.as_mut() {
+            match m.kind {
+                MouseEventKind::ScrollUp if in_quote => *scroll = scroll.saturating_sub(3),
+                MouseEventKind::ScrollDown if in_quote => *scroll += 3,
+                _ => {
+                    text.mouse(m);
+                }
+            }
+        }
+        Act::None
+    }
+
+    fn draw_modal(&mut self, f: &mut Frame, area: Rect) {
+        use ratatui::widgets::{Block, Clear};
+        self.modal_btns.clear();
+        let Some(modal) = self.modal.as_mut() else { return };
+        let w = area.width.saturating_sub(4).clamp(20, 110);
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        match modal {
+            Modal::Comment { title, quote, scroll, edit, text, .. } => {
+                let tw = w.saturating_sub(4);
+                let th = (text.rows_for(tw) as u16).clamp(3, 8);
+                // the selected lines: at most half the screen (and 24 rows); more: they scroll
+                let room = (area.height.saturating_sub(th + 6) as usize).min(usize::from(area.height / 2).max(3)).min(24);
+                let qh = quote.len().min(room);
+                *scroll = (*scroll).min(quote.len() - qh);
+                let h = (qh as u16 + th + 5 + u16::from(qh > 0)).min(area.height);
+                let y = area.y + (area.height.saturating_sub(h)) / 3;
+                let r = Rect { x, y, width: w, height: h };
+                f.render_widget(Clear, r);
+                let head = if edit.is_some() { format!(" edit comment · {title} ") } else { format!(" comment on {title} ") };
+                f.render_widget(Block::bordered().border_style(theme::accent()).title(Span::styled(crate::nav::fit(&head, usize::from(w.saturating_sub(4))), theme::accent_bold())).style(theme::text()), r);
+                let inner = Rect { x: r.x + 2, y: r.y + 1, width: w.saturating_sub(4), height: h.saturating_sub(2) };
+                let bg = code_bg();
+                let mut yy = inner.y;
+                // 1 column for the scrollbar when the lines scroll
+                let bar = quote.len() > qh;
+                let cw = inner.width.saturating_sub(u16::from(bar));
+                self.modal_quote = Rect { y: yy, height: qh as u16, ..inner };
+                for l in quote.iter().skip(*scroll).take(qh) {
+                    let row = Rect { y: yy, height: 1, width: cw, ..inner };
+                    match l {
+                        QLine::Gap => {}
+                        QLine::Path(p) => f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(p, usize::from(cw)), theme::bold())), row),
+                        QLine::Code(c) => {
+                            let st = match c.chars().next() {
+                                Some('+') => Style::default().fg(theme::pal().ok),
+                                Some('-') => Style::default().fg(theme::pal().danger),
+                                _ => theme::muted(),
+                            };
+                            f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(c, usize::from(cw)), st)).style(Style::default().bg(bg)), row);
+                        }
+                    }
+                    yy += 1;
+                }
+                if bar {
+                    // the thumb: the visible part of the lines
+                    let n = quote.len();
+                    let len = (qh * qh).div_ceil(n).max(1);
+                    let at = (*scroll * qh) / n;
+                    for k in 0..qh {
+                        let on = k >= at && k < at + len;
+                        let cell = Span::styled(if on { "┃" } else { "│" }, if on { theme::accent() } else { theme::line() });
+                        f.render_widget(Paragraph::new(cell), Rect { x: inner.x + cw, y: inner.y + k as u16, width: 1, height: 1 });
+                    }
+                }
+                if qh > 0 {
+                    yy += 1;
+                }
+                let tr = Rect { y: yy, height: th.min(inner.bottom().saturating_sub(yy + 1)), ..inner };
+                text.render(f, tr, true);
+                let hint = Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner };
+                let (save, cancel) = (" save ", " cancel ");
+                f.render_widget(Paragraph::new(Line::from(vec![Span::styled(save, theme::pill()), Span::raw(" "), Span::styled(cancel, theme::muted()), Span::styled("  ctrl+⏎ save · esc cancel · 0 text: delete", theme::muted())])), hint);
+                self.modal_btns.push((Rect { width: save.len() as u16, ..hint }, true));
+                self.modal_btns.push((Rect { x: hint.x + save.len() as u16 + 1, width: cancel.len() as u16, ..hint }, false));
+            }
+            Modal::Confirm { question, yes, .. } => {
+                let w = w.min(70);
+                let x = area.x + (area.width.saturating_sub(w)) / 2;
+                let r = Rect { x, y: area.y + area.height / 3, width: w, height: 5.min(area.height) };
+                f.render_widget(Clear, r);
+                f.render_widget(Block::bordered().border_style(theme::accent()).style(theme::text()), r);
+                let inner = Rect { x: r.x + 2, y: r.y + 1, width: w.saturating_sub(4), height: 3 };
+                f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(question, usize::from(inner.width)), theme::text())), Rect { height: 1, ..inner });
+                let (ys, ns) = if *yes { (theme::pill(), theme::muted()) } else { (theme::muted(), theme::pill()) };
+                let row = Rect { y: inner.y + 2, height: 1, ..inner };
+                f.render_widget(Paragraph::new(Line::from(vec![Span::styled(" yes ", ys), Span::raw("  "), Span::styled(" no ", ns), Span::styled("   y / n · ←→ · enter", theme::muted())])), row);
+                self.modal_btns.push((Rect { width: 5, ..row }, true));
+                self.modal_btns.push((Rect { x: row.x + 7, width: 4, ..row }, false));
+            }
+        }
+    }
+
+    /// The selected lines per file as patch picks: (path, lines label, pick); 0 changed line
+    /// picked (context only): 0 entry.
+    fn picks(&self) -> Vec<(String, String, patch::Pick)> {
+        let mut paths: Vec<&String> = self.sel.keys().collect();
+        paths.sort();
+        paths
+            .into_iter()
+            .filter_map(|p| {
+                let f = self.changes.files.iter().find(|f| &f.path == p)?;
+                let set = &self.sel[p];
+                let pk = pick_of(f, set);
+                (!pk.is_empty()).then(|| (p.clone(), lines_label(set), pk))
+            })
+            .collect()
+    }
+
+    /// Stash ITEMS: out of the worktree, into the stash (on a thread).
+    fn stash_op(&mut self, items: Vec<(String, String, patch::Pick)>) -> Act {
+        let rev = if self.changes.rev.is_empty() { "HEAD".to_string() } else { self.changes.rev.clone() };
+        self.start_op(Op::Stash { thread: self.id.clone(), rev, items })
+    }
+
+    /// What the owner's message from the changes view takes along: the selected lines, the open
+    /// comments. None: neither.
+    pub fn context(&self) -> Option<String> {
+        let mut s = String::new();
+        if !self.sel.is_empty() {
+            s.push_str("Selected lines (file:lines, new side; `removed`: old side):\n");
+            let mut paths: Vec<&String> = self.sel.keys().collect();
+            paths.sort();
+            for p in paths {
+                let spot = Spot { path: p.clone(), line: 0, lines: lines_label(&self.sel[p]) };
+                s.push_str(&format!("- `{}`\n```diff\n{}\n```\n", spot.label(), self.quote(&spot)));
+            }
+        }
+        if !self.comments.is_empty() {
+            s.push_str("Open review comments (file:line, new side):\n");
+            for c in &self.comments {
+                s.push_str(&format!("- `{}:{}`: {}\n", c.path, c.at(), c.text.replace('\n', " / ")));
+            }
+        }
+        (!s.is_empty()).then(|| format!("[codehead: context from the changes view]\n{}", s.trim_end()))
     }
 
     /// Tests: FILES as the read changes (a git read on its way: dropped).
@@ -1839,25 +2307,33 @@ impl View {
         self.built = None;
     }
 
-    /// The filter has the keys (letters, esc, enter go to it).
+    /// The view has the letters: the filter, a modal, the commit message.
     pub fn typing(&self) -> bool {
-        self.filtering
+        self.filtering || self.modal.is_some() || (self.scm.focus && self.scm.msg_focus)
     }
 
-    /// Esc is the view's: it leaves the filter, clears it or the selection.
+    /// Esc is the view's: it closes a modal, leaves the filter or the message, clears the
+    /// filter, the selection or the panel's picks.
     pub fn takes_esc(&self) -> bool {
-        self.filtering || !self.filter.is_empty() || !self.sel.is_empty()
+        self.typing() || !self.filter.is_empty() || !self.sel.is_empty() || (self.scm.focus && !self.scm.picked.is_empty())
     }
 
-    /// Show the files of level L (the filter clears).
-    fn set_tab(&mut self, l: crate::rank::Level) {
-        self.tab = l;
-        self.tab_by_hand = true;
-        self.filter.clear();
-        self.filtering = false;
-        self.built = None;
-        self.at = 0;
-        self.top = 0;
+    /// The keys of the footer now.
+    pub fn hints(&self) -> &'static str {
+        match &self.modal {
+            Some(Modal::Comment { .. }) => return "ctrl+⏎: save · esc: cancel · alt+↑↓ / wheel: scroll the lines · 0 text: delete ",
+            Some(Modal::Confirm { .. }) => return "y / enter: yes · n / esc: no ",
+            None => {}
+        }
+        if self.scm.focus && self.scm.msg_focus {
+            "commit message · ctrl+⏎: commit the staged files · ctrl+g: draft by model · esc: back "
+        } else if self.scm.focus {
+            "j k · space: pick · e: IDE · s: stage / unstage · p: stash · →: open · x: remove · r: restore · alt: review "
+        } else if self.filtering {
+            "type to filter · enter: 1st hit · esc: clear "
+        } else {
+            "j k: file · space: select · e: IDE · s: stage · c: comment · r: reviewed · alt: panel · i: prompt "
+        }
     }
 
     /// A key while the filter has the focus.
@@ -1889,56 +2365,73 @@ impl View {
         Act::None
     }
 
-    /// The tab bar and the filter row.
+    /// The summary row and the filter row (they stay while the rows scroll).
     fn draw_bars(&mut self, f: &mut Frame) {
-        self.tab_hits.clear();
+        f.render_widget(Paragraph::new(self.summary()), self.summary_rect);
         let filtered = !self.filter.trim().is_empty();
-        let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
-        let mut x = self.tabs_rect.x + 1;
-        for (n, l) in crate::rank::Level::ALL.into_iter().enumerate() {
-            let (done, all) = self.counts[l as usize];
-            let label = format!(" {} {} {done}/{all} ", n + 1, l.label());
-            let color = match l {
-                crate::rank::Level::Critical => theme::pal().danger,
-                crate::rank::Level::High => theme::pal().warn,
-                crate::rank::Level::Medium => theme::pal().accent,
-                crate::rank::Level::Low => theme::pal().muted,
-            };
-            let st = if l == self.tab && !filtered { theme::pill() } else if all == 0 { theme::muted() } else { Style::default().fg(color) };
-            let w = label.width() as u16;
-            self.tab_hits.push((Rect { x, y: self.tabs_rect.y, width: w, height: 1 }, l));
-            x += w + 1;
-            spans.push(Span::styled(label, st));
-            spans.push(Span::raw(" "));
-        }
-        let state = if self.ranking.is_some() {
-            Span::styled(format!(" classifying… ({})", self.classifier.as_ref().map_or("path rules", |c| c.label.as_str())), theme::accent())
-        } else if let Some(e) = &self.rank_error {
-            Span::styled(format!(" path rules · {e}"), theme::muted())
-        } else if let Some(r) = &self.rank {
-            Span::styled(format!(" by {}{}", r.model, if self.fresh_rank { "" } else { " · older set of files" }), theme::muted())
-        } else {
-            Span::styled(" by path rules", theme::muted())
-        };
-        spans.push(state);
-        f.render_widget(Paragraph::new(Line::from(spans)), self.tabs_rect);
         let line = if self.filtering {
             Line::from(vec![Span::styled(" f ", theme::pill()), Span::styled(format!(" {}", self.filter), theme::text()), Span::styled("▏", theme::accent()), Span::styled("  enter: 1st hit · esc: clear", theme::muted())])
         } else if filtered {
             Line::from(vec![Span::styled(" f ", theme::muted()), Span::styled(format!(" {}", self.filter), theme::accent()), Span::styled("  f: edit · esc: clear", theme::muted())])
         } else {
-            Line::styled(" f  filter by name or content, every level", theme::muted())
+            Line::styled(" f  filter by name or content", theme::muted())
         };
         f.render_widget(Paragraph::new(line), self.filter_rect);
     }
 
+    /// The rows pinned on top while row TOP shows: its box's head (+ the why under it), once
+    /// the head scrolled out of view. 0: TOP is a head, between the boxes or after one.
+    fn pinned(&self, top: usize) -> Vec<usize> {
+        let Some(r) = self.rows.get(top) else { return Vec::new() };
+        if r.head || matches!(r.body, Body::Blank | Body::Group(..) | Body::Hits(_) | Body::Conflict | Body::Foot) {
+            return Vec::new();
+        }
+        let Some(hi) = self.rows[..top].iter().rposition(|x| x.head && x.file == r.file) else { return Vec::new() };
+        let mut v = vec![hi];
+        if self.rows.get(hi + 1).is_some_and(|x| x.body == Body::Why) {
+            v.push(hi + 1);
+        }
+        v
+    }
+
+    /// Row I of the rows in RECT: its line, the selection's tint, the code background, the cursor.
+    fn draw_row(&self, f: &mut Frame, rect: Rect, i: usize, x0: u16, width: u16) {
+        f.render_widget(Paragraph::new(self.line(i)), rect);
+        let buf = f.buffer_mut();
+        if self.selected(i) {
+            // a selected line: a bar in the gutter, its text on the selection tint (the sign
+            // column keeps its color)
+            let sel_bg = theme::tint(theme::pal().accent, theme::pal().panel, 0.28);
+            for x in rect.x + 2..rect.right().saturating_sub(2) {
+                if let Some(c) = buf.cell_mut((x, rect.y))
+                    && c.bg == ratatui::style::Color::Reset
+                {
+                    c.set_bg(sel_bg);
+                }
+            }
+            if let Some(c) = buf.cell_mut((rect.x + 1, rect.y)) {
+                c.set_symbol("▌").set_fg(theme::pal().accent);
+            }
+        }
+        // inside a box: the code's dark background
+        if self.rows.get(i).is_some_and(|r| matches!(r.body, Body::Why | Body::Note(_) | Body::Hunk(_) | Body::Diff(..) | Body::Side(..) | Body::Finding(..) | Body::Comment(..))) {
+            let bg = code_bg();
+            for x in rect.x + 1..rect.right().saturating_sub(1) {
+                if let Some(c) = buf.cell_mut((x, rect.y))
+                    && c.bg == ratatui::style::Color::Reset
+                {
+                    c.set_bg(bg);
+                }
+            }
+        }
+        if i == self.at && !self.scm.focus {
+            theme::hover(f.buffer_mut(), Rect { x: x0, width: 1, ..rect });
+            f.render_widget(Paragraph::new(Span::styled("▌", theme::accent())), Rect { x: x0 + width, width: 1, ..rect });
+        }
+    }
+
     pub fn draw(&mut self, f: &mut Frame, area: Rect) {
-        // the tab bar and the filter row on top (room permitting), the rows below
-        let bars = area.height >= 6;
-        self.tabs_rect = if bars { Rect { height: 1, ..area } } else { Rect::default() };
-        self.filter_rect = if bars { Rect { y: area.y + 1, height: 1, ..area } } else { Rect::default() };
-        let area = if bars { Rect { y: area.y + 2, height: area.height - 2, ..area } } else { area };
-        self.area = area;
+        let full = area;
         if self.poll_review() {
             self.built = None;
         }
@@ -1954,54 +2447,92 @@ impl View {
         if self.poll() {
             self.built = None;
         }
+        self.sync_stash(false);
         self.refresh(false);
-        if let Some(e) = &self.error {
-            f.render_widget(Paragraph::new(Line::styled(format!("  changes: {e}"), theme::muted())), area);
-            return;
-        }
-        if self.changes.files.is_empty() {
-            let msg = if self.loaded.is_none() { "  reading changes…".to_string() } else { format!("  0 changes against {}", self.changes.base) };
-            f.render_widget(Paragraph::new(Line::styled(msg, theme::muted())), area);
-            return;
-        }
+        // the panel left (ctrl+b; room permitting), a line, the review right
+        let panel = self.scm.shown && area.width >= PANEL_MIN;
+        let (panel_rect, area) = if panel {
+            let pw = (area.width / 4).clamp(30, 46);
+            for y in area.y..area.bottom() {
+                f.buffer_mut()[(area.x + pw, y)].set_symbol("│").set_style(theme::line());
+            }
+            (Rect { width: pw, ..area }, Rect { x: area.x + pw + 1, width: area.width - pw - 1, ..area })
+        } else {
+            self.scm.focus = false;
+            self.scm.rect = Rect::default();
+            (Rect::default(), area)
+        };
+        // the summary row and the filter row on top (room permitting), the rows below
+        let bars = area.height >= 6;
+        self.summary_rect = if bars { Rect { height: 1, ..area } } else { Rect::default() };
+        self.filter_rect = if bars { Rect { y: area.y + 1, height: 1, ..area } } else { Rect::default() };
+        let area = if bars { Rect { y: area.y + 2, height: area.height - 2, ..area } } else { area };
+        self.area = area;
+        self.shown_rows.clear();
+        let msg = if let Some(e) = &self.error {
+            Some(format!("  changes: {e}"))
+        } else if self.changes.files.is_empty() {
+            Some(if self.loaded.is_none() { "  reading changes…".to_string() } else { format!("  0 changes against {}", self.changes.base) })
+        } else {
+            None
+        };
         let width = area.width.saturating_sub(1);
-        self.build(width);
-        if bars {
-            self.draw_bars(f);
-        }
-        let h = usize::from(area.height);
-        // the cursor in view; a box header 1 row below the top when it can
-        if self.at < self.top + 1 {
-            self.top = self.at.saturating_sub(1);
-        } else if self.at >= self.top + h {
-            self.top = self.at + 1 - h;
-        }
-        self.top = self.top.min(self.rows.len().saturating_sub(h));
-        // only the rows in view get made: O(rows on screen) per frame
-        let sel_bg = theme::tint(theme::pal().accent, theme::pal().panel, 0.28);
-        for y in self.top..(self.top + h).min(self.rows.len()) {
-            let rect = Rect { x: area.x, y: area.y + (y - self.top) as u16, width, height: 1 };
-            f.render_widget(Paragraph::new(self.line(y)), rect);
-            if self.selected(y) {
-                // a selected line: a bar in the gutter, its text on the selection tint (the sign
-                // column keeps its color)
-                let buf = f.buffer_mut();
-                for x in rect.x + 2..rect.right().saturating_sub(2) {
-                    if let Some(c) = buf.cell_mut((x, rect.y))
-                        && c.bg == ratatui::style::Color::Reset
-                    {
-                        c.set_bg(sel_bg);
-                    }
-                }
-                if let Some(c) = buf.cell_mut((rect.x + 1, rect.y)) {
-                    c.set_symbol("▌").set_fg(theme::pal().accent);
-                }
+        if let Some(m) = msg {
+            f.render_widget(Paragraph::new(Line::styled(m, theme::muted())), area);
+        } else {
+            self.build(width);
+            if bars {
+                self.draw_bars(f);
             }
-            if y == self.at {
-                theme::hover(f.buffer_mut(), Rect { x: area.x, width: 1, ..rect });
-                f.render_widget(Paragraph::new(Span::styled("▌", theme::accent())), Rect { x: area.x + width, width: 1, ..rect });
+            let h = usize::from(area.height);
+            // the cursor in view; a box header 1 row below the top when it can
+            if self.at < self.top + 1 {
+                self.top = self.at.saturating_sub(1);
+            } else if self.at >= self.top + h {
+                self.top = self.at + 1 - h;
+            }
+            self.top = self.top.min(self.rows.len().saturating_sub(h));
+            // the cursor's box head pinned on top: the cursor stays below it
+            let pin = self.pinned(self.top).len();
+            if pin > 0 && self.at < self.top + pin && !self.rows[self.at].head {
+                self.top = self.at.saturating_sub(pin);
+            }
+            let pinned = self.pinned(self.top);
+            // only the rows in view get made: O(rows on screen) per frame
+            for y in self.top..(self.top + h).min(self.rows.len()) {
+                let k = y - self.top;
+                let row = pinned.get(k).copied().unwrap_or(y);
+                let rect = Rect { x: area.x, y: area.y + k as u16, width, height: 1 };
+                self.draw_row(f, rect, row, area.x, width);
+                self.shown_rows.push(row);
             }
         }
+        if panel {
+            self.draw_panel(f, panel_rect);
+        }
+        self.draw_modal(f, full);
+    }
+
+    /// Where the IDE opens: the 1st selected line (in the cursor's file, else the 1st file with
+    /// a selection), else the cursor's line; a removed line: the worktree line it sat before.
+    fn open_spot(&self) -> Option<(String, u32)> {
+        let cur = self.file_at();
+        let sel_file = cur.filter(|f| self.sel.get(&f.path).is_some_and(|s| !s.is_empty())).or_else(|| {
+            let mut seen = std::collections::HashSet::new();
+            self.rows.iter().filter(|r| seen.insert(r.file)).filter_map(|r| self.changes.files.get(r.file)).find(|f| self.sel.get(&f.path).is_some_and(|s| !s.is_empty()))
+        });
+        if let Some(f) = sel_file {
+            let keys = &self.sel[&f.path];
+            let first = f.hunks.iter().flat_map(|h| worktree_lines(h).into_iter().zip(&h.lines)).filter(|(_, l)| lkey(l).is_some_and(|k| keys.contains(&k))).map(|(n, _)| n).min();
+            return Some((f.path.clone(), first.unwrap_or_else(|| f.first_line()).max(1)));
+        }
+        let (f, r) = (cur?, self.rows.get(self.at)?);
+        let line = match r.body {
+            Body::Diff(h, k) => worktree_lines(&f.hunks[h]).get(k).copied(),
+            Body::Side(h, dk, ak) => ak.or(dk).and_then(|k| worktree_lines(&f.hunks[h]).get(k).copied()),
+            _ => r.at,
+        };
+        Some((f.path.clone(), line.unwrap_or_else(|| f.first_line()).max(1)))
     }
 
     fn file_at(&self) -> Option<&FileDiff> {
@@ -2032,22 +2563,73 @@ impl View {
         self.rebuild_on_file();
     }
 
+    /// The keys to the panel / the review (the panel shows).
+    pub fn toggle_focus(&mut self) {
+        self.scm.shown = true;
+        self.scm.focus = !self.scm.focus;
+        self.scm.msg_focus = false;
+    }
+
+    /// A modifier key alone (the kitty keyboard protocol: `crate::all_keys`): an alt tap
+    /// toggles the focus; true: it did.
+    pub fn modifier(&mut self, k: KeyEvent) -> bool {
+        use ratatui::crossterm::event::{KeyEventKind, ModifierKeyCode};
+        let alt = matches!(k.code, KeyCode::Modifier(ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt));
+        match k.kind {
+            KeyEventKind::Press if alt => self.alt_tap = true,
+            KeyEventKind::Repeat if alt => {}
+            KeyEventKind::Release if alt && std::mem::take(&mut self.alt_tap) && !self.typing() => {
+                self.toggle_focus();
+                return true;
+            }
+            _ => self.alt_tap = false,
+        }
+        false
+    }
+
+    /// A key other than a modifier: the next alt release is 0 tap.
+    pub fn no_tap(&mut self) {
+        self.alt_tap = false;
+    }
+
     pub fn key(&mut self, k: KeyEvent) -> Act {
+        if matches!(k.code, KeyCode::Modifier(_)) {
+            self.modifier(k);
+            return Act::None;
+        }
+        self.alt_tap = false;
+        if self.modal.is_some() {
+            return self.modal_key(k);
+        }
         if self.filtering {
             return self.filter_key(k);
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        // ctrl+b: the panel on / off; alt alone (a tap: press, release, 0 key between): the keys
+        // to the panel / the review
+        if ctrl && k.code == KeyCode::Char('b') {
+            self.scm.shown = !self.scm.shown;
+            self.scm.focus &= self.scm.shown;
+            self.scm.msg_focus &= self.scm.shown;
+            return Act::None;
+        }
+
+        if self.scm.focus {
+            return self.panel_key(k);
+        }
         let last = self.rows.len().saturating_sub(1);
         match k.code {
-            // j up, k down (the owner's pick)
-            KeyCode::Down | KeyCode::Char('k') if !ctrl => self.at = (self.at + 1).min(last),
-            KeyCode::Up | KeyCode::Char('j') if !ctrl => self.at = self.at.saturating_sub(1),
+            // ↑↓: 1 line; j / ctrl+↑: 1 file up, k / ctrl+↓: 1 file down (the owner's pick)
+            KeyCode::Down if !ctrl => self.at = (self.at + 1).min(last),
+            KeyCode::Up if !ctrl => self.at = self.at.saturating_sub(1),
+            KeyCode::Char('k') | KeyCode::Down => self.jump(true, |r| r.head),
+            KeyCode::Char('j') | KeyCode::Up => self.jump(false, |r| r.head),
             KeyCode::PageDown => self.at = (self.at + self.page()).min(last),
             KeyCode::PageUp => self.at = self.at.saturating_sub(self.page()),
             KeyCode::Char('}') => self.jump(true, |r| r.head),
             KeyCode::Char('{') => self.jump(false, |r| r.head),
             KeyCode::Char('n') => self.jump(true, |r| r.hunk || r.head),
-            KeyCode::Char('p') => self.jump(false, |r| r.hunk || r.head),
+            KeyCode::Char('N') => self.jump(false, |r| r.hunk || r.head),
             KeyCode::Char('g') | KeyCode::Home => self.at = 0,
             KeyCode::Char('G') | KeyCode::End => self.at = last,
             // space: the line selected / not, the cursor 1 down
@@ -2063,8 +2645,8 @@ impl View {
             KeyCode::Char('r') => return self.toggle_reviewed(),
             KeyCode::Left => self.fold(true),
             KeyCode::Right => self.fold(false),
-            KeyCode::Char(c @ '1'..='4') => self.set_tab(crate::rank::Level::ALL[usize::from(c as u8 - b'1')]),
             KeyCode::Char('f') => self.filtering = true,
+            KeyCode::Char('t') => return Act::ToggleChat,
             KeyCode::Esc => {
                 if !self.filter.is_empty() {
                     self.filter.clear();
@@ -2082,16 +2664,31 @@ impl View {
                 return Act::Send(text);
             }
             KeyCode::Enter => {
-                if let Some(f) = self.file_at() {
+                if let Some(ci) = self.rows.get(self.at).and_then(|r| r.comment) {
+                    self.edit_comment(ci);
+                } else if let Some(f) = self.file_at() {
                     let on = !self.folded(f);
                     self.fold(on);
                 }
             }
-            KeyCode::Char('s') => {
+            KeyCode::Char('w') => {
                 let now = self.side_by_side(self.area.width.saturating_sub(1));
                 self.side = Some(!now);
                 self.rebuild_on_file();
                 return Act::Toast(if now { "unified".into() } else { "side by side".into() });
+            }
+            // s: the selected lines into the index (a part of each file); p: into the stash
+            KeyCode::Char('s') | KeyCode::Char('p') => {
+                let picks = self.picks();
+                if picks.is_empty() {
+                    let what = if self.sel.is_empty() { "0 lines selected · space / click: select" } else { "0 changed lines selected (context only)" };
+                    return Act::Toast(what.into());
+                }
+                self.sel.clear();
+                if k.code == KeyCode::Char('p') {
+                    return self.stash_op(picks);
+                }
+                return self.start_op(Op::StageLines(picks.into_iter().map(|(p, _, pk)| (p, pk)).collect()));
             }
             KeyCode::Char('R') => {
                 if self.classifier.is_none() {
@@ -2116,12 +2713,7 @@ impl View {
                     return self.start_op(op);
                 }
             }
-            KeyCode::Char('m') => {
-                if !self.has_staged() {
-                    return Act::Toast("0 staged files · a: stage the box".into());
-                }
-                return Act::CommitMessage;
-            }
+            KeyCode::Char('m') => self.focus_message(),
             KeyCode::Char('P') => return self.start_op(Op::Push),
             KeyCode::Char('U') => {
                 if self.changes.base == "HEAD" {
@@ -2140,14 +2732,14 @@ impl View {
                     ));
                 }
             }
-            // c: a comment on the selected lines, else on the cursor's line
+            // c: the comment modal on the selected lines, else on the cursor's line
             KeyCode::Char('c') => {
                 let spots = self.spots();
                 if !spots.is_empty() {
-                    return Act::Comment(spots);
-                }
-                if let (Some(f), Some(r)) = (self.file_at(), self.rows.get(self.at)) {
-                    return Act::Comment(vec![Spot { path: f.path.clone(), line: r.at.unwrap_or_else(|| f.first_line()), lines: String::new() }]);
+                    self.open_comment(spots);
+                } else if let (Some(f), Some(r)) = (self.file_at(), self.rows.get(self.at)) {
+                    let spot = Spot { path: f.path.clone(), line: r.at.unwrap_or_else(|| f.first_line()), lines: String::new() };
+                    self.open_comment(vec![spot]);
                 }
             }
             KeyCode::Char('x') => {
@@ -2169,7 +2761,7 @@ impl View {
                     && let Some(x) = self.review.as_ref().and_then(|r| r.findings.get(fi)).cloned()
                 {
                     self.drop_finding(fi);
-                    self.comments.push(Comment { path: x.file.clone(), line: x.line, text: crate::review::as_comment(&x), lines: String::new() });
+                    self.comments.push(Comment { path: x.file.clone(), line: x.line, text: crate::review::as_comment(&x), lines: String::new(), quote: String::new() });
                     write_comments(&self.id, &self.comments);
                     self.rebuild_here();
                     return Act::Toast(format!("finding → comment batch · {} · ctrl+enter: send", self.comments.len()));
@@ -2203,9 +2795,10 @@ impl View {
                 self.ci = Some(rx);
                 return Act::Toast("CI: reading the failed log for the lead…".into());
             }
-            KeyCode::Char('o') => {
-                if let (Some(f), Some(r)) = (self.file_at(), self.rows.get(self.at)) {
-                    return Act::Open(f.path.clone(), r.at.unwrap_or_else(|| f.first_line()));
+            // o / e: the IDE at the 1st selected line, else at the cursor's line
+            KeyCode::Char('o') | KeyCode::Char('e') => {
+                if let Some((path, line)) = self.open_spot() {
+                    return Act::Open(path, line);
                 }
             }
             _ => {}
@@ -2213,7 +2806,6 @@ impl View {
         Act::None
     }
 
-    /// The rows change (fold, layout): the cursor stays on its file's header.
     /// The rows change (a comment): the cursor stays on its row number.
     fn rebuild_here(&mut self) {
         let width = self.built.map_or(self.area.width.saturating_sub(1), |b| b.0);
@@ -2223,6 +2815,7 @@ impl View {
         self.at = at.min(self.rows.len().saturating_sub(1));
     }
 
+    /// The rows change (fold, layout): the cursor stays on its file's header.
     fn rebuild_on_file(&mut self) {
         let file = self.rows.get(self.at).map(|r| r.file);
         let width = self.built.map_or(self.area.width.saturating_sub(1), |b| b.0);
@@ -2254,22 +2847,32 @@ impl View {
         Act::Toast(format!("{} · {done}/{all} reviewed", if on { "reviewed" } else { "not reviewed" }))
     }
 
-    /// A click on a tab: its files; on the filter row: the filter takes the keys; on a row: the
-    /// cursor there; a drag over diff rows selects their lines (as space does).
-    pub fn mouse(&mut self, m: MouseEvent) {
-        let at = ratatui::layout::Position { x: m.column, y: m.row };
-        let click = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
-        if click && let Some(&(_, l)) = self.tab_hits.iter().find(|(r, _)| r.contains(at)) {
-            self.set_tab(l);
-            return;
+    /// The row index under screen row Y of the rows' area (pinned rows included).
+    fn row_at_y(&self, y: u16) -> Option<usize> {
+        self.shown_rows.get(usize::from(y.checked_sub(self.area.y)?)).copied()
+    }
+
+    /// A click on the filter row: the filter takes the keys; on a row: the cursor there, its
+    /// lines into the selection (a drag: the rows it passes; shift+click: the rows from the last
+    /// click); the right button takes lines out (2 right clicks: the selection clears); a click
+    /// on a comment opens it.
+    pub fn mouse(&mut self, m: MouseEvent) -> Act {
+        if self.modal.is_some() {
+            return self.modal_mouse(m);
         }
+        let at = ratatui::layout::Position { x: m.column, y: m.row };
+        if self.drag.is_none() && self.scm.rect.contains(at) {
+            return self.panel_mouse(m);
+        }
+        let click = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
         if click && self.filter_rect.contains(at) {
             self.filtering = true;
-            return;
+            self.scm.focus = false;
+            return Act::None;
         }
         let last = self.rows.len().saturating_sub(1);
         // a drag past the rows' top / bottom: the row there, the view scrolls 1
-        if let (MouseEventKind::Drag(MouseButton::Left), Some((anchor, base))) = (m.kind, self.drag.clone()) {
+        if let (MouseEventKind::Drag(MouseButton::Left | MouseButton::Right), Some((anchor, base, add))) = (m.kind, self.drag.clone()) {
             let h = usize::from(self.area.height);
             let row = if m.row < self.area.y {
                 self.top = self.top.saturating_sub(1);
@@ -2278,24 +2881,22 @@ impl View {
                 self.top = (self.top + 1).min(self.rows.len().saturating_sub(h));
                 self.top + h.saturating_sub(1)
             } else {
-                self.top + usize::from(m.row - self.area.y)
+                self.row_at_y(m.row).unwrap_or(self.top + usize::from(m.row - self.area.y))
             }
             .min(last);
-            if row != anchor || self.sel != base {
-                self.sel = base;
-                for i in anchor.min(row)..=anchor.max(row) {
-                    self.select_row(i, true);
-                }
+            self.sel = base;
+            for i in anchor.min(row)..=anchor.max(row) {
+                self.select_row(i, add);
             }
             self.at = row;
-            return;
+            return Act::None;
         }
         if matches!(m.kind, MouseEventKind::Up(_)) {
             self.drag = None;
-            return;
+            return Act::None;
         }
         if !self.area.contains(at) {
-            return;
+            return Act::None;
         }
         match m.kind {
             MouseEventKind::ScrollDown => {
@@ -2306,13 +2907,178 @@ impl View {
                 self.top = self.top.saturating_sub(3);
                 self.at = self.at.min(self.top + usize::from(self.area.height).saturating_sub(2));
             }
-            MouseEventKind::Down(_) => {
-                self.at = (self.top + usize::from(m.row - self.area.y)).min(last);
+            MouseEventKind::Down(b @ (MouseButton::Left | MouseButton::Right)) => {
                 self.filtering = false;
-                self.drag = Some((self.at, self.sel.clone()));
+                self.scm.focus = false;
+                let row = self.row_at_y(m.row).unwrap_or(self.top + usize::from(m.row - self.area.y)).min(last);
+                self.at = row;
+                if b == MouseButton::Right {
+                    // 2 right clicks in a row: the whole selection clears
+                    if self.right_at.is_some_and(|t| t.elapsed() < DOUBLE_CLICK) {
+                        self.right_at = None;
+                        self.sel.clear();
+                        return Act::None;
+                    }
+                    self.right_at = Some(Instant::now());
+                    self.drag = Some((row, self.sel.clone(), false));
+                    self.select_row(row, false);
+                    return Act::None;
+                }
+                if let Some(ci) = self.rows.get(row).and_then(|r| r.comment) {
+                    self.edit_comment(ci);
+                    return Act::None;
+                }
+                if m.modifiers.contains(KeyModifiers::SHIFT)
+                    && let Some(a) = self.anchor
+                {
+                    for i in a.min(row)..=a.max(row) {
+                        self.select_row(i, true);
+                    }
+                    return Act::None;
+                }
+                self.anchor = Some(row);
+                self.drag = Some((row, self.sel.clone(), true));
+                self.select_row(row, true);
             }
             _ => {}
         }
+        Act::None
+    }
+}
+
+/// The comment modal's text input with TEXT.
+fn comment_area(text: &str) -> Box<crate::textarea::TextArea> {
+    let mut t = crate::textarea::TextArea::new(false, "the comment · ctrl+⏎ save");
+    t.style = Some(theme::panel());
+    t.set_text(text);
+    t.move_end();
+    Box::new(t)
+}
+
+/// The code's background inside the boxes: the panel color, darker.
+fn code_bg() -> ratatui::style::Color {
+    theme::tint(ratatui::style::Color::Rgb(0, 0, 0), theme::pal().panel, 0.55)
+}
+
+/// The panel shows from this many columns.
+const PANEL_MIN: u16 = 90;
+/// 2 right clicks within this time: the selection clears.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// A modal over the changes view.
+enum Modal {
+    /// A comment: on SPOTS (new) or comment EDIT; the diff lines it is on.
+    Comment { title: String, quote: Vec<QLine>, scroll: usize, edit: Option<usize>, spots: Vec<Spot>, text: Box<crate::textarea::TextArea> },
+    /// A yes / no question; THEN runs on yes.
+    Confirm { question: String, yes: bool, then: Then },
+}
+
+/// A line of the comment modal's selected lines: a file's path, a diff line, a gap between
+/// files.
+#[derive(Clone, Debug, PartialEq)]
+enum QLine {
+    Path(String),
+    Code(String),
+    Gap,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Then {
+    DropStash(String),
+    ClearStash,
+}
+
+/// The patch pick of KEYS (selected lines) in F: added lines by number, removed lines by (the
+/// new-side line they sit before, their text).
+/// The worktree line of each line of hunk H: added and context lines their own, a removed line
+/// the line it sat before.
+fn worktree_lines(h: &Hunk) -> Vec<u32> {
+    let mut n = h.new.max(1);
+    h.lines
+        .iter()
+        .map(|l| match l.kind {
+            Kind::Del => n,
+            _ => {
+                let at = l.new.unwrap_or(n);
+                n = at + 1;
+                at
+            }
+        })
+        .collect()
+}
+
+fn pick_of(f: &FileDiff, keys: &std::collections::BTreeSet<LKey>) -> patch::Pick {
+    let mut p = patch::Pick::default();
+    for h in &f.hunks {
+        let mut n = h.new;
+        for l in &h.lines {
+            match l.kind {
+                Kind::Add => {
+                    if keys.contains(&(false, l.new.unwrap_or(0))) {
+                        p.adds.insert(n);
+                    }
+                    n += 1;
+                }
+                Kind::Ctx => n += 1,
+                Kind::Del => {
+                    if l.old.is_some_and(|o| keys.contains(&(true, o))) {
+                        p.dels.insert((n, l.text.clone()));
+                    }
+                }
+            }
+        }
+    }
+    p
+}
+
+#[cfg(test)]
+mod tests_support {
+    use super::*;
+
+    pub const DIFF: &str = "diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -10,4 +10,5 @@ fn run() {
+ let a = 1;
+-let b = 2;
++let b = 3;
++let c = 4;
+ let d = 5;
+diff --git a/tests/a_test.rs b/tests/a_test.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/a_test.rs
+@@ -0,0 +1,2 @@
++#[test]
++fn t() {}
+diff --git a/old.rs b/new.rs
+similarity index 100%
+rename from old.rs
+rename to new.rs
+diff --git a/img.png b/img.png
+Binary files a/img.png and b/img.png differ
+";
+
+    /// A view of DIFF, 0 stored state.
+    pub fn test_view() -> View {
+        let mut files = parse(DIFF);
+        order(&mut files);
+        let id = format!("changes-scm-{}", std::process::id());
+        let mut v = View::new(&id, Path::new("/tmp"));
+        v.marks.clear();
+        v.comments.clear();
+        v.stash.clear();
+        v.changes = Changes { base: "origin/main".into(), files, ..Default::default() };
+        v.loaded = Some(Instant::now());
+        v
+    }
+
+    /// The view drawn at W x H: its rows of text.
+    pub fn draw(v: &mut View, w: u16, h: u16) -> Vec<String> {
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        t.draw(|f| v.draw(f, f.area())).unwrap();
+        let b = t.backend().buffer().clone();
+        (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect()).collect()
     }
 }
 
@@ -2381,6 +3147,7 @@ Binary files a/img.png and b/img.png differ
         order(&mut files);
         let mut v = View::new("changes-test-0000", Path::new("/tmp"));
         v.marks.clear();
+        v.scm.shown = false;
         v.changes = Changes { base: "origin/main".into(), files, ..Default::default() };
         v.loaded = Some(Instant::now());
         v
@@ -2396,7 +3163,7 @@ Binary files a/img.png and b/img.png differ
         v.build(120);
         let t = text(&v);
         let h = t.iter().position(|l| l.starts_with("┌─ ☐ src/a.rs")).unwrap();
-        assert!(t[h].ends_with("logic · +2 −1 ─┐") && t[0].contains("4 files"), "{t:#?}");
+        assert!(t[h].ends_with("logic · +2 −1 ─┐") && summary(&v).contains("4 files"), "{t:#?}");
         assert!(t.iter().any(|l| l.contains("⋯ fn run() {")), "{t:#?}");
         assert!(t.iter().any(|l| l.contains(" 11     - let b = 2;")), "{t:#?}");
         assert!(t.iter().any(|l| l.contains("     11 + let b = 3;")), "{t:#?}");
@@ -2408,10 +3175,7 @@ Binary files a/img.png and b/img.png differ
         let row = t.iter().find(|l| l.contains("let b = 2;")).unwrap();
         assert!(row.contains("- let b = 2;") && row.contains("+ let b = 3;"), "pairs on 1 row: {row}");
         assert!(t.iter().any(|l| l.contains("+ let c = 4;") && !l.contains("- ")), "{t:#?}");
-        // a new file stays unified: 0 empty left half (a test: the low tab)
-        v.set_tab(crate::rank::Level::Low);
-        v.build(SIDE_MIN);
-        let t = text(&v);
+        // a new file stays unified: 0 empty left half
         let new = t.iter().find(|l| l.contains("fn t() {}")).unwrap();
         assert!(!new.contains(" │ "), "{new}");
     }
@@ -2431,24 +3195,20 @@ Binary files a/img.png and b/img.png differ
         assert_eq!(paths, ["tests/a_test.rs", "src/a.rs", "new.rs", "img.png"], "unranked files after the groups");
         v.build(100);
         let t = text(&v);
-        assert!(t[0].ends_with("order: haiku"), "{t:#?}");
+        assert!(summary(&v).ends_with("order: haiku"), "{t:#?}");
         let g1 = t.iter().position(|l| l.starts_with(" 1 · Test first  the test drives it")).unwrap();
         assert!(t[g1 + 1].contains("☐ tests/a_test.rs") && t[g1 + 2].contains("adds the test"), "{t:#?}");
         assert!(t.iter().any(|l| l.starts_with(" 2 · Core")), "{t:#?}");
-        // the agent's levels: the 3 in the high tab (picked: critical has 0 files)
-        assert_eq!((v.tab, v.counts), (crate::rank::Level::High, [(0, 0), (0, 3), (0, 0), (0, 1)]));
-        assert!(!t.iter().any(|l| l.contains("img.png")), "{t:#?}");
-        // img.png: unranked, path rules: low, under its category
-        v.set_tab(crate::rank::Level::Low);
-        v.build(100);
-        let t = text(&v);
+        // the agent's levels: the 3 high; img.png (unranked, path rules: low) after them, under
+        // its category
+        assert_eq!(v.counts, [(0, 0), (0, 3), (0, 0), (0, 1)]);
         let img = t.iter().position(|l| l.contains("img.png")).unwrap();
         assert_eq!(t[img - 1], " logic", "{t:#?}");
         // a new set of paths: the rank no longer applies
         v.changes.files.pop();
         v.built = None;
         v.build(100);
-        assert!(text(&v)[0].ends_with("path order"));
+        assert!(summary(&v).ends_with("path order"));
     }
 
     #[test]
@@ -2489,7 +3249,7 @@ Binary files a/img.png and b/img.png differ
         let t = text(&v);
         let at = t.iter().position(|l| l.contains("+ let c = 4;")).unwrap();
         assert!(t[at + 1].contains("⚠ major · c is never read") && t[at + 2].contains("what breaks"), "{t:#?}");
-        assert!(t[0].contains("2 findings (sonnet)"), "{t:#?}");
+        assert!(summary(&v).contains("2 findings (sonnet)"), "{t:#?}");
         // y: the finding becomes a comment
         v.at = v.rows.iter().position(|r| r.finding == Some(0)).unwrap();
         v.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
@@ -2548,8 +3308,8 @@ Binary files a/img.png and b/img.png differ
         assert_eq!(v.progress(), (1, 4));
         let t = text(&v);
         let h = t.iter().position(|l| l.contains("☑ src/a.rs")).unwrap();
-        assert!(t[h + 1].starts_with('└'), "folded: {t:#?}");
-        // the cursor went to the next box of the tab (medium: src/a.rs, new.rs)
+        assert!(t[h].starts_with("── ☑") && t[h].ends_with("──") && !t[h + 1].starts_with('│'), "folded: 1 line: {t:#?}");
+        // the cursor went to the next box (medium: src/a.rs, new.rs)
         assert!(v.rows[v.at].head && v.changes.files[v.rows[v.at].file].path == "new.rs");
         // the file changes: the mark goes, `updated` shows
         let mut changed = parse(&DIFF.replace("let c = 4;", "let c = 5;"));
@@ -2571,10 +3331,26 @@ Binary files a/img.png and b/img.png differ
         let i = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("let c = 4;")).unwrap();
         v.at = i;
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)), Act::Open("src/a.rs".into(), 12));
+        // a removed line: the worktree line it sat before (its old number: 11 as well here)
+        let del = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("- let b = 2;")).unwrap();
+        v.at = del;
+        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)), Act::Open("src/a.rs".into(), 11));
+        // the selection wins: its 1st line, also with the cursor in an other file
+        select(&mut v, "+ let c = 4;");
+        select(&mut v, "+ fn t() {}");
+        v.at = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("+ fn t() {}")).unwrap();
+        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)), Act::Open("tests/a_test.rs".into(), 2));
+        v.at = v.rows.iter().position(|r| r.head).unwrap();
+        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)), Act::Open("src/a.rs".into(), 12));
+        v.sel.clear();
         // } / {: box heads
         v.at = v.rows.iter().position(|r| r.head).unwrap();
         v.key(KeyEvent::new(KeyCode::Char('}'), KeyModifiers::NONE));
         assert!(v.rows[v.at].head && v.changes.files[v.rows[v.at].file].path == "new.rs");
+    }
+
+    fn summary(v: &View) -> String {
+        v.summary().spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
     fn text_of(v: &View, i: usize) -> String {
@@ -2599,19 +3375,38 @@ Binary files a/img.png and b/img.png differ
     }
 
     #[test]
-    fn j_goes_up_k_goes_down_1_line() {
+    fn arrows_go_1_line_j_k_and_ctrl_arrows_1_file_the_box_border_lights_up() {
         let mut v = view(parse(DIFF));
         let s = screen(&mut v, 100, 30);
         // the cursor (▌ at the right edge) on the 1st box's head
         let head = row_of(&s, "☐ src/a.rs");
+        let next = row_of(&s, "☐ old.rs → new.rs");
         assert!(s[head].ends_with('▌'), "{s:#?}");
+        press(&mut v, KeyCode::Down);
+        let s = screen(&mut v, 100, 30);
+        assert!(s[head + 1].ends_with('▌') && s[head + 1].contains("⋯ fn run() {"), "↓: 1 down: {s:#?}");
+        press(&mut v, KeyCode::Down);
+        press(&mut v, KeyCode::Up);
+        let s = screen(&mut v, 100, 30);
+        assert!(s[head + 1].ends_with('▌'), "↑: 1 up: {s:#?}");
+        // the focused box: accent border; the other box: the line color
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        t.draw(|f| v.draw(f, f.area())).unwrap();
+        let buf = t.backend().buffer().clone();
+        assert_eq!(buf[(0, head as u16 + 1)].fg, theme::pal().accent);
+        assert_ne!(buf[(0, next as u16 + 1)].fg, theme::pal().accent);
         press(&mut v, KeyCode::Char('k'));
         let s = screen(&mut v, 100, 30);
-        assert!(s[head + 1].ends_with('▌') && s[head + 1].contains("⋯ fn run() {"), "k: 1 down: {s:#?}");
-        press(&mut v, KeyCode::Char('k'));
+        assert!(s[next].ends_with('▌'), "k: 1 file down: {s:#?}");
         press(&mut v, KeyCode::Char('j'));
         let s = screen(&mut v, 100, 30);
-        assert!(s[head + 1].ends_with('▌'), "j: 1 up: {s:#?}");
+        assert!(s[head].ends_with('▌'), "j: 1 file up: {s:#?}");
+        v.key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
+        let s = screen(&mut v, 100, 30);
+        assert!(s[next].ends_with('▌'), "ctrl+↓: 1 file down: {s:#?}");
+        v.key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+        let s = screen(&mut v, 100, 30);
+        assert!(s[head].ends_with('▌'), "ctrl+↑: 1 file up: {s:#?}");
     }
 
     #[test]
@@ -2623,13 +3418,13 @@ Binary files a/img.png and b/img.png differ
         let b2 = row_of(&s, "- let b = 2;");
         // the cursor to `- let b = 2;`, space: selected, the cursor 1 down
         while !screen(&mut v, 100, 30)[b2].ends_with('▌') {
-            press(&mut v, KeyCode::Char('k'));
+            press(&mut v, KeyCode::Down);
         }
         press(&mut v, KeyCode::Char(' '));
         let s = screen(&mut v, 100, 30);
         assert!(s[b2 + 1].ends_with('▌'), "1 down: {s:#?}");
         // skip `+ let b = 3;`, select `+ let c = 4;`: 2 lines apart
-        press(&mut v, KeyCode::Char('k'));
+        press(&mut v, KeyCode::Down);
         press(&mut v, KeyCode::Char(' '));
         let s = screen(&mut v, 100, 30);
         let mark = |y: usize| s[y].chars().nth(1) == Some('▌');
@@ -2638,14 +3433,24 @@ Binary files a/img.png and b/img.png differ
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
         t.draw(|f| v.draw(f, f.area())).unwrap();
         let buf = t.backend().buffer().clone();
+        let _ = &buf;
         let text_x = s[b2].find("let").map(|x| s[b2][..x].chars().count() as u16).unwrap();
-        assert_ne!(buf[(text_x, b2 as u16)].bg, ratatui::style::Color::Reset);
-        assert_eq!(buf[(text_x, b2 as u16 + 1)].bg, ratatui::style::Color::Reset);
-        // c: 1 comment on both lines
-        let Act::Comment(spots) = press(&mut v, KeyCode::Char('c')) else { panic!() };
-        assert_eq!(spots, [Spot { path: "src/a.rs".into(), line: 12, lines: "12 · removed 11".into() }]);
+        assert_ne!(buf[(text_x, b2 as u16)].bg, code_bg());
+        assert_eq!(buf[(text_x, b2 as u16 + 1)].bg, code_bg(), "0 selection: the code background");
+        // c: the modal, 1 comment on both lines; the modal shows them
+        press(&mut v, KeyCode::Char('c'));
+        let Some(Modal::Comment { spots, quote, .. }) = &v.modal else { panic!() };
+        assert_eq!(spots, &[Spot { path: "src/a.rs".into(), line: 12, lines: "12 · removed 11".into() }]);
         assert_eq!(spots[0].label(), "src/a.rs:12 · removed 11");
-        v.add_comment(&spots, "both wrong");
+        assert_eq!(quote, &[QLine::Code("- let b = 2;".into()), QLine::Code("+ let c = 4;".into())]);
+        assert!(v.typing());
+        let s = screen(&mut v, 100, 30);
+        assert!(s.iter().any(|l| l.contains("comment on src/a.rs:12 · removed 11")) && s.iter().any(|l| l.contains("- let b = 2;")), "{s:#?}");
+        for c in "both wrong".chars() {
+            press(&mut v, KeyCode::Char(c));
+        }
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(v.modal.is_none() && v.comments[0].quote == "- let b = 2;\n+ let c = 4;");
         let s = screen(&mut v, 100, 30);
         let c = row_of(&s, "✎ 12 · removed 11: both wrong");
         assert!(s[c - 1].contains("+ let c = 4;"), "under the last selected line: {s:#?}");
@@ -2666,12 +3471,12 @@ Binary files a/img.png and b/img.png differ
         let mut v = view(parse(DIFF));
         let s = screen(&mut v, 100, 30);
         assert!(s.iter().any(|l| l.contains("let b = 3;")));
-        press(&mut v, KeyCode::Char('k'));
-        press(&mut v, KeyCode::Char('k'));
+        press(&mut v, KeyCode::Down);
+        press(&mut v, KeyCode::Down);
         press(&mut v, KeyCode::Left);
         let s = screen(&mut v, 100, 30);
         let head = row_of(&s, "☐ src/a.rs");
-        assert!(s[head + 1].starts_with('└') && !s.iter().any(|l| l.contains("let b = 3;")), "folded: {s:#?}");
+        assert!(s[head].starts_with("── ☐") && !s.iter().any(|l| l.contains("let b = 3;")), "folded: {s:#?}");
         assert!(s[head].ends_with('▌'), "the cursor on the head: {s:#?}");
         press(&mut v, KeyCode::Right);
         let s = screen(&mut v, 100, 30);
@@ -2679,28 +3484,28 @@ Binary files a/img.png and b/img.png differ
     }
 
     #[test]
-    fn tabs_split_by_level_keys_and_clicks_switch_and_classifying_shows() {
+    fn every_level_shows_and_the_summary_stays_on_top() {
         let mut v = view(parse(DIFF));
-        let s = screen(&mut v, 100, 30);
-        // path rules: src/a.rs + new.rs medium, the test and the binary low; medium picked
-        assert!(s[0].contains(" 1 critical 0/0 ") && s[0].contains(" 2 high 0/0 ") && s[0].contains(" 3 medium 0/2 ") && s[0].contains(" 4 low 0/2 "), "{}", s[0]);
-        assert!(s[0].contains("by path rules"), "{}", s[0]);
-        assert!(s.iter().any(|l| l.contains("src/a.rs")) && !s.iter().any(|l| l.contains("a_test.rs")), "{s:#?}");
-        press(&mut v, KeyCode::Char('4'));
-        let s = screen(&mut v, 100, 30);
-        assert!(s.iter().any(|l| l.contains("tests/a_test.rs")) && !s.iter().any(|l| l.contains("src/a.rs")), "{s:#?}");
-        // a click on the medium tab
-        let x = s[0].find(" 3 medium").map(|b| s[0][..b].chars().count() as u16 + 2).unwrap();
-        v.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: 0, modifiers: KeyModifiers::NONE });
-        let s = screen(&mut v, 100, 30);
-        assert_eq!(v.tab, crate::rank::Level::Medium);
-        assert!(s.iter().any(|l| l.contains("src/a.rs")), "{s:#?}");
+        let s = screen(&mut v, 100, 12);
+        assert!(s[0].contains("4 files") && s[1].contains("filter by name"), "{s:#?}");
+        // all files, by level: src/a.rs (medium) before tests/a_test.rs (low)
+        let all = v.rows.iter().filter(|r| r.head).map(|r| v.changes.files[r.file].path.clone()).collect::<Vec<_>>();
+        assert_eq!(all[0], "src/a.rs");
+        assert!(all.contains(&"tests/a_test.rs".to_string()) && all.contains(&"img.png".to_string()), "{all:?}");
+        // scrolled into the box: the summary stays, the box head pins under it
+        for _ in 0..6 {
+            press(&mut v, KeyCode::Down);
+        }
+        v.top = v.rows.iter().position(|r| r.body == Body::Diff(0, 2)).unwrap();
+        v.at = v.top + 2;
+        let s = screen(&mut v, 100, 12);
+        assert!(s[0].contains("4 files"), "{s:#?}");
+        assert!(s[2].starts_with("┌─ ☐ src/a.rs"), "the head pinned: {s:#?}");
+        assert!(!s.iter().skip(3).any(|l| l.contains("┌─ ☐ src/a.rs")), "{s:#?}");
         // a call on its way: classifying…
         let (_tx, rx) = mpsc::channel();
         v.ranking = Some(rx);
-        v.classifier = Some(crate::rank::Runner { label: "ada".into(), harness: "claude".into(), model: None });
-        let s = screen(&mut v, 100, 30);
-        assert!(s[0].contains("classifying… (ada)"), "{}", s[0]);
+        assert!(screen(&mut v, 100, 12)[0].contains("classifying…"));
     }
 
     #[test]
@@ -2745,7 +3550,7 @@ Binary files a/img.png and b/img.png differ
         let mut v = view(parse(DIFF));
         screen(&mut v, 100, 30);
         for _ in 0..4 {
-            press(&mut v, KeyCode::Char('k'));
+            press(&mut v, KeyCode::Down);
         }
         let at = v.at;
         let read = |v: &mut View, c: Changes| {
@@ -2784,10 +3589,26 @@ Binary files a/img.png and b/img.png differ
         assert!((a..=b).all(|y| s[y].chars().nth(1) == Some('▌')), "{s:#?}");
         assert!(s[b + 1].chars().nth(1) != Some('▌'), "{s:#?}");
         assert_eq!(v.sel["src/a.rs"].len(), 3);
-        // a plain click: 0 selection change
+        // a click adds its line; a right click takes 1 out; 2 right clicks: 0 selection
         v.mouse(ev(MouseEventKind::Down(MouseButton::Left), b + 1));
         v.mouse(ev(MouseEventKind::Up(MouseButton::Left), b + 1));
+        assert_eq!(v.sel["src/a.rs"].len(), 4);
+        v.mouse(ev(MouseEventKind::Down(MouseButton::Right), a));
+        v.mouse(ev(MouseEventKind::Up(MouseButton::Right), a));
         assert_eq!(v.sel["src/a.rs"].len(), 3);
+        v.mouse(ev(MouseEventKind::Down(MouseButton::Right), b));
+        assert!(v.sel.is_empty(), "a double right click clears");
+        // shift+click: the rows from the last click
+        v.mouse(ev(MouseEventKind::Down(MouseButton::Left), a));
+        v.mouse(ev(MouseEventKind::Up(MouseButton::Left), a));
+        v.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 20, row: b as u16, modifiers: KeyModifiers::SHIFT });
+        assert_eq!(v.sel["src/a.rs"].len(), 3);
+        // a right drag takes the rows it passes out
+        v.right_at = None;
+        v.mouse(ev(MouseEventKind::Down(MouseButton::Right), a));
+        v.mouse(ev(MouseEventKind::Drag(MouseButton::Right), b));
+        v.mouse(ev(MouseEventKind::Up(MouseButton::Right), b));
+        assert!(v.sel.is_empty());
     }
 
     #[test]
@@ -2812,6 +3633,216 @@ Binary files a/img.png and b/img.png differ
         assert!(!cached.contains("+three") && cached.contains("-18"), "{cached}");
         assert!(run_op(&d, &Op::StageHunk("x.txt".into(), 10)).is_err(), "0 hunk at line 10");
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// A view of a real repo D (its changes read now), the cursor's thread ID.
+    fn real_view(d: &Path, id: &str) -> View {
+        let mut v = View::new(id, d);
+        v.scm.shown = false;
+        v.changes = load(d).unwrap();
+        v.loaded = Some(Instant::now());
+        v.stash.clear();
+        v.build(120);
+        v
+    }
+
+    /// Select the rows whose text has PAT.
+    fn select(v: &mut View, pat: &str) {
+        let rows: Vec<usize> = (0..v.rows.len()).filter(|&i| text_of(v, i).contains(pat)).collect();
+        assert!(!rows.is_empty(), "{pat}");
+        for i in rows {
+            v.select_row(i, true);
+        }
+    }
+
+    /// The git step on its way ends (its toast note back).
+    fn wait_op(v: &mut View) -> String {
+        for _ in 0..200 {
+            if v.poll_op() {
+                return v.take_note().unwrap_or_default();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("git step: 0 end");
+    }
+
+    #[test]
+    fn s_stages_only_the_selected_lines_p_stashes_them() {
+        let d = std::env::temp_dir().join(format!("codehead-lines-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let sh = |c: &str| assert!(Command::new("sh").arg("-c").arg(c).current_dir(&d).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "{c}");
+        sh("git init -q && git config user.email t@t && git config user.name t && seq 1 20 > x.txt && git add -A && git commit -qm init");
+        // 1 hunk, 2 changes: 3 → three, 5 → five; a new file of 3 lines
+        sh("seq 1 20 | sed 's/^3$/three/;s/^5$/five/' > x.txt && printf 'a\\nb\\nc\\n' > n.txt");
+        let id = format!("changes-lines-{}", std::process::id());
+        let mut v = real_view(&d, &id);
+        select(&mut v, "+ three");
+        select(&mut v, "- 3");
+        select(&mut v, "+ b");
+        press(&mut v, KeyCode::Char('s'));
+        assert!(wait_op(&mut v).contains("staged the selected lines"), "{:?}", v.note);
+        let cached = git(&d, &["diff", "--cached", "-U0"]).unwrap();
+        assert!(cached.contains("-3\n+three") && !cached.contains("five") && cached.contains("+b") && !cached.contains("+a"), "{cached}");
+        assert!(v.sel.is_empty(), "the selection clears");
+        // p: `five` out of the worktree, into the stash; its agent (0 known: the lead) asked for a name
+        let mut v = real_view(&d, &id);
+        select(&mut v, "+ five");
+        select(&mut v, "- 5");
+        press(&mut v, KeyCode::Char('p'));
+        assert!(wait_op(&mut v).contains("stashed x.txt"), "{:?}", v.note);
+        let x = std::fs::read_to_string(d.join("x.txt")).unwrap();
+        assert!(x.contains("\nthree\n4\n5\n6\n"), "{x}");
+        assert_eq!(v.stash.len(), 1);
+        assert_eq!((v.stash[0].path.as_str(), v.stash[0].lines.as_str(), v.stash[0].asked), ("x.txt", "5 · removed 5", true));
+        let ask = v.take_send().unwrap();
+        assert!(ask.contains("`stash_name`") && ask.contains(&v.stash[0].id) && ask.contains("+five"), "{ask}");
+        // the patch puts it back
+        let p = d.join("p.diff");
+        std::fs::write(&p, &v.stash[0].patch).unwrap();
+        sh("git apply p.diff && rm p.diff");
+        assert!(std::fs::read_to_string(d.join("x.txt")).unwrap().contains("\nfive\n"));
+        // restore: the message to the agent, the entry marked
+        let eid = v.stash[0].id.clone();
+        let _ = v.restore(&eid);
+        let msg = v.take_send().unwrap();
+        assert!(msg.contains("`stash_restored`") && msg.contains("ask the owner"), "{msg}");
+        assert!(v.stash[0].restoring);
+        // the agent names it, then reports it restored (the MCP tools)
+        stash::set_name(&id, &eid, "five as a word").unwrap();
+        v.sync_stash(true);
+        assert_eq!(v.stash[0].title(), "five as a word");
+        stash::restored(&id, &eid).unwrap();
+        v.sync_stash(true);
+        assert!(v.stash.is_empty());
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(&id));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn stashed_lines_go_back_to_their_spot_in_any_order_after_a_shift() {
+        for order in [[0usize, 1], [1, 0]] {
+            let d = std::env::temp_dir().join(format!("codehead-restore-{}-{}", std::process::id(), order[0]));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            let sh = |c: &str| assert!(Command::new("sh").arg("-c").arg(c).current_dir(&d).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "{c}");
+            sh("git init -q && git config user.email t@t && git config user.name t && seq 1 30 > x.txt && git add -A && git commit -qm init");
+            // A after 5, 10 → ten, B C after 20, 25 removed; ten staged
+            sh("seq 1 30 | sed 's/^5$/5\\nA/;s/^10$/ten/;s/^20$/20\\nB\\nC/;/^25$/d' > x.txt");
+            let want = std::fs::read_to_string(d.join("x.txt")).unwrap();
+            assert!(want.contains("5\nA\n6") && want.contains("20\nB\nC\n21") && !want.contains("\n25\n"), "{want}");
+            let id = format!("changes-restore-{}-{}", std::process::id(), order[0]);
+            let mut v = real_view(&d, &id);
+            select(&mut v, "+ ten");
+            select(&mut v, "- 10");
+            press(&mut v, KeyCode::Char('s'));
+            wait_op(&mut v);
+            // stash 1: B (C stays) and ten (staged: out of the index too); stash 2: the removed 25
+            let mut v = real_view(&d, &id);
+            select(&mut v, "+ B");
+            select(&mut v, "+ ten");
+            select(&mut v, "- 10");
+            press(&mut v, KeyCode::Char('p'));
+            assert!(wait_op(&mut v).contains("stashed"), "{:?}", v.note);
+            let mut v = real_view(&d, &id);
+            select(&mut v, "- 25");
+            press(&mut v, KeyCode::Char('p'));
+            assert!(wait_op(&mut v).contains("stashed"), "{:?}", v.note);
+            let x = std::fs::read_to_string(d.join("x.txt")).unwrap();
+            assert!(x.contains("20\nC\n21") && x.contains("\n10\n") && x.contains("\n25\n") && x.contains("5\nA\n6"), "{x}");
+            assert!(!git(&d, &["diff", "--cached"]).unwrap().contains("ten"), "ten out of the index");
+            let stash = stash::read(&id);
+            assert_eq!(stash.len(), 2);
+            // the agent's edits since: 3 lines on top, a line between the spots
+            sh("{ printf 'h1\\nh2\\nh3\\n'; sed 's/^15$/15\\nmid/' x.txt; } > y && mv y x.txt");
+            for i in order {
+                std::fs::write(d.join("p.diff"), &stash[i].patch).unwrap();
+                // the restore's steps: `git apply`, else with 1 line of context (the context of an
+                // entry can hold the spot of an other entry)
+                sh("{ git apply p.diff || git apply -C1 p.diff; } && rm p.diff");
+            }
+            let got = std::fs::read_to_string(d.join("x.txt")).unwrap();
+            let want = format!("h1\nh2\nh3\n{}", want.replace("\n15\n", "\n15\nmid\n"));
+            assert_eq!(got, want);
+            let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(&id));
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn the_comment_modal_groups_lines_per_file_and_scrolls_them() {
+        let mut v = view(parse(DIFF));
+        v.id = "changes-modal-0000".into();
+        v.build(100);
+        select(&mut v, "+ let c = 4;");
+        select(&mut v, "+ fn t() {}");
+        press(&mut v, KeyCode::Char('c'));
+        let Some(Modal::Comment { quote, .. }) = &v.modal else { panic!() };
+        assert_eq!(quote.iter().filter(|q| matches!(q, QLine::Path(_))).count(), 2);
+        assert_eq!(quote.iter().filter(|q| **q == QLine::Gap).count(), 1);
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        t.draw(|f| v.draw(f, f.area())).unwrap();
+        let buf = t.backend().buffer().clone();
+        // the title has the paths too: the rows after it
+        let row = |pat: &str| (0..30u16).filter(|&y| (0..100u16).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().contains(pat)).nth(1).unwrap();
+        let (p1, gap) = (row("src/a.rs:12"), row("tests/a_test.rs:2") - 1);
+        assert_ne!(buf[(10, p1)].bg, code_bg(), "the path: 0 code background");
+        assert_eq!(buf[(10, p1 + 1)].bg, code_bg(), "the lines: the code background");
+        assert_ne!(buf[(10, gap)].bg, code_bg(), "the gap between files: 0 background");
+        // a short screen: the lines scroll (alt+↓), the box fits
+        let long: Vec<QLine> = (0..40).map(|i| QLine::Code(format!("+ line {i}"))).collect();
+        if let Some(Modal::Comment { quote, .. }) = v.modal.as_mut() {
+            *quote = long;
+        }
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        t.draw(|f| v.draw(f, f.area())).unwrap();
+        let shown = |t: &ratatui::Terminal<ratatui::backend::TestBackend>| t.backend().buffer().content().iter().map(|c| c.symbol().to_string()).collect::<String>();
+        assert!(shown(&t).contains("+ line 0") && !shown(&t).contains("+ line 39"));
+        v.key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT));
+        t.draw(|f| v.draw(f, f.area())).unwrap();
+        assert!(!shown(&t).contains("+ line 0 ") && shown(&t).contains("+ line 1"));
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-modal-0000"));
+    }
+
+    #[test]
+    fn the_prompt_takes_the_selection_and_the_comments_along() {
+        let mut v = view(parse(DIFF));
+        v.id = "changes-context-0000".into();
+        v.comments.clear();
+        v.build(100);
+        assert!(v.context().is_none());
+        let i = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("+ let c = 4;")).unwrap();
+        v.select_row(i, true);
+        v.comments.push(Comment { path: "src/a.rs".into(), line: 11, text: "why 3?".into(), lines: String::new(), quote: String::new() });
+        let c = v.context().unwrap();
+        assert!(c.contains("- `src/a.rs:12`\n```diff\n+ let c = 4;\n```") && c.contains("- `src/a.rs:11`: why 3?"), "{c}");
+    }
+
+    #[test]
+    fn enter_on_a_comment_edits_it_0_text_deletes_it() {
+        let mut v = view(parse(DIFF));
+        v.id = "changes-edit-0000".into();
+        v.comments.clear();
+        v.build(100);
+        v.add_comment(&[Spot { path: "src/a.rs".into(), line: 11, lines: String::new() }], "old");
+        assert_eq!(v.comments[0].quote, "+ let b = 3;");
+        v.at = v.rows.iter().position(|r| r.comment == Some(0)).unwrap();
+        press(&mut v, KeyCode::Enter);
+        let Some(Modal::Comment { edit: Some(0), .. }) = &v.modal else { panic!("edit modal") };
+        v.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        for c in "new".chars() {
+            press(&mut v, KeyCode::Char(c));
+        }
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(v.comments[0].text.ends_with("new"), "{:?}", v.comments);
+        press(&mut v, KeyCode::Enter);
+        v.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        if let Some(Modal::Comment { text, .. }) = v.modal.as_mut() {
+            text.set_text("");
+        }
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(v.comments.is_empty());
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-edit-0000"));
     }
 
     #[test]
@@ -2855,7 +3886,7 @@ Binary files a/img.png and b/img.png differ
         let mut view = view(parse(DIFF));
         view.pr = parse_pr(&v);
         view.build(140);
-        assert!(text(&view)[0].contains("PR #12 open ✓2 ✗1 ●2"), "{:?}", text(&view)[0]);
+        assert!(summary(&view).contains("PR #12 open ✓2 ✗1 ●2"), "{:?}", summary(&view));
     }
 
     #[test]

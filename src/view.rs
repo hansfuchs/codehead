@@ -83,6 +83,8 @@ enum Msg {
     Subscribed,
     /// All live text of an agent so far: (agent, text).
     Live(String, String),
+    /// The owner's shell command ended: (command, output, exit code).
+    Shell(String, String, i32),
 }
 
 struct View {
@@ -155,6 +157,10 @@ struct View {
     queued: Option<(String, String, String)>,
     /// Sent messages the log does not show yet: text, sent at, error.
     pending: Vec<(String, Instant, Option<String>)>,
+    /// Shell mode: the owner's commands since the last message (the next one takes them to the
+    /// agents); the commands running now.
+    shell_ctx: Vec<String>,
+    shell_running: usize,
     /// Per agent: live text not logged yet (token chunks), shown at the end of the stream.
     live: Vec<(String, String)>,
     // views of the thread (view bar): chat or changes; the prompt's focus outside chat
@@ -176,11 +182,10 @@ struct View {
     urls_read: Option<Receiver<Vec<String>>>,
     urls_at: Option<Instant>,
     url_rect: Option<(Rect, String)>,
-    /// A review comment in the prompt: the lines it is on, the draft the prompt had before.
-    commenting: Option<(Vec<crate::changes::Spot>, String)>,
-    /// A commit message in the prompt: the draft the prompt had before; a model's draft on its way.
-    committing: Option<String>,
-    drafting: Option<Receiver<Result<String, String>>>,
+    /// The chat above the prompt in the changes view (0 split): open; its title row (a click
+    /// folds / opens it).
+    mini_chat: bool,
+    mini_rect: Rect,
     /// `> handoff`: the document on its way.
     handing: Option<Receiver<Result<String, String>>>,
     // chrome
@@ -262,6 +267,8 @@ impl View {
             replace: None,
             queued: None,
             pending: Vec::new(),
+            shell_ctx: Vec::new(),
+            shell_running: 0,
             live: Vec::new(),
             pane: Pane::Chat,
             changes: crate::changes::View::new(id, cwd),
@@ -276,9 +283,8 @@ impl View {
             urls_read: None,
             urls_at: None,
             url_rect: None,
-            commenting: None,
-            committing: None,
-            drafting: None,
+            mini_chat: true,
+            mini_rect: Rect::default(),
             handing: None,
             // tests: 0 shared state between parallel views
             monitors: crate::monitors::Monitors::new(id),
@@ -305,14 +311,10 @@ impl View {
 
     // ---------- the prompt draft on disk ----------
 
-    /// The unsent prompt: the draft a comment or a commit message borrowed the prompt from, the
-    /// draft under a history step, else the prompt's text; with its pasted files.
+    /// The unsent prompt: the draft under a history step, else the prompt's text; with its
+    /// pasted files.
     fn prompt_draft(&self) -> String {
-        let text = match (&self.committing, &self.commenting, self.hist_at) {
-            (Some(d), _, _) | (None, Some((_, d)), _) => d.clone(),
-            (None, None, Some(_)) => self.draft.clone(),
-            (None, None, None) => self.input.text(),
-        };
+        let text = if self.hist_at.is_some() { self.draft.clone() } else { self.input.text() };
         // sent, not in the log yet: a crash before the host has it loses 0 messages
         let unsent: Vec<&str> = self.pending.iter().map(|(t, ..)| t.as_str()).collect();
         if text.trim().is_empty() && unsent.is_empty() {
@@ -565,35 +567,62 @@ impl View {
 
     // ---------- send ----------
 
+    /// Shell mode: the prompt starts with `!`.
+    fn shell_mode(&self) -> bool {
+        self.input.text().starts_with('!')
+    }
+
+    /// Run COMMAND (shell mode) in the worktree, off the UI thread: $SHELL -c, stdout and stderr
+    /// together, at most SHELL_TIMEOUT; Msg::Shell when it ends.
+    fn run_shell(&mut self, command: String) {
+        self.shell_running += 1;
+        self.toast(format!("! {command}"));
+        let (cwd, tx) = (self.cwd.clone(), self.tx.clone());
+        std::thread::spawn(move || {
+            let (output, code) = shell(&cwd, &command);
+            let _ = tx.send(Msg::Shell(command, output, code));
+        });
+    }
+
+    /// The shell COMMAND ended: into the thread's log (all see it), its output along with the
+    /// owner's next message.
+    fn shell_done(&mut self, command: String, output: String, code: i32) {
+        self.shell_running = self.shell_running.saturating_sub(1);
+        let cut: String = output.chars().take(SHELL_CTX_CHARS).collect();
+        let more = if cut.len() < output.len() { "\n… (cut)" } else { "" };
+        self.shell_ctx.push(format!("$ {command}  (exit {code})\n```\n{}{more}\n```", cut.trim_end()));
+        #[cfg(not(test))]
+        if let Err(e) = store::append(&self.id, &store::Event::new(None, store::Kind::Shell { command, output, code })) {
+            self.toast(format!("shell: {e}"));
+        }
+        #[cfg(test)]
+        self.thread.items.push(stream::Item::Shell { command, output, code, ts: 0 });
+        self.dirty = true;
+    }
+
     fn submit(&mut self) {
-        // a commit message: commit the staged files, the draft back
-        if let Some(draft) = self.committing.take() {
-            let msg = self.input.text().trim().to_string();
-            if msg.is_empty() {
-                self.committing = Some(draft);
-                self.toast("0 message · ctrl+g: draft one");
-                return;
-            }
-            let act = self.changes.start_op(crate::changes::Op::Commit(msg));
-            self.input.set_text(&draft);
-            self.prompt_focus = false;
-            self.drafting = None;
-            self.changes_act(act);
-            return;
-        }
-        // a review comment: into the batch, the draft back, the keys back to the changes view
-        if let Some((spots, draft)) = self.commenting.take() {
-            let text = self.input.text();
-            self.changes.add_comment(&spots, &text);
-            self.input.set_text(&draft);
-            self.prompt_focus = false;
-            let on = spots.iter().map(|s| s.label()).collect::<Vec<_>>().join(", ");
-            self.toast(format!("comment on {on} · {} in the batch · ctrl+enter: send", self.changes.comment_count()));
-            return;
-        }
         let mut text = crate::textarea::without_empty_items(&self.input.text()).to_string();
         if text.trim().is_empty() {
             return;
+        }
+        // shell mode: `!command` runs here, 0 message
+        if let Some(cmd) = text.strip_prefix('!') {
+            let cmd = cmd.trim().to_string();
+            if cmd.is_empty() {
+                return;
+            }
+            self.input.set_text("");
+            self.hist_at = None;
+            self.back = 0;
+            self.run_shell(cmd);
+            return;
+        }
+        // from the changes view: the selected lines and the open comments go along
+        if self.pane == Pane::Changes
+            && let Some(c) = self.changes.context()
+        {
+            text = format!("{text}\n\n{c}");
+            self.mini_chat = true;
         }
         let files: Vec<String> = self.attachments.iter().filter(|(m, _)| text.contains(m.as_str())).map(|(_, p)| format!("- {}", p.display())).collect();
         if !files.is_empty() {
@@ -626,10 +655,16 @@ impl View {
         let named = crate::engine::host::mentions(&text, &names);
         self.bring_front(&named);
         self.pending.push((text.clone(), Instant::now(), None));
-        if named.is_empty() {
-            self.host("send", json!({"op": "prompt", "text": text, "to": self.default_to()}));
+        // the owner's shell commands since the last message: to the agents along
+        let context = if self.shell_ctx.is_empty() {
+            String::new()
         } else {
-            self.host("send", json!({"op": "prompt", "text": text}));
+            format!("[codehead: the owner ran these shell commands in {} since the last message]\n\n{}", self.cwd.display(), std::mem::take(&mut self.shell_ctx).join("\n\n"))
+        };
+        if named.is_empty() {
+            self.host("send", json!({"op": "prompt", "text": text, "to": self.default_to(), "context": context}));
+        } else {
+            self.host("send", json!({"op": "prompt", "text": text, "context": context}));
         }
     }
 
@@ -885,7 +920,21 @@ impl View {
     // ---------- keys ----------
 
     /// True: the view ends (EXIT set).
+    /// The changes view has the keys (0 text input): every key as an escape code, for an alt
+    /// tap.
+    fn all_keys(&self) -> bool {
+        self.pane == Pane::Changes && !self.prompt_focus && self.menu.is_none() && !self.changes.typing()
+    }
+
     fn key(&mut self, k: KeyEvent) -> bool {
+        // a modifier alone (press, release): an alt tap in the changes view, else 0 effect
+        if matches!(k.code, KeyCode::Modifier(_)) {
+            if self.all_keys() && self.changes.modifier(k) {
+                self.dirty = true;
+            }
+            return false;
+        }
+        self.changes.no_tap();
         // a key after a search jump: the mark goes
         if self.menu.is_none() && self.flash.take().is_some() {
             self.dirty = true;
@@ -941,7 +990,8 @@ impl View {
         if self.pane != Pane::Chat && !self.prompt_focus {
             // the changes view's filter, selection: esc is the view's
             let esc_here = self.pane == Pane::Changes && k.code == KeyCode::Esc && self.changes.takes_esc();
-            let through = (matches!(k.code, KeyCode::Esc | KeyCode::Tab) && !esc_here) || (ctrl && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('y'))) || crate::config::menu_key().matches(&k);
+            let tab = matches!(k.code, KeyCode::Tab | KeyCode::BackTab) && !ctrl;
+            let through = ((k.code == KeyCode::Esc || tab) && !esc_here) || (ctrl && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('y'))) || crate::config::menu_key().matches(&k);
             if !through {
                 if k.code == KeyCode::Char('i') && !ctrl && !alt && !(self.pane == Pane::Changes && self.changes.typing()) {
                     self.prompt_focus = true;
@@ -992,13 +1042,6 @@ impl View {
             }
             // the prompt in the changes view: esc gives the keys back to the view
             KeyCode::Esc if self.pane != Pane::Chat && self.prompt_focus => {
-                if let Some((_, draft)) = self.commenting.take() {
-                    self.input.set_text(&draft);
-                }
-                if let Some(draft) = self.committing.take() {
-                    self.input.set_text(&draft);
-                    self.drafting = None;
-                }
                 self.prompt_focus = false;
                 return false;
             }
@@ -1043,20 +1086,6 @@ impl View {
                 self.toast("ctrl+c again: quit");
                 return false;
             }
-            // a commit message in the prompt: ctrl+g has a model draft it from the staged diff
-            KeyCode::Char('g') if ctrl && self.committing.is_some() => {
-                if self.drafting.is_none() {
-                    let (tx, rx) = mpsc::channel();
-                    let dir = self.cwd.clone();
-                    let model = crate::config::rank_model().unwrap_or_else(|| "haiku".into());
-                    std::thread::spawn(move || {
-                        let _ = tx.send(crate::changes::draft_message(&dir, &model));
-                    });
-                    self.drafting = Some(rx);
-                    self.toast("drafting the commit message…");
-                }
-                return false;
-            }
             // ctrl+y: yazi (full screen) on the worktree; its pick goes into the prompt
             KeyCode::Char('y') if ctrl => {
                 self.yazi = Some(self.cwd.clone());
@@ -1086,6 +1115,11 @@ impl View {
             }
             KeyCode::Char('i') if ctrl || k.modifiers.contains(KeyModifiers::SUPER) => {
                 self.open_vscode();
+                return false;
+            }
+            // shell mode, 1 line: enter runs it
+            KeyCode::Enter if k.modifiers.is_empty() && self.shell_mode() && !self.input.text().contains('\n') => {
+                self.submit();
                 return false;
             }
             KeyCode::Enter if ctrl || k.modifiers.contains(KeyModifiers::ALT) || k.modifiers.contains(KeyModifiers::SUPER) => {
@@ -1152,18 +1186,9 @@ impl View {
             crate::changes::Act::None => {}
             crate::changes::Act::Toast(t) => self.toast(t),
             crate::changes::Act::Open(file, line) => self.open_at(&file, line),
-            crate::changes::Act::Comment(spots) => {
-                // the prompt takes the comment; its draft waits
-                let draft = self.input.text();
-                self.input.set_text("");
-                self.commenting = Some((spots, draft));
-                self.prompt_focus = true;
-            }
-            crate::changes::Act::CommitMessage => {
-                let draft = self.input.text();
-                self.input.set_text("");
-                self.committing = Some(draft);
-                self.prompt_focus = true;
+            crate::changes::Act::ToggleChat => {
+                self.mini_chat = !self.mini_chat;
+                self.dirty = true;
             }
             crate::changes::Act::Send(text) => {
                 self.back = 0;
@@ -1199,7 +1224,7 @@ impl View {
     /// The IDE (setting `editor`) at FILE:LINE of the worktree (VS Code: the window that has it open).
     fn open_at(&mut self, file: &str, line: u32) {
         let cwd = self.cwd.clone();
-        self.open_editor(|k| crate::editor::args_at(k, &cwd, file, line), format!("{file}:{line}"));
+        self.open_editor(|k| crate::editor::args_at(k, &cwd, file, line), Some((file, line)), format!("{file}:{line}"));
     }
 
     /// portless: read this thread's live URLs every 5 s (on a thread). 0 portless, 0 worktree: 0.
@@ -1232,23 +1257,29 @@ impl View {
     /// ctrl+i: the IDE on the thread's worktree.
     fn open_vscode(&mut self) {
         let cwd = self.cwd.clone();
-        self.open_editor(|k| crate::editor::args_dir(k, &cwd), cwd.display().to_string());
+        self.open_editor(|k| crate::editor::args_dir(k, &cwd), None, cwd.display().to_string());
     }
 
     /// Start the IDE with ARGS (by its kind); the toast names WHAT, else why not; once: the trust hint.
-    fn open_editor(&mut self, args: impl Fn(crate::editor::Kind) -> Vec<std::ffi::OsString>, what: String) {
+    /// TARGET (file, line; None: the worktree): a window that has the worktree open gets it.
+    fn open_editor(&mut self, args: impl Fn(crate::editor::Kind) -> Vec<std::ffi::OsString>, target: Option<(&str, u32)>, what: String) {
         let Some(e) = crate::editor::find() else {
             self.toast("IDE: 0 found · setting editor (code, cursor, zed, idea …)");
             return;
         };
         // a terminal editor: full screen in this terminal (the view loop suspends codehead)
-        if e.kind == crate::editor::Kind::Terminal {
+        if e.kind.in_terminal() {
             let mut argv: Vec<std::ffi::OsString> = vec![e.bin.clone().into()];
             argv.extend(args(e.kind));
             self.outside = Some(argv);
             return;
         }
-        match crate::editor::spawn(&e, &args(e.kind)) {
+        let (argv, reused) = match crate::editor::reuse_args(&e, &self.cwd, target) {
+            Some(a) => (a, true),
+            None => (args(e.kind), false),
+        };
+        let what = if reused { format!("{what} (open window)") } else { what };
+        match crate::editor::spawn(&e, &argv) {
             Ok(()) => {
                 let hint = crate::editor::trust_hint(&self.cwd);
                 self.toast(hint.unwrap_or_else(|| format!("IDE: {what}")));
@@ -1404,7 +1435,18 @@ impl View {
         if self.pane != Pane::Chat {
             if self.view_rect.contains(at) {
                 self.prompt_focus = self.prompt_focus && !click;
-                if self.pane == Pane::Files { self.files.mouse(m) } else { self.changes.mouse(m) }
+                if self.pane == Pane::Files {
+                    self.files.mouse(m);
+                } else {
+                    let act = self.changes.mouse(m);
+                    self.changes_act(act);
+                }
+                return;
+            }
+            // the chat's title row in the changes view: folds / opens it
+            if click && self.mini_rect.contains(at) {
+                self.mini_chat = !self.mini_chat;
+                self.dirty = true;
                 return;
             }
             // the chat of the split: its scroll below; a click there: 0 selection
@@ -1862,6 +1904,26 @@ impl View {
             } else {
                 st
             };
+            // narrow (0 split): the chat above the prompt, under the changes (its title row folds it)
+            self.mini_rect = Rect::default();
+            let st = if self.stream_rect == st && st.height >= 16 {
+                let rows = if self.mini_chat { (st.height / 3).clamp(4, 14) } else { 0 };
+                let title = Rect { y: st.bottom() - rows - 1, height: 1, ..st };
+                let chat = Rect { y: title.bottom(), height: rows, ..st };
+                let label = if self.mini_chat { "▾ chat · t: fold " } else { "▸ chat · t: open " };
+                let busy = if self.thread.busy.is_empty() { String::new() } else { format!("· {} at work ", self.thread.busy.len()) };
+                let text = format!("─ {label}{busy}");
+                let fill = usize::from(title.width).saturating_sub(unicode_width::UnicodeWidthStr::width(text.as_str()));
+                f.render_widget(Paragraph::new(Line::from(vec![Span::styled(text, theme::muted()), Span::styled("─".repeat(fill), theme::line())])), title);
+                self.mini_rect = title;
+                self.stream_rect = chat;
+                if rows > 0 {
+                    self.draw_stream(f, chat);
+                }
+                Rect { height: title.y - st.y, ..st }
+            } else {
+                st
+            };
             self.view_rect = st;
             self.changes.draw(f, st);
             if let Some(n) = self.changes.take_note() {
@@ -1872,17 +1934,6 @@ impl View {
                 let to = self.default_to().join(", ");
                 self.send_prompt(m);
                 self.toast(format!("CI log sent to {to}"));
-            }
-            // a model's commit message draft: into the prompt (still in commit mode)
-            if let Some(rx) = &self.drafting
-                && let Ok(r) = rx.try_recv()
-            {
-                self.drafting = None;
-                match r {
-                    Ok(m) if self.committing.is_some() => self.input.set_text(&m),
-                    Ok(_) => {}
-                    Err(e) => self.toast(format!("draft: {e}")),
-                }
             }
         }
         if mon_h > 0 {
@@ -1983,7 +2034,7 @@ impl View {
 
         // the input bubble: its top border the header's bottom line (├ ┴ ┤)
         let bubble = Rect { y: bubble_top, height: bubble_bottom + 1 - bubble_top, ..area };
-        let edge = Style::default().fg(theme::pal().hover);
+        let edge = Style::default().fg(if self.shell_mode() { theme::shell() } else { theme::pal().hover });
         {
             let buf = f.buffer_mut();
             let (left, right) = (bubble.x, bubble.right().saturating_sub(1));
@@ -2030,24 +2081,27 @@ impl View {
         if self.members.is_empty() {
             to.clear();
         }
+        let shell = self.shell_mode();
+        if shell {
+            let sh = Style::default().fg(theme::shell());
+            to = vec![Span::styled("  ! shell mode", sh.add_modifier(Modifier::BOLD)), Span::styled(format!(" · in {}", tilde(&self.cwd)), theme::muted())];
+        } else if self.shell_running > 0 {
+            to.push(Span::styled(format!("  · ! {} running", self.shell_running), Style::default().fg(theme::shell())));
+        }
         f.render_widget(Paragraph::new(Line::from(to)), hint);
-        f.render_widget(Paragraph::new(Line::styled("⌘/ctrl+⏎ send · ↑↓ history ", theme::muted())).right_aligned(), Rect { x: hint.x + hint.width / 2, width: hint.width - hint.width / 2, ..hint });
+        let keys = if shell {
+            "⏎ run · output: to the agents with your next message "
+        } else if self.input.is_empty() {
+            "! for shell mode · ⌘/ctrl+⏎ send · ↑↓ history "
+        } else {
+            "⌘/ctrl+⏎ send · ↑↓ history "
+        };
+        f.render_widget(Paragraph::new(Line::styled(keys, theme::muted())).right_aligned(), Rect { x: hint.x + hint.width / 2, width: hint.width - hint.width / 2, ..hint });
 
         // footer: keys or toast right
         let right = match &self.toast {
             Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Span::styled(format!("{m} "), theme::accent()),
-            _ if self.committing.is_some() => Span::styled(
-                if self.drafting.is_some() { "drafting… · esc: cancel ".to_string() } else { "commit message · ctrl+g: draft by model · ⌘/ctrl+⏎: commit the staged files · esc: cancel ".to_string() },
-                theme::accent(),
-            ),
-            _ if let Some((spots, _)) = &self.commenting => {
-                let on = spots.iter().map(|s| s.label()).collect::<Vec<_>>().join(", ");
-                Span::styled(format!("comment on {on} · ⌘/ctrl+⏎: add to the batch · esc: cancel "), theme::accent())
-            }
-            _ if self.pane == Pane::Changes && !self.prompt_focus && self.changes.typing() => Span::styled("type to filter · enter: 1st hit · esc: clear ", theme::muted()),
-            _ if self.pane == Pane::Changes && !self.prompt_focus => {
-                Span::styled("j k · space: select · c: comment · r: reviewed · ←→: fold · 1-4: tabs · f: filter · i: prompt ", theme::muted())
-            }
+            _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled(self.changes.hints(), theme::muted()),
             _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · pgup pgdn: scroll · o: IDE · y: yazi · c: copy path · S: share · i: prompt ", theme::muted()),
             _ if self.pane != Pane::Chat => Span::styled("esc: back to the view · F1-F3: views ", theme::muted()),
             _ => Span::styled("tab: menu · F1-F3: views · esc: interrupt · esc esc: codehead ", theme::muted()),
@@ -2179,6 +2233,7 @@ fn run_outside<B: Backend>(term: &mut Terminal<B>, target: &Path) -> Result<Vec<
 fn suspended<B: Backend>(term: &mut Terminal<B>, argv: &[std::ffi::OsString], env: &[(String, String)]) -> std::io::Result<std::process::ExitStatus> {
     use ratatui::crossterm::{cursor, event, execute, terminal};
     let mut out = std::io::stdout();
+    crate::all_keys(false);
     let _ = execute!(out, event::PopKeyboardEnhancementFlags, event::DisableMouseCapture, event::DisableBracketedPaste, terminal::LeaveAlternateScreen, cursor::Show);
     let _ = terminal::disable_raw_mode();
     let status = std::process::Command::new(&argv[0]).args(&argv[1..]).envs(env.iter().cloned()).status();
@@ -2280,6 +2335,14 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     crate::engine::trace("view new …");
     let mut v = View::new(id, cwd, title, tx);
     crate::engine::trace("view new");
+    // the view ends (any way): the base keyboard flags again
+    struct AllKeysOff;
+    impl Drop for AllKeysOff {
+        fn drop(&mut self) {
+            crate::all_keys(false);
+        }
+    }
+    let _keys = AllKeysOff;
     // a handoff: its document waits as the prompt draft
     if let Some(d) = crate::handoff::take_draft(id) {
         v.input.set_text(&d);
@@ -2307,11 +2370,13 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
             drawn = Instant::now();
             dirty = false;
         }
+        crate::all_keys(v.all_keys());
         for (ev, at) in crate::read_ready(Duration::from_millis(50))? {
             crate::textarea::stamp(Some(at));
             dirty = true;
             let done = match ev {
-                Event::Key(k) if k.kind != KeyEventKind::Release => v.key(k),
+                // a release: only a modifier's (an alt tap)
+                Event::Key(k) if k.kind != KeyEventKind::Release || matches!(k.code, KeyCode::Modifier(_)) => v.key(k),
                 Event::Mouse(m) => {
                     v.mouse(m);
                     v.mouse_exit
@@ -2358,8 +2423,6 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
                     let e = e.lines().next().unwrap_or_default().to_string();
                     // an empty prompt: the message back in it (never lost), else marked failed
                     if v.input.text().trim().is_empty()
-                        && v.committing.is_none()
-                        && v.commenting.is_none()
                         && let Some(i) = v.pending.iter().rposition(|p| p.2.is_none())
                     {
                         let (text, ..) = v.pending.remove(i);
@@ -2383,6 +2446,10 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
                 }
                 Msg::Done(..) => {}
                 Msg::Cost(s) => v.cost = Some(*s),
+                Msg::Shell(cmd, out, code) => {
+                    v.shell_done(cmd, out, code);
+                    wake = true;
+                }
                 Msg::Wake => wake = true,
                 Msg::Subscribed => {
                     v.live.clear();
@@ -2590,7 +2657,6 @@ mod ask_tests {
 #[cfg(test)]
 mod pane_tests {
     use super::*;
-    use ratatui::backend::TestBackend;
 
     fn view() -> View {
         let (tx, _rx) = mpsc::channel();
@@ -2602,7 +2668,7 @@ mod pane_tests {
     }
 
     fn screen(v: &mut View) -> String {
-        let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut t = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
         t.draw(|f| v.draw(f)).unwrap();
         let b = t.backend().buffer().clone();
         (0..30).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
@@ -2647,16 +2713,16 @@ mod pane_tests {
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
         v.changes.set_files(crate::changes::parse("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n x\n-a\n+b\n y\n"));
         let s = screen(&mut v);
-        assert!(s.contains(" 3 medium 0/1 ") && s.contains("┌─ ☐ src/a.rs"), "{s}");
-        // k k k: head → hunk → ` x` → `- a`; space selects 2 lines (the cursor goes down)
+        assert!(s.contains("▾ medium") && s.contains("┌─ ☐ src/a.rs"), "{s}");
+        // ↓ ↓ ↓: head → hunk → ` x` → `- a`; space selects 2 lines (the cursor goes down)
         for _ in 0..3 {
-            press(&mut v, KeyCode::Char('k'), KeyModifiers::NONE);
+            press(&mut v, KeyCode::Down, KeyModifiers::NONE);
         }
         press(&mut v, KeyCode::Char(' '), KeyModifiers::NONE);
         press(&mut v, KeyCode::Char(' '), KeyModifiers::NONE);
-        // c: the prompt takes the comment on both lines
+        // c: the modal takes the comment on both lines
         press(&mut v, KeyCode::Char('c'), KeyModifiers::NONE);
-        assert!(v.prompt_focus);
+        assert!(!v.prompt_focus && v.changes.typing());
         let s = screen(&mut v);
         assert!(s.contains("comment on src/a.rs:2 · removed 2"), "{s}");
         press(&mut v, KeyCode::Char('n'), KeyModifiers::NONE);
@@ -2680,39 +2746,105 @@ mod comment_tests {
     use super::*;
 
     #[test]
-    fn a_comment_borrows_the_prompt_and_gives_the_draft_back() {
+    fn a_leading_bang_runs_a_shell_command_its_output_goes_along_with_the_next_message() {
+        let (tx, rx) = mpsc::channel();
+        let mut v = View::new("shelltest-0000", Path::new("/tmp"), "t", tx);
+        let mut t = Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
+        t.draw(|f| v.draw(f)).unwrap();
+        let shown = |t: &Terminal<ratatui::backend::TestBackend>| t.backend().buffer().content().iter().map(|c| c.symbol().to_string()).collect::<String>();
+        assert!(shown(&t).contains("! for shell mode"));
+        for c in "!echo hi; echo oops >&2; exit 3".chars() {
+            v.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        t.draw(|f| v.draw(f)).unwrap();
+        assert!(shown(&t).contains("! shell mode"), "{}", shown(&t));
+        // enter runs it: 0 message to the agents
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(v.input.is_empty() && v.ops.borrow().is_empty());
+        let Ok(Msg::Shell(cmd, out, code)) = rx.recv_timeout(Duration::from_secs(10)) else { panic!("0 shell result") };
+        assert_eq!((cmd.as_str(), code), ("echo hi; echo oops >&2; exit 3", 3));
+        assert!(out.contains("hi") && out.contains("oops"), "{out}");
+        v.shell_done(cmd, out, code);
+        t.draw(|f| v.draw(f)).unwrap();
+        assert!(shown(&t).contains("exit 3") && shown(&t).contains("⎿ hi"), "{}", shown(&t));
+        // the next message takes the output along (for the agents only), once
+        v.input.set_text("why does it fail?");
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        let sent = v.ops.borrow().last().cloned().unwrap();
+        assert_eq!(sent["text"], "why does it fail?");
+        let ctx = sent["context"].as_str().unwrap();
+        assert!(ctx.contains("$ echo hi; echo oops >&2; exit 3  (exit 3)") && ctx.contains("oops"), "{ctx}");
+        v.input.set_text("again");
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!(v.ops.borrow().last().unwrap()["context"], "");
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("shelltest-0000"));
+    }
+
+    #[test]
+    fn a_comment_opens_a_modal_and_the_prompt_keeps_its_draft() {
         let (tx, _rx) = mpsc::channel();
         let mut v = View::new("commenttest-0000", Path::new("/tmp"), "t", tx);
         v.set_pane(Pane::Changes);
+        v.changes.set_files(crate::changes::parse("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n x\n-a\n+b\n y\n"));
         v.input.set_text("half a message");
-        v.changes_act(crate::changes::Act::Comment(vec![crate::changes::Spot { path: "src/a.rs".into(), line: 12, lines: String::new() }]));
-        assert!(v.prompt_focus && v.input.text().is_empty());
+        let mut t = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        t.draw(|f| v.draw(f)).unwrap();
+        v.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(!v.prompt_focus && v.changes.typing(), "the modal has the keys");
         v.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
         v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
         assert_eq!(v.changes.comment_count(), 1);
-        assert!(!v.prompt_focus && v.input.text() == "half a message" && v.commenting.is_none());
-        // esc cancels: 0 comment, the draft back
-        v.changes_act(crate::changes::Act::Comment(vec![crate::changes::Spot { path: "src/a.rs".into(), line: 13, lines: String::new() }]));
+        assert!(!v.prompt_focus && v.input.text() == "half a message");
+        // esc cancels: 0 comment, 0 interrupt timer
+        v.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         v.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
         v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(v.changes.comment_count(), 1);
+        assert!(!v.changes.typing() && v.last_esc.is_none());
         assert_eq!(v.input.text(), "half a message");
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("commenttest-0000"));
     }
 
     #[test]
-    fn a_commit_message_borrows_the_prompt_too() {
+    fn the_commit_message_lives_in_the_panel() {
         let (tx, _rx) = mpsc::channel();
         let mut v = View::new("committest-0000", Path::new("/tmp"), "t", tx);
         v.set_pane(Pane::Changes);
         v.input.set_text("draft");
-        v.changes_act(crate::changes::Act::CommitMessage);
-        assert!(v.prompt_focus && v.input.text().is_empty() && v.committing.is_some());
-        // an empty message: 0 commit, still in commit mode
+        v.key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        assert!(v.changes.typing() && !v.prompt_focus);
+        v.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        // 0 staged files: 0 commit, the message stays
         v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
-        assert!(v.committing.is_some());
+        assert!(v.changes.typing());
         v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(v.committing.is_none() && v.input.text() == "draft" && !v.prompt_focus);
+        assert!(!v.changes.typing() && v.input.text() == "draft" && !v.prompt_focus);
+    }
+
+    #[test]
+    fn a_message_from_the_changes_view_takes_the_selection_along() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("contexttest-0000", Path::new("/tmp"), "t", tx);
+        v.set_pane(Pane::Changes);
+        v.changes.set_files(crate::changes::parse("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n x\n-a\n+b\n y\n"));
+        let mut t = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        t.draw(|f| v.draw(f)).unwrap();
+        // ↓ ↓ ↓ ↓: `+ b`; space: selected
+        for _ in 0..4 {
+            v.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        v.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        v.input.set_text("stage only these");
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        let sent = v.ops.borrow().last().cloned().unwrap();
+        let text = sent["text"].as_str().unwrap();
+        assert!(text.starts_with("stage only these\n\n[codehead: context from the changes view]") && text.contains("+ b"), "{text}");
+        // the chat above the prompt shows (narrow: 0 split)
+        let s = { t.draw(|f| v.draw(f)).unwrap(); t.backend().buffer().clone() };
+        let rows: Vec<String> = (0..30).map(|y| (0..100).map(|x| s[(x, y)].symbol().to_string()).collect()).collect();
+        assert!(rows.iter().any(|l| l.contains("▾ chat · t: fold")), "{rows:#?}");
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("contexttest-0000"));
     }
 }
 
@@ -2986,5 +3118,68 @@ mod prompt_draft_tests {
         let v = View::new(id, Path::new("/tmp"), "t", tx);
         assert_eq!(v.input.text(), "the task");
         let _ = std::fs::remove_dir_all(store::thread_dir(id));
+    }
+}
+
+/// The longest a shell-mode command runs.
+const SHELL_TIMEOUT: Duration = Duration::from_secs(120);
+/// The output of a shell-mode command the agents get (the thread shows up to 16 KB).
+const SHELL_CTX_CHARS: usize = 8_000;
+const SHELL_LOG_BYTES: usize = 16_000;
+
+/// Run COMMAND in DIR with $SHELL -c (else sh): (stdout and stderr together, cut; exit code, -1:
+/// killed or 0 start).
+fn shell(dir: &Path, command: &str) -> (String, i32) {
+    use std::io::Read;
+    let sh = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "sh".into());
+    let Ok((mut reader, writer)) = std::io::pipe() else { return ("pipe failed".into(), -1) };
+    let Ok(w2) = writer.try_clone() else { return ("pipe failed".into(), -1) };
+    let child = std::process::Command::new(&sh).arg("-c").arg(command).current_dir(dir).stdin(std::process::Stdio::null()).stdout(writer).stderr(w2).spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return (format!("{sh}: {e}"), -1),
+    };
+    // the reader on its own thread: a full pipe never blocks the child
+    let read = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = reader.by_ref().take(4 * SHELL_LOG_BYTES as u64).read_to_end(&mut buf);
+        // the rest: drained, dropped
+        let _ = std::io::copy(&mut reader, &mut std::io::sink());
+        buf
+    });
+    let start = Instant::now();
+    let code = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st.code().unwrap_or(-1),
+            Ok(None) if start.elapsed() > SHELL_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break -1;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => break -1,
+        }
+    };
+    let buf = read.join().unwrap_or_default();
+    let text = String::from_utf8_lossy(&buf);
+    // ANSI colors off: the plain text
+    let text: String = crate::ansi::to_lines(&text).iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()).collect::<Vec<_>>().join("\n");
+    let mut out: String = text.chars().take(SHELL_LOG_BYTES).collect();
+    if out.len() < text.len() {
+        out.push_str("\n… (cut)");
+    }
+    if code == -1 && start.elapsed() > SHELL_TIMEOUT {
+        out.push_str(&format!("\n(killed after {} s)", SHELL_TIMEOUT.as_secs()));
+    }
+    (out, code)
+}
+
+/// P with the home dir as `~`.
+fn tilde(p: &Path) -> String {
+    let home = crate::config::home();
+    match p.strip_prefix(&home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => p.display().to_string(),
     }
 }

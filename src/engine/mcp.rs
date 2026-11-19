@@ -26,6 +26,21 @@ fn tools() -> Value {
             }, "required": ["state"]}
         },
         {
+            "name": "stash_name",
+            "description": "Name an entry of the owner's stash (lines the owner took out of the worktree in the changes view): 2-6 words on what the lines do. Call it when codehead asks you to.",
+            "inputSchema": {"type": "object", "properties": {
+                "id": {"type": "string", "description": "The stash entry id"},
+                "name": {"type": "string", "description": "2-6 words"}
+            }, "required": ["id", "name"]}
+        },
+        {
+            "name": "stash_restored",
+            "description": "Report that a stash entry the owner asked you to restore is back in the worktree: the entry leaves the stash. Only after the patch applied (or the owner settled each conflict).",
+            "inputSchema": {"type": "object", "properties": {
+                "id": {"type": "string", "description": "The stash entry id"}
+            }, "required": ["id"]}
+        },
+        {
             "name": "list_agents",
             "description": "Every agent: name, harness/model, mode, whether it is on this thread.",
             "inputSchema": {"type": "object", "properties": {}}
@@ -43,6 +58,8 @@ fn call(thread: &str, agent: &str, name: &str, args: &Value) -> Result<String, S
             client::send(thread, &json!({"op": "status", "agent": agent, "state": args["state"], "note": args["note"]}))?;
             Ok("status set".into())
         }
+        "stash_name" => crate::changes::stash::set_name(thread, args["id"].as_str().unwrap_or_default(), args["name"].as_str().unwrap_or_default()),
+        "stash_restored" => crate::changes::stash::restored(thread, args["id"].as_str().unwrap_or_default()),
         "list_agents" => {
             let on = super::store::load(thread).map(|t| t.agents).unwrap_or_default();
             let rows: Vec<Value> = roster::active()
@@ -102,7 +119,7 @@ mod tests {
         let r = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})).unwrap();
         assert_eq!(r["result"]["protocolVersion"], "2025-03-26");
         let r = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
-        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 3);
+        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 5);
         assert!(handle("t", "a", &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none());
     }
 }

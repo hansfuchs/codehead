@@ -40,6 +40,7 @@ description: Every key, per screen.
 | --- | --- |
 | `ctrl+enter` | send (`⌘enter`, `alt+enter`); `ctrl+s` never sends |
 | `enter` | new line; a question open: answer |
+| `!` (1st char of the prompt) | shell mode: `enter` runs the command in the thread's worktree (`$SHELL -c`, max. 120 s); the thread shows its output, your next message takes it to the agents |
 | `↑` `↓` | a question open: its choices; else sent messages |
 | `1`-`9`, `space` | a question: pick (several: toggle); letters: the **Other** answer |
 | `←` `→` | a question with several parts: previous / next part |
@@ -48,7 +49,7 @@ description: Every key, per screen.
 | `ctrl+c` | clear the prompt; twice on an empty prompt: quit |
 | `ctrl+o` | open / close all tool runs |
 | `ctrl+t` | open / close all thoughts (hidden: show them) |
-| `ctrl+i` | the IDE (setting `editor`) on the thread's worktree (`⌘i`) |
+| `ctrl+i` | the IDE (setting `editor`) on the thread's worktree (`⌘i`): the window that has it open, else a new one |
 | `pgup` `pgdn`, `shift+↑↓`, wheel | scroll the stream |
 | `tab` / `shift+tab` | thread header under the view bar: the open threads (`←→` pick, `enter` open) |
 | `alt+←` `alt+→` (`⌥←` `⌥→`) | previous / next view of the thread: chat, changes, files (the view bar on the top row); word jumps in the prompt: `ctrl+←→` |
@@ -59,37 +60,57 @@ description: Every key, per screen.
 ## Changes view
 
 The classifier agent (setting `classify`; empty: the default agent, with its harness and model;
-Claude Code or Codex) sorts the files into the tabs on top: critical (security, money, important
+Claude Code or Codex) sorts the files into levels: critical (security, money, important
 business logic), high, medium, low. The same call groups the files that do 1 thing, in reading
 order, with a title + why per group and a why per file. It runs in the background (`classifying…`),
 1 call per set of paths (`threads/<id>/rank.json`); without it (or while it runs): path rules.
 
 The branch's changes against its base (merge-base with `origin/<default>`; on the default
-branch: uncommitted only), 1 box per file, in review order: schema / API, logic, config, UI,
-docs, tests, generated (folded). Side by side from 170 columns. A reviewed box folds; if its
-diff changes later, it shows `updated`. Under the tabs: the filter (fuzzy, by file name and diff
-content, over every tab, best hit first).
+branch: uncommitted only), 1 box per file, by level, then in review order: schema / API, logic,
+config, UI, docs, tests, generated (folded: 1 line). Side by side from 170 columns. A reviewed
+box folds; if its diff changes later, it shows `updated`. The summary row and the filter (fuzzy,
+by file name and diff content, best hit first) stay on top; a box's head (and its why) stays
+under them until the box scrolls past.
+
+The source control panel on the left (`ctrl+b`, from 90 columns): the commit message on top,
+then staged, changes (by level, `U` `A` `M` `D` `R` per file), comments (by file) and the stash.
+Labels out of view stick to the top / bottom edge; a click on one scrolls to it. Narrow (0 chat on
+the left): the chat sits above the prompt (`t` or a click on its title row folds it). A message
+from the changes view takes the selected lines and the open comments along: "stage only these",
+"work on the comments".
+
+The stash: lines or files out of the worktree, each with the patch that puts them back (not a git
+stash). The agent that wrote the lines names the entry (MCP tool `stash_name`). `↺` restore: the
+agent applies the patch at the lines' place (`git apply`, else `git apply -C1`) and asks you on any conflict (`stash_restored` ends
+the entry). `✕` remove one, `✕ clear` all (both ask first).
 
 | Key | Action |
 | --- | --- |
-| `j` / `k` | 1 line up / down |
+| `j` / `k`, `ctrl+↑` / `ctrl+↓` | 1 file up / down (the box head; its border lights up) |
 | `{` / `}` | previous / next box |
-| `n` / `p` | next / previous hunk |
-| `↑` `↓`, `pgup` `pgdn`, `g` `G` | move the cursor |
-| `space` | select the line on / off, the cursor goes 1 down (lines apart are fine; a mouse drag selects too); `esc` clears |
+| `n` / `N` | next / previous hunk |
+| `↑` `↓`, `pgup` `pgdn`, `g` `G` | move the cursor (`↑` `↓`: 1 line) |
+| `space` | select the line on / off, the cursor goes 1 down (lines apart are fine); `esc` clears |
+| click, drag | add the lines to the selection; `shift+click`: the lines from the last click |
+| right click, right drag | take the lines out of the selection; 2 right clicks: clear it |
+| `s` | stage only the selected lines (a part of each file: `git apply --cached`) |
+| `p` | stash the selected lines (out of the worktree, into the panel's stash) |
 | `r` | reviewed on / off (the cursor goes to the next box) |
 | `←` / `→`, `enter` | fold / open, toggle the box |
-| `1` - `4`, click | tab: critical / high / medium / low |
 | `f`, click | the filter: type, `enter` jumps to the 1st hit, `esc` clears |
-| `o` | the IDE at the line under the cursor (VS Code family: the window that has the worktree open) |
-| `s` | side by side / unified |
+| `e`, `o` | edit in the IDE (setting `editor`): at the 1st selected line, else at the line under the cursor (a removed line: where it was); the window that has the worktree open, else a new one (VS Code family, Zed, JetBrains); `flow` (flow-control.dev): a running instance with the worktree as a project gets the file (`--connect`), else a new GUI window (`--gui`); `terminal`: full screen in codehead's terminal, back on quit |
+| `w` | side by side / unified |
 | `ctrl+r` | read git again (it also does every 4 s) |
 | `R` | classify again (setting `classify`) |
-| `c` | comment on the selected lines (else the line under the cursor): the prompt takes it, `⌘/ctrl+⏎` adds it to the batch, `esc` cancels (the draft comes back) |
+| `c` | comment on the selected lines (else the line under the cursor): a modal shows the lines per file (`alt+↑` `↓`, the wheel: scroll them), `⌘/ctrl+⏎` adds it to the batch, `esc` cancels |
+| `enter`, click on a comment | edit it in the modal (0 text: deleted) |
 | `x` | delete the comment (or dismiss the finding) under the cursor |
 | `ctrl+enter` (`⌘enter`, `alt+enter`) | send all comments as 1 message to the lead (`file:line`: text each) |
 | `a` / `u` | stage / unstage: on a box head the file, on a diff row its hunk (box head: `●` staged, `◐` a part) |
-| `m` | commit message in the prompt: `ctrl+g` drafts it from the staged diff (setting `rank` model), `⌘/ctrl+⏎` commits, `esc` cancels |
+| `m` | the commit message (panel): `ctrl+g` drafts it from the staged diff (setting `rank` model), `⌘/ctrl+⏎` commits, `esc` leaves it |
+| `ctrl+b` | the source control panel on / off |
+| `alt` (alone: press, release) | the keys to the panel / the review (terminals with the kitty keyboard protocol) |
+| `t` | the chat above the prompt: fold / open |
 | `P` | push (`git push -u origin HEAD`) |
 | `U` | fetch + rebase on the base (`origin/<default>`) |
 | `A` / `K` / `X` | a rebase stopped on conflicts: the agent resolves / continue / abort |
@@ -99,6 +120,21 @@ content, over every tab, best hit first).
 | `F` | CI failed: the latest failed run's log (last 150 lines) goes to the agents of your last message |
 | `M` | merge the PR when its checks pass (`gh pr merge --squash --auto`) |
 | `i` | the prompt gets the keys; `esc` gives them back |
+
+In the panel:
+
+| Key | Action |
+| --- | --- |
+| `j` / `k`, `↑` `↓` | move the cursor |
+| `←` / `→` | on a label: fold / open; `←` on a row: to its label; `→` on a file / comment: jump to it |
+| `space`, `shift+click` | pick files |
+| `s` | stage the picked files (staged section: unstage) |
+| `p` | stash the picked files (whole) |
+| `enter` | on a comment: edit it; on a file: jump to it, the keys to the review |
+| `x` | delete the comment / remove the stash entry (asks first) |
+| `r` | restore the stash entry (its agent) |
+| `X` | clear the stash (asks first) |
+| `m` | the commit message |
 
 ## Files view
 
@@ -110,7 +146,7 @@ rendered, code in syntax colors).
 | --- | --- |
 | `j` / `k`, `↑` `↓` | pick a file |
 | `space`, `pgup` `pgdn`, wheel | scroll the preview |
-| `o` | the IDE at the file |
+| `e`, `o` | edit the file in the IDE (its 1st changed line) |
 | `y` | yazi on the file (full screen; codehead's own yazi config, themed from the palette) |
 | `c` | copy the file's path |
 | `r` | read the list again |

@@ -248,6 +248,9 @@ pub enum Kind {
     /// The agent got a note of edits in its worktree since its last turn, not its own: SUMMARY
     /// (1 line: who, files, line ranges).
     Edits { summary: String },
+    /// The owner ran COMMAND in the thread's worktree (shell mode, `!` in the prompt): its
+    /// OUTPUT (stdout and stderr, cut to 16 KB), its exit CODE (-1: 0 code, a signal / timeout).
+    Shell { command: String, output: String, code: i32 },
     /// A subagent of the agent (its master) started: ID (the tool call that started it), PARENT
     /// (the subagent that started it; None: the master itself), what it does.
     SubStart {

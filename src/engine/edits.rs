@@ -154,6 +154,13 @@ pub fn turn_end(id: &str, dir: &Path, agent: &str, all_idle: bool) {
     save(id, &st);
 }
 
+/// The agent whose turn last changed PATH in DIR (the edits log of thread ID). None: the
+/// owner, or 0 record.
+pub fn writer(id: &str, dir: &Path, path: &str) -> Option<String> {
+    let st = load(id);
+    st.log.iter().rev().find(|c| git(dir, &["diff", "--name-only", &c.from, &c.to, "--", path], None).is_some_and(|o| !o.trim().is_empty()))?.by.clone()
+}
+
 impl State {
     /// A turn of AGENT starts at tree NOW, time TS: the owner's edits since the last agent
     /// stopped (0 agents at work in between) go in the log.

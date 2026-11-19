@@ -265,6 +265,7 @@ impl Tty {
 
     /// Input modes off, alternate screen kept (the next screen takes it over: no flash).
     fn release(&mut self, out: &mut Stdout) {
+        all_keys(false);
         if self.enhanced {
             let _ = execute!(out, PopKeyboardEnhancementFlags);
             self.enhanced = false;
@@ -286,6 +287,7 @@ fn restore_on_panic() {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let mut out = io::stdout();
+        all_keys(false);
         let _ = execute!(out, PopKeyboardEnhancementFlags, DisableMouseCapture, DisableBracketedPaste, cursor::Show, LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
         hook(info);
@@ -317,6 +319,32 @@ fn catch_signals() {
         // SAFETY: the handler only stores to an atomic (async-signal-safe).
         unsafe { libc::signal(s, on_signal as *const () as libc::sighandler_t) };
     }
+}
+
+static ALL_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// ON: every key as an escape code, modifiers alone and releases too (the kitty keyboard
+/// protocol: an alt tap in the changes view); off: back to the base flags. Terminals without
+/// it ignore the request.
+pub fn all_keys(on: bool) {
+    use std::sync::atomic::Ordering;
+    if ALL_KEYS.swap(on, Ordering::Relaxed) == on {
+        return;
+    }
+    let mut out = io::stdout();
+    let _ = if on {
+        execute!(
+            out,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+            )
+        )
+    } else {
+        execute!(out, PopKeyboardEnhancementFlags)
+    };
 }
 
 pub fn read_ready(wait: Duration) -> Result<Vec<(Event, Instant)>, String> {

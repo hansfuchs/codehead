@@ -32,6 +32,8 @@ pub enum Item {
     /// Tool calls of an agent between 2 of its messages; THOUGHTS: (calls before it, text).
     Run { agent: String, key: usize, calls: Vec<Call>, start: u64, end: u64, thoughts: Vec<(usize, String)> },
     Note { agent: String, text: String, color: Color },
+    /// The owner's shell command (`!` in the prompt): its output, its exit code.
+    Shell { command: String, output: String, code: i32, ts: u64 },
     /// An answered ask: what AGENT asked (QUESTION), the owner's ANSWER (allow false: declined /
     /// denied). ASKED, TS: the times of the ask and of the answer.
     Settled { agent: String, question: String, answer: String, allow: bool, permission: bool, asked: u64, ts: u64 },
@@ -256,6 +258,7 @@ impl Thread {
                 self.items.push(Item::Note { agent, text: "left the thread".into(), color: theme::pal().muted });
             }
             Kind::Error { message } => self.items.push(Item::Note { agent, text: message.clone(), color: theme::pal().danger }),
+            Kind::Shell { command, output, code } => self.items.push(Item::Shell { command: command.clone(), output: output.clone(), code: *code, ts: e.ts }),
             Kind::Edits { summary } => self.items.push(Item::Note { agent, text: format!("got the edits since its last turn · {summary}"), color: theme::pal().muted }),
             Kind::SubStart { id, parent, description, agent_type, background, prompt } => {
                 if !self.subs.iter().any(|s| &s.id == id) {
@@ -306,7 +309,14 @@ impl Thread {
 
     /// The owner's messages, oldest first (compose history).
     pub fn sent(&self) -> Vec<String> {
-        self.items.iter().filter_map(|i| if let Item::Prompt { from, text, .. } = i { (from == "owner").then(|| text.clone()) } else { None }).collect()
+        self.items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Prompt { from, text, .. } => (from == "owner").then(|| text.clone()),
+                Item::Shell { command, .. } => Some(format!("!{command}")),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The last messages of AGENT, oldest first, max. CHARS (a handoff).
@@ -891,6 +901,11 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                 }
                 last_agent = None;
             }
+            Item::Shell { command, output, code, ts } => {
+                blank(&mut d);
+                d.rows.extend(shell_rows(command, output, *code, *ts, w));
+                last_agent = None;
+            }
             Item::Note { agent, text, color } => {
                 let c = color_of(colors, agent);
                 let pre = [Span::styled("● ", Style::default().fg(*color)), Span::styled(format!("{agent} "), Style::default().fg(c))];
@@ -1399,6 +1414,11 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                     _ => {}
                 }
             }
+            Item::Shell { command, output, code, ts } => {
+                close(&mut d, &mut cur);
+                gap(&mut d);
+                d.rows.extend(shell_rows(command, output, *code, *ts, w));
+            }
             Item::Note { agent, text, color } => {
                 close(&mut d, &mut cur);
                 gap(&mut d);
@@ -1867,4 +1887,31 @@ mod resume_tests {
     fn text(d: &Drawn) -> String {
         d.rows.iter().map(|r| r.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>() + "\n").collect()
     }
+}
+
+/// Lines of shell output shown in the thread (the rest: a count).
+const SHELL_LINES: usize = 20;
+
+/// The rows of the owner's shell COMMAND: `! command · 13:42 · exit 1`, its OUTPUT under it.
+fn shell_rows(command: &str, output: &str, code: i32, ts: u64, w: usize) -> Vec<Row> {
+    let sh = Style::default().fg(theme::shell());
+    let mut head = vec![Span::styled("! ", sh.add_modifier(Modifier::BOLD)), Span::styled(command.to_string(), theme::bold()), Span::styled(format!("  {}", clock(ts)), theme::muted())];
+    if code != 0 {
+        let what = if code < 0 { "killed".to_string() } else { format!("exit {code}") };
+        head.push(Span::styled(format!(" · {what}"), Style::default().fg(theme::pal().danger)));
+    }
+    let mut rows = vec![Row::plain(Line::from(head))];
+    let lines: Vec<&str> = output.trim_end().lines().collect();
+    let bar = [Span::styled("  ⎿ ", sh)];
+    let pad = [Span::raw("    ")];
+    if lines.is_empty() {
+        rows.extend(render::plain("(0 output)", w, theme::muted(), &bar));
+    }
+    for (i, l) in lines.iter().take(SHELL_LINES).enumerate() {
+        rows.extend(render::plain(l, w, theme::muted(), if i == 0 { &bar } else { &pad }));
+    }
+    if lines.len() > SHELL_LINES {
+        rows.extend(render::plain(&format!("… {} more lines", lines.len() - SHELL_LINES), w, theme::muted(), &pad));
+    }
+    rows
 }

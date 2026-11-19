@@ -160,6 +160,11 @@ pub fn text() -> Style {
 pub fn muted() -> Style {
     Style::default().fg(pal().muted)
 }
+/// Shell mode (`!` in the prompt): its marks, its border.
+pub fn shell() -> Color {
+    Color::Rgb(253, 93, 177)
+}
+
 pub fn line() -> Style {
     Style::default().fg(pal().line)
 }

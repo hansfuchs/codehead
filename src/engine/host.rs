@@ -292,8 +292,11 @@ impl Host {
                 if t.state != "open" {
                     store::update(&self.id, |t| t.state = "open".into())?;
                 }
+                // CONTEXT (the owner's shell commands since the last message): for the agents only
+                let ctx = s("context");
+                let full = if ctx.trim().is_empty() { text.clone() } else { format!("{text}\n\n{ctx}") };
                 for a in &to {
-                    self.deliver(a, &text)?;
+                    self.deliver(a, &full)?;
                 }
                 Ok(json!({"to": to}))
             }
