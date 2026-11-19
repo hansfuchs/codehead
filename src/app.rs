@@ -307,7 +307,7 @@ impl AgentForm {
             } else {
                 harness.set_text(&a.harness_model());
             }
-            color = a.color.as_deref().and_then(|c| agents::COLORS.iter().position(|x| *x == c)).unwrap_or(4);
+            color = a.color.as_deref().and_then(|c| agents::COLORS.iter().position(|x| *x == c)).unwrap_or(3);
             mode = agents::MODES.iter().position(|m| *m == a.mode).unwrap_or(0);
         } else {
             harness.set_text("claude");

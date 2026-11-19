@@ -6,10 +6,11 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Widget};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::{agents, theme};
@@ -225,7 +226,8 @@ fn next_cost(s: &Snap, n: &Next) -> Option<(u64, f64)> {
 /// Window L as a bar of WIDTH cells: the used % a solid bg, the share of the next message `▒`,
 /// the rest dithered (`░`).
 fn bar(pct: f64, next: f64, width: usize) -> Vec<Span<'static>> {
-    let col = if pct >= 90.0 { theme::pal().danger } else if pct >= 70.0 { theme::pal().warn } else { theme::pal().muted };
+    // used: the line gray (dimmer than text), warn / danger near the limit
+    let col = if pct >= 90.0 { theme::pal().danger } else if pct >= 70.0 { theme::pal().warn } else { theme::pal().line };
     let cells = |p: f64| ((p.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
     let used = cells(pct).min(width);
     // a share > 0: 1 cell at least (visible)
@@ -239,16 +241,127 @@ fn bar(pct: f64, next: f64, width: usize) -> Vec<Span<'static>> {
 }
 
 /// The cost box in AREA. NEXT: the next message (its cost line, its share in the window bars).
+/// Only the cells that change move: bars and sparklines dither over, text decodes in. The last
+/// box stays over a thread switch (the next thread's box morphs out of it).
 pub fn draw_in(f: &mut Frame, area: Rect, s: &Snap, age: Duration, next: &Next) {
-    draw_at(f, area, s, age, now(), next)
+    let at0 = Rect::new(0, 0, area.width, area.height);
+    let mut fresh = Buffer::empty(at0);
+    draw_at(&mut fresh, at0, s, age, now(), next);
+    let mut m = MORPH.lock().unwrap_or_else(|e| e.into_inner());
+    match m.as_mut() {
+        None => *m = Some(Morph { from: fresh.clone(), to: fresh, start: Instant::now() - MORPH_TIME }),
+        Some(mo) if mo.to != fresh => {
+            mo.from = mo.shown();
+            mo.to = fresh;
+            mo.start = Instant::now();
+        }
+        Some(_) => {}
+    }
+    blit(f, area, &m.as_ref().expect("set above").shown());
+}
+
+/// The last cost box, in AREA (a new thread: its 1st snapshot not in yet). 0 box yet: nothing.
+pub fn draw_last(f: &mut Frame, area: Rect) {
+    let m = MORPH.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(mo) = m.as_ref() {
+        blit(f, area, &mo.shown());
+    }
+}
+
+/// A cost box morph under way: frames at 30 per second.
+pub fn morphing() -> bool {
+    MORPH.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|m| m.start.elapsed() < MORPH_TIME)
+}
+
+/// Seconds of a cost box morph.
+const MORPH_TIME: Duration = Duration::from_millis(450);
+
+static MORPH: std::sync::Mutex<Option<Morph>> = std::sync::Mutex::new(None);
+
+/// The cost box from FROM (what was on screen) to TO (the new box), from START. Buffers at 0, 0.
+struct Morph {
+    from: Buffer,
+    to: Buffer,
+    start: Instant,
+}
+
+impl Morph {
+    /// The box now: equal cells as they are; bar cells by a 4x4 Bayer order, text cells by a
+    /// left-to-right decode (old, noise in the accent, new).
+    fn shown(&self) -> Buffer {
+        let p = (self.start.elapsed().as_secs_f32() / MORPH_TIME.as_secs_f32()).min(1.0);
+        if p >= 1.0 {
+            return self.to.clone();
+        }
+        let mut out = self.to.clone();
+        let a = self.to.area;
+        let blank = Cell::default();
+        let frame = (p * 1000.0 / 33.0) as u64;
+        for y in 0..a.height {
+            for x in 0..a.width {
+                let new = &self.to[(x, y)];
+                let old = self.from.cell((x, y)).unwrap_or(&blank);
+                if old == new {
+                    continue;
+                }
+                let cell = if is_bar(old) || is_bar(new) {
+                    if p > BAYER[(y % 4) as usize][(x % 4) as usize] { new.clone() } else { old.clone() }
+                } else {
+                    let at = x as f32 / a.width.max(1) as f32;
+                    let cyc = p * (1.0 + BAND);
+                    if cyc > at + BAND {
+                        new.clone()
+                    } else if cyc > at {
+                        let n = crate::avatar::regi::hash(frame * 131 + u64::from(y) * 977 + u64::from(x));
+                        let mut c = new.clone();
+                        c.set_char(NOISE[(n * NOISE.len() as f32) as usize % NOISE.len()]).set_style(theme::accent());
+                        c
+                    } else {
+                        old.clone()
+                    }
+                };
+                out[(x, y)] = cell;
+            }
+        }
+        out
+    }
+}
+
+const BAND: f32 = 0.15;
+const NOISE: [char; 10] = ['░', '▒', '▓', '/', '\\', '|', '-', '+', '*', '#'];
+/// 4x4 Bayer thresholds, 0..1.
+const BAYER: [[f32; 4]; 4] = [
+    [0.5 / 16.0, 8.5 / 16.0, 2.5 / 16.0, 10.5 / 16.0],
+    [12.5 / 16.0, 4.5 / 16.0, 14.5 / 16.0, 6.5 / 16.0],
+    [3.5 / 16.0, 11.5 / 16.0, 1.5 / 16.0, 9.5 / 16.0],
+    [15.5 / 16.0, 7.5 / 16.0, 13.5 / 16.0, 5.5 / 16.0],
+];
+
+/// A cell of a window bar or a sparkline: it dithers, it does not decode.
+fn is_bar(c: &Cell) -> bool {
+    let sym = c.symbol();
+    (sym == " " && c.bg != ratatui::style::Color::Reset) || sym.chars().next().is_some_and(|ch| SPARK.contains(&ch) || "░▒▓█".contains(ch))
+}
+
+/// BOX (at 0, 0) into the frame at AREA.
+fn blit(f: &mut Frame, area: Rect, b: &Buffer) {
+    let buf = f.buffer_mut();
+    for y in 0..area.height.min(b.area.height) {
+        for x in 0..area.width.min(b.area.width) {
+            if let Some(c) = buf.cell_mut((area.x + x, area.y + y)) {
+                *c = b[(x, y)].clone();
+            }
+        }
+    }
 }
 
 fn draw(f: &mut Frame, s: &Snap, age: Duration, now: u64) {
-    draw_at(f, f.area(), s, age, now, &Next::default())
+    let area = f.area();
+    draw_at(f.buffer_mut(), area, s, age, now, &Next::default())
 }
 
-fn draw_at(f: &mut Frame, area: Rect, s: &Snap, age: Duration, now: u64, next: &Next) {
-    f.render_widget(Paragraph::new("").style(theme::text()), area);
+fn draw_at(buf: &mut Buffer, area: Rect, s: &Snap, age: Duration, now: u64, next: &Next) {
+    Paragraph::new("").style(theme::text()).render(area, buf);
     let inner = Rect { x: area.x + 1, width: area.width.saturating_sub(2), ..area };
     let w = inner.width as usize;
     let mut lines = Vec::new();
@@ -280,7 +393,7 @@ fn draw_at(f: &mut Frame, area: Rect, s: &Snap, age: Duration, now: u64, next: &
             lines.push(Line::styled(format!("{cost:>w$}"), theme::muted()));
         }
         lines.push(Line::styled("thread not found (yet)", theme::muted()));
-        f.render_widget(Paragraph::new(lines), inner);
+        Paragraph::new(lines).render(inner, buf);
         return;
     }
     let name_w = s.agents.iter().map(|a| a.name.chars().count()).max().unwrap_or(3).max(3) + 1;
@@ -331,7 +444,12 @@ fn draw_at(f: &mut Frame, area: Rect, s: &Snap, age: Duration, now: u64, next: &
         let many = s.limits.iter().any(|l| l.harness != s.limits[0].harness);
         let label = |l: &Limit| if many { format!("{} {}", l.harness, window(&l.window)) } else { window(&l.window) };
         let lw = s.limits.iter().map(|l| label(l).chars().count()).max().unwrap_or(0).max(name_w.saturating_sub(1));
-        for l in &s.limits {
+        // the windows side by side, 2 columns between them (too narrow: 1 per row)
+        let n = s.limits.len();
+        let seg = w.saturating_sub(2 * (n - 1)) / n;
+        let side = s.limits.iter().all(|l| seg >= label(l).chars().count() + 1 + 4 + 9);
+        let mut row: Vec<Span> = Vec::new();
+        for (i, l) in s.limits.iter().enumerate() {
             // window reset since the last report: 0 %
             let fresh = l.resets.is_some_and(|r| r <= now);
             let pct = if fresh { 0.0 } else { l.pct };
@@ -344,11 +462,26 @@ fn draw_at(f: &mut Frame, area: Rect, s: &Snap, age: Duration, now: u64, next: &
                 Some(r) => format!(" {:>3.0}% {:>3}", pct, until(r, now)),
                 None => format!(" {:>3.0}%", pct),
             };
-            let bw = w.saturating_sub(lw + 1 + 9).max(4);
-            let mut spans = vec![Span::styled(format!("{:lw$} ", label(l)), theme::muted())];
-            spans.extend(bar(pct, share, bw));
-            spans.push(Span::styled(tail, theme::muted()));
-            lines.push(Line::from(spans));
+            let tail = format!("{tail:<9}");
+            if side {
+                let lab = label(l);
+                let bw = seg - lab.chars().count() - 1 - 9;
+                if i > 0 {
+                    row.push(Span::raw("  "));
+                }
+                row.push(Span::styled(format!("{lab} "), theme::muted()));
+                row.extend(bar(pct, share, bw));
+                row.push(Span::styled(tail, theme::muted()));
+            } else {
+                let bw = w.saturating_sub(lw + 1 + 9).max(4);
+                let mut spans = vec![Span::styled(format!("{:lw$} ", label(l)), theme::muted())];
+                spans.extend(bar(pct, share, bw));
+                spans.push(Span::styled(tail, theme::muted()));
+                lines.push(Line::from(spans));
+            }
+        }
+        if side {
+            lines.push(Line::from(row));
         }
     }
     // the next message (thread view only): tokens, $, its share of each window
@@ -371,10 +504,10 @@ fn draw_at(f: &mut Frame, area: Rect, s: &Snap, age: Duration, now: u64, next: &
     if !s.status.is_empty() {
         lines.push(Line::styled(s.status.clone(), theme::muted()));
     }
-    f.render_widget(Paragraph::new(lines), inner);
+    Paragraph::new(lines).render(inner, buf);
     if area.height > 1 && !compact {
         let foot = Rect { y: area.bottom() - 1, height: 1, ..inner };
-        f.render_widget(Paragraph::new(Line::styled(format!("updated {}s ago · q close", age.as_secs()), theme::line())), foot);
+        Paragraph::new(Line::styled(format!("updated {}s ago · q close", age.as_secs()), theme::line())).render(foot, buf);
     }
 }
 
@@ -510,7 +643,11 @@ mod tests {
         let (w, h) = (56, 7);
         let next = Next { to: vec!["amon".into()], chars: 400 };
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-        t.draw(|f| draw_at(f, f.area(), &s, Duration::from_secs(1), now, &next)).unwrap();
+        t.draw(|f| {
+            let a = f.area();
+            draw_at(f.buffer_mut(), a, &s, Duration::from_secs(1), now, &next)
+        })
+        .unwrap();
         let b = t.backend().buffer().clone();
         let text: String = (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string() + "\n").collect();
         println!("{text}");
@@ -521,10 +658,36 @@ mod tests {
         // the bars: used part solid (bg), the next message's share ▒, the rest dithered ░
         let row = text.lines().position(|l| l.starts_with(" 5h")).expect("5h row");
         let cells: Vec<_> = (0..w).map(|x| b[(x, row as u16)].clone()).collect();
-        assert!(cells.iter().any(|c| c.symbol() == " " && c.bg == theme::pal().muted), "used part");
+        assert!(cells.iter().any(|c| c.symbol() == " " && c.bg == theme::pal().line), "used part");
         assert!(text.lines().nth(row).unwrap().contains('▒') && text.contains('░'), "{text}");
+        // the windows side by side: 5h and 7d on 1 row
+        assert!(text.lines().nth(row).unwrap().contains(" 7d "), "{text}");
         // the next message: ≥ context + text tokens, $, share per window (0 rate: ?)
         assert!(text.contains("≥38.1k tok ~$0.38 · 5h +0.2% · 7d ?"), "{text}");
+    }
+
+    #[test]
+    fn a_morph_moves_only_the_changed_cells() {
+        let r = Rect::new(0, 0, 8, 1);
+        let mut from = Buffer::empty(r);
+        from.set_string(0, 0, "ab 12%", Style::default());
+        let mut to = Buffer::empty(r);
+        to.set_string(0, 0, "ab 47%", Style::default());
+        let row = |b: &Buffer| (0..8).map(|x| b[(x, 0)].symbol().to_string()).collect::<String>();
+        let at = |secs: f32| Morph { from: from.clone(), to: to.clone(), start: Instant::now() - Duration::from_secs_f32(secs) };
+        // start: the old box; the end: the new one
+        assert_eq!(row(&at(0.0).shown()), row(&from));
+        assert_eq!(row(&at(1.0).shown()), row(&to));
+        // midway: equal cells untouched, changed ones old, noise or new
+        let mid = row(&at(MORPH_TIME.as_secs_f32() * 0.5).shown());
+        assert!(mid.starts_with("ab ") && mid.ends_with("%  "), "{mid}");
+        // bar cells dither: each one old or new, 0 noise
+        let mut fb = Buffer::empty(r);
+        fb.set_string(0, 0, "░░░░░░░░", Style::default());
+        let mut tb = Buffer::empty(r);
+        tb.set_string(0, 0, "▒▒▒▒▒▒▒▒", Style::default());
+        let m = Morph { from: fb, to: tb, start: Instant::now() - MORPH_TIME / 2 };
+        assert!(row(&m.shown()).chars().all(|c| c == '░' || c == '▒'));
     }
 }
 

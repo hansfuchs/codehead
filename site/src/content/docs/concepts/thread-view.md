@@ -12,7 +12,7 @@ The thread view has these parts, top to bottom:
   Markdown (tables too) with syntax colors in code blocks. Links open on a click. Scrolled
   up, its last row is a `┄` fold line.
 - **Title row**: the thread title, the scroll position (`↑12 · esc: live`).
-- **Header**: 1 frame with a card per agent (sprite, name, harness and model, effort, and
+- **Header**: a card per agent (sprite, name, harness and model, effort, and
   **working…**, **monitoring…** or **waits on you**) and, on screens 70 columns and wider,
   the tokens box: tokens, cost and context per agent, the last hour as a sparkline, and your
   plan's usage windows.
@@ -81,6 +81,9 @@ A permission request or an agent question (Claude Code's `AskUserQuestion`) appe
 stream with its choices. On an empty prompt: `↑` `↓` move, `1`-`9` pick, `space` picks several
 (multi-select), `enter` answers. A click on a choice works too. A question with several parts
 asks them 1 by 1.
+
+While its question waits, the agent turns yellow: its avatar, name and messages. Yellow is not
+an agent color, so a blocked agent stands out at once.
 
 ## Steering
 

@@ -9,7 +9,8 @@ use ratatui::text::{Line, Span};
 use crate::engine::{client, roster, store};
 use crate::theme;
 
-pub const COLORS: [&str; 7] = ["red", "orange", "yellow", "green", "blue", "purple", "gray"];
+/// Agent colors. 0 yellow: yellow is a blocked agent (a question waits on the owner).
+pub const COLORS: [&str; 6] = ["red", "orange", "green", "blue", "purple", "gray"];
 pub const MODES: [&str; 4] = ["autopilot", "edits", "supervised", "plan"];
 /// Claude Code effort levels (`claude --effort`). "default": key unset, Claude Code decides.
 pub const EFFORTS: [&str; 6] = ["default", "low", "medium", "high", "xhigh", "max"];
@@ -153,12 +154,12 @@ pub struct Use {
 pub fn color(name: Option<&str>) -> Color {
     match name {
         Some("purple") => Color::Magenta,
-        Some("yellow") => Color::Yellow,
         Some("red") => Color::Red,
         Some("green") => Color::Green,
         Some("blue") => Color::Blue,
         Some("gray") => Color::Gray,
         Some("orange") => Color::Indexed(208),
+        // yellow (gone: the blocked color), unknown: the accent
         _ => theme::pal().accent,
     }
 }

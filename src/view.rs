@@ -14,7 +14,7 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use serde_json::{Value, json};
 
@@ -439,9 +439,24 @@ impl View {
         crate::avatar::Spawn::random_except(&taken)
     }
 
-    /// A spawn runs: frames at 30 per second.
+    /// A spawn (or its text decode) runs: frames at 30 per second.
     fn spawning(&self) -> bool {
-        self.spawns.values().any(|s| !s.done())
+        self.spawns.values().any(|s| !s.over()) || crate::cost::morphing()
+    }
+
+    /// The color of agent NAME now: blocked (a question waits on the owner): all warn yellow,
+    /// else its own.
+    fn color(&self, name: &str) -> Color {
+        if self.thread.asks.iter().any(|q| q.agent == name) { theme::pal().warn } else { self.colors.get(name).copied().unwrap_or(theme::pal().accent) }
+    }
+
+    /// The agent colors now (blocked agents: yellow).
+    fn colors_now(&self) -> stream::Colors {
+        let mut c = self.colors.clone();
+        for q in &self.thread.asks {
+            c.insert(q.agent.clone(), theme::pal().warn);
+        }
+        c
     }
 
     /// The avatar status of agent NAME.
@@ -460,20 +475,27 @@ impl View {
 
     /// The spawns over the header (and what is below it), in the agent colors.
     fn draw_spawns(&mut self, f: &mut Frame) {
-        self.spawns.retain(|_, s| !s.done());
+        self.spawns.retain(|_, s| !s.over());
         let area = f.area();
         for (name, slot) in self.slots.borrow().iter() {
             let Some(sp) = self.spawns.get(name) else { continue };
             let sprite = self.profiles.get(name).map(|p| p.0.clone()).unwrap_or_else(|| crate::sprites::default_for(name));
             let Some(rows) = sp.rows(&sprite.avatar, self.avatar_status(name)) else { continue };
-            let color = self.colors.get(name).copied().unwrap_or(theme::pal().accent);
+            let color = self.color(name);
             let (ax, ay) = crate::avatar::SPAWN_AT;
             let (x0, y0) = (slot.x as i32 - ax as i32, slot.y as i32 - ay as i32);
             let buf = f.buffer_mut();
             for (r, row) in rows.iter().enumerate() {
                 for (c, ch) in row.chars().enumerate() {
                     let (x, y) = (x0 + c as i32, y0 + r as i32);
-                    if x < area.x as i32 || y < area.y as i32 || x >= area.right() as i32 || y >= area.bottom() as i32 {
+                    // the header rows only (its last row: the input bubble's top line)
+                    let bottom = (slot.y + slot.height) as i32;
+                    if x < area.x as i32 || y < area.y as i32 || x >= area.right() as i32 || y >= (area.bottom() as i32).min(bottom) {
+                        continue;
+                    }
+                    // outside the sprite: blank cells stay transparent (the cards next to it show)
+                    let inside = (slot.x as i32..(slot.x + slot.width) as i32).contains(&x) && (slot.y as i32..bottom).contains(&y);
+                    if !inside && (ch == ' ' || ch == '\u{2800}') {
                         continue;
                     }
                     buf[(x as u16, y as u16)].set_char(ch).set_style(theme::text().fg(color));
@@ -1536,7 +1558,7 @@ impl View {
     fn card(&self, name: &str) -> Card {
         let tick = self.tick();
         let a = self.roster.iter().find(|a| a.name == name);
-        let color = self.colors.get(name).copied().unwrap_or(theme::pal().accent);
+        let color = self.color(name);
         let (sprite, effort) = self.profiles.get(name).cloned().unwrap_or_else(|| (crate::sprites::default_for(name), String::new()));
         let model = self.thread.models.get(name).filter(|m| !m.is_empty()).map(|m| crate::agents::model_name(m)).or_else(|| a.map(crate::agents::model_of)).unwrap_or_default();
         let harness = a.map(|a| title_case(&a.harness)).unwrap_or_default();
@@ -1558,12 +1580,18 @@ impl View {
         let text_w = [name.chars().count(), tech.chars().count(), effort.chars().count() + status_w].into_iter().max().unwrap_or(0);
         let mut last = vec![Span::styled(format!("  {effort}"), theme::muted())];
         last.extend(status);
-        let side = vec![
+        let mut side = vec![
             vec![],
             vec![Span::styled(format!("  {name}"), Style::default().fg(color).add_modifier(Modifier::BOLD))],
             vec![Span::styled(format!("  {tech}"), theme::muted())],
             last,
         ];
+        // a spawn: 0 text until the snap, then the text decodes in (width kept: 0 layout jump)
+        if let Some(sp) = self.spawns.get(name) {
+            let p = sp.reveal();
+            let (noise, dim) = (Style::default().fg(color), theme::line());
+            side = side.into_iter().map(|l| if p <= 0.0 { Vec::new() } else { crate::avatar::decode(l, p, noise, dim) }).collect();
+        }
         (sprite, color, side, (crate::sprites::W + 2 + text_w + 4) as u16)
     }
 
@@ -1577,20 +1605,6 @@ impl View {
         let token_left = cost.x.saturating_sub(2);
         let fit = if cost.width > 0 { token_left + 1 } else { area.right() }.saturating_sub(area.x);
         let outer = if cost.width == 0 { area } else { Rect { width: cards_w(&cards).min(fit), ..area } };
-        let block = Block::new().borders(Borders::ALL).border_type(BorderType::Plain).border_style(theme::line());
-        f.render_widget(block, area);
-        if cost.width > 0 {
-            let buf = f.buffer_mut();
-            for x in [outer.right().saturating_sub(1), token_left] {
-                if x <= area.x || x + 1 >= area.right() {
-                    continue;
-                }
-                for y in area.y..area.bottom() {
-                    let sym = if y == area.y { "┬" } else if y + 1 == area.bottom() { "┴" } else { "│" };
-                    buf[(x, y)].set_symbol(sym).set_style(theme::line());
-                }
-            }
-        }
         let rows = Rect { y: area.y + 1, height: area.height.saturating_sub(2), ..area };
         let mut x = area.x + 2;
         let mut slots = Vec::new();
@@ -1641,7 +1655,7 @@ impl View {
             for (agent, text) in &self.live {
                 self.thread.items.push(stream::Item::Text { agent: agent.clone(), text: text.clone(), ts: now, thoughts: Vec::new(), key: 0 });
             }
-            self.drawn = stream::draw(&self.thread, self.look, st.width, &self.colors, &self.harness_of, &fold, &self.ask);
+            self.drawn = stream::draw(&self.thread, self.look, st.width, &self.colors_now(), &self.harness_of, &fold, &self.ask);
             self.thread.items.truncate(logged);
             self.dirty = false;
             if let Some(a) = anchor {
@@ -1961,6 +1975,9 @@ impl View {
             if let Some(s) = &self.cost {
                 let next = crate::cost::Next { to: self.recipients(), chars: self.input.text().chars().count() };
                 crate::cost::draw_in(f, cost, s, self.cost_at.elapsed(), &next);
+            } else {
+                // a new thread: the last box until this one's numbers come (then it morphs)
+                crate::cost::draw_last(f, cost);
             }
         }
 
@@ -1973,9 +1990,8 @@ impl View {
             for x in left..=right {
                 let top = buf[(x, bubble_top)].symbol().to_string();
                 let sym = match top.as_str() {
-                    _ if x == left => if head_h > 0 { "├" } else { "┌" },
-                    _ if x == right => if head_h > 0 { "┤" } else { "┐" },
-                    "└" | "┘" | "┴" if head_h > 0 => "┴",
+                    _ if x == left => "┌",
+                    _ if x == right => "┐",
                     _ => "─",
                 };
                 buf[(x, bubble_top)].reset();
@@ -2009,8 +2025,7 @@ impl View {
             if i > 0 {
                 to.push(Span::styled(", ", theme::muted()));
             }
-            let c = self.colors.get(&name).copied().unwrap_or(theme::pal().accent);
-            to.push(Span::styled(name.to_lowercase(), Style::default().fg(c)));
+            to.push(Span::styled(name.to_lowercase(), Style::default().fg(self.color(&name))));
         }
         if self.members.is_empty() {
             to.clear();

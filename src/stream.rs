@@ -1182,10 +1182,11 @@ struct Open {
     minute: String,
 }
 
-/// A divider in an agent's box: `│ ──────── 13:42 ` (the box's right border comes on close).
+/// A divider in an agent's box: `├──────── 13:42 ─┤`, joined to both borders (the time where
+/// the top border has it). Full width W: the close adds 0 right border to it.
 fn minute_divider(w: usize, border: Style, at: &str) -> Row {
-    let fill = w.saturating_sub(3 + at.width() + 2);
-    Row::plain(Line::from(vec![Span::styled("│ ", border), Span::styled("─".repeat(fill), border), Span::styled(format!(" {at} "), theme::muted())]))
+    let fill = w.saturating_sub(1 + at.width() + 2 + 2);
+    Row::plain(Line::from(vec![Span::styled(format!("├{}", "─".repeat(fill)), border), Span::styled(format!(" {at} "), theme::muted()), Span::styled("─┤", border)]))
 }
 
 /// Top border of width W: `┌─ ` LEFT ` ─────── ` RIGHT ` ─┐`. Returns the row and the
@@ -1228,6 +1229,10 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
         let Some(o) = cur.take() else { return };
         for r in &mut d.rows[o.start + 1..] {
             let rw = r.line.width();
+            // a full row (a minute divider): its own right end
+            if rw >= w {
+                continue;
+            }
             r.line.spans.push(Span::raw(" ".repeat((w - 1).saturating_sub(rw))));
             r.line.spans.push(Span::styled("│", o.border));
         }
@@ -1495,6 +1500,10 @@ mod tests {
             let div: Vec<usize> = rows.iter().enumerate().filter(|(_, r)| r.contains("──") && !r.starts_with('┌') && !r.starts_with('└')).map(|(i, _)| i).collect();
             assert_eq!(div.len(), 1, "{look:?}\n{s}");
             let i = div[0];
+            // bubbles: the divider joins both borders, as wide as the box
+            if look == Look::Bubbles {
+                assert!(rows[i].starts_with('├') && rows[i].ends_with("─┤") && rows[i].chars().count() == rows[0].chars().count(), "{s}");
+            }
             assert!(rows[i].contains(&m1), "{look:?}\n{s}");
             // blank rows above and below the divider
             let blank = |r: &str| r.trim_matches(|c: char| c == '│' || c == ' ').is_empty();

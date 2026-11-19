@@ -160,7 +160,7 @@ impl Avatar {
     /// The first frame (every eye on, idle, no motion): the shape a spawn forms.
     fn rest(&self) -> Vec<glyph::Cell> {
         match self.cat {
-            Cat::Regi => regi::rest(&regi::all()[self.idx]),
+            Cat::Regi => regi::rest(&regi::all()[self.idx], &self.look()),
             Cat::Geo => self.cells(Status::Idle, 0.0),
         }
     }
@@ -224,6 +224,43 @@ pub struct Spawn {
     pub start: f32,
 }
 
+/// Seconds of the text decode after a spawn.
+pub const REVEAL: f32 = 0.35;
+
+/// Line SPANS, decoded to progress P (0..1): noise resolves left to right (the lab `decode`).
+/// Not yet reached: dim dots; the noise band: NOISE color; resolved: the span styles.
+pub fn decode(spans: Vec<ratatui::text::Span<'static>>, p: f32, noise: ratatui::style::Style, dim: ratatui::style::Style) -> Vec<ratatui::text::Span<'static>> {
+    use ratatui::text::Span;
+    if p >= 1.0 {
+        return spans;
+    }
+    const NOISE: [char; 10] = ['░', '▒', '▓', '/', '\\', '|', '-', '+', '*', '#'];
+    const BAND: f32 = 0.15;
+    let len = spans.iter().map(|s| s.content.chars().count()).sum::<usize>().max(1) as f32;
+    let cyc = p * (1.0 + BAND);
+    let frame = (now() * 30.0) as u64;
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    for s in spans {
+        for ch in s.content.chars() {
+            let at = i as f32 / len;
+            let cell = if ch == ' ' {
+                Span::styled(" ", s.style)
+            } else if cyc > at + BAND {
+                Span::styled(ch.to_string(), s.style)
+            } else if cyc > at {
+                let n = regi::hash(frame * 131 + i as u64);
+                Span::styled(NOISE[(n * NOISE.len() as f32) as usize % NOISE.len()].to_string(), noise)
+            } else {
+                Span::styled("·", dim)
+            };
+            out.push(cell);
+            i += 1;
+        }
+    }
+    out
+}
+
 pub const SPAWN_W: usize = spawn::CW;
 pub const SPAWN_H: usize = spawn::CH;
 /// Cell of the 7x4 sprite in the spawn canvas.
@@ -254,7 +291,22 @@ impl Spawn {
 
     /// The flash after the snap included.
     pub fn done(&self) -> bool {
-        now() - self.start > spawn::timing(self.anim).2 + 0.15
+        now() - self.start > self.end()
+    }
+
+    /// Seconds from START to the end of the flash.
+    fn end(&self) -> f32 {
+        spawn::timing(self.anim).2 + 0.15
+    }
+
+    /// Progress 0..1 of the text decode after the spawn (0: spawn under way, 1: text shown).
+    pub fn reveal(&self) -> f32 {
+        ((now() - self.start - self.end()) / REVEAL).clamp(0.0, 1.0)
+    }
+
+    /// Spawn and text decode over.
+    pub fn over(&self) -> bool {
+        self.reveal() >= 1.0
     }
 
     /// The 13x6 canvas rows of A (the sprite at SPAWN_AT), status S after the snap. None: over.
@@ -305,10 +357,34 @@ mod tests {
     }
 
     #[test]
+    fn a_spawn_forms_the_agents_own_eyes() {
+        // every regi, every eye pick: the spawn's end (rest) has the agent's pattern, not the regi's
+        for idx in 0..Cat::Regi.count() {
+            let r = &regi::all()[idx];
+            for eyes in std::iter::once(None).chain((0..regi::PATTERNS.len()).map(Some)) {
+                let a = Avatar { cat: Cat::Regi, idx, eyes, speed: 1.0 };
+                let pat = eyes.map_or(r.pattern, |k| regi::PATTERNS[k]);
+                let want = regi::rest(r, &regi::Look { pattern: Some(pat), speed: 1.0 });
+                assert!(a.rest() == want, "regi {idx} eyes {eyes:?}: the spawn forms other eyes");
+            }
+        }
+    }
+
+    #[test]
     fn a_spawn_ends() {
         let s = Spawn { anim: 7, start: now() - 10.0 };
         assert!(s.done() && s.rows(&Avatar::default(), Status::Idle).is_none());
         let s = Spawn { anim: 7, start: now() };
         assert!(s.rows(&Avatar::default(), Status::Idle).is_some());
+        assert_eq!(s.reveal(), 0.0);
+    }
+
+    #[test]
+    fn decode_resolves() {
+        use ratatui::{style::Style, text::Span};
+        let line = || vec![Span::raw("  GIGAS")];
+        let text = |v: Vec<Span<'static>>| v.iter().map(|s| s.content.to_string()).collect::<String>();
+        assert_eq!(text(decode(line(), 1.0, Style::default(), Style::default())), "  GIGAS");
+        assert_eq!(text(decode(line(), 0.0, Style::default(), Style::default())), "  ·····");
     }
 }

@@ -82,24 +82,17 @@ impl Pattern {
     }
 }
 
-/// The talk of the working status: 1 rhythm per avatar.
+/// The talk of the working status: 1 blink rhythm per avatar (tempo, how often, how short; see
+/// `blinks`). The names stay from the older animations.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Talk {
-    /// In reading order on, then all off.
     Sweep,
-    /// Syllables: a random set per beat.
     Chatter,
-    /// A wave from the center out.
     CenterOut,
-    /// 2 dots run around the ring, the center on.
     Chase,
-    /// All on / off in a morse rhythm.
     Morse,
-    /// 1 row at a time, top to bottom.
     Rows,
-    /// Left and right in turn, the center on.
     Halves,
-    /// All on, 2 quick blinks per beat.
     Stutter,
 }
 
@@ -128,38 +121,54 @@ pub fn hash(n: u64) -> f32 {
     (x & 0xFFFF) as f32 / 65535.0
 }
 
+/// Working: dot K of TALK off at time T. Every dot blinks on its own: per slot (its own length
+/// and phase) a chance of 1 short blink at a random point, so the pattern stays in view and single
+/// dots wink in a pseudo random rhythm. TALK sets the tempo and how often.
+pub fn blinks(talk: Talk, k: usize, t: f32) -> bool {
+    // (slot seconds, blink chance per slot, blink seconds)
+    let (slot, chance, dur) = match talk {
+        Talk::Sweep => (0.55, 0.16, 0.11),
+        Talk::Chatter => (0.38, 0.14, 0.08),
+        Talk::CenterOut => (0.6, 0.15, 0.12),
+        Talk::Chase => (0.45, 0.16, 0.09),
+        Talk::Morse => (0.5, 0.2, 0.07),
+        Talk::Rows => (0.7, 0.16, 0.13),
+        Talk::Halves => (0.48, 0.15, 0.1),
+        Talk::Stutter => (0.42, 0.22, 0.06),
+    };
+    blink((talk as u64 + 1) * 7919 + k as u64 * 104_729, slot, chance, dur, t)
+}
+
+/// Thinking: dot K of TALK off at time T. As `blinks`, slower: longer slots, longer blinks
+/// (a slow, heavy-lidded wink per dot), own phases per talk.
+pub fn blinks_slow(talk: Talk, k: usize, t: f32) -> bool {
+    blink((talk as u64 + 41) * 7919 + k as u64 * 104_729, 1.5, 0.3, 0.26, t)
+}
+
+/// 1 dot of seed SEED off at time T: per slot (SLOT s, ±30 % per dot, its own phase) CHANCE of 1
+/// blink of DUR s at a random point of the slot.
+fn blink(seed: u64, slot: f32, chance: f32, dur: f32, t: f32) -> bool {
+    let len = slot * (0.7 + 0.6 * hash(seed));
+    let u = t + hash(seed + 1) * len;
+    let j = (u / len).floor() as u64;
+    let at = u - j as f32 * len;
+    let s = seed.wrapping_mul(31).wrapping_add(j);
+    if hash(s * 3 + 2) >= chance {
+        return false;
+    }
+    let start = hash(s * 3 + 3) * (len - dur).max(0.0);
+    (start..start + dur).contains(&at)
+}
+
 /// Dot K of PAT on at time T, status S (0 working, 1 thinking, 2 idle, 3 blocked, 4 done).
 /// BLINK: the idle blink style (0 single, 1 double, 2 row by row).
 pub fn lit(pat: Pattern, talk: Talk, blink: usize, s: usize, t: f32, k: usize) -> bool {
     let d = pat.dots();
     let (x, y) = d[k];
     let center = x == 0.0 && y == 0.0;
-    // the ring: the dots that are not the center, by angle
-    let n = d.len();
-    let ring: Vec<usize> = {
-        let mut r: Vec<usize> = (0..n).filter(|&i| d[i] != (0.0, 0.0)).collect();
-        r.sort_by(|&a, &b| d[a].1.atan2(d[a].0).total_cmp(&d[b].1.atan2(d[b].0)));
-        r
-    };
-    let ring_at = ring.iter().position(|&i| i == k);
     match s {
-        0 => match talk {
-            Talk::Sweep => {
-                let step = (t * 11.0) as usize % (n + 3);
-                k <= step && step < n
-            }
-            Talk::Chatter => hash((t * 8.0) as u64 * 13 + k as u64) < 0.55,
-            Talk::CenterOut => {
-                let r = if center { 0 } else if x.abs() <= 0.5 && y.abs() < 1.0 { 1 } else { 2 };
-                (t * 7.0) as usize % 4 == r
-            }
-            Talk::Chase => center || ring_at.is_some_and(|i| ((t * 10.0) as usize + ring.len() - i) % ring.len() < 2),
-            Talk::Morse => b"1101011100"[(t * 9.0) as usize % 10] == b'1',
-            Talk::Rows => (t * 7.0) as usize % 5 == (y + 1.5) as usize,
-            Talk::Halves => center || ((t * 5.0) as usize).is_multiple_of(2) == (x < 0.0),
-            Talk::Stutter => !matches!(((t * 12.0) as usize) % 8, 1 | 3),
-        },
-        1 => center || ring_at == Some((t * 3.5) as usize % ring.len().max(1)),
+        0 => !blinks(talk, k, t),
+        1 => !blinks_slow(talk, k, t),
         2 => {
             let p = 2.6 + (blink as f32) * 0.7;
             let u = t.rem_euclid(p);
@@ -596,14 +605,21 @@ pub fn render(r: &Regi, s: usize, t: f32, look: &Look) -> Vec<Cell> {
     render_with(r, pat, s, t, look.speed, |k| lit(pat, r.talk, r.blink, s, t + r.phase, k))
 }
 
-/// R at rest: every dot on, idle colors, the pose at T 0.
-pub fn rest(r: &Regi) -> Vec<Cell> {
-    render_with(r, r.pattern, 2, 0.0, 1.0, |_| true)
+/// R at rest: every dot on, idle colors, the pose at T 0. LOOK: the eye pattern (the agent's
+/// `eyes=` pick over the regi's own).
+pub fn rest(r: &Regi, look: &Look) -> Vec<Cell> {
+    render_with(r, look.pattern.unwrap_or(r.pattern), 2, 0.0, 1.0, |_| true)
 }
 
 fn render_with(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn(usize) -> bool) -> Vec<Cell> {
     let (eye_c, frame_c) = colors(s);
-    let dots = match r.kind {
+    cells(&dots_with(r, pat, s, t, speed, on), eye_c, frame_c)
+}
+
+/// The 14x16 dots of R (0 off, 1 frame, 2 eye). The eyes: 1 rigid pattern, whatever the pose
+/// (only its anchor moves), a blink only takes dots out of it.
+fn dots_with(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn(usize) -> bool) -> Vec<u8> {
+    match r.kind {
         Kind::Flat(f) => flat_dots(r, f, pat, on),
         Kind::Solid(solid, motion) => {
             let t = t + r.phase;
@@ -611,32 +627,35 @@ fn render_with(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn
             // blocked: a shake now and then
             let yaw = if s == 3 && (t * 0.8).fract() < 0.2 { r.yaw + (t * 50.0).sin() * 0.1 } else { r.yaw };
             let (mesh, eye, ey) = solid.mesh();
-            let marks: Vec<(f32, f32, u8)> = pat.dots().iter().enumerate().filter(|(k, _)| on(*k)).map(|(_, &(x, y))| (x * eye.0, ey - y * eye.1, 2)).collect();
-            draw3d(&mesh, &[], &marks, (yaw, pitch, roll), bob)
+            // offsets in whole dots from the anchor (the pattern's center on the front face)
+            let marks: Vec<(i32, i32, u8)> = pat.dots().iter().enumerate().filter(|(k, _)| on(*k)).map(|(_, &(x, y))| ((x * eye.0).round() as i32, (y * eye.1).round() as i32, 2)).collect();
+            draw3d(&mesh, &[], (0.0, ey), &marks, (yaw, pitch, roll), bob)
         }
-    };
-    cells(&dots, eye_c, frame_c)
+    }
 }
 
 pub const DW: usize = 14;
 pub const DH: usize = 16;
 
-/// 14x16 dots (0 off, 1 frame, 2 eye) → 7x4 cells; a cell with an eye dot: the eye color.
+/// 14x16 dots (0 off, 1 frame, 2 eye) → 7x4 cells, every dot drawn (0
+/// gaps in the shape). 1 color per cell: the eye color only for eye dots alone; a cell of eye and
+/// frame dots takes the frame color (a frame dot in the eye color: a fake eye).
 pub fn cells(dots: &[u8], eye_c: super::glyph::Rgb, frame_c: super::glyph::Rgb) -> Vec<Cell> {
     let mut out = Vec::with_capacity(28);
     for cy in 0..4 {
         for cx in 0..7 {
-            let (mut bits, mut eye) = (0, false);
+            let (mut frame, mut eyes) = (0, 0);
             for dy in 0..4 {
                 for dx in 0..2 {
-                    let v = dots[(cy * 4 + dy) * DW + cx * 2 + dx];
-                    if v > 0 {
-                        bits |= BIT[dy][dx];
+                    match dots[(cy * 4 + dy) * DW + cx * 2 + dx] {
+                        1 => frame |= BIT[dy][dx],
+                        2 => eyes |= BIT[dy][dx],
+                        _ => {}
                     }
-                    eye |= v == 2;
                 }
             }
-            out.push(Cell { ch: braille(bits), fg: if eye { eye_c } else { frame_c }, bg: None });
+            let eye = eyes != 0 && frame == 0;
+            out.push(Cell { ch: braille(frame | eyes), fg: if eye { eye_c } else { frame_c }, bg: None });
         }
     }
     out
@@ -704,7 +723,9 @@ pub fn pose(m: Motion, s: usize, t: f32) -> (f32, f32, f32) {
 /// MESH as a 1-dot wireframe in 14x16 dots: the silhouette and the creases in view. WIRES:
 /// extra 3d segments (horns, pins), always drawn. MARKS: points on the front face plane
 /// (x, y, value: 1 line, 2 eye), drawn while the front looks at the viewer.
-pub fn draw3d(mesh: &Mesh, wires: &[(P3, P3)], marks: &[(f32, f32, u8)], (yaw, pitch, roll): (f32, f32, f32), bob: f32) -> Vec<u8> {
+/// MARKS: dot offsets (x right, y down) from ANCHOR (x, y on the front face), projected as 1 rigid
+/// group: a pose moves them together, 0 rounding per mark.
+pub fn draw3d(mesh: &Mesh, wires: &[(P3, P3)], anchor: (f32, f32), marks: &[(i32, i32, u8)], (yaw, pitch, roll): (f32, f32, f32), bob: f32) -> Vec<u8> {
     let vr: Vec<P3> = mesh.verts.iter().map(|&p| rot(p, yaw, pitch, roll)).collect();
     // perspective: a camera 40 dots away
     let proj = |p: P3| -> (f32, f32) {
@@ -749,10 +770,118 @@ pub fn draw3d(mesh: &Mesh, wires: &[(P3, P3)], marks: &[(f32, f32, u8)], (yaw, p
         line(proj(rot(a, yaw, pitch, roll)), proj(rot(b, yaw, pitch, roll)), &mut set);
     }
     if norms[0].2 > 0.2 {
+        let (ax, ay) = proj(rot((anchor.0, anchor.1, mesh.front_z(anchor.0, anchor.1)), yaw, pitch, roll));
+        let (ax, ay) = (ax.round(), ay.round());
         for &(x, y, v) in marks {
-            let (px, py) = proj(rot((x, y, mesh.front_z(x, y)), yaw, pitch, roll));
-            set(px, py, v);
+            set(ax + x as f32, ay + y as f32, v);
         }
     }
     dots
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn working_eyes_blink_one_by_one() {
+        // over 40 s at 60 fps: each dot blinks, mostly 0 or 1 dot off, never half of them
+        for talk in TALKS {
+            let n = 9;
+            let (mut off_any, mut multi) = (vec![false; n], 0);
+            for f in 0..2400 {
+                let t = f as f32 / 60.0;
+                let off = (0..n).filter(|&k| blinks(talk, k, t)).count();
+                assert!(off <= n / 2, "{talk:?} {t}: {off} off");
+                multi += usize::from(off > 1);
+                (0..n).for_each(|k| off_any[k] |= blinks(talk, k, t));
+            }
+            assert!(off_any.iter().all(|&b| b), "{talk:?}: a dot never blinks");
+            assert!(multi < 2400 / 20, "{talk:?}: {multi} frames with 2+ off");
+        }
+    }
+
+    #[test]
+    fn eye_patterns_stay_rigid() {
+        // every regi, its own pattern and each override, every status, 10 s at 10 fps: the eyes
+        // all on: 1 shape (moved, never changed); a blink: a subset of it, 0 dot elsewhere
+        let eyes = |d: &[u8]| -> Vec<(i32, i32)> { (0..DW * DH).filter(|&i| d[i] == 2).map(|i| ((i % DW) as i32, (i / DW) as i32)).collect() };
+        let norm = |e: &[(i32, i32)]| -> Vec<(i32, i32)> {
+            let (mx, my) = (e.iter().map(|p| p.0).min().unwrap_or(0), e.iter().map(|p| p.1).min().unwrap_or(0));
+            let mut v: Vec<(i32, i32)> = e.iter().map(|p| (p.0 - mx, p.1 - my)).collect();
+            v.sort();
+            v
+        };
+        for (i, r) in all().iter().enumerate() {
+            for pat in std::iter::once(r.pattern).chain(PATTERNS) {
+                let n = pat.dots().len();
+                let mut shape: Option<Vec<(i32, i32)>> = None;
+                for s in 0..5 {
+                    for f in 0..100 {
+                        let t = f as f32 / 10.0;
+                        let full = eyes(&dots_with(r, pat, s, t, 1.0, |_| true));
+                        if full.is_empty() {
+                            continue; // the face turned away: 0 eyes
+                        }
+                        assert_eq!(full.len(), n, "regi {i} {pat:?} s{s} t{t}: {} of {n} eyes", full.len());
+                        let sh = norm(&full);
+                        match &shape {
+                            None => shape = Some(sh),
+                            Some(a) => assert_eq!(a, &sh, "regi {i} {pat:?} s{s} t{t}: the eye pattern changed"),
+                        }
+                        let d = dots_with(r, pat, s, t, 1.0, |k| lit(pat, r.talk, r.blink, s, t + r.phase, k));
+                        assert!(eyes(&d).iter().all(|p| full.contains(p)), "regi {i} {pat:?} s{s} t{t}: a lit eye off the pattern");
+                        // drawn: every dot of the shape (0 gaps); the eye color only on eye dots
+                        let (ec, fc) = colors(s);
+                        let drawn = cells(&d, ec, fc);
+                        for (c, cell) in drawn.iter().enumerate() {
+                            let bits = (cell.ch as u32).saturating_sub(0x2800) & 0xFF;
+                            let (mut frame, mut eye) = (0, 0);
+                            for j in 0..8 {
+                                match d[((c / 7) * 4 + j / 2) * DW + (c % 7) * 2 + j % 2] {
+                                    1 => frame |= BIT[j / 2][j % 2],
+                                    2 => eye |= BIT[j / 2][j % 2],
+                                    _ => {}
+                                }
+                            }
+                            assert_eq!(bits, frame | eye, "regi {i} {pat:?} s{s} t{t}: cell {c} a gap");
+                            if ec != fc && cell.fg == ec {
+                                assert_eq!(frame, 0, "regi {i} {pat:?} s{s} t{t}: cell {c} a frame dot in the eye color");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn thinking_eyes_blink_slower() {
+        // over 60 s at 60 fps: each dot blinks, blinks last longer, fewer blinks than working
+        let n = 9;
+        for talk in TALKS {
+            let count = |off: &dyn Fn(usize, f32) -> bool| {
+                let (mut starts, mut frames, mut seen) = (0, 0, vec![false; n]);
+                for k in 0..n {
+                    let mut was = false;
+                    for f in 0..3600 {
+                        let o = off(k, f as f32 / 60.0);
+                        starts += usize::from(o && !was);
+                        frames += usize::from(o);
+                        seen[k] |= o;
+                        was = o;
+                    }
+                }
+                (starts, frames as f32 / starts.max(1) as f32, seen.iter().all(|&b| b))
+            };
+            let (ws, wlen, _) = count(&|k, t| blinks(talk, k, t));
+            let (ts, tlen, all) = count(&|k, t| blinks_slow(talk, k, t));
+            assert!(all, "{talk:?}: a dot never blinks");
+            assert!(ts < ws && tlen > wlen, "{talk:?}: thinking {ts} blinks of {tlen} frames, working {ws} of {wlen}");
+            for f in 0..3600 {
+                let off = (0..n).filter(|&k| blinks_slow(talk, k, f as f32 / 60.0)).count();
+                assert!(off <= n / 2, "{talk:?}: {off} off");
+            }
+        }
+    }
 }
