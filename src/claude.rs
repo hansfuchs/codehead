@@ -26,6 +26,9 @@ pub struct Session {
     pub when: String,
     /// Thread id: the context comes from a codehead thread, not a free Claude Code session.
     pub thread: Option<String>,
+    /// Main checkout of the git repo of CWD (repo filter of the threads tab).
+    #[serde(default)]
+    pub repo: Option<PathBuf>,
 }
 
 fn tail(path: &Path, n: u64) -> String {
@@ -124,6 +127,7 @@ pub fn load(limit: usize) -> Vec<Session> {
                 let mut s = Session { id: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(), path: path.clone(), ..Default::default() };
                 parse(&tail(&path, TAIL), &mut s);
                 if s.last.is_empty() { parse(&tail(&path, BIG), &mut s); }
+                s.repo = crate::threads::repo_root(Path::new(&s.cwd));
                 let session = (!s.last.is_empty() && !s.cwd.is_empty()).then_some(s);
                 cache.insert(path, (mtime, len, session.clone()));
                 session

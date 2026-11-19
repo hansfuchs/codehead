@@ -78,6 +78,8 @@ pub struct Menu {
     loading: Option<Receiver<Vec<Card>>>,
     tcursor: usize,
     toffset: usize,
+    /// Repo filter of the threads tab (chip + dropdown, ctrl+r).
+    repo: crate::repofilter::RepoFilter,
     /// Thread in view (None: start screen).
     thread: Option<String>,
     members: Vec<String>,
@@ -147,6 +149,7 @@ impl Menu {
             loading,
             tcursor: 0,
             toffset: 0,
+            repo: crate::repofilter::RepoFilter::new(),
             thread,
             members,
             roster,
@@ -266,7 +269,13 @@ impl Menu {
     }
 
     fn visible(&self) -> Vec<usize> {
-        nav::filter(&self.cards, &self.filter.text())
+        nav::filter(&self.cards, &self.filter.text()).into_iter().filter(|&i| self.repo.keeps(self.cards[i].repo.as_deref())).collect()
+    }
+
+    /// Repo dropdown options: the repos of every card (0 filter applied).
+    fn repo_opts(&self) -> Vec<crate::repofilter::Opt> {
+        let repos: Vec<Option<&std::path::Path>> = self.cards.iter().map(|c| c.repo.as_deref()).collect();
+        crate::repofilter::options(&repos)
     }
 
     /// The agents of the thread (an agent the roster lacks: 0 harness), index = index in `members`.
@@ -328,6 +337,18 @@ impl Menu {
 
     pub fn key(&mut self, k: KeyEvent) -> Action {
         self.poll();
+        // repo dropdown of the threads tab: its keys first (esc closes only it); ctrl+r opens it
+        let ctrl_r = k.code == KeyCode::Char('r') && k.modifiers.contains(ratatui::crossterm::event::KeyModifiers::CONTROL);
+        if self.tab == Tab::Threads && (self.repo.is_open() || ctrl_r) {
+            let opts = self.repo_opts();
+            if !self.repo.is_open() {
+                self.repo.open(&opts);
+            } else if self.repo.key(k, &opts).1 {
+                self.tcursor = 0;
+                self.toffset = 0;
+            }
+            return Action::None;
+        }
         match k.code {
             // tab: closes (tab opens the menu in the thread view); ←/→ only switch the tabs
             KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => return Action::Close,
@@ -468,6 +489,18 @@ impl Menu {
         let at = Position { x: m.column, y: m.row };
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // repo chip / dropdown of the threads tab: an open dropdown takes every click
+                if self.tab == Tab::Threads {
+                    let opts = self.repo_opts();
+                    let (handled, changed) = self.repo.click(at, &opts);
+                    if changed {
+                        self.tcursor = 0;
+                        self.toffset = 0;
+                    }
+                    if handled {
+                        return Action::None;
+                    }
+                }
                 if !self.frame.contains(at) {
                     return Action::Close;
                 }
@@ -576,7 +609,7 @@ impl Menu {
             }
             Tab::Threads => {
                 self.draw_threads(f, body);
-                &[("type", "filter"), ("↑↓", "move"), ("enter", "open"), ("←→", "tabs"), ("esc tab", "close")]
+                &[("type", "filter"), ("ctrl+r", "repo"), ("↑↓", "move"), ("enter", "open"), ("←→", "tabs"), ("esc tab", "close")]
             }
             Tab::Search => {
                 self.draw_search(f, body);
@@ -595,6 +628,10 @@ impl Menu {
                 &[("↑↓", "move"), ("enter", "run · remove (2×)"), ("←→", "tabs"), ("esc tab", "close")]
             }
         };
+        if self.tab == Tab::Threads {
+            let opts = self.repo_opts();
+            self.repo.draw_menu(f, &opts, body);
+        }
         let mut spans = Vec::new();
         for (k, l) in hints {
             spans.push(Span::styled(format!("{k} "), theme::accent()));
@@ -644,13 +681,16 @@ impl Menu {
     }
 
     fn draw_threads(&mut self, f: &mut Frame, body: Rect) {
+        // the repo chip right, the name filter left of it
         let fr = Rect { height: 1, ..body };
+        let chip = self.repo.draw_chip(f, fr);
+        let fr = Rect { width: fr.width.saturating_sub(chip + 2), ..fr };
         f.render_widget(Paragraph::new(Span::styled("› ", theme::accent())), Rect { width: 2, ..fr });
         self.filter.render(f, Rect { x: fr.x + 2, width: fr.width.saturating_sub(2), ..fr }, true);
         let list = Rect { y: body.y + 2, height: body.height.saturating_sub(2), ..body };
         let vis = self.visible();
         if vis.is_empty() {
-            let msg = if self.loading.is_some() { "reading threads…" } else { "0 threads" };
+            let msg = if self.loading.is_some() { "reading threads…" } else if self.repo.choice.is_some() { "0 threads in this repo" } else { "0 threads" };
             f.render_widget(Paragraph::new(Span::styled(msg, theme::muted())), Rect { height: 1, ..list });
             return;
         }
@@ -673,7 +713,7 @@ impl Menu {
         let more = vis.len().saturating_sub(self.toffset + fits);
         if self.toffset > 0 || more > 0 {
             let text = format!("{}↑ · {more}↓", self.toffset);
-            f.render_widget(Paragraph::new(Span::styled(text, theme::muted())).right_aligned(), Rect { y: body.y, height: 1, ..body });
+            f.render_widget(Paragraph::new(Span::styled(text, theme::muted())).right_aligned(), fr);
         }
     }
 
@@ -920,6 +960,46 @@ mod tests {
             m.key(k(KeyCode::Char(c)));
         }
         assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "t1"));
+    }
+
+    #[test]
+    fn threads_repo_filter_by_ctrl_r() {
+        use ratatui::crossterm::event::KeyModifiers;
+        let repo = |c: &str, r: &str| Card { repo: Some(r.into()), ..card(c, c) };
+        let mut m = Menu::new(Vec::new(), None, Vec::new(), Vec::new(), vec![repo("alpha one", "/x/alpha"), repo("beta one", "/x/beta"), repo("beta two", "/x/beta")]);
+        m.key(k(KeyCode::Right));
+        assert_eq!(m.visible().len(), 3);
+        let draw = |m: &mut Menu| {
+            let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 30)).unwrap();
+            t.draw(|f| m.render(f, f.area(), f.area())).unwrap();
+            let b = t.backend().buffer().clone();
+            (0..30).map(|y| (0..90).map(|x| b[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
+        };
+        assert!(draw(&mut m).contains("repo › all ▾"));
+        m.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        let s = draw(&mut m);
+        assert!(s.contains("all repos") && s.contains("beta") && s.contains("2 · /x/beta"), "{s}");
+        // esc: closes the dropdown, the menu stays
+        assert_eq!(m.key(k(KeyCode::Esc)), Action::None);
+        m.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        // type: filters the dropdown; enter picks; the filter text stays empty
+        for c in "alp".chars() {
+            m.key(k(KeyCode::Char(c)));
+        }
+        m.key(k(KeyCode::Enter));
+        assert_eq!(m.filter.text(), "");
+        assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "alpha one"));
+        assert_eq!(m.visible().len(), 1);
+        assert!(draw(&mut m).contains("repo › alpha ▾"));
+        // name filter + repo filter: both apply
+        m.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        m.key(k(KeyCode::Down));
+        m.key(k(KeyCode::Down));
+        m.key(k(KeyCode::Enter));
+        for c in "two".chars() {
+            m.key(k(KeyCode::Char(c)));
+        }
+        assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "beta two"));
     }
 
     #[test]

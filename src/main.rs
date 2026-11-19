@@ -40,6 +40,7 @@ mod rank;
 mod search;
 mod review;
 mod render;
+mod repofilter;
 mod settings;
 mod setup;
 mod skills;

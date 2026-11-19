@@ -103,6 +103,9 @@ pub struct Worktree {
     pub when: String,
     /// A linked git worktree (delete may remove it). False: thread works in place.
     pub linked: bool,
+    /// Main checkout of the row's git repo (repo filter). None: outside any repo.
+    #[serde(default)]
+    pub repo: Option<PathBuf>,
 }
 
 impl Worktree {
@@ -135,6 +138,31 @@ pub fn repo_of(path: &Path) -> Option<PathBuf> {
         return None;
     }
     common.parent().map(Path::to_path_buf)
+}
+
+/// Main checkout of the git repo that holds PATH, by the file system only (0 git runs: the threads
+/// tabs call it per row): the nearest `.git` dir, or for a linked worktree the repo its `.git`
+/// file points to (`gitdir: <repo>/.git/worktrees/<name>`).
+pub fn repo_root(path: &Path) -> Option<PathBuf> {
+    for d in path.ancestors().filter(|d| !d.as_os_str().is_empty()) {
+        let g = d.join(".git");
+        if g.is_dir() {
+            return Some(d.to_path_buf());
+        }
+        if g.is_file() {
+            let text = std::fs::read_to_string(&g).ok()?;
+            let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+            let gitdir = if gitdir.is_relative() { d.join(gitdir) } else { gitdir };
+            let main = gitdir.ancestors().find(|a| a.file_name().is_some_and(|n| n == ".git")).and_then(Path::parent);
+            return Some(main.map_or_else(|| d.to_path_buf(), Path::to_path_buf));
+        }
+    }
+    None
+}
+
+/// Repo of a thread: its project dir, else its worktree.
+pub fn repo_of_thread(t: &Thread) -> Option<PathBuf> {
+    [t.dir.as_deref(), t.worktree.as_deref()].into_iter().flatten().find_map(|p| repo_root(Path::new(p)))
 }
 
 fn real(p: &str) -> String {
@@ -300,21 +328,22 @@ pub fn load(repo: Option<&Path>) -> Vec<Worktree> {
     let mut out = Vec::new();
     for t in all_threads() {
         let wt = t.worktree.as_ref().and_then(|p| wts.iter().find(|(wp, _)| real(wp) == real(p)));
+        let rp = repo_of_thread(&t);
         let row = match (wt, &t.worktree) {
             (Some((path, branch)), _) => {
                 used.insert(path.clone());
                 let p = Path::new(path);
-                Worktree { unpushed: unpushed(branch, p), when: when_of(p), path: path.clone(), branch: branch.clone(), linked: true, thread: Some(t) }
+                Worktree { unpushed: unpushed(branch, p), when: when_of(p), path: path.clone(), branch: branch.clone(), linked: true, thread: Some(t), repo: rp }
             }
             // worktree of another repo
             (None, Some(path)) if Path::new(path).exists() => {
                 let branch = t.branch.clone().unwrap_or_else(|| "(detached)".into());
                 let p = Path::new(path);
-                Worktree { unpushed: unpushed(&branch, p), when: when_of(p), path: path.clone(), branch, linked: true, thread: Some(t) }
+                Worktree { unpushed: unpushed(&branch, p), when: when_of(p), path: path.clone(), branch, linked: true, thread: Some(t), repo: rp }
             }
             _ => {
                 let when = crate::notes::ago(std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.updated));
-                Worktree { path: t.dir.clone().unwrap_or_default(), branch: "in place".into(), unpushed: 0, when, linked: false, thread: Some(t) }
+                Worktree { path: t.dir.clone().unwrap_or_default(), branch: "in place".into(), unpushed: 0, when, linked: false, thread: Some(t), repo: rp }
             }
         };
         out.push(row);
@@ -324,7 +353,7 @@ pub fn load(repo: Option<&Path>) -> Vec<Worktree> {
             continue;
         }
         let p = Path::new(&path);
-        out.push(Worktree { thread: None, unpushed: unpushed(&branch, p), when: when_of(p), path, branch, linked: true });
+        out.push(Worktree { thread: None, unpushed: unpushed(&branch, p), when: when_of(p), path, branch, linked: true, repo: repo.map(Path::to_path_buf) });
     }
     out
 }

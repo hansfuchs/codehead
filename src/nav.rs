@@ -20,6 +20,8 @@ pub struct Card {
     /// Worktree (else project dir) of the thread: the thread view works there.
     pub dir: Option<PathBuf>,
     pub branch: String,
+    /// Main checkout of the thread's git repo (repo filter of the threads tab).
+    pub repo: Option<PathBuf>,
 }
 
 impl Card {
@@ -116,6 +118,7 @@ pub fn load() -> Vec<Card> {
             };
             let dir = [t.worktree.clone(), t.dir.clone()].into_iter().flatten().map(PathBuf::from).find(|p| p.is_dir());
             Card {
+                repo: crate::threads::repo_of_thread(&t),
                 busy: t.busy,
                 unread,
                 activity: last.unwrap_or(0).max(t.updated * 1000),

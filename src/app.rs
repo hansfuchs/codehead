@@ -183,6 +183,7 @@ enum Field {
 enum Act {
     Filter,
     ThreadFilter,
+    RepoFilter,
     AgentFilter,
     DeleteNote,
     EditNote,
@@ -550,6 +551,8 @@ pub struct App {
     /// Threads tab filter (fuzzy, thread names). Some = row shows text.
     tfilter: Option<String>,
     tfilter_editing: bool,
+    /// Repo filter of the threads tab (chip + dropdown, ctrl+r).
+    trepo: crate::repofilter::RepoFilter,
     /// Input of the threads filter; TFILTER holds its text.
     tfilter_ta: TextArea,
     tpreview: HashMap<String, Vec<Line<'static>>>,
@@ -705,7 +708,7 @@ fn worktree_of(c: &crate::nav::Card) -> Worktree {
         busy: c.busy,
         ..Default::default()
     };
-    Worktree { path, branch: if c.branch.is_empty() { "in place".into() } else { c.branch.clone() }, thread: Some(thread), unpushed: 0, when: String::new(), linked: !c.branch.is_empty() }
+    Worktree { path, branch: if c.branch.is_empty() { "in place".into() } else { c.branch.clone() }, thread: Some(thread), unpushed: 0, when: String::new(), linked: !c.branch.is_empty(), repo: c.repo.clone() }
 }
 
 fn key_name(k: &KeyEvent) -> String {
@@ -861,6 +864,7 @@ impl App {
             tsel: HashSet::new(),
             tfilter: None,
             tfilter_editing: false,
+            trepo: crate::repofilter::RepoFilter::new(),
             tfilter_ta: TextArea::new(true, ""),
             tpreview: HashMap::new(),
             thread_reads: Reads::default(),
@@ -1043,6 +1047,7 @@ impl App {
         };
         let section = |i: usize| self.tsection(i);
         let mut v: Vec<(u8, i64, usize)> = (0..nw + self.sessions.len())
+            .filter(|&i| self.trepo.keeps(self.trepo_of(i)))
             .filter_map(|i| if q.is_empty() { Some((section(i), 0, i)) } else { fuzzy(&q, &name(i)).map(|sc| (section(i), -sc, i)) })
             .collect();
         v.sort();
@@ -2092,6 +2097,7 @@ impl App {
             (Screen::Pick, Tab::Threads) => (
                 vec![
                     c("f", "filter thread names (fuzzy)", Act::ThreadFilter),
+                    c("ctrl+r", "filter by repo (dropdown)", Act::RepoFilter),
                     c("d", "delete thread + worktree (+ branch, if pushed)", Act::DeleteThreads),
                     c("r", "reload", Act::Reload),
                     c("q", "quit", Act::Quit),
@@ -2101,6 +2107,7 @@ impl App {
                     ("space", "select thread / worktree"),
                     ("enter", "open thread (new task if none)"),
                     ("f", "filter: enter / esc back to the list"),
+                    ("ctrl+r", "repo filter: ↑↓ move, type: filter, enter: pick, esc: close"),
                     ("enter on claude", "new thread, last response as context"),
                     ("c", "thread / claude session: last response in / out of the task context"),
                     ("tab / shift+tab", "switch tab"),
@@ -2198,6 +2205,13 @@ impl App {
                 }
                 self.afilter_ta.move_end();
                 self.afilter_editing = true;
+            }
+            Act::RepoFilter => {
+                self.switch_tab(Tab::Threads);
+                let opts = self.trepo_opts();
+                self.tabs_focus = false;
+                self.tfilter_editing = false;
+                self.trepo.open(&opts);
             }
             Act::ThreadFilter => {
                 self.switch_tab(Tab::Threads);
@@ -2436,6 +2450,13 @@ impl App {
             self.last_esc = None;
             return self.where_key(k);
         }
+        // repo dropdown of the threads tab: its keys first (esc closes it, 0 double esc); ctrl+r opens it
+        if self.screen == Screen::Pick && self.tab == Tab::Threads && self.modal.is_none()
+            && (self.trepo.is_open() || (ctrl && k.code == KeyCode::Char('r')))
+        {
+            self.last_esc = None;
+            return self.trepo_key(k);
+        }
         // @ and > dropdowns of the prompt: their keys first (esc closes them, 0 double esc)
         if self.mention_on() {
             // skills: of the picked agents' harnesses (0 picked: of every agent's)
@@ -2528,7 +2549,7 @@ impl App {
     /// for an Esc to close (modal, filter input, thread filter, the notes list of the task).
     fn at_start(&self) -> bool {
         let notes = self.screen == Screen::Pick && self.tab == Tab::Notes;
-        self.modal.is_none() && self.drafts_menu.is_none() && self.where_menu.is_none() && !notes
+        self.modal.is_none() && self.drafts_menu.is_none() && self.where_menu.is_none() && !notes && !self.trepo.is_open()
             && !self.filter_editing && !self.tfilter_editing && !self.afilter_editing
             && !(self.screen == Screen::Pick && self.tab == Tab::Threads && self.tfilter.as_deref().is_some_and(|q| !q.is_empty()))
             && !(self.screen == Screen::Pick && self.tab == Tab::Agents && self.afilter.as_deref().is_some_and(|q| !q.is_empty()))
@@ -2539,6 +2560,7 @@ impl App {
         self.modal = None;
         self.drafts_menu = None;
         self.where_menu = None;
+        self.trepo.close();
         self.filter_editing = false;
         self.tfilter_editing = false;
         self.afilter_editing = false;
@@ -2641,6 +2663,7 @@ impl App {
         self.screen = Screen::Pick;
         if tab == Tab::Threads {
             self.refresh_threads();
+            self.trepo.sync();
         }
         if tab == Tab::Agents {
             self.refresh_agents();
@@ -2832,6 +2855,36 @@ impl App {
                     self.run(c.act);
                 }
             }
+        }
+    }
+
+    /// Repo dropdown options: the repos of every threads tab row (0 filter applied).
+    fn trepo_opts(&self) -> Vec<crate::repofilter::Opt> {
+        let wts = self.worktrees.as_deref().unwrap_or(&[]);
+        let repos: Vec<Option<&Path>> = wts.iter().map(|w| w.repo.as_deref()).chain(self.sessions.iter().map(|s| s.repo.as_deref())).collect();
+        crate::repofilter::options(&repos)
+    }
+
+    /// Repo of threads tab item I (worktrees ++ sessions).
+    fn trepo_of(&self, i: usize) -> Option<&Path> {
+        let wts = self.worktrees.as_deref().unwrap_or(&[]);
+        match wts.get(i) {
+            Some(w) => w.repo.as_deref(),
+            None => self.sessions.get(i - wts.len()).and_then(|s| s.repo.as_deref()),
+        }
+    }
+
+    /// Keys of the repo dropdown (ctrl+r: open / close).
+    fn trepo_key(&mut self, k: KeyEvent) {
+        let opts = self.trepo_opts();
+        self.tabs_focus = false;
+        if !self.trepo.is_open() {
+            self.tfilter_editing = false;
+            return self.trepo.open(&opts);
+        }
+        if self.trepo.key(k, &opts).1 {
+            self.tcursor = 0;
+            self.pscroll = 0;
         }
     }
 
@@ -3293,6 +3346,19 @@ impl App {
             }
             return;
         }
+        // repo chip / dropdown of the threads tab: an open dropdown takes every click
+        if down && self.screen == Screen::Pick && self.tab == Tab::Threads {
+            let opts = self.trepo_opts();
+            let (handled, changed) = self.trepo.click(at, &opts);
+            if changed {
+                self.tcursor = 0;
+                self.pscroll = 0;
+            }
+            if handled {
+                self.tabs_focus = false;
+                return;
+            }
+        }
         if down && let Some(&(_, tab)) = self.regions.tabs.iter().find(|(r, _)| r.contains(at)) {
             self.switch_tab(tab);
             self.tabs_focus = false;
@@ -3480,6 +3546,10 @@ impl App {
             self.draw_drafts(f, area);
             self.draw_where_menu(f, area);
         }
+        if self.screen == Screen::Pick && self.tab == Tab::Threads {
+            let opts = self.trepo_opts();
+            self.trepo.draw_menu(f, &opts, body);
+        }
         self.draw_modal(f, area);
         if let Some(m) = self.menu.as_mut() {
             m.render(f, area, area);
@@ -3620,10 +3690,14 @@ impl App {
         }
         if self.tab == Tab::Threads {
             let [row, _, rest] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)]).areas(area);
+            // the repo chip right, the name filter left of it
+            f.render_widget(Block::new().style(theme::panel()), row);
+            let chip = self.trepo.draw_chip(f, row);
+            let row = Rect { width: row.width.saturating_sub(chip + 2), ..row };
             let label = Style::default().fg(if self.tfilter_editing { theme::pal().accent } else { theme::pal().muted });
             let q = self.tfilter.clone().unwrap_or_default();
             let total = self.n_worktrees() + self.sessions.len();
-            let count = if q.is_empty() { String::new() } else { format!("{} of {total} ", self.n_threads()) };
+            let count = if q.is_empty() && self.trepo.choice.is_none() { String::new() } else { format!("{} of {total} ", self.n_threads()) };
             if self.tfilter_editing {
                 f.render_widget(Paragraph::new(Span::styled("filter › ", label)).style(theme::panel()), row);
                 self.tfilter_ta.render(f, filter_input(row, count.width()), true);
@@ -5760,7 +5834,7 @@ mod render_tests {
         let w = |id: &str, f: &dyn Fn(&mut threads::Thread)| {
             let mut t = threads::Thread { id: id.into(), title: format!("thread {id}"), state: "open".into(), ..Default::default() };
             f(&mut t);
-            Worktree { path: format!("/p/{id}"), branch: "b".into(), linked: true, unpushed: 0, when: "1m".into(), thread: Some(t) }
+            Worktree { path: format!("/p/{id}"), branch: "b".into(), linked: true, unpushed: 0, when: "1m".into(), thread: Some(t), repo: None }
         };
         a.worktrees = Some(vec![
             w("settled", &|_| {}),
@@ -5778,11 +5852,53 @@ mod render_tests {
     }
 
     #[test]
+    fn threads_tab_repo_filter_by_ctrl_r_and_click() {
+        let mut a = app();
+        let w = |id: &str, repo: Option<&str>| {
+            let t = threads::Thread { id: id.into(), title: format!("thread {id}"), state: "open".into(), ..Default::default() };
+            Worktree { path: format!("/p/{id}"), branch: "b".into(), linked: true, unpushed: 0, when: "1m".into(), thread: Some(t), repo: repo.map(PathBuf::from) }
+        };
+        a.worktrees = Some(vec![w("one", Some("/x/alpha")), w("two", Some("/x/beta")), w("three", Some("/x/beta")), w("loose", None)]);
+        a.sessions = vec![Session { id: "s1".into(), title: "claude work".into(), cwd: "/x/alpha".into(), repo: Some("/x/alpha".into()), ..Default::default() }];
+        a.switch_tab(Tab::Threads);
+        a.tabs_focus = false;
+        assert_eq!(a.n_threads(), 5);
+        let s = dump(&mut a, 120, 30);
+        assert!(s.contains("repo › all ▾"), "{s}");
+        key(&mut a, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        let s = dump(&mut a, 120, 30);
+        assert!(s.contains("all repos") && s.contains("2 · /x/beta") && s.contains("outside git repos"), "{s}");
+        // esc: closes the dropdown only (0 tab change, 0 quit)
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!a.trepo.is_open() && a.tab == Tab::Threads && a.outcome.is_none());
+        // ctrl+r, type "alp", enter: alpha rows only (thread + claude session)
+        key(&mut a, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        for c in "alp".chars() {
+            key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.n_threads(), 2);
+        let s = dump(&mut a, 120, 30);
+        assert!(s.contains("repo › alpha ▾") && s.contains("2 of 5") && s.contains("thread one") && !s.contains("thread two"), "{s}");
+        // a click on the chip opens the dropdown; a click on a row picks it
+        let chip = a.trepo.chip_rect();
+        a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: chip.x + 1, row: chip.y, modifiers: KeyModifiers::NONE });
+        assert!(a.trepo.is_open());
+        dump(&mut a, 120, 30);
+        let i = a.trepo_opts().iter().position(|o| o.label == "outside git repos").unwrap();
+        let row = a.trepo.row_rect(i).unwrap();
+        a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: row.x + 2, row: row.y, modifiers: KeyModifiers::NONE });
+        assert!(!a.trepo.is_open());
+        assert_eq!(a.n_threads(), 1);
+        assert_eq!(a.current_wt().map(|w| w.key()), Some("loose".to_string()));
+    }
+
+    #[test]
     fn thread_sections_have_gaps_and_preview_uses_title() {
         let mut a = app();
         let w = Worktree {
             path: "/project".into(), branch: "in place".into(), linked: false,
-            unpushed: 0, when: "1m".into(),
+            unpushed: 0, when: "1m".into(), repo: None,
             thread: Some(threads::Thread {
                 id: "a1".into(), title: "fix latency".into(), state: "open".into(),
                 live: 1, updated: 0, worktree: None, branch: None, dir: Some("/project".into()), ..Default::default()
