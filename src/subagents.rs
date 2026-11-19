@@ -237,7 +237,7 @@ impl Subagents {
         f.render_widget(Clear, r);
         let block = Block::new()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .border_type(BorderType::Plain)
             .border_style(theme::accent())
             .title(Span::styled(" subagents ", theme::accent_bold()))
             .title_bottom(Line::styled(" ↑↓ select · d stop · pgup/pgdn scroll · esc close ", theme::muted()).right_aligned());

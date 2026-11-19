@@ -485,7 +485,7 @@ pub struct Drawn {
 /// How the stream draws messages (setting `messages`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Look {
-    /// hell's: an agent's turn in a rounded box (name, time in its top border), the owner's
+    /// hell's: an agent's turn in a box (name, time in its top border), the owner's
     /// messages in a bubble on the right.
     #[default]
     Bubbles,
@@ -1105,12 +1105,12 @@ fn owner_bubble(d: &mut Drawn, w: usize, text: &str, to_note: &str, ts: u64) {
         let fill = bw - 2 - button.width() - 2;
         let at = (left + 1 + fill) as u16;
         d.rows.push(Row {
-            line: Line::from(vec![pad, Span::styled(format!("╰{}", "─".repeat(fill)), border), Span::styled(button, theme::accent()), Span::styled("──╯", border)]),
+            line: Line::from(vec![pad, Span::styled(format!("└{}", "─".repeat(fill)), border), Span::styled(button, theme::accent()), Span::styled("──┘", border)]),
             copies: vec![(at, at + button.width() as u16, text.trim_end().to_string())],
             ..Default::default()
         });
     } else {
-        d.rows.push(Row::plain(Line::from(vec![pad, Span::styled(format!("╰{}╯", "─".repeat(bw - 2)), border)])));
+        d.rows.push(Row::plain(Line::from(vec![pad, Span::styled(format!("└{}┘", "─".repeat(bw - 2)), border)])));
     }
     for f in files {
         let name = f.rsplit('/').next().unwrap_or(f);
@@ -1127,10 +1127,10 @@ struct Open {
     agent: Option<String>,
 }
 
-/// Rounded top border of width W: `╭─ ` LEFT ` ─────── ` RIGHT ` ─╮`. Returns the row and the
+/// Top border of width W: `┌─ ` LEFT ` ─────── ` RIGHT ` ─┐`. Returns the row and the
 /// column after LEFT (where a wave goes).
 fn top_border(w: usize, border: Style, left: Vec<Span<'static>>, wave: bool, right: &str) -> (Row, u16) {
-    let mut spans = vec![Span::styled("╭─", border)];
+    let mut spans = vec![Span::styled("┌─", border)];
     let lw: usize = left.iter().map(|s| s.content.width()).sum();
     let mut used = 2;
     if lw > 0 {
@@ -1153,7 +1153,7 @@ fn top_border(w: usize, border: Style, left: Vec<Span<'static>>, wave: bool, rig
     if rw > 0 {
         spans.push(Span::styled(format!(" {right} "), theme::muted()));
     }
-    spans.push(Span::styled("─╮", border));
+    spans.push(Span::styled("─┐", border));
     (Row::plain(Line::from(spans)), wave_at as u16)
 }
 
@@ -1170,7 +1170,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
             r.line.spans.push(Span::raw(" ".repeat((w - 1).saturating_sub(rw))));
             r.line.spans.push(Span::styled("│", o.border));
         }
-        d.rows.push(Row::plain(Line::from(vec![Span::styled(format!("╰{}╯", "─".repeat(w - 2)), o.border)])));
+        d.rows.push(Row::plain(Line::from(vec![Span::styled(format!("└{}┘", "─".repeat(w - 2)), o.border)])));
     };
     let gap = |d: &mut Drawn| {
         if !d.rows.is_empty() {
@@ -1565,17 +1565,17 @@ mod tests {
         let s = text(&d);
         let rows: Vec<&str> = s.lines().collect();
         // the owner's bubble: right, the time in its top border, the file name below it
-        let top = rows.iter().position(|r| r.trim_start().starts_with("╭") && r.contains("─╮")).unwrap();
-        assert!(rows[top].starts_with(' ') && rows[top].ends_with("─╮") && rows[top].contains(&clock(1_000_000)), "{s}");
+        let top = rows.iter().position(|r| r.trim_start().starts_with("┌") && r.contains("─┐")).unwrap();
+        assert!(rows[top].starts_with(' ') && rows[top].ends_with("─┐") && rows[top].contains(&clock(1_000_000)), "{s}");
         assert!(rows.iter().any(|r| r.ends_with("│ fix it   │") || (r.contains("│ fix it") && r.ends_with('│'))), "{s}");
         assert!(rows.iter().any(|r| r.ends_with("📎 a.png")), "{s}");
         // the agent's turn: 1 box, its name in the top border, the run on 2 rows, the text inside
-        let b = rows.iter().position(|r| r.starts_with("╭─ ada")).unwrap();
+        let b = rows.iter().position(|r| r.starts_with("┌─ ada")).unwrap();
         assert_eq!(rows[b].chars().count(), 50, "{s}");
         assert!(rows.iter().any(|r| r.starts_with("│ ▸ List files") && r.ends_with('│')), "{s}");
         assert!(rows.iter().any(|r| r.starts_with("│   1 call · 0.0s")), "{s}");
         assert!(rows.iter().any(|r| r.starts_with("│ ※ SUMMARY")) && rows.iter().any(|r| r.starts_with("│ DONE. it works.")), "{s}");
-        assert!(rows.last().unwrap().starts_with("╰") && rows.last().unwrap().ends_with('╯'), "{s}");
+        assert!(rows.last().unwrap().starts_with("└") && rows.last().unwrap().ends_with('┘'), "{s}");
         assert!(widest(&d) <= 50);
         // at work: 1 wave in its top border
         assert_eq!(d.waves.len(), 1);
@@ -1586,7 +1586,7 @@ mod tests {
         t.push(&ev(Some("ada"), Kind::Answer { id: "q".into(), allow: true, label: "red".into() }));
         let s = text(&draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, &Picker::default()));
         let rows: Vec<&str> = s.lines().collect();
-        let q = rows.iter().position(|r| r.starts_with("╭─ ada asked")).expect(&s);
+        let q = rows.iter().position(|r| r.starts_with("┌─ ada asked")).expect(&s);
         assert!(rows[q + 2].starts_with("│ color?"), "{s}");
         assert!(rows[q + 4..].iter().any(|r| r.trim_end().ends_with("│ red    │") || (r.contains("│ red") && r.ends_with('│') && r.starts_with(' '))), "{s}");
         // declined: 0 answer bubble
@@ -1595,8 +1595,8 @@ mod tests {
         let s = text(&draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, &Picker::default()));
         // ada still at work, 0 output since: 0 empty box below the declined ask
         let tail: Vec<&str> = s.lines().rev().take(8).collect();
-        assert!(tail.iter().any(|r| r.starts_with("│ denied")) && tail[0].starts_with('╰'), "{s}");
-        assert!(!tail.iter().take_while(|r| !r.starts_with("│ denied")).any(|r| r.starts_with("╭─ ada")), "{s}");
+        assert!(tail.iter().any(|r| r.starts_with("│ denied")) && tail[0].starts_with('└'), "{s}");
+        assert!(!tail.iter().take_while(|r| !r.starts_with("│ denied")).any(|r| r.starts_with("┌─ ada")), "{s}");
     }
 
     #[test]
@@ -1614,8 +1614,8 @@ mod tests {
         let bubble = rows.iter().position(|r| r.contains("next")).unwrap();
         // 0 output yet: 0 empty box below the owner's message, 0 wave on the answer above it
         assert!(d.waves.is_empty(), "{s}");
-        assert!(!rows[bubble..].iter().any(|r| r.starts_with("╭─ ada")), "{s}");
-        assert_eq!(rows.iter().filter(|r| r.starts_with("╭─ ada")).count(), 1, "{s}");
+        assert!(!rows[bubble..].iter().any(|r| r.starts_with("┌─ ada")), "{s}");
+        assert_eq!(rows.iter().filter(|r| r.starts_with("┌─ ada")).count(), 1, "{s}");
         // the 1st output of the turn: the wave moves into its box, 0 empty box
         t.push(&ev(Some("ada"), Kind::Text { text: "second".into() }));
         let d = draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &fold, &Picker::default());

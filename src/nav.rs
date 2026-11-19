@@ -195,7 +195,7 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
         return;
     }
     let border = if cur { theme::accent_bold() } else { theme::line() };
-    let mut block = Block::new().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(border).style(theme::text());
+    let mut block = Block::new().borders(Borders::ALL).border_type(BorderType::Plain).border_style(border).style(theme::text());
     if here {
         block = block.title(Span::styled(" here ", if cur { theme::accent_bold() } else { theme::muted() }));
     }

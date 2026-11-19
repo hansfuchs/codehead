@@ -4145,7 +4145,7 @@ impl App {
         [a.name.clone(), tech, effort]
     }
 
-    /// Agent card: rounded box, sprite left, text right. Picked: border in the agent color, ◼ (+ order).
+    /// Agent card: box, sprite left, text right. Picked: border in the agent color, ◼ (+ order).
     /// Cursor: accent border.
     fn draw_card(&self, f: &mut Frame, r: Rect, a: &Agent, cur: bool) {
         let color = agents::color(a.color.as_deref());
@@ -4203,7 +4203,7 @@ impl App {
         f.render_widget(Clear, r);
         let block = Block::new()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .border_type(BorderType::Plain)
             .border_style(theme::accent())
             .title(Span::styled(format!(" {title} "), theme::accent_bold()))
             .style(theme::text());
@@ -4617,7 +4617,7 @@ mod render_tests {
         assert!(out.contains("claude · Opus 5.5") && out.contains("codex · gpt-5.5"), "{out}");
         // 0 blank rows between the harness groups: the codex heading right below the claude card
         let codex = row("codex · 1");
-        assert!(lines[codex - 1].contains('╰'), "{out}");
+        assert!(lines[codex - 1].contains('└'), "{out}");
         println!("--- where row\n{out}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4992,7 +4992,7 @@ mod render_tests {
         a.field = Field::Prompt;
         type_text(&mut a, "read >");
         let s = dump(&mut a, 120, 40);
-        assert!(s.contains("╭ commands ") && s.contains("mention"), "{s}");
+        assert!(s.contains("┌ commands ") && s.contains("mention"), "{s}");
         // mention → files (of the test dir, 0 git) → the note file, by fuzzy text
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         let s = dump(&mut a, 120, 40);
@@ -5008,7 +5008,7 @@ mod render_tests {
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         assert!(a.outcome.is_none() && a.screen == Screen::Compose);
         let s = dump(&mut a, 120, 40);
-        assert!(!s.contains("╭ commands "), "{s}");
+        assert!(!s.contains("┌ commands "), "{s}");
     }
 
     #[test]

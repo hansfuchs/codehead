@@ -688,7 +688,7 @@ impl Settings {
             };
             let block = Block::new()
                 .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
+                .border_type(BorderType::Plain)
                 .border_style(border)
                 .title(Span::styled(title, if on { theme::accent_bold() } else { theme::muted() }));
             let inner = block.inner(r);
@@ -934,14 +934,14 @@ mod tests {
         let buffer = terminal.backend().buffer().clone();
         let line = |y: u16| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>();
         let top = (0..140).find(|&y| line(y).contains("alias 1 · enter: edit · d: delete")).expect("highlighted box");
-        assert!(line(top).trim_start().starts_with('╭'));
+        assert!(line(top).trim_start().starts_with('┌'));
         assert!(line(top + 1).contains("docs") && line(top + 2).contains("~/docs/"));
-        assert!(line(top + 3).trim_start().starts_with('╰'));
+        assert!(line(top + 3).trim_start().starts_with('└'));
         // another item focused: gray border, plain title
         key(&mut form, KeyCode::Down);
         terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
         let buffer = terminal.backend().buffer().clone();
-        let x = (0..80).find(|&x| buffer[(x, top)].symbol() == "╭").unwrap();
+        let x = (0..80).find(|&x| buffer[(x, top)].symbol() == "┌").unwrap();
         assert_eq!(buffer[(x, top)].fg, theme::pal().line);
         let _ = std::fs::remove_dir_all(dir);
     }

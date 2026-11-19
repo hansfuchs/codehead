@@ -1,6 +1,6 @@
 //! Agent cards, as every screen shows them: grouped by harness (groups and agents A→Z), a heading
 //! row per group (`claude · 3`), the cards in as many columns as fit. A card: sprite left, text
-//! right; with a rounded border (agents tab, task picker, F2 menu) or without (the `@` dropdown).
+//! right; with a border (agents tab, task picker, F2 menu) or without (the `@` dropdown).
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -149,7 +149,7 @@ pub fn draw(f: &mut Frame, r: Rect, a: &Agent, rows: &[String], look: Look) {
     let lit = look.cur || look.lit;
     let base = look.bg.map_or(Style::default(), |c| Style::default().bg(c));
     let inner = if let Some(border) = look.border {
-        let mut block = Block::new().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(border).style(base);
+        let mut block = Block::new().borders(Borders::ALL).border_type(BorderType::Plain).border_style(border).style(base);
         if let Some(t) = look.title {
             block = block.title(t);
         }

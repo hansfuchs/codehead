@@ -1631,7 +1631,7 @@ impl View {
             },
             Body::Hits(n) => Line::styled(format!(" {n} files match · by name and content, every level · enter: the 1st · esc: clear"), theme::muted()),
             Body::Head => self.head_line(r.file, f, w),
-            Body::Foot => Line::styled(format!("╰{}╯", "─".repeat(w.saturating_sub(2))), border),
+            Body::Foot => Line::styled(format!("└{}┘", "─".repeat(w.saturating_sub(2))), border),
             Body::Why => {
                 let why = self.ranked(&f.path).map(|x| x.2).unwrap_or_default();
                 bar(vec![Span::styled(crate::nav::fit(why, inner), theme::muted().add_modifier(Modifier::ITALIC))])
@@ -1727,7 +1727,7 @@ impl View {
             Some(false) => Span::styled("◐ ", Style::default().fg(theme::pal().warn)),
             None => Span::raw(""),
         };
-        let mut head = vec![Span::styled("╭─ ", border), mark, stage];
+        let mut head = vec![Span::styled("┌─ ", border), mark, stage];
         let fitted = crate::nav::fit(&name, room);
         let marks: Vec<usize> = self.hits.get(&i).map(|m| m.iter().map(|x| x + skip).filter(|&x| x < fitted.chars().count()).collect()).unwrap_or_default();
         head.extend(crate::fuzzy::spans(&fitted, &marks, theme::bold(), theme::accent_bold().add_modifier(Modifier::UNDERLINED)));
@@ -1738,7 +1738,7 @@ impl View {
         let fill = w.saturating_sub(used + right.width() + 3);
         head.push(Span::styled(format!(" {}", "─".repeat(fill)), border));
         head.push(Span::styled(right, theme::muted()));
-        head.push(Span::styled("─╮", border));
+        head.push(Span::styled("─┐", border));
         Line::from(head)
     }
 
@@ -2073,6 +2073,14 @@ impl View {
                     self.sel.clear();
                 }
             }
+            // ctrl+enter (⌘enter, alt+enter): the comment batch to the thread, as a send in the thread
+            KeyCode::Enter if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) => {
+                let Some(text) = batch(&self.comments) else { return Act::Toast("0 comments · c: comment on the line".into()) };
+                self.comments.clear();
+                write_comments(&self.id, &self.comments);
+                self.built = None;
+                return Act::Send(text);
+            }
             KeyCode::Enter => {
                 if let Some(f) = self.file_at() {
                     let on = !self.folded(f);
@@ -2155,7 +2163,7 @@ impl View {
                     return Act::Toast("finding dismissed".into());
                 }
             }
-            // y on a finding: into the comment batch (C sends it)
+            // y on a finding: into the comment batch (ctrl+enter sends it)
             KeyCode::Char('y') => {
                 if let Some(fi) = self.rows.get(self.at).and_then(|r| r.finding)
                     && let Some(x) = self.review.as_ref().and_then(|r| r.findings.get(fi)).cloned()
@@ -2164,7 +2172,7 @@ impl View {
                     self.comments.push(Comment { path: x.file.clone(), line: x.line, text: crate::review::as_comment(&x), lines: String::new() });
                     write_comments(&self.id, &self.comments);
                     self.rebuild_here();
-                    return Act::Toast(format!("finding → comment batch · {} · C: send", self.comments.len()));
+                    return Act::Toast(format!("finding → comment batch · {} · ctrl+enter: send", self.comments.len()));
                 }
             }
             KeyCode::Char('V') => return self.start_review(),
@@ -2194,13 +2202,6 @@ impl View {
                 });
                 self.ci = Some(rx);
                 return Act::Toast("CI: reading the failed log for the lead…".into());
-            }
-            KeyCode::Char('C') => {
-                let Some(text) = batch(&self.comments) else { return Act::Toast("0 comments · c: comment on the line".into()) };
-                self.comments.clear();
-                write_comments(&self.id, &self.comments);
-                self.built = None;
-                return Act::Send(text);
             }
             KeyCode::Char('o') => {
                 if let (Some(f), Some(r)) = (self.file_at(), self.rows.get(self.at)) {
@@ -2394,12 +2395,12 @@ Binary files a/img.png and b/img.png differ
         let mut v = view(parse(DIFF));
         v.build(120);
         let t = text(&v);
-        let h = t.iter().position(|l| l.starts_with("╭─ ☐ src/a.rs")).unwrap();
-        assert!(t[h].ends_with("logic · +2 −1 ─╮") && t[0].contains("4 files"), "{t:#?}");
+        let h = t.iter().position(|l| l.starts_with("┌─ ☐ src/a.rs")).unwrap();
+        assert!(t[h].ends_with("logic · +2 −1 ─┐") && t[0].contains("4 files"), "{t:#?}");
         assert!(t.iter().any(|l| l.contains("⋯ fn run() {")), "{t:#?}");
         assert!(t.iter().any(|l| l.contains(" 11     - let b = 2;")), "{t:#?}");
         assert!(t.iter().any(|l| l.contains("     11 + let b = 3;")), "{t:#?}");
-        assert!(t.iter().filter(|l| l.starts_with(['╭', '│', '╰'])).all(|l| l.width() == 120), "every box row 120 wide: {t:#?}");
+        assert!(t.iter().filter(|l| l.starts_with(['┌', '│', '└'])).all(|l| l.width() == 120), "every box row 120 wide: {t:#?}");
         // binary: folded
         assert!(!t.iter().any(|l| l.contains("binary file")));
         v.build(SIDE_MIN);
@@ -2463,12 +2464,12 @@ Binary files a/img.png and b/img.png differ
         let at = t.iter().position(|l| l.contains("+ let b = 3;")).unwrap();
         assert!(t[at + 1].contains("✎ 11: why 3?") && t[at + 2].contains("keep 2"), "{t:#?}");
         let end = t.iter().position(|l| l.contains("outside any hunk")).unwrap();
-        assert!(t[end + 1].starts_with('╰'), "orphan at the box end: {t:#?}");
+        assert!(t[end + 1].starts_with('└'), "orphan at the box end: {t:#?}");
         // x on a comment row deletes it
         v.at = v.rows.iter().position(|r| r.comment == Some(1)).unwrap();
         v.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert_eq!(v.comment_count(), 1);
-        match v.key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT)) {
+        match v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)) {
             Act::Send(s) => assert_eq!(s, "Review comments on the changes (file:line, new side). Address each one:\n- `src/a.rs:11`: why 3?\n  keep 2"),
             a => panic!("{a:?}"),
         }
@@ -2547,7 +2548,7 @@ Binary files a/img.png and b/img.png differ
         assert_eq!(v.progress(), (1, 4));
         let t = text(&v);
         let h = t.iter().position(|l| l.contains("☑ src/a.rs")).unwrap();
-        assert!(t[h + 1].starts_with('╰'), "folded: {t:#?}");
+        assert!(t[h + 1].starts_with('└'), "folded: {t:#?}");
         // the cursor went to the next box of the tab (medium: src/a.rs, new.rs)
         assert!(v.rows[v.at].head && v.changes.files[v.rows[v.at].file].path == "new.rs");
         // the file changes: the mark goes, `updated` shows
@@ -2649,7 +2650,7 @@ Binary files a/img.png and b/img.png differ
         let c = row_of(&s, "✎ 12 · removed 11: both wrong");
         assert!(s[c - 1].contains("+ let c = 4;"), "under the last selected line: {s:#?}");
         assert!(!s.iter().any(|l| l.chars().nth(1) == Some('▌')), "the selection clears: {s:#?}");
-        let Act::Send(b) = v.key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT)) else { panic!() };
+        let Act::Send(b) = v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)) else { panic!() };
         assert!(b.ends_with("- `src/a.rs:12 · removed 11`: both wrong"), "{b}");
         // esc (the view's while a selection is on) clears it
         v.at = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("+ let b = 3;")).unwrap();
@@ -2670,7 +2671,7 @@ Binary files a/img.png and b/img.png differ
         press(&mut v, KeyCode::Left);
         let s = screen(&mut v, 100, 30);
         let head = row_of(&s, "☐ src/a.rs");
-        assert!(s[head + 1].starts_with('╰') && !s.iter().any(|l| l.contains("let b = 3;")), "folded: {s:#?}");
+        assert!(s[head + 1].starts_with('└') && !s.iter().any(|l| l.contains("let b = 3;")), "folded: {s:#?}");
         assert!(s[head].ends_with('▌'), "the cursor on the head: {s:#?}");
         press(&mut v, KeyCode::Right);
         let s = screen(&mut v, 100, 30);

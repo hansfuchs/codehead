@@ -982,8 +982,8 @@ mod tests {
         assert_eq!((c.settle(""), c.cursor[1]), (3, 0));
         let s = screen(&mut c, &mut ta, 100, 24, Rect::new(0, 18, 100, 4));
         // name + description in the row, the full description of the current row in a box above
-        assert!(s.contains("╭ skills ") && s.contains("tmux  Use the tmux CLI to manage sessions."), "{s}");
-        assert!(s.contains("╭ antislop ") && s.contains("│ Detect and fix AI writing patterns in text."), "{s}");
+        assert!(s.contains("┌ skills ") && s.contains("tmux  Use the tmux CLI to manage sessions."), "{s}");
+        assert!(s.contains("┌ antislop ") && s.contains("│ Detect and fix AI writing patterns in text."), "{s}");
         // typed text: the name first, a match in the description too; the best on top
         ta.insert("spread");
         assert_eq!(c.settle("spread"), 1);
@@ -1065,7 +1065,7 @@ mod tests {
         c.set_test_items(Kind::Files, (0..30).map(|i| item(&format!("src/file-{i:02}.rs"), i)).collect());
         let input = Rect::new(0, 20, 100, 5);
         let all = screen(&mut c, &mut ta, 100, 30, input);
-        for label in ["╭ commands ", "╭ mention ", "╭ mention › files "] {
+        for label in ["┌ commands ", "┌ mention ", "┌ mention › files "] {
             assert!(all.contains(label), "{label}:\n{all}");
         }
         // 30 files, 10 in view: the latest at the bottom, ▲ (rows above), 0 ▼
@@ -1082,7 +1082,7 @@ mod tests {
         let [a, b, files] = c.areas[..] else { panic!("{:?}", c.areas) };
         assert!(files.bottom() <= a.y.min(b.y) && files.right() <= 60, "{:?}", c.areas);
         assert!(!files.intersects(a) && !files.intersects(b) && b.bottom() <= input.y, "{:?}", c.areas);
-        assert!(all.contains("╭ commands ") && all.contains("╭ mention ") && all.contains("x >"), "{all}");
+        assert!(all.contains("┌ commands ") && all.contains("┌ mention ") && all.contains("x >"), "{all}");
         // 0 room above the prompt box: below it
         let input = Rect::new(0, 1, 100, 3);
         ta.set_text(">");

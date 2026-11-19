@@ -90,7 +90,7 @@ pub fn place_beside(parent: Rect, row_y: u16, w: u16, rows: usize, bounds: Rect,
     Some(Rect { x: bounds.right() - w, y, width: w, height: h })
 }
 
-/// Frame of a dropdown in R: cleared, rounded border, LABEL on top, NOTE bottom right. UP / DOWN:
+/// Frame of a dropdown in R: cleared, plain border, LABEL on top, NOTE bottom right. UP / DOWN:
 /// rows wait above / below → ▲ / ▼ on the right border. ACTIVE: the dropdown with the keys (accent
 /// border; a parent of an open submenu: gray). Returns the area of the rows.
 pub fn frame(f: &mut Frame, r: Rect, label: &str, note: &str, up: bool, down: bool, active: bool) -> Rect {
@@ -98,7 +98,7 @@ pub fn frame(f: &mut Frame, r: Rect, label: &str, note: &str, up: bool, down: bo
     let border = if active { theme::accent() } else { theme::line() };
     let mut block = Block::new()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Plain)
         .border_style(border)
         .title(Span::styled(format!(" {label} "), if active { theme::accent_bold() } else { theme::muted() }))
         .style(Style::default().bg(theme::pal().on_accent).fg(theme::pal().text));

@@ -159,7 +159,7 @@ impl Monitors {
         let r = Rect { height: area.height - 1, ..area };
         self.popup = r;
         f.render_widget(Clear, r);
-        let block = Block::new().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(theme::accent())
+        let block = Block::new().borders(Borders::ALL).border_type(BorderType::Plain).border_style(theme::accent())
             .title(Span::styled(" monitors ", theme::accent_bold()))
             .title_bottom(Line::styled(" ↑↓ select · d end · pgup/pgdn scroll · esc close ", theme::muted()).right_aligned());
         let inner = block.inner(r);

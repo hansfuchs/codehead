@@ -1,7 +1,7 @@
 //! F2 menu: 1 modal for the start screen and the thread view. Tabs: quick (commands),
 //! threads (filter + thread cards), agents (the agents of the thread in view: remove, add; edit →
-//! the agents tab of the start screen). ↑↓ move, tab / shift+tab, ←→: next / previous tab, enter: run,
-//! a single esc closes.
+//! the agents tab of the start screen). ↑↓ move, ←→: next / previous tab, enter: run,
+//! a single esc or tab closes.
 
 use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
@@ -246,14 +246,15 @@ impl Menu {
     pub fn key(&mut self, k: KeyEvent) -> Action {
         self.poll();
         match k.code {
-            KeyCode::Esc => return Action::Close,
+            // tab: closes (tab opens the menu in the thread view); ←/→ only switch the tabs
+            KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => return Action::Close,
             _ if crate::config::menu_key().matches(&k) => return Action::Close,
-            // ←/→ too: tabs only (0 run, 0 cursor in the threads filter)
-            KeyCode::Tab | KeyCode::Right => {
+            // ←/→: tabs only (0 run, 0 cursor in the threads filter)
+            KeyCode::Right => {
                 self.switch(1);
                 return Action::None;
             }
-            KeyCode::BackTab | KeyCode::Left => {
+            KeyCode::Left => {
                 self.switch(-1);
                 return Action::None;
             }
@@ -448,7 +449,7 @@ impl Menu {
         f.render_widget(Clear, r);
         let block = Block::new()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .border_type(BorderType::Plain)
             .border_style(theme::accent())
             .title(Span::styled(" menu ", theme::accent_bold()))
             .style(theme::text());
@@ -476,15 +477,15 @@ impl Menu {
         let hints: &[(&str, &str)] = match self.tab {
             Tab::Quick => {
                 self.draw_quick(f, body);
-                &[("↑↓", "move"), ("enter", "run"), ("tab ←→", "tabs"), ("esc", "close")]
+                &[("↑↓", "move"), ("enter", "run"), ("←→", "tabs"), ("esc tab", "close")]
             }
             Tab::Threads => {
                 self.draw_threads(f, body);
-                &[("type", "filter"), ("↑↓", "move"), ("enter", "open"), ("tab ←→", "tabs"), ("esc", "close")]
+                &[("type", "filter"), ("↑↓", "move"), ("enter", "open"), ("←→", "tabs"), ("esc tab", "close")]
             }
             Tab::Tokens => {
                 self.draw_tokens(f, body);
-                &[("↑↓", "scroll"), ("r", "reload"), ("tab ←→", "tabs"), ("esc", "close")]
+                &[("↑↓", "scroll"), ("r", "reload"), ("←→", "tabs"), ("esc tab", "close")]
             }
             Tab::Agents if self.adding.is_some() => {
                 self.draw_agents(f, body);
@@ -492,7 +493,7 @@ impl Menu {
             }
             Tab::Agents => {
                 self.draw_agents(f, body);
-                &[("↑↓", "move"), ("enter", "run · remove (2×)"), ("tab ←→", "tabs"), ("esc", "close")]
+                &[("↑↓", "move"), ("enter", "run · remove (2×)"), ("←→", "tabs"), ("esc tab", "close")]
             }
         };
         let mut spans = Vec::new();
@@ -691,17 +692,19 @@ mod tests {
     fn tabs_cycle_and_esc_closes() {
         let mut m = menu();
         assert_eq!(m.tab, Tab::Quick);
-        m.key(k(KeyCode::Tab));
+        m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Threads);
-        m.key(k(KeyCode::Tab));
+        m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Tokens);
-        m.key(k(KeyCode::Tab));
+        m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Agents);
-        m.key(k(KeyCode::Tab));
+        m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Quick);
-        m.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        m.key(k(KeyCode::Left));
         assert_eq!(m.tab, Tab::Agents);
         assert_eq!(m.key(k(KeyCode::Esc)), Action::Close);
+        assert_eq!(m.key(k(KeyCode::Tab)), Action::Close);
+        assert_eq!(m.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)), Action::Close);
     }
 
     #[test]
@@ -719,7 +722,7 @@ mod tests {
     #[test]
     fn threads_filter_and_open() {
         let mut m = menu();
-        m.key(k(KeyCode::Tab));
+        m.key(k(KeyCode::Right));
         m.key(k(KeyCode::Down));
         assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "t2"));
         for c in "first".chars() {
@@ -731,7 +734,7 @@ mod tests {
     #[test]
     fn agents_remove_needs_2_enters_and_add_picks_off_thread_agents() {
         let mut m = menu();
-        m.key(k(KeyCode::BackTab));
+        m.key(k(KeyCode::Left));
         assert_eq!(m.tab, Tab::Agents);
         assert_eq!(m.key(k(KeyCode::Enter)), Action::Home(Home::Agents));
         m.key(k(KeyCode::Down));
@@ -750,7 +753,7 @@ mod tests {
     #[test]
     fn start_screen_agents_tab_has_the_edit_button_only() {
         let mut m = Menu::new(Vec::new(), None, Vec::new(), vec![agent("amon")], vec![card("t1", "x")]);
-        m.key(k(KeyCode::BackTab));
+        m.key(k(KeyCode::Left));
         m.key(k(KeyCode::Down));
         assert_eq!(m.key(k(KeyCode::Enter)), Action::Home(Home::Agents));
     }
@@ -760,13 +763,13 @@ mod tests {
     fn live_threads_tab() {
         let cards = nav::load();
         let mut m = Menu::new(Vec::new(), cards.first().map(|c| c.id.clone()), vec!["amon".into()], crate::agents::cached(), cards);
-        m.key(k(KeyCode::Tab));
+        m.key(k(KeyCode::Right));
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 34)).unwrap();
         t.draw(|f| m.render(f, f.area(), f.area())).unwrap();
         let b = t.backend().buffer().clone();
         let s: Vec<String> = (0..34).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect()).collect();
         println!("{}", s.join("\n"));
-        m.key(k(KeyCode::Tab));
+        m.key(k(KeyCode::Right));
         m.detail = Some(crate::cost::detail(m.thread.as_deref()));
         t.draw(|f| m.render(f, f.area(), f.area())).unwrap();
         let b = t.backend().buffer().clone();
@@ -800,13 +803,13 @@ mod render_tests {
         let roster = vec![agent("amon", "claude"), agent("nova", "codex"), agent("lilith", "claude"), agent("regi", "codex")];
         let mut m = Menu::new(Vec::new(), Some("t1".into()), vec!["nova".into(), "amon".into(), "lilith".into()], roster, vec![Card { id: "t1".into(), ..Default::default() }]);
         assert_eq!(m.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)), Action::Home(Home::New));
-        m.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        m.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         let s = screen(&mut m);
         assert!(s.contains("claude · 2") && s.contains("codex · 1") && s.contains("+ add an agent"), "{s}");
         // 0 blank rows between the harness groups: the heading right below the cards above
         let lines: Vec<&str> = s.lines().collect();
         let codex = lines.iter().position(|l| l.contains("codex · 1")).unwrap();
-        assert!(lines[codex - 1].contains('╰'), "{s}");
+        assert!(lines[codex - 1].contains('└'), "{s}");
         // ↓: the cards in grid order (claude: amon, lilith; codex: nova)
         m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));

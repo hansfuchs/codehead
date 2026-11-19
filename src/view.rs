@@ -389,7 +389,7 @@ impl View {
             self.input.set_text(&draft);
             self.prompt_focus = false;
             let on = spots.iter().map(|s| s.label()).collect::<Vec<_>>().join(", ");
-            self.toast(format!("comment on {on} · {} in the batch · C: send", self.changes.comment_count()));
+            self.toast(format!("comment on {on} · {} in the batch · ctrl+enter: send", self.changes.comment_count()));
             return;
         }
         let mut text = self.input.text().trim_end().to_string();
@@ -1349,7 +1349,7 @@ impl View {
         (sprite, color, side, (crate::sprites::W + 2 + text_w + 4) as u16)
     }
 
-    /// Header (hell's): 1 rounded frame over the agents box (the cards) and the tokens box (COST:
+    /// Header (hell's): 1 frame over the agents box (the cards) and the tokens box (COST:
     /// the pane's area, 0 width: 0 tokens box), straight lines between them.
     fn draw_header(&self, f: &mut Frame, area: Rect, cost: Rect) {
         if area.height == 0 {
@@ -1359,7 +1359,7 @@ impl View {
         let token_left = cost.x.saturating_sub(2);
         let fit = if cost.width > 0 { token_left + 1 } else { area.right() }.saturating_sub(area.x);
         let outer = if cost.width == 0 { area } else { Rect { width: cards_w(&cards).min(fit), ..area } };
-        let block = Block::new().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(theme::line());
+        let block = Block::new().borders(Borders::ALL).border_type(BorderType::Plain).border_style(theme::line());
         f.render_widget(block, area);
         if cost.width > 0 {
             let buf = f.buffer_mut();
@@ -1709,7 +1709,7 @@ impl View {
             }
         }
 
-        // the input bubble: rounded, its top border the header's bottom line (├ ┴ ┤)
+        // the input bubble: its top border the header's bottom line (├ ┴ ┤)
         let bubble = Rect { y: bubble_top, height: bubble_bottom + 1 - bubble_top, ..area };
         let edge = Style::default().fg(theme::pal().hover);
         {
@@ -1718,15 +1718,15 @@ impl View {
             for x in left..=right {
                 let top = buf[(x, bubble_top)].symbol().to_string();
                 let sym = match top.as_str() {
-                    _ if x == left => if head_h > 0 { "├" } else { "╭" },
-                    _ if x == right => if head_h > 0 { "┤" } else { "╮" },
-                    "╰" | "╯" | "┴" if head_h > 0 => "┴",
+                    _ if x == left => if head_h > 0 { "├" } else { "┌" },
+                    _ if x == right => if head_h > 0 { "┤" } else { "┐" },
+                    "└" | "┘" | "┴" if head_h > 0 => "┴",
                     _ => "─",
                 };
                 buf[(x, bubble_top)].reset();
                 buf[(x, bubble_top)].set_symbol(sym).set_style(edge);
                 buf[(x, bubble_bottom)].reset();
-                buf[(x, bubble_bottom)].set_symbol(if x == left { "╰" } else if x == right { "╯" } else { "─" }).set_style(edge);
+                buf[(x, bubble_bottom)].set_symbol(if x == left { "└" } else if x == right { "┘" } else { "─" }).set_style(edge);
             }
             for y in in_top..bubble_bottom {
                 buf[(left, y)].set_symbol("│").set_style(edge);
@@ -1848,11 +1848,11 @@ fn effort_label(level: &str) -> String {
 
 /// A stream row's text without the message bar on its left.
 /// The text columns of a stream row (chars, end exclusive): inside its box or right of its bar,
-/// trailing spaces off. None: a border row (`╭─ … ╮`, `╰─ copy ─╯`).
+/// trailing spaces off. None: a border row (`┌─ … ┐`, `└─ copy ─┘`).
 fn content_cols(row: &str) -> Option<(usize, usize)> {
     let chars: Vec<char> = row.chars().collect();
     let t = row.trim_start();
-    if t.starts_with('╭') || t.starts_with('╰') {
+    if t.starts_with('┌') || t.starts_with('└') {
         return None;
     }
     let bar = |c: char| "│┃▌┆".contains(c);
@@ -2333,7 +2333,7 @@ mod pane_tests {
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
         v.changes.set_files(crate::changes::parse("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n x\n-a\n+b\n y\n"));
         let s = screen(&mut v);
-        assert!(s.contains(" 3 medium 0/1 ") && s.contains("╭─ ☐ src/a.rs"), "{s}");
+        assert!(s.contains(" 3 medium 0/1 ") && s.contains("┌─ ☐ src/a.rs"), "{s}");
         // k k k: head → hunk → ` x` → `- a`; space selects 2 lines (the cursor goes down)
         for _ in 0..3 {
             press(&mut v, KeyCode::Char('k'), KeyModifiers::NONE);
