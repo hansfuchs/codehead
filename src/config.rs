@@ -41,6 +41,18 @@ pub struct File {
     /// `[colors]` overrides: color name (theme::NAMES) → `#RRGGBB`.
     pub colors: BTreeMap<String, String>,
     pub aliases: BTreeMap<String, String>,
+    /// `[harness.<name>]`: defaults of a harness's agents (HARNESS_FIELDS) → value.
+    pub harness: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// Fields of a `[harness.<name>]` table: the model, effort (Claude Code), the ACP command,
+/// extra arguments (Claude Code).
+pub const HARNESS_FIELDS: [&str; 4] = ["model", "effort", "command", "args"];
+
+/// Field FIELD of `[harness.NAME]`, read from the file now (a long-lived host sees edits).
+pub fn harness_opt(name: &str, field: &str) -> Option<String> {
+    let f = read_file(&path()).map(|(_, f)| f).unwrap_or_default();
+    f.harness.get(name)?.get(field).cloned().filter(|v| !v.trim().is_empty())
 }
 
 static CFG: OnceLock<RwLock<File>> = OnceLock::new();
@@ -91,6 +103,17 @@ fn parse(text: &str) -> Result<File, String> {
                     f.scheme = Some(v);
                 } else {
                     f.colors.insert(name.clone(), v);
+                }
+            }
+            continue;
+        }
+        if k == "harness" {
+            for (name, t) in v.as_table().ok_or("harness: must be a table")? {
+                for (field, v) in t.as_table().ok_or_else(|| format!("harness.{name}: must be a table"))? {
+                    let key = format!("harness.{name}.{field}");
+                    let v = v.as_str().ok_or_else(|| format!("{key}: must be a string"))?.to_string();
+                    validate(key, &v)?;
+                    f.harness.entry(name.clone()).or_default().insert(field.clone(), v);
                 }
             }
             continue;
@@ -190,6 +213,20 @@ pub fn validate(key: String, v: &str) -> Result<(), String> {
         "keys.command" => command_char(v).map(|_| ()).ok_or_else(|| format!("keys.command: 1 symbol (not a letter, digit, space or @), not {v}")),
         "colors.scheme" if crate::theme::Palette::preset(v).is_none() => {
             Err(format!("colors.scheme: {}, not {v}", crate::theme::PRESETS.iter().map(|p| p.0).collect::<Vec<_>>().join(" or ")))
+        }
+        k if k.starts_with("harness.") => {
+            let mut parts = k.splitn(3, '.').skip(1);
+            let (name, field) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+            if crate::engine::harnesses::get(name).is_none() {
+                return Err(format!("{k}: unknown harness {name}"));
+            }
+            if !HARNESS_FIELDS.contains(&field) {
+                return Err(format!("unknown key {k}"));
+            }
+            if field == "effort" && !v.is_empty() && !["low", "medium", "high", "xhigh", "max"].contains(&v) {
+                return Err(format!("{k}: low, medium, high, xhigh or max, not {v}"));
+            }
+            Ok(())
         }
         k if k.starts_with("colors.") && k != "colors.scheme" => {
             let name = &k["colors.".len()..];
@@ -331,6 +368,36 @@ fn document(base: &str, file: &File) -> Result<String, String> {
             }
         }
     }
+    // [harness.<name>]: 1 sub-table per harness, gone when empty
+    if file.harness.is_empty() {
+        doc.remove("harness");
+    } else {
+        if !doc.contains_key("harness") {
+            let mut t = toml_edit::Table::new();
+            t.set_implicit(true);
+            doc["harness"] = toml_edit::Item::Table(t);
+        }
+        let all = doc["harness"].as_table_mut().ok_or("harness: must be a table")?;
+        let gone: Vec<String> = all.iter().filter(|(k, _)| !file.harness.contains_key(*k)).map(|(k, _)| k.to_string()).collect();
+        for k in gone {
+            all.remove(&k);
+        }
+        for (name, fields) in &file.harness {
+            if !all.contains_key(name) {
+                all.insert(name, toml_edit::Item::Table(toml_edit::Table::new()));
+            }
+            let t = all[name.as_str()].as_table_like_mut().ok_or_else(|| format!("harness.{name}: must be a table"))?;
+            let gone: Vec<String> = t.iter().filter(|(k, _)| !fields.contains_key(*k)).map(|(k, _)| k.to_string()).collect();
+            for k in gone {
+                t.remove(&k);
+            }
+            for (k, v) in fields {
+                if t.get(k).and_then(|x| x.as_str()) != Some(v) {
+                    t.insert(k, toml_edit::Item::Value(toml_edit::Value::from(v.clone())));
+                }
+            }
+        }
+    }
     if !file.aliases.is_empty() || doc.contains_key("aliases") {
         if !doc.contains_key("aliases") {
             doc["aliases"] = toml_edit::Item::Table(toml_edit::Table::new());
@@ -425,6 +492,10 @@ impl File {
             "keys.menu" => self.menu_key.clone(),
             "keys.command" => self.command_key.clone(),
             "colors.scheme" => self.scheme.clone(),
+            k if k.starts_with("harness.") => {
+                let (name, field) = k["harness.".len()..].split_once('.')?;
+                self.harness.get(name)?.get(field).cloned()
+            }
             k => k.strip_prefix("colors.").and_then(|n| self.colors.get(n).cloned()),
         }
     }
@@ -448,6 +519,22 @@ impl File {
             "keys.menu" => self.menu_key = v,
             "keys.command" => self.command_key = v,
             "colors.scheme" => self.scheme = v,
+            k if k.starts_with("harness.") => {
+                let Some((name, field)) = k["harness.".len()..].split_once('.') else { return };
+                match v {
+                    Some(v) => {
+                        self.harness.entry(name.to_string()).or_default().insert(field.to_string(), v);
+                    }
+                    None => {
+                        if let Some(t) = self.harness.get_mut(name) {
+                            t.remove(field);
+                            if t.is_empty() {
+                                self.harness.remove(name);
+                            }
+                        }
+                    }
+                }
+            }
             k => {
                 if let Some(n) = k.strip_prefix("colors.") {
                     match v {

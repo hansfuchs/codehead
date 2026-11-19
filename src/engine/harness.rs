@@ -216,11 +216,16 @@ pub fn args(s: &Spec, servers: serde_json::Map<String, Value>, allow: &[String])
     .map(String::from)
     .to_vec();
     a.extend(allow.iter().cloned());
-    if let Some(m) = s.agent.model.as_deref().filter(|m| !m.is_empty() && *m != "default") {
-        a.extend(["--model".into(), m.into()]);
+    // the agent's own model / effort, else the harness tab's
+    let own = |v: &Option<String>| v.clone().filter(|v| !v.is_empty() && v != "default");
+    if let Some(m) = own(&s.agent.model).or_else(|| crate::config::harness_opt("claude", "model")) {
+        a.extend(["--model".into(), m]);
     }
-    if let Some(e) = s.agent.effort.as_deref().filter(|e| !e.is_empty() && *e != "default") {
-        a.extend(["--effort".into(), e.into()]);
+    if let Some(e) = own(&s.agent.effort).or_else(|| crate::config::harness_opt("claude", "effort")) {
+        a.extend(["--effort".into(), e]);
+    }
+    if let Some(extra) = crate::config::harness_opt("claude", "args") {
+        a.extend(super::harnesses::split(&extra));
     }
     if let Some(r) = s.resume {
         a.extend(["--resume".into(), r.into()]);
@@ -274,7 +279,7 @@ fn spawn_acp(s: &Spec, h: &super::harnesses::Harness, cmd: &[String], tx: Sender
     let setup = super::acp::Setup {
         cwd: s.dir.display().to_string(),
         resume: s.resume.filter(|_| !s.fork).map(String::from),
-        model: s.agent.model.clone().filter(|m| !m.is_empty() && m != "default"),
+        model: s.agent.model.clone().filter(|m| !m.is_empty() && m != "default").or_else(|| crate::config::harness_opt(h.name, "model")),
         mcp: (s.exe.display().to_string(), vec!["mcp".into()], vec![("CODEHEAD_THREAD".into(), s.thread.into()), ("CODEHEAD_AGENT".into(), s.agent.name.clone())]),
         preamble: s.system.to_string(),
         harness: h.name.to_string(),

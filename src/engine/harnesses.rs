@@ -49,11 +49,11 @@ pub fn installed() -> Vec<&'static Harness> {
 }
 
 /// The ACP command of harness H for an agent: the agent's own `command`, else
-/// `$CODEHEAD_ACP_<NAME>`, else the default. None: Claude Code (not ACP).
+/// `$CODEHEAD_ACP_<NAME>`, else `[harness.<name>] command`, else the default. None: Claude Code.
 pub fn acp_command(h: &Harness, own: Option<&str>) -> Option<Vec<String>> {
     let Drive::Acp(default) = h.drive else { return None };
     let env = std::env::var(format!("CODEHEAD_ACP_{}", h.name.to_uppercase())).ok();
-    match own.map(String::from).or(env).filter(|c| !c.trim().is_empty()) {
+    match own.map(String::from).or(env).or_else(|| crate::config::harness_opt(h.name, "command")).filter(|c| !c.trim().is_empty()) {
         Some(c) => Some(split(&c)),
         None => Some(default.iter().map(|s| s.to_string()).collect()),
     }
