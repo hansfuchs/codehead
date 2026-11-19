@@ -629,7 +629,8 @@ fn dots_with(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn(u
             let (mesh, eye, ey) = solid.mesh();
             // offsets in whole dots from the anchor (the pattern's center on the front face)
             let marks: Vec<(i32, i32, u8)> = pat.dots().iter().enumerate().filter(|(k, _)| on(*k)).map(|(_, &(x, y))| ((x * eye.0).round() as i32, (y * eye.1).round() as i32, 2)).collect();
-            draw3d(&mesh, &[], (0.0, ey), &marks, (yaw, pitch, roll), bob)
+            let fit = fit(&mesh, motion, r.yaw);
+            draw3d_in(&mesh, &[], (0.0, ey), &marks, (yaw, pitch, roll), bob, fit)
         }
     }
 }
@@ -725,12 +726,59 @@ pub fn pose(m: Motion, s: usize, t: f32) -> (f32, f32, f32) {
 /// (x, y, value: 1 line, 2 eye), drawn while the front looks at the viewer.
 /// MARKS: dot offsets (x right, y down) from ANCHOR (x, y on the front face), projected as 1 rigid
 /// group: a pose moves them together, 0 rounding per mark.
-pub fn draw3d(mesh: &Mesh, wires: &[(P3, P3)], anchor: (f32, f32), marks: &[(i32, i32, u8)], (yaw, pitch, roll): (f32, f32, f32), bob: f32) -> Vec<u8> {
+pub fn draw3d(mesh: &Mesh, wires: &[(P3, P3)], anchor: (f32, f32), marks: &[(i32, i32, u8)], pose: (f32, f32, f32), bob: f32) -> Vec<u8> {
+    draw3d_in(mesh, wires, anchor, marks, pose, bob, Fit::FREE)
+}
+
+/// Where a solid sits on the 14x16 dots: its scale, the canvas point of its center.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fit {
+    pub scale: f32,
+    pub cx: f32,
+    pub cy: f32,
+}
+
+impl Fit {
+    /// 0 fit: scale 1, the center a little right of and below the middle.
+    pub const FREE: Fit = Fit { scale: 1.0, cx: 6.6, cy: 7.6 };
+}
+
+/// Perspective: a camera 40 dots away. P relative to the canvas center, y up → (x, y) right, down.
+fn persp(p: P3, bob: f32) -> (f32, f32) {
+    let k = 40.0 / (40.0 - p.2);
+    (p.0 * k, -(p.1 + bob) * k)
+}
+
+/// The fit of MESH in MOTION at turn YAW: every vertex over 1 whole motion (pitch, roll, bob,
+/// the blocked shake) inside the canvas, the swept area centered; a smaller scale only when that
+/// area is larger than the canvas. 0 dots cut off at the canvas edge while it floats.
+pub fn fit(mesh: &Mesh, motion: Motion, yaw: f32) -> Fit {
+    let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    let mut take = |yaw: f32, (pitch, roll, bob): (f32, f32, f32)| {
+        for &v in &mesh.verts {
+            let (x, y) = persp(rot(v, yaw, pitch, roll), bob);
+            (x0, x1, y0, y1) = (x0.min(x), x1.max(x), y0.min(y), y1.max(y));
+        }
+    };
+    // 32 s in 1/8 s steps: every motion's period (max. 2π / 0.8 ≈ 7.9 s) several times
+    for i in 0..256 {
+        take(yaw, pose(motion, 0, i as f32 / 8.0));
+    }
+    // blocked: its fixed pose, the shake ±0.1 rad
+    for d in [-0.1, 0.0, 0.1] {
+        take(yaw + d, pose(motion, 3, 0.0));
+    }
+    let (w, h) = ((DW - 1) as f32, (DH - 1) as f32);
+    let scale = (w / (x1 - x0).max(1e-3)).min(h / (y1 - y0).max(1e-3)).min(1.0);
+    Fit { scale, cx: w / 2.0 - (x0 + x1) / 2.0 * scale, cy: h / 2.0 - (y0 + y1) / 2.0 * scale }
+}
+
+/// [`draw3d`] placed by FIT.
+pub fn draw3d_in(mesh: &Mesh, wires: &[(P3, P3)], anchor: (f32, f32), marks: &[(i32, i32, u8)], (yaw, pitch, roll): (f32, f32, f32), bob: f32, fit: Fit) -> Vec<u8> {
     let vr: Vec<P3> = mesh.verts.iter().map(|&p| rot(p, yaw, pitch, roll)).collect();
-    // perspective: a camera 40 dots away
     let proj = |p: P3| -> (f32, f32) {
-        let k = 40.0 / (40.0 - p.2);
-        (6.6 + p.0 * k, 7.6 - (p.1 + bob) * k)
+        let (x, y) = persp(p, bob);
+        (fit.cx + x * fit.scale, fit.cy + y * fit.scale)
     };
     let normal = |f: &[usize]| unit(cross(sub(vr[f[1]], vr[f[0]]), sub(vr[f[2]], vr[f[0]])));
     let norms: Vec<P3> = mesh.faces.iter().map(|f| normal(f)).collect();
@@ -782,6 +830,30 @@ pub fn draw3d(mesh: &Mesh, wires: &[(P3, P3)], anchor: (f32, f32), marks: &[(i32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn floating_solids_stay_inside_the_canvas() {
+        // every solid, every motion, a range of turns: each vertex of each frame on a dot of the canvas
+        for solid in SOLIDS.iter().chain(&NEW_SOLIDS) {
+            let (mesh, _, _) = solid.mesh();
+            for motion in MOTIONS {
+                for yaw in [-0.5f32, -0.2, 0.0, 0.3, 0.6] {
+                    let f = fit(&mesh, motion, yaw);
+                    assert!(f.scale > 0.75, "{solid:?} {motion:?}: scale {}", f.scale);
+                    for s in 0..4 {
+                        for i in 0..400 {
+                            let (pitch, roll, bob) = pose(motion, s, i as f32 * 0.05);
+                            for &v in &mesh.verts {
+                                let (x, y) = persp(rot(v, yaw, pitch, roll), bob);
+                                let (x, y) = (f.cx + x * f.scale, f.cy + y * f.scale);
+                                assert!((-0.5..DW as f32 - 0.5).contains(&x) && (-0.5..DH as f32 - 0.5).contains(&y), "{solid:?} {motion:?} yaw {yaw} s {s}: ({x}, {y})");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn working_eyes_blink_one_by_one() {
