@@ -154,6 +154,20 @@ fn list_item(line: &[char]) -> Option<(usize, usize, String)> {
     None
 }
 
+/// TEXT without its trailing empty Markdown list items (a marker an Enter left, e.g. `7.`), only
+/// after other lines, trimmed at the end. A sent message: 0 stray marker the view hides.
+pub fn without_empty_items(text: &str) -> &str {
+    let mut t = text.trim_end();
+    while let Some(i) = t.rfind('\n') {
+        let line: Vec<char> = t[i + 1..].chars().chain([' ']).collect();
+        match list_item(&line) {
+            Some((indent, w, _)) if line.len() == indent + w => t = t[..i].trim_end(),
+            _ => break,
+        }
+    }
+    t
+}
+
 /// $CODEHEAD_KEYLOG=<file>: every key of every input goes there (ms since the 1st key, code, modifiers).
 /// For a report on keys the terminal sends in a way codehead does not expect.
 fn keylog(k: &KeyEvent, now: Instant) {
@@ -1271,6 +1285,18 @@ mod tests {
         t.key_at(k(KeyCode::Char('.')), ms(0));
         t.key_at(k(KeyCode::Char(' ')), ms(1));
         assert_eq!(t.text(), "end. ");
+    }
+
+    #[test]
+    fn sent_text_drops_trailing_empty_list_items() {
+        // the owner's message: a stray `7. ` line an Enter left at the end
+        assert_eq!(without_empty_items("points:\n7. set auto-allow\n8. yes, v1\n7. "), "points:\n7. set auto-allow\n8. yes, v1");
+        assert_eq!(without_empty_items("a\n- x\n- \n  - [ ] \n\n"), "a\n- x");
+        assert_eq!(without_empty_items("a\n3)"), "a");
+        // items with text, plain lines, a lone marker as the whole message: kept
+        assert_eq!(without_empty_items("a\n1. b  "), "a\n1. b");
+        assert_eq!(without_empty_items("a\nv1."), "a\nv1.");
+        assert_eq!(without_empty_items("-"), "-");
     }
 
     #[test]

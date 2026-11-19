@@ -1567,7 +1567,8 @@ impl App {
     /// prompt. 0 title: the prompt comes first (its 1st line: the title), 0 line twice.
     pub fn message(&self) -> String {
         let derived = self.title.text().trim().is_empty();
-        let prompt = self.prompt.text();
+        let text = self.prompt.text();
+        let prompt = crate::textarea::without_empty_items(&text);
         let mut parts = Vec::new();
         if derived {
             parts.push(crate::config::expand_aliases(prompt.trim()));

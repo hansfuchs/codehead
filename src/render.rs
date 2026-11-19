@@ -366,7 +366,14 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
                 let first = [m, vec![Span::styled(mark, theme::accent())]].concat();
                 block = Some(Block { pieces: Vec::new(), first, rest });
             }
-            Event::End(TagEnd::Item) => flush(&mut block, &mut out),
+            // an empty item: its marker alone (the view shows what was sent)
+            Event::End(TagEnd::Item) => match block.take() {
+                Some(b) if b.pieces.is_empty() => out.push(Row::plain(Line::from(b.first))),
+                b => {
+                    block = b;
+                    flush(&mut block, &mut out);
+                }
+            },
             Event::TaskListMarker(done) => {
                 if let Some(b) = block.as_mut() {
                     b.pieces.push(Piece { text: if done { "☑ ".into() } else { "☐ ".into() }, style: theme::muted(), ..Default::default() });
@@ -692,6 +699,12 @@ mod tests {
 
     fn text(rows: &[Row]) -> Vec<String> {
         rows.iter().map(|r| r.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>().trim_end().to_string()).collect()
+    }
+
+    #[test]
+    fn empty_list_items_show_their_marker() {
+        let t = text(&markdown("1. a\n2. \n3. c", 40, &[]));
+        assert_eq!(t.iter().filter(|l| !l.is_empty()).cloned().collect::<Vec<_>>(), ["1. a", "2.", "3. c"], "{t:#?}");
     }
 
     #[test]

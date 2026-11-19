@@ -392,7 +392,7 @@ impl View {
             self.toast(format!("comment on {on} · {} in the batch · ctrl+enter: send", self.changes.comment_count()));
             return;
         }
-        let mut text = self.input.text().trim_end().to_string();
+        let mut text = crate::textarea::without_empty_items(&self.input.text()).to_string();
         if text.trim().is_empty() {
             return;
         }
