@@ -36,6 +36,9 @@ pub struct Setup {
     pub mcp: (String, Vec<String>, Vec<(String, String)>),
     /// Sent before the 1st prompt of a new session: who the agent is, the thread.
     pub preamble: String,
+    /// The harness name (status rows) and the agent's codehead MCP servers.
+    pub harness: String,
+    pub servers: Vec<super::servers::Server>,
 }
 
 struct State {
@@ -48,6 +51,8 @@ struct State {
     /// Loads replay the history as updates: 0 events from them.
     loading: bool,
     can_load: bool,
+    /// `mcpServers` of `session/new` / `session/load`, set on the `initialize` reply.
+    mcp: Value,
     busy: bool,
     queue: VecDeque<String>,
     /// The preamble goes before the 1st prompt (a new session only).
@@ -88,9 +93,13 @@ fn session_model(r: &Value) -> (String, bool) {
     }
 }
 
-fn mcp_servers(s: &Setup) -> Value {
+/// `mcpServers`: codehead's own, then the agent's servers the harness can run (HTTP, SSE: its
+/// `mcpCapabilities`); the rest: (server, why).
+fn mcp_servers(s: &Setup, http: bool, sse: bool) -> (Value, Vec<(String, String)>) {
     let (cmd, args, env) = &s.mcp;
-    json!([{"name": "codehead", "command": cmd, "args": args, "env": env.iter().map(|(k, v)| json!({"name": k, "value": v})).collect::<Vec<_>>()}])
+    let own = json!({"name": "codehead", "command": cmd, "args": args, "env": env.iter().map(|(k, v)| json!({"name": k, "value": v})).collect::<Vec<_>>()});
+    let (more, errors) = super::servers::acp_config(&s.servers, http, sse);
+    (Value::Array(std::iter::once(own).chain(more).collect()), errors)
 }
 
 impl State {
@@ -149,8 +158,11 @@ impl State {
                     return Err(format!("initialize: {e}"));
                 }
                 self.can_load = r["agentCapabilities"]["loadSession"].as_bool().unwrap_or(false);
+                let caps = &r["agentCapabilities"]["mcpCapabilities"];
+                let (mcp, errors) = mcp_servers(&self.setup, caps["http"].as_bool().unwrap_or(false), caps["sse"].as_bool().unwrap_or(false));
+                super::harness::report_mcp_errors(&self.setup.harness, &errors, &self.tx, &self.name);
+                self.mcp = mcp.clone();
                 let cwd = self.setup.cwd.clone();
-                let mcp = mcp_servers(&self.setup);
                 match self.setup.resume.clone().filter(|_| self.can_load) {
                     Some(sid) => {
                         self.loading = true;
@@ -169,7 +181,7 @@ impl State {
                 } else if why == Pending::Load {
                     // the old session is gone: a new one
                     let cwd = self.setup.cwd.clone();
-                    let mcp = mcp_servers(&self.setup);
+                    let mcp = self.mcp.clone();
                     return self.request("session/new", json!({"cwd": cwd, "mcpServers": mcp}), Pending::New);
                 } else {
                     if let Some(e) = err {
@@ -382,6 +394,7 @@ pub fn start(stdin: ChildStdin, stdout: std::process::ChildStdout, stderr: Arc<M
         session: None,
         loading: false,
         can_load: false,
+        mcp: Value::Null,
         busy: false,
         queue: VecDeque::new(),
         preamble,
@@ -528,7 +541,7 @@ mod tests {
     fn thought_chunks_become_1_thought_before_the_next_text_or_tool() {
         let (tx, rx) = std::sync::mpsc::channel();
         let (stdin, _lines) = std::sync::mpsc::channel::<String>();
-        let setup = Setup { cwd: "/".into(), resume: None, model: None, mcp: (String::new(), Vec::new(), Vec::new()), preamble: String::new() };
+        let setup = Setup { cwd: "/".into(), resume: None, model: None, mcp: (String::new(), Vec::new(), Vec::new()), preamble: String::new(), harness: "x".into(), servers: Vec::new() };
         let mut s = State {
             stdin,
             next: 0,
@@ -536,6 +549,7 @@ mod tests {
             session: None,
             loading: false,
             can_load: false,
+            mcp: Value::Null,
             busy: true,
             queue: VecDeque::new(),
             preamble: None,

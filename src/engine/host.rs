@@ -56,6 +56,9 @@ struct Live {
     busy: bool,
     /// The owner interrupted the running turn: its end is no error.
     interrupted: bool,
+    /// The agent's MCP servers at the session's start (`servers::stamp`): another stamp at the
+    /// next message → a new process (resumed) with the new set.
+    mcp: String,
 }
 
 struct Host {
@@ -131,16 +134,23 @@ impl Host {
             t = store::update(&self.id, |t| t.agents.push(agent.to_string()))?;
             self.log(Some(agent), Kind::Join);
         }
-        if self.sessions.contains_key(agent) {
-            return Ok(());
-        }
         let a = roster::get(agent).ok_or_else(|| format!("no agent {agent}"))?;
+        let mcp = super::servers::stamp(&a);
+        if let Some(l) = self.sessions.get(agent) {
+            // the MCP servers changed: an idle session restarts (resumed: the conversation stays)
+            if l.busy || l.mcp == mcp {
+                return Ok(());
+            }
+            if let Some(mut l) = self.sessions.remove(agent) {
+                l.session.kill();
+            }
+        }
         let roster = roster::active();
         let system = harness::system_prompt(&a, &t, &roster);
         let dir = t.work_dir();
         let spec = harness::Spec { agent: &a, thread: &self.id, dir: &dir, resume: t.sessions.get(agent).map(String::as_str), fork: t.fork.iter().any(|a| a == agent), system: &system, exe: &self.exe };
         let session = harness::spawn(&spec, self.harness_tx.clone())?;
-        self.sessions.insert(agent.to_string(), Live { session, busy: false, interrupted: false });
+        self.sessions.insert(agent.to_string(), Live { session, busy: false, interrupted: false, mcp });
         Ok(())
     }
 
@@ -430,12 +440,16 @@ impl Host {
                     super::write_atomic(&path, v.to_string().as_bytes())
                 });
             }
+            Out::Mcp(harness, rows) => super::servers::record(&harness, rows),
             Out::Control(id, req) => {
-                // ACP agents: the mode decides what runs without the owner
+                // ACP agents: the mode decides what runs without the owner, auto-allowed MCP
+                // servers run always
                 if let Some(l) = self.sessions.get_mut(&agent)
                     && l.session.host_allows()
                     && let Some(a) = roster::get(&agent)
-                    && super::guard::auto_allow(&a.mode, req["tool_name"].as_str().unwrap_or_default(), req["input"]["_kind"].as_str().unwrap_or_default(), &req["input"])
+                    && let tool = req["tool_name"].as_str().unwrap_or_default()
+                    && (super::guard::auto_allow(&a.mode, tool, req["input"]["_kind"].as_str().unwrap_or_default(), &req["input"])
+                        || super::servers::acp_auto_allowed(tool, &super::servers::for_agent(&a)))
                 {
                     if let Err(e) = l.session.allow(&id, &json!({})) {
                         self.log(Some(&agent), Kind::Error { message: format!("auto-allow: {e}") });

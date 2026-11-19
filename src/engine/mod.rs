@@ -7,6 +7,7 @@
 //! - `host`: `codehead host <thread>`, the detached process that owns a thread's sessions.
 //! - `client`: the UI side of the host socket.
 //! - `mcp`: `codehead mcp`, the tools agents use to message each other.
+//! - `servers`: the MCP servers codehead owns and connects to every harness.
 
 pub mod acp;
 pub mod client;
@@ -17,6 +18,7 @@ pub mod harnesses;
 pub mod host;
 pub mod mcp;
 pub mod roster;
+pub mod servers;
 pub mod store;
 pub mod subagents;
 

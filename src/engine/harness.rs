@@ -27,6 +27,18 @@ pub enum Out {
     Delta(String),
     /// The process ended: its last stderr lines.
     Exit(String),
+    /// MCP servers as a harness saw them (harness, rows): for the settings' MCP tab.
+    Mcp(String, Vec<(String, super::servers::Status)>),
+}
+
+/// codehead servers the harness did not get (ERRORS: server, why) → status rows, via TX.
+pub(super) fn report_mcp_errors(harness: &str, errors: &[(String, String)], tx: &Sender<(String, Out)>, agent: &str) {
+    if errors.is_empty() {
+        return;
+    }
+    let at = super::now_ms();
+    let rows = errors.iter().map(|(n, e)| (n.clone(), super::servers::Status { state: "failed".into(), error: e.clone(), source: "codehead".into(), at, ..Default::default() })).collect();
+    let _ = tx.send((agent.to_string(), Out::Mcp(harness.to_string(), rows)));
 }
 
 pub struct Spec<'a> {
@@ -163,13 +175,21 @@ fn harness_command(bin: &str, s: &Spec) -> Command {
 /// Output of a tool result kept in the log.
 const OUTPUT_CAP: usize = 4096;
 
-pub fn args(s: &Spec) -> Vec<String> {
-    let mcp = json!({"mcpServers": {"codehead": {
-        "type": "stdio",
-        "command": s.exe.display().to_string(),
-        "args": ["mcp"],
-        "env": {"CODEHEAD_THREAD": s.thread, "CODEHEAD_AGENT": s.agent.name},
-    }}});
+/// Claude Code's arguments. SERVERS: the agent's codehead MCP servers (`servers::claude_config`),
+/// ALLOW: their tool prefixes that run without an ask.
+pub fn args(s: &Spec, servers: serde_json::Map<String, Value>, allow: &[String]) -> Vec<String> {
+    let mut all = serde_json::Map::new();
+    all.insert(
+        "codehead".into(),
+        json!({
+            "type": "stdio",
+            "command": s.exe.display().to_string(),
+            "args": ["mcp"],
+            "env": {"CODEHEAD_THREAD": s.thread, "CODEHEAD_AGENT": s.agent.name},
+        }),
+    );
+    all.extend(servers.into_iter().filter(|(k, _)| k != "codehead"));
+    let mcp = json!({ "mcpServers": all });
     let mut a: Vec<String> = [
         "-p",
         "--input-format",
@@ -195,6 +215,7 @@ pub fn args(s: &Spec) -> Vec<String> {
     ]
     .map(String::from)
     .to_vec();
+    a.extend(allow.iter().cloned());
     if let Some(m) = s.agent.model.as_deref().filter(|m| !m.is_empty() && *m != "default") {
         a.extend(["--model".into(), m.into()]);
     }
@@ -256,14 +277,22 @@ fn spawn_acp(s: &Spec, h: &super::harnesses::Harness, cmd: &[String], tx: Sender
         model: s.agent.model.clone().filter(|m| !m.is_empty() && m != "default"),
         mcp: (s.exe.display().to_string(), vec!["mcp".into()], vec![("CODEHEAD_THREAD".into(), s.thread.into()), ("CODEHEAD_AGENT".into(), s.agent.name.clone())]),
         preamble: s.system.to_string(),
+        harness: h.name.to_string(),
+        servers: super::servers::for_agent(s.agent),
     };
     let conn = super::acp::start(stdin, stdout, tail, setup, s.agent.name.clone(), tx);
     Ok(Session { child, driver: Box::new(conn) })
 }
 
 fn spawn_claude(s: &Spec, tx: Sender<(String, Out)>) -> Result<Session, String> {
+    let servers = super::servers::for_agent(s.agent);
+    let allow: Vec<String> = servers.iter().filter(|v| v.auto_allow).map(|v| format!("mcp__{}", v.name)).collect();
+    let (entries, env, errors) = super::servers::claude_config(&servers);
+    report_mcp_errors("claude", &errors, &tx, &s.agent.name);
     let mut child = harness_command("claude", s)
-        .args(args(s))
+        .args(args(s, entries, &allow))
+        // secrets of the MCP servers: `${CODEHEAD_MCP_<n>}` in the config, the values here
+        .envs(env)
         // Claude Code leaves the Artifact tools out of SDK sessions without this
         .env("CLAUDE_CODE_ARTIFACT", std::env::var("CLAUDE_CODE_ARTIFACT").unwrap_or_else(|_| "1".into()))
         .spawn()
@@ -378,6 +407,10 @@ impl Parser {
                     session: v["session_id"].as_str().unwrap_or_default().into(),
                     model: self.model.clone(),
                 }));
+                let mcp = super::servers::from_init(v);
+                if !mcp.is_empty() {
+                    out.push(Out::Mcp("claude".into(), mcp));
+                }
             }
             "assistant" if v["parent_tool_use_id"].is_null() => {
                 let u = &v["message"]["usage"];

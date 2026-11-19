@@ -52,6 +52,9 @@ pub struct Agent {
     /// Skills the agent loads (names; empty: all of its harness).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
+    /// codehead MCP servers the agent gets (names in `mcp.toml`; empty: 0).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp: Vec<String>,
     /// Archived agents keep their file (old threads still show them) but leave every list.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
