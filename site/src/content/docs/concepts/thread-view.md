@@ -16,14 +16,14 @@ The thread view has these parts, top to bottom:
   **working…**, **monitoring…** or **waits on you**) and, on screens 70 columns and wider,
   the tokens box: tokens, cost and context per agent, the last hour as a sparkline, and your
   plan's usage windows.
-- **Prompt**: a rounded bubble below the header. `enter` adds a line, `ctrl+enter` sends
+- **Prompt**: a bubble below the header. `enter` adds a line, `ctrl+enter` sends
   (`⌘enter`, `alt+enter` too; `ctrl+s` never sends). `↑` on the 1st row of an empty prompt walks your
   sent messages. The row below names who gets the message (`→ ada`: the lead, or the
   `@named` agents).
 
 The `messages` setting picks how messages look:
 
-- `bubbles` (default): an agent's turn in a rounded box, its name and time in the top border,
+- `bubbles` (default): an agent's turn in a box, its name and time in the top border,
   a wave there while it works. Your messages sit in a bubble on the right, their time in its
   top border, attached files below it.
 - `lines`: a name badge, then the agent's text behind a bar in its color. Your messages on the

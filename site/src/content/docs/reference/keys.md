@@ -10,7 +10,7 @@ description: Every key, per screen.
 
 | Key | Action |
 | --- | --- |
-| `F2` | menu: quick commands (`n`: new thread), threads, tokens, agents |
+| `F2` | menu: quick commands (`n`: new thread), threads, tokens, agents (`←→`: tabs, `esc` / `tab`: close) |
 | `tab` / `shift+tab` | next / previous field (a question: its choices ↔ the prompt) |
 | `alt+1`-`alt+4` | start screen: new, threads, agents, settings tab (macOS: Option as Meta) |
 | `ctrl+←` `ctrl+→`, `alt+←` `alt+→` | word jumps in a text field |
@@ -87,14 +87,14 @@ content, over every tab, best hit first).
 | `R` | classify again (setting `classify`) |
 | `c` | comment on the selected lines (else the line under the cursor): the prompt takes it, `⌘/ctrl+⏎` adds it to the batch, `esc` cancels (the draft comes back) |
 | `x` | delete the comment (or dismiss the finding) under the cursor |
-| `C` | send all comments as 1 message to the lead (`file:line`: text each) |
+| `ctrl+enter` (`⌘enter`, `alt+enter`) | send all comments as 1 message to the lead (`file:line`: text each) |
 | `a` / `u` | stage / unstage: on a box head the file, on a diff row its hunk (box head: `●` staged, `◐` a part) |
 | `m` | commit message in the prompt: `ctrl+g` drafts it from the staged diff (setting `rank` model), `⌘/ctrl+⏎` commits, `esc` cancels |
 | `P` | push (`git push -u origin HEAD`) |
 | `U` | fetch + rebase on the base (`origin/<default>`) |
 | `A` / `K` / `X` | a rebase stopped on conflicts: the agent resolves / continue / abort |
 | `V` | the reviewer (setting `review`) reads the diff: findings show under their line (`⚠ severity · title`) |
-| `y` | on a finding: into the comment batch (`C` sends it) |
+| `y` | on a finding: into the comment batch (`ctrl+enter` sends it) |
 | `O` | ship: push + open the pull request (`gh pr create --fill`); the summary row shows `PR #n` and its checks `✓ ✗ ●` (read every 30 s) |
 | `F` | CI failed: the latest failed run's log (last 150 lines) goes to the agents of your last message |
 | `M` | merge the PR when its checks pass (`gh pr merge --squash --auto`) |
