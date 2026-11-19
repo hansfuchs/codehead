@@ -312,6 +312,11 @@ impl TextArea {
         self.area
     }
 
+    /// The cursor: (row, column in chars).
+    pub fn cursor(&self) -> (usize, usize) {
+        (self.cur.row, self.cur.col)
+    }
+
     pub fn hide(&mut self) {
         self.area = Rect::default();
     }

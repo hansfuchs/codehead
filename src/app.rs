@@ -1169,6 +1169,10 @@ impl App {
     /// Background reads in. True: something on screen may change (a redraw is due).
     pub fn tick(&mut self) -> bool {
         let mut dirty = self.previews.poll();
+        // the settings' MCP tab: harness lists, probes, sign-ins in the background
+        if let Some(s) = self.settings.as_mut() {
+            dirty |= s.poll();
+        }
         let keep = self.current_wt().map(|w| w.key()).or_else(|| self.current_session().map(|s| s.key()));
         let mut changed = false;
         for (_, rows) in self.thread_reads.poll() {
@@ -4180,7 +4184,7 @@ impl App {
             Screen::Pick if self.tab == Tab::Notes && self.cfg.copy_mode => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "copy"), ("esc", "quit")],
             Screen::Pick if self.tab == Tab::Notes => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "confirm"), ("esc", "new"), ("tab", "back")],
             Screen::Pick if self.tab == Tab::Threads => &[("↑↓", "move"), ("f", "filter"), ("space", "select"), ("c", "context"), ("enter", "open"), ("F1-F4", "tabs")],
-            Screen::Pick if self.tab == Tab::Settings => &[("↑↓", "move"), ("enter", "edit / done"), ("ctrl+d", "default"), ("d", "delete alias"), ("ctrl+n", "add alias"), ("tab", "next field"), ("esc", "undo edit"), ("F1-F4", "tabs")],
+            Screen::Pick if self.tab == Tab::Settings => self.settings.as_ref().map_or(&[], |s| s.help()),
             Screen::Pick if self.afilter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to cards")],
             Screen::Pick => &[("↑↓←→", "move"), ("f", "filter"), ("enter", "edit"), ("F1-F4", "tabs")],
         };
@@ -5477,6 +5481,42 @@ mod render_tests {
     }
 
     #[test]
+    fn settings_sub_tabs_reach_the_mcp_servers_and_its_add_form() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let s = crate::engine::servers::Server { name: "docs-x".into(), kind: "stdio".into(), command: Some("npx".into()), args: vec!["-y".into(), "docs".into()], auto_allow: true, ..Default::default() };
+        crate::engine::servers::save(&[s]).unwrap();
+        let mut a = app();
+        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        // ↑ from the 1st field: the sub-tab bar; → →: mcp servers
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        assert!(a.settings.as_ref().unwrap().bar && !a.tabs_focus);
+        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        let screen = dump(&mut a, 100, 30);
+        assert!(screen.contains("harnesses") && screen.contains("model"), "{screen}");
+        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        let screen = dump(&mut a, 100, 30);
+        assert!(screen.contains("codehead · every harness") && screen.contains("docs-x") && screen.contains("0 agents · auto-allow"), "{screen}");
+        assert!(screen.contains("a add"), "help bar: {screen}");
+        // a: the add form; a typed name; esc: gone, 0 write
+        key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
+        a.paste("new-one");
+        let screen = dump(&mut a, 100, 30);
+        assert!(screen.contains("add MCP server") && screen.contains("new-one"), "{screen}");
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        let screen = dump(&mut a, 100, 30);
+        assert!(!screen.contains("add MCP server"), "{screen}");
+        assert_eq!(crate::engine::servers::load().unwrap().len(), 1);
+        // the filter: / then text, a miss shows 0 rows
+        key(&mut a, KeyCode::Char('/'), KeyModifiers::NONE);
+        a.paste("zzqq");
+        let screen = dump(&mut a, 100, 30);
+        assert!(screen.contains("0 servers match the filter"), "{screen}");
+        crate::engine::servers::save(&[]).unwrap();
+    }
+
+    #[test]
     fn settings_tab_keeps_form_edits_and_task_text() {
         let mut a = app();
         a.title.set_text("task title");
@@ -5489,7 +5529,7 @@ mod render_tests {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         a.paste("~/notes/platform/");
         let screen = dump(&mut a, 60, 18);
-        assert!(screen.lines().next().unwrap().contains("settings"), "{screen}");
+        assert!(screen.lines().next().unwrap().contains("settings") && screen.contains("mcp servers"), "{screen}");
         assert!(screen.contains("not applied"), "{screen}");
         assert!(screen.contains("~/notes/platform/"), "{screen}");
         // alt+1 / alt+4: away and back, the form edits and the task text stay
@@ -5513,25 +5553,25 @@ mod render_tests {
         assert!(a.tab == Tab::Settings && !a.tabs_focus);
         // a plain field: typed, esc → the text at entry, 0 write
         let s = a.settings.as_mut().unwrap();
-        let start = s.fields[0].text();
+        let start = s.form.fields[0].text();
         a.paste("/tmp/elsewhere/");
-        assert_ne!(a.settings.as_ref().unwrap().fields[0].text(), start);
+        assert_ne!(a.settings.as_ref().unwrap().form.fields[0].text(), start);
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(a.settings.as_ref().unwrap().fields[0].text(), start);
+        assert_eq!(a.settings.as_ref().unwrap().form.fields[0].text(), start);
         assert_eq!(std::fs::read_to_string(&a.settings_path).unwrap_or_default(), before);
         // an alias: unlocked, typed, esc → 0 alias, locked, 0 write
         key(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
         a.paste("project:x");
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         let s = a.settings.as_ref().unwrap();
-        assert!(s.editing.is_none() && s.fields[crate::settings::PLAIN].text().is_empty());
+        assert!(s.form.editing.is_none() && s.form.fields[crate::settings::PLAIN].text().is_empty());
         assert_eq!(std::fs::read_to_string(&a.settings_path).unwrap_or_default(), before);
         // tab / shift+tab: the next / previous field, settings stays
-        let at = a.settings.as_ref().unwrap().focus;
+        let at = a.settings.as_ref().unwrap().form.focus;
         key(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
-        assert_eq!(a.settings.as_ref().unwrap().focus, at - 1);
+        assert_eq!(a.settings.as_ref().unwrap().form.focus, at - 1);
         key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(a.settings.as_ref().unwrap().focus, at);
+        assert_eq!(a.settings.as_ref().unwrap().form.focus, at);
         assert!(a.tab == Tab::Settings);
     }
 

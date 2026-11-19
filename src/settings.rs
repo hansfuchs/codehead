@@ -16,7 +16,8 @@ use crate::textarea::TextArea;
 use crate::{config, theme};
 
 /// A plain field: its config key, label, hint, env var that overrides it ("": none).
-struct Spec {
+#[derive(Clone, Copy)]
+pub(crate) struct Spec {
     key: &'static str,
     label: &'static str,
     help: &'static str,
@@ -28,13 +29,12 @@ const fn spec(key: &'static str, label: &'static str, help: &'static str, env: &
 }
 
 /// The plain fields, then the alias boxes.
-const SPECS: [Spec; 27] = [
+const SPECS: [Spec; 26] = [
     spec("notes", "notes", "directory of Markdown notes, ~ expands to home", "CODEHEAD_NOTES"),
     spec("styles", "styles", "directory of agent output styles", "CODEHEAD_STYLES"),
     spec("home", "home repo", "git repo with AGENTS.md (notes, other repos): every agent reads it", "CODEHEAD_HOME_REPO"),
     spec("agent", "agent", "agent picked for a new thread", "CODEHEAD_AGENT"),
     spec("prefix", "prefix", "prefix of new branches and worktrees", "CODEHEAD_PREFIX"),
-    spec("models", "models", "Claude models of the agent form, comma-separated", "CODEHEAD_MODELS"),
     spec("ports", "ports", "dev servers: auto (portless when installed), portless, or block ($CODEHEAD_PORT only)", "CODEHEAD_PORTS"),
     spec("messages", "messages", "bubbles (boxes, yours on the right) or lines (name, bar)", "CODEHEAD_MESSAGES"),
     spec("thoughts", "thoughts", "hidden, folded (a click opens) or open · ctrl+t in a thread", "CODEHEAD_THOUGHTS"),
@@ -57,14 +57,15 @@ const SPECS: [Spec; 27] = [
     spec("colors.danger", "danger", "errors", ""),
     spec("colors.warn", "warn", "blocked, questions", ""),
 ];
+#[cfg(test)]
 pub(crate) const PLAIN: usize = SPECS.len();
 /// Groups: the 1st field, the title, what the group sets.
 const SECTIONS: [(usize, &str, &str); 5] = [
     (0, "paths", "where codehead reads notes, output styles and the home repo"),
     (3, "new threads", "defaults of the new tab and the agent form"),
-    (7, "thread view", "how messages and thoughts look, your edits, the review order, the IDE"),
-    (14, "keys", "keys of every screen"),
-    (16, "colors", "a preset; a set field below overrides 1 of its colors"),
+    (6, "thread view", "how messages and thoughts look, your edits, the review order, the IDE"),
+    (13, "keys", "keys of every screen"),
+    (15, "colors", "a preset; a set field below overrides 1 of its colors"),
 ];
 /// The alias group, after the plain fields.
 const ALIASES: (&str, &str) = ("path aliases", "short names for directories: name/ → target/ · enter: edit / done · d: delete · ctrl+n: add");
@@ -98,8 +99,16 @@ enum Hit {
     Add,
 }
 
-pub struct Settings {
+/// A form of codehead.toml fields: the codehead tab (plain fields + path aliases), the harnesses tab.
+pub struct Form {
     path: PathBuf,
+    specs: Vec<Spec>,
+    /// Groups: the 1st field, the title, what the group sets.
+    sections: Vec<(usize, &'static str, &'static str)>,
+    /// The path alias boxes after the plain fields.
+    aliases_on: bool,
+    /// Fields 0..N: directory paths (path suggestions).
+    path_fields: usize,
     base: Option<String>,
     saved: config::File,
     /// 6 plain fields, then 2 per alias (name, target).
@@ -122,10 +131,19 @@ pub struct Settings {
     pair_entry: Option<(usize, String, String)>,
 }
 
-impl Settings {
+impl Form {
+    /// The codehead tab.
     pub fn new(path: PathBuf) -> Self {
+        Self::with(path, SPECS.to_vec(), SECTIONS.to_vec(), true, 2)
+    }
+
+    pub(crate) fn with(path: PathBuf, specs: Vec<Spec>, sections: Vec<(usize, &'static str, &'static str)>, aliases_on: bool, path_fields: usize) -> Self {
         let mut form = Self {
             path,
+            specs,
+            sections,
+            aliases_on,
+            path_fields,
             base: None,
             saved: config::File::default(),
             fields: Vec::new(),
@@ -142,7 +160,7 @@ impl Settings {
             pair_entry: None,
         };
         if form.reload().is_none() {
-            form.fields = (0..PLAIN).map(|_| Self::input("", "use default")).collect();
+            form.fields = (0..form.plain()).map(|_| Self::input("", "use default")).collect();
         }
         form
     }
@@ -154,36 +172,43 @@ impl Settings {
         input
     }
 
+    /// The number of plain fields.
+    pub(crate) fn plain(&self) -> usize {
+        self.specs.len()
+    }
+
     fn aliases(&self) -> usize {
-        self.fields.len().saturating_sub(PLAIN) / 2
+        self.fields.len().saturating_sub(self.plain()) / 2
     }
 
     /// 1st navigation item of each section: general, the SECTIONS, the aliases.
     fn starts(&self) -> Vec<usize> {
-        SECTIONS.iter().map(|s| s.0).chain([PLAIN]).collect()
+        self.sections.iter().map(|s| s.0).chain(self.aliases_on.then(|| self.plain())).collect()
     }
 
-    /// The add row: the last navigation item.
+    /// The last navigation item: the add row (0 aliases: the last field).
     fn add_item(&self) -> usize {
-        PLAIN + self.aliases()
+        if self.aliases_on { self.plain() + self.aliases() } else { self.plain().saturating_sub(1) }
     }
 
     /// The text field keys go to: a plain field, or a field of the open alias box.
     fn field(&self) -> Option<usize> {
-        if self.focus < PLAIN { Some(self.focus) } else { self.editing }
+        if self.focus < self.plain() { Some(self.focus) } else { self.editing }
     }
 
     /// The alias box of field I (≥ 6).
-    fn alias_of(i: usize) -> usize {
-        (i - PLAIN) / 2
+    fn alias_of(&self, i: usize) -> usize {
+        (i - self.plain()) / 2
     }
 
     fn reload(&mut self) -> Option<config::File> {
         match config::read_file(&self.path) {
             Ok((text, file)) => {
-                self.fields = SPECS.iter().map(|sp| Self::input(&file.get(sp.key).unwrap_or_default(), &format!("default: {}", Self::default_of(&file, sp.key)))).collect();
-                for (name, path) in &file.aliases {
-                    self.push_alias(name, path);
+                self.fields = self.specs.iter().map(|sp| Self::input(&file.get(sp.key).unwrap_or_default(), &format!("default: {}", Self::default_of(&file, sp.key)))).collect();
+                if self.aliases_on {
+                    for (name, path) in &file.aliases {
+                        self.push_alias(name, path);
+                    }
                 }
                 self.base = Some(text);
                 self.path_focus = None;
@@ -213,18 +238,21 @@ impl Settings {
         if key == "classify" {
             return "the default agent".into();
         }
+        if let Some(d) = crate::harnesstab::default_of(key) {
+            return d;
+        }
         config::defaults().get(key).unwrap_or_else(|| "amon, else first agent".into())
     }
 
     /// Plain field I back to its default: blank, applied.
     fn reset(&mut self, i: usize) {
-        if i >= PLAIN || self.fields[i].text().is_empty() {
+        if i >= self.plain() || self.fields[i].text().is_empty() {
             return;
         }
         self.fields[i].set_text("");
         self.commit();
         if !self.error {
-            self.status = format!("{}: default", SPECS[i].key);
+            self.status = format!("{}: default", self.specs[i].key);
         }
     }
 
@@ -234,7 +262,7 @@ impl Settings {
     }
 
     fn values(&self) -> Result<config::File, String> {
-        if self.fields.len() < PLAIN {
+        if self.fields.len() < self.plain() {
             return Err("reload config before save".into());
         }
         let value = |i: usize| {
@@ -242,7 +270,7 @@ impl Settings {
             (!text.is_empty()).then_some(text)
         };
         let mut aliases = BTreeMap::new();
-        for pair in self.fields[PLAIN..].as_chunks::<2>().0 {
+        for pair in self.fields[self.plain()..].as_chunks::<2>().0 {
             let name = pair[0].text().trim().to_string();
             let target = pair[1].text().trim().to_string();
             // a new box, 0 text yet: not an alias
@@ -254,8 +282,11 @@ impl Settings {
                 return Err(format!("duplicate alias: {name}"));
             }
         }
-        let mut file = config::File { aliases, ..config::File::default() };
-        for (i, sp) in SPECS.iter().enumerate() {
+        let mut file = self.saved.clone();
+        if self.aliases_on {
+            file.aliases = aliases;
+        }
+        for (i, sp) in self.specs.iter().enumerate() {
             let v = value(i);
             if let Some(v) = &v {
                 config::validate(sp.key.to_string(), v)?;
@@ -313,7 +344,7 @@ impl Settings {
     }
 
     fn delete_alias(&mut self, k: usize) {
-        let at = PLAIN + k * 2;
+        let at = self.plain() + k * 2;
         if at + 2 > self.fields.len() {
             return;
         }
@@ -330,7 +361,7 @@ impl Settings {
         if was_editing.is_none()
             && let Some(i) = self.editing
         {
-            let at = PLAIN + Self::alias_of(i) * 2;
+            let at = self.plain() + self.alias_of(i) * 2;
             self.pair_entry = Some((at, self.fields[at].text(), self.fields[at + 1].text()));
         }
         if self.field() != before {
@@ -353,7 +384,7 @@ impl Settings {
     fn revert(&mut self) {
         if let Some(i) = self.editing {
             if let Some((at, name, target)) = self.pair_entry.take()
-                && at == PLAIN + Self::alias_of(i) * 2
+                && at == self.plain() + self.alias_of(i) * 2
                 && (self.fields[at].text() != name || self.fields[at + 1].text() != target)
             {
                 self.fields[at].set_text(&name);
@@ -369,7 +400,7 @@ impl Settings {
         {
             self.fields[i].set_text(&text);
             self.fields[i].move_start();
-            self.status = format!("{}: edit undone", SPECS.get(i).map_or("field", |s| s.key));
+            self.status = format!("{}: edit undone", self.specs.get(i).map_or("field", |s| s.key));
         }
     }
 
@@ -390,16 +421,16 @@ impl Settings {
                     self.applied = self.reload();
                     return Action::None;
                 }
-                KeyCode::Char('n' | 'N') => {
+                KeyCode::Char('n' | 'N') if self.aliases_on => {
                     self.add_alias();
                     return Action::None;
                 }
-                KeyCode::Char('d' | 'D') if self.focus < PLAIN => {
+                KeyCode::Char('d' | 'D') if self.focus < self.plain() => {
                     self.reset(self.focus);
                     return Action::None;
                 }
-                KeyCode::Char('d' | 'D') if (PLAIN..self.add_item()).contains(&self.focus) => {
-                    self.delete_alias(self.focus - PLAIN);
+                KeyCode::Char('d' | 'D') if (self.plain()..self.add_item()).contains(&self.focus) => {
+                    self.delete_alias(self.focus - self.plain());
                     return Action::None;
                 }
                 _ => {}
@@ -414,8 +445,8 @@ impl Settings {
                 }
                 // esc: the alias as it was at unlock, locked, 0 commit
                 KeyCode::Esc => self.revert(),
-                KeyCode::Up if key.modifiers.is_empty() && !(i - PLAIN).is_multiple_of(2) => self.editing = Some(i - 1),
-                KeyCode::Down if key.modifiers.is_empty() && (i - PLAIN).is_multiple_of(2) => self.editing = Some(i + 1),
+                KeyCode::Up if key.modifiers.is_empty() && !(i - self.plain()).is_multiple_of(2) => self.editing = Some(i - 1),
+                KeyCode::Down if key.modifiers.is_empty() && (i - self.plain()).is_multiple_of(2) => self.editing = Some(i + 1),
                 KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {}
                 // tab: done with the alias, the next item
                 KeyCode::Tab | KeyCode::BackTab => {
@@ -463,14 +494,14 @@ impl Settings {
                 self.commit();
                 self.focus = self.starts().into_iter().find(|&s| s > self.focus).unwrap_or(self.add_item());
             }
-            KeyCode::Enter if self.focus == self.add_item() => self.add_alias(),
-            KeyCode::Enter if self.focus >= PLAIN => self.editing = Some(PLAIN + (self.focus - PLAIN) * 2),
+            KeyCode::Enter if self.aliases_on && self.focus == self.add_item() => self.add_alias(),
+            KeyCode::Enter if self.focus >= self.plain() => self.editing = Some(self.plain() + (self.focus - self.plain()) * 2),
             KeyCode::Enter => {
                 self.commit();
                 self.focus = (self.focus + 1).min(self.add_item());
             }
-            KeyCode::Char('d') if key.modifiers.is_empty() && (PLAIN..self.add_item()).contains(&self.focus) => {
-                self.delete_alias(self.focus - PLAIN);
+            KeyCode::Char('d') if key.modifiers.is_empty() && (self.plain()..self.add_item()).contains(&self.focus) => {
+                self.delete_alias(self.focus - self.plain());
             }
             _ => {
                 if let Some(i) = self.field() {
@@ -497,7 +528,7 @@ impl Settings {
     }
 
     fn sync_paths(&mut self) {
-        let focus = self.field().filter(|&i| i < 2 || (i >= PLAIN && !(i - PLAIN).is_multiple_of(2)));
+        let focus = self.field().filter(|&i| i < self.path_fields || (i >= self.plain() && !(i - self.plain()).is_multiple_of(2)));
         if focus != self.path_focus {
             self.paths.reset_input();
             self.path_focus = focus;
@@ -548,15 +579,15 @@ impl Settings {
                     self.reset(i);
                     return Action::None;
                 }
-                Hit::Field(i) if i < PLAIN => {
+                Hit::Field(i) if i < self.plain() => {
                     if self.focus != i { self.commit(); }
                     self.editing = None;
                     self.focus = i;
                 }
                 Hit::Field(i) => {
-                    let k = Self::alias_of(i);
-                    if self.editing.is_none_or(|e| Self::alias_of(e) != k) { self.commit(); }
-                    self.focus = PLAIN + k;
+                    let k = self.alias_of(i);
+                    if self.editing.is_none_or(|e| self.alias_of(e) != k) { self.commit(); }
+                    self.focus = self.plain() + k;
                     self.editing = Some(i);
                 }
             }
@@ -580,16 +611,12 @@ impl Settings {
         }
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("settings", theme::accent_bold()),
-                Span::styled(if self.dirty() { " · not applied" } else { "" }, theme::muted()),
+                Span::styled(if self.dirty() { "not applied · " } else { "" }, theme::text().fg(theme::pal().warn)),
+                Span::styled(self.path.display().to_string(), theme::muted()),
             ])),
             Rect { height: 1, ..area },
         );
-        f.render_widget(
-            Paragraph::new(Line::styled(self.path.display().to_string(), theme::muted())),
-            Rect { y: area.y + 1, height: 1, ..area },
-        );
-        let all = Rect { y: area.y + 3, height: area.height - 4, ..area };
+        let all = Rect { y: area.y + 2, height: area.height - 3, ..area };
         // fields and boxes: indented under their group's heading
         let body = Rect { x: all.x + INDENT, width: all.width.saturating_sub(INDENT), ..all };
         // virtual rows: per group its heading (2) + 1 blank, 3 per plain field, the alias heading
@@ -598,8 +625,8 @@ impl Settings {
         let mut items = Vec::new();
         let mut y = 0usize;
         let mut heads = Vec::new();
-        for i in 0..PLAIN {
-            if let Some((_, title, desc)) = SECTIONS.iter().find(|s| s.0 == i) {
+        for i in 0..self.plain() {
+            if let Some((_, title, desc)) = self.sections.iter().find(|s| s.0 == i) {
                 heads.push((y, *title, *desc));
                 y += 3;
             }
@@ -607,12 +634,16 @@ impl Settings {
             y += 3;
         }
         let heading = y;
-        y += 3;
+        if self.aliases_on {
+            y += 3;
+        }
         for _ in 0..n {
             items.push((y, 4));
             y += 4;
         }
-        items.push((y, 1));
+        if self.aliases_on {
+            items.push((y, 1));
+        }
         let (top, height) = items[self.focus.min(items.len() - 1)];
         let view = body.height as usize;
         if top < self.offset {
@@ -634,15 +665,15 @@ impl Settings {
             group_head(f, at(hy, 1).map(full), at(hy + 1, 1).map(full), title, desc);
         }
         let pal = theme::pal();
-        for i in 0..PLAIN {
+        for i in 0..self.plain() {
             let Some(row) = at(items[i].0, 1) else { continue };
             let focused = active && self.focus == i;
             f.render_widget(
-                Paragraph::new(Line::styled(SPECS[i].label, if focused { theme::accent_bold() } else { theme::muted() })),
+                Paragraph::new(Line::styled(self.specs[i].label, if focused { theme::accent_bold() } else { theme::muted() })),
                 Rect { width: label_width, ..row },
             );
             // right of the input: a color's swatch, ↺ (back to the default) while the field is set
-            let swatch = SPECS[i].key.strip_prefix("colors.").and_then(|n| pal.get(n));
+            let swatch = self.specs[i].key.strip_prefix("colors.").and_then(|n| pal.get(n));
             let tail = 3 + if swatch.is_some() { 3 } else { 0 };
             let input = Rect { x: row.x + label_width, width: row.width.saturating_sub(label_width + tail), ..row };
             f.render_widget(Paragraph::new("").style(theme::panel()), input);
@@ -659,14 +690,14 @@ impl Settings {
             }
             self.rows.push((row, Hit::Field(i)));
             if let Some(hint_row) = at(items[i].0 + 1, 1) {
-                let env = SPECS[i].env;
+                let env = self.specs[i].env;
                 let hint = (!env.is_empty())
                     .then(|| std::env::var(env).ok().filter(|s| !s.is_empty()))
                     .flatten()
                     .map(|s| format!("{env} override: {s}"))
                     .unwrap_or_else(|| {
                         let reset = if focused && !self.fields[i].text().is_empty() { " · ctrl+d / ↺: default" } else { "" };
-                        format!("{}{reset}", SPECS[i].help)
+                        format!("{}{reset}", self.specs[i].help)
                     });
                 f.render_widget(
                     Paragraph::new(Line::styled(hint, theme::muted())),
@@ -674,9 +705,11 @@ impl Settings {
                 );
             }
         }
-        group_head(f, at(heading, 1).map(full), at(heading + 1, 1).map(full), ALIASES.0, ALIASES.1);
+        if self.aliases_on {
+            group_head(f, at(heading, 1).map(full), at(heading + 1, 1).map(full), ALIASES.0, ALIASES.1);
+        }
         for k in 0..n {
-            let item = PLAIN + k;
+            let item = self.plain() + k;
             let Some(r) = at(items[item].0, 4) else { continue };
             let on = active && self.focus == item;
             let open = on && self.editing.is_some();
@@ -698,7 +731,7 @@ impl Settings {
                 f.render_widget(Paragraph::new("").style(theme::panel()), inner);
             }
             for (j, label) in ["name", "target"].into_iter().enumerate() {
-                let i = PLAIN + k * 2 + j;
+                let i = self.plain() + k * 2 + j;
                 let row = Rect { y: inner.y + j as u16, height: 1, x: inner.x + 1, width: inner.width.saturating_sub(2) };
                 let focused = open && self.editing == Some(i);
                 let lw = 8.min(row.width / 3);
@@ -714,7 +747,7 @@ impl Settings {
                 self.rows.push((row, Hit::Field(i)));
             }
         }
-        if let Some(row) = at(items[self.add_item()].0, 1) {
+        if self.aliases_on && let Some(row) = at(items[self.add_item()].0, 1) {
             let focused = active && self.focus == self.add_item();
             f.render_widget(
                 Paragraph::new(Line::styled(" + add path alias (ctrl+n) ", if focused { theme::pill() } else { theme::panel() })),
@@ -736,20 +769,218 @@ impl Settings {
     }
 }
 
+impl Spec {
+    pub(crate) const fn new(key: &'static str, label: &'static str, help: &'static str, env: &'static str) -> Spec {
+        spec(key, label, help, env)
+    }
+}
+
+/// The sub-tabs of the settings tab.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Sub {
+    Codehead,
+    Harnesses,
+    Mcp,
+}
+
+const SUBS: [(Sub, &str); 3] = [(Sub::Codehead, "codehead"), (Sub::Harnesses, "harnesses"), (Sub::Mcp, "mcp servers")];
+
+/// The settings tab: a bar of sub-tabs (codehead, harnesses, mcp servers), the sub-tab below.
+/// ↑ from the 1st row of a sub-tab: the bar; ←→ there: another sub-tab; ↑ again: the main tabs.
+pub struct Settings {
+    pub(crate) form: Form,
+    pub(crate) harness: Form,
+    pub(crate) mcp: crate::mcptab::McpTab,
+    pub(crate) sub: Sub,
+    /// The keys go to the sub-tab bar.
+    pub(crate) bar: bool,
+    bar_hits: Vec<(Rect, Sub)>,
+}
+
+impl Settings {
+    pub fn new(path: PathBuf) -> Self {
+        Self { form: Form::new(path.clone()), harness: crate::harnesstab::form(path), mcp: crate::mcptab::McpTab::new(), sub: Sub::Codehead, bar: false, bar_hits: Vec::new() }
+    }
+
+    /// Background results of the MCP tab. true: redraw.
+    pub fn poll(&mut self) -> bool {
+        self.mcp.poll()
+    }
+
+    /// Sub-tab S: the last edit of the form left applies, the form entered reads the file again
+    /// (the other form may have written it).
+    pub fn switch(&mut self, s: Sub) {
+        if s == self.sub {
+            return;
+        }
+        self.commit();
+        self.sub = s;
+        match s {
+            Sub::Codehead => {
+                self.form.reload();
+            }
+            Sub::Harnesses => {
+                self.harness.reload();
+            }
+            Sub::Mcp => self.mcp.enter(),
+        }
+    }
+
+    pub fn commit(&mut self) {
+        match self.sub {
+            Sub::Codehead => self.form.commit(),
+            Sub::Harnesses => self.harness.commit(),
+            Sub::Mcp => {}
+        }
+    }
+
+    pub fn take_applied(&mut self) -> Option<config::File> {
+        let a = self.form.take_applied();
+        let b = self.harness.take_applied();
+        b.or(a)
+    }
+
+    pub fn suggestions_key(&mut self, key: KeyEvent) -> bool {
+        !self.bar && self.sub == Sub::Codehead && self.form.suggestions_key(key)
+    }
+
+    pub fn focus_input(&mut self) {
+        match self.sub {
+            Sub::Codehead => self.form.focus_input(),
+            Sub::Harnesses => self.harness.focus_input(),
+            Sub::Mcp => {}
+        }
+    }
+
+    pub fn key(&mut self, key: KeyEvent) -> Action {
+        if self.bar {
+            let at = SUBS.iter().position(|s| s.0 == self.sub).unwrap_or(0);
+            match key.code {
+                KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => self.switch(SUBS[(at + SUBS.len() - 1) % SUBS.len()].0),
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.switch(SUBS[(at + 1) % SUBS.len()].0),
+                KeyCode::Up => return Action::Header,
+                KeyCode::Down | KeyCode::Enter | KeyCode::Char('j') | KeyCode::Esc => {
+                    self.bar = false;
+                    self.focus_input();
+                }
+                _ => {}
+            }
+            return Action::None;
+        }
+        let up = match self.sub {
+            Sub::Codehead => matches!(self.form.key(key), Action::Header),
+            Sub::Harnesses => matches!(self.harness.key(key), Action::Header),
+            Sub::Mcp => !self.mcp.key(key),
+        };
+        if up {
+            self.bar = true;
+        }
+        Action::None
+    }
+
+    pub fn mouse(&mut self, event: MouseEvent) -> Action {
+        let at = Position { x: event.column, y: event.row };
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+            && let Some(&(_, s)) = self.bar_hits.iter().find(|(r, _)| r.contains(at))
+        {
+            self.switch(s);
+            self.bar = false;
+            return Action::None;
+        }
+        self.bar = false;
+        match self.sub {
+            Sub::Codehead => self.form.mouse(event),
+            Sub::Harnesses => self.harness.mouse(event),
+            Sub::Mcp => {
+                self.mcp.mouse(event);
+                Action::None
+            }
+        }
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        match self.sub {
+            Sub::Codehead => self.form.paste(text),
+            Sub::Harnesses => self.harness.paste(text),
+            Sub::Mcp => self.mcp.paste(text),
+        }
+    }
+
+    pub fn row_at(&self, at: Position) -> Option<Rect> {
+        if let Some((r, _)) = self.bar_hits.iter().find(|(r, _)| r.contains(at)) {
+            return Some(*r);
+        }
+        match self.sub {
+            Sub::Codehead => self.form.row_at(at),
+            Sub::Harnesses => self.harness.row_at(at),
+            Sub::Mcp => None,
+        }
+    }
+
+    /// Keys of the help bar.
+    pub fn help(&self) -> &'static [(&'static str, &'static str)] {
+        if self.bar {
+            return &[("←→", "sub-tab"), ("↓ enter", "in"), ("↑", "main tabs")];
+        }
+        match self.sub {
+            Sub::Codehead => &[("↑↓", "move"), ("enter", "edit / done"), ("ctrl+d", "default"), ("d", "delete alias"), ("ctrl+n", "add alias"), ("tab", "next field"), ("esc", "undo edit")],
+            Sub::Harnesses => &[("↑↓", "move"), ("tab", "next field"), ("ctrl+d", "default"), ("esc", "undo edit")],
+            Sub::Mcp => self.mcp.help(),
+        }
+    }
+
+    pub fn draw(&mut self, f: &mut Frame, area: Rect, active: bool) {
+        self.bar_hits.clear();
+        if area.height < 6 || area.width < 16 {
+            return;
+        }
+        let mut x = area.x;
+        let mut spans = Vec::new();
+        for (s, label) in SUBS {
+            let on = s == self.sub;
+            let st = match (on, active && self.bar) {
+                (true, true) => theme::pill(),
+                (true, false) => theme::accent_bold(),
+                _ => theme::muted(),
+            };
+            let text = format!(" {label} ");
+            let w = text.chars().count() as u16;
+            self.bar_hits.push((Rect { x, y: area.y, width: w, height: 1 }, s));
+            x += w + 1;
+            spans.push(Span::styled(text, st));
+            spans.push(Span::raw(" "));
+        }
+        if self.sub == Sub::Harnesses {
+            let missing = crate::harnesstab::missing();
+            if !missing.is_empty() {
+                spans.push(Span::styled(format!("  not installed: {}", missing.iter().map(|m| m.0).collect::<Vec<_>>().join(", ")), theme::muted()));
+            }
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), Rect { height: 1, ..area });
+        let body = Rect { y: area.y + 2, height: area.height - 2, ..area };
+        let inner = active && !self.bar;
+        match self.sub {
+            Sub::Codehead => self.form.draw(f, body, inner),
+            Sub::Harnesses => self.harness.draw(f, body, inner),
+            Sub::Mcp => self.mcp.draw(f, body, inner),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn fixture(name: &str) -> (PathBuf, Settings) {
+    fn fixture(name: &str) -> (PathBuf, Form) {
         let dir = std::env::temp_dir().join(format!("codehead-settings-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("codehead.toml");
         std::fs::write(&path, "# config\nnotes = '~/notes'\n").unwrap();
-        let form = Settings::new(path);
+        let form = Form::new(path);
         (dir, form)
     }
 
-    fn key(form: &mut Settings, code: KeyCode) -> Action {
+    fn key(form: &mut Form, code: KeyCode) -> Action {
         form.key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
@@ -763,7 +994,7 @@ mod tests {
         std::fs::write(dir.join("codehead.toml"), "notes = '~/notes/'\nstyles = '~/styles/'\nagent = 'amon'\nprefix = 'task'\nmodels = 'opus'\nmessages = 'lines'\n[aliases]\ndocs = '~/docs/'\n").unwrap();
         form.reload().unwrap();
 
-        let at_start = |form: &mut Settings, i: usize| {
+        let at_start = |form: &mut Form, i: usize| {
             assert_eq!(form.field(), Some(i));
             assert!(form.fields[i].path_word().is_none());
             let text = form.fields[i].text();
@@ -828,21 +1059,21 @@ mod tests {
         let file = dir.join("codehead.toml");
         std::fs::write(&file, "messages = 'lines'\n[keys]\nmenu = 'ctrl+p'\n[colors]\nscheme = 'amber'\n").unwrap();
         form.reload().unwrap();
-        form.focus = 7;
+        form.focus = 6;
         form.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert_eq!(form.fields[7].text(), "");
+        assert_eq!(form.fields[6].text(), "");
         let saved = config::read_file(&file).unwrap().1;
         assert_eq!((saved.messages, saved.menu_key.as_deref()), (None, Some("ctrl+p")));
         // a click on ↺ of the scheme field
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 100)).unwrap();
         terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
-        let (r, _) = *form.rows.iter().find(|(_, h)| *h == Hit::Reset(16)).expect("↺ on the set scheme field");
+        let (r, _) = *form.rows.iter().find(|(_, h)| *h == Hit::Reset(15)).expect("↺ on the set scheme field");
         form.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x, row: r.y, modifiers: KeyModifiers::NONE });
         assert_eq!(config::read_file(&file).unwrap().1.scheme, None);
-        assert!(!form.rows.iter().any(|(_, h)| *h == Hit::Reset(7)));
+        assert!(!form.rows.iter().any(|(_, h)| *h == Hit::Reset(6)));
         // an invalid value: 0 write, the error shows
-        form.focus = 17;
-        form.fields[17].set_text("red");
+        form.focus = 16;
+        form.fields[16].set_text("red");
         form.commit();
         assert!(form.error && form.status.contains("#RRGGBB"));
         let _ = std::fs::remove_dir_all(dir);
@@ -911,7 +1142,7 @@ mod tests {
         assert!(form.reload().is_none());
         assert!(form.error);
         assert_eq!(form.fields.len(), PLAIN + 20);
-        let mut invalid = Settings::new(dir.join("codehead.toml"));
+        let mut invalid = Form::new(dir.join("codehead.toml"));
         terminal.draw(|f| invalid.draw(f, f.area(), true)).unwrap();
         assert!(invalid.error);
         invalid.fields[0].set_text("~/x");
