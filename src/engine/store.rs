@@ -51,6 +51,9 @@ pub struct Thread {
     /// keeps its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fork: Vec<String>,
+    /// Agents stopped on a usage limit: the time (unix ms) the host resumes each.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resume: BTreeMap<String, u64>,
 }
 
 fn open() -> String {
@@ -239,6 +242,9 @@ pub enum Kind {
     Leave,
     /// A session failed or ended without a turn end.
     Error { message: String },
+    /// The agent stopped on a usage limit: the host sends it `continue` at AT (unix ms), with
+    /// codehead open or not. AT 0: the resume is off (it ran, or the owner wrote first).
+    Resume { at: u64 },
     /// The agent got a note of edits in its worktree since its last turn, not its own: SUMMARY
     /// (1 line: who, files, line ranges).
     Edits { summary: String },

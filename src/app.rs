@@ -2165,6 +2165,10 @@ impl App {
             Action::Close | Action::Remove(_) | Action::Add(_) => {}
             Action::Home(h) => self.go_home(h),
             Action::Open(c) => self.outcome = Some(Outcome::Resume(Box::new(worktree_of(&c)))),
+            Action::Jump(c, ts) => {
+                crate::search::jump_to(&c.id, ts);
+                self.outcome = Some(Outcome::Resume(Box::new(worktree_of(&c))));
+            }
             Action::Command(KEYS_ITEM) => {
                 let kw = self.menu_help.iter().map(|(k, _)| k.width()).max().unwrap_or(0);
                 let lines = self.menu_help.iter().map(|(k, l)| Line::from(vec![Span::styled(format!("{k:<kw$}  "), theme::accent()), Span::styled(*l, theme::muted())])).collect();

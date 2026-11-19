@@ -1,5 +1,5 @@
 //! F2 menu: 1 modal for the start screen and the thread view. Tabs: quick (commands),
-//! threads (filter + thread cards), agents (the agents of the thread in view: remove, add; edit →
+//! threads (filter + thread cards), search (the messages of every thread), tokens, agents (the agents of the thread in view: remove, add; edit →
 //! the agents tab of the start screen). ↑↓ move, ←→: next / previous tab, enter: run,
 //! a single esc or tab closes.
 
@@ -22,11 +22,12 @@ use crate::theme;
 pub enum Tab {
     Quick,
     Threads,
+    Search,
     Tokens,
     Agents,
 }
 
-const TABS: [(Tab, &str); 4] = [(Tab::Quick, "quick"), (Tab::Threads, "threads"), (Tab::Tokens, "tokens"), (Tab::Agents, "agents")];
+const TABS: [(Tab, &str); 5] = [(Tab::Quick, "quick"), (Tab::Threads, "threads"), (Tab::Search, "search"), (Tab::Tokens, "tokens"), (Tab::Agents, "agents")];
 
 /// A tab of the start screen the menu opens.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -44,6 +45,8 @@ pub enum Action {
     Close,
     Home(Home),
     Open(Card),
+    /// A search result: thread CARD, scrolled to its message of time TS.
+    Jump(Card, u64),
     /// Quick command of the host (its id).
     Command(usize),
     Remove(String),
@@ -94,6 +97,15 @@ pub struct Menu {
     detail_rx: Option<Receiver<crate::cost::Detail>>,
     detail_at: Option<Instant>,
     dscroll: u16,
+    /// Search tab: the query, every thread's messages (read once, in the background), the hits of
+    /// QUERY (indexes into MSGS) and the query they are for, cursor, 1st hit in view.
+    search: TextArea,
+    msgs: Option<Vec<crate::search::Msg>>,
+    msgs_rx: Option<Receiver<Vec<crate::search::Msg>>>,
+    hits: Vec<usize>,
+    hits_for: String,
+    scursor: usize,
+    soffset: usize,
     /// Last draw: tab labels, rows (clicks).
     tab_rects: Vec<(Rect, Tab)>,
     rows: Vec<(Rect, usize)>,
@@ -104,6 +116,7 @@ fn builtins() -> Vec<Item> {
     vec![
         Item { label: "new thread: start screen, new tab".into(), key: "n".into(), id: usize::MAX, section: "codehead" },
         Item { label: "settings: start screen, settings tab".into(), key: String::new(), id: usize::MAX - 1, section: "codehead" },
+        Item { label: "search: the messages of every thread".into(), key: "f".into(), id: usize::MAX - 2, section: "codehead" },
     ]
 }
 
@@ -123,6 +136,8 @@ impl Menu {
         all.extend(items);
         let mut filter = TextArea::new(true, "filter threads");
         filter.style = Some(theme::text());
+        let mut search = TextArea::new(true, "search messages: you + agents, every thread");
+        search.style = Some(theme::text());
         Menu {
             tab: Tab::Quick,
             items: all,
@@ -145,6 +160,13 @@ impl Menu {
             detail_rx: None,
             detail_at: None,
             dscroll: 0,
+            search,
+            msgs: None,
+            msgs_rx: None,
+            hits: Vec::new(),
+            hits_for: String::new(),
+            scursor: 0,
+            soffset: 0,
             tab_rects: Vec::new(),
             rows: Vec::new(),
             frame: Rect::default(),
@@ -180,6 +202,67 @@ impl Menu {
             self.cards = c;
             self.loading = None;
         }
+        if let Some(rx) = &self.msgs_rx
+            && let Ok(m) = rx.try_recv()
+        {
+            self.msgs = Some(m);
+            self.msgs_rx = None;
+            self.hits_for = String::from("\0");
+        }
+        // the search tab: the messages read once, on its 1st show
+        if self.tab == Tab::Search && self.msgs.is_none() && self.msgs_rx.is_none() && !cfg!(test) {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::search::load());
+            });
+            self.msgs_rx = Some(rx);
+        }
+        self.refresh_hits();
+    }
+
+    /// Tests: messages to search (0 read of the real threads).
+    #[cfg(test)]
+    pub fn set_msgs(&mut self, m: Vec<crate::search::Msg>) {
+        self.msgs = Some(m);
+        self.hits_for = String::from("\0");
+    }
+
+    /// The hits of the query, if it changed (or the messages came).
+    fn refresh_hits(&mut self) {
+        let q = self.search.text();
+        if q == self.hits_for {
+            return;
+        }
+        self.hits = self.msgs.as_deref().map(|m| crate::search::find(m, &q)).unwrap_or_default();
+        self.hits_for = q;
+        self.scursor = 0;
+        self.soffset = 0;
+    }
+
+    /// The card of thread ID (the threads tab's, else 1 from the message).
+    fn card_of(&self, m: &crate::search::Msg) -> Card {
+        self.cards.iter().find(|c| c.id == m.thread).cloned().unwrap_or_else(|| Card { id: m.thread.clone(), title: m.title.clone(), dir: m.dir.clone(), ..Default::default() })
+    }
+
+    fn jump(&self, hit: usize) -> Action {
+        let Some(m) = self.hits.get(hit).and_then(|&i| self.msgs.as_ref()?.get(i)) else { return Action::None };
+        Action::Jump(self.card_of(m), m.ts)
+    }
+
+    fn search_key(&mut self, k: KeyEvent) -> Action {
+        let n = self.hits.len();
+        match k.code {
+            KeyCode::Up if n > 0 => self.scursor = (self.scursor + n - 1) % n,
+            KeyCode::Down if n > 0 => self.scursor = (self.scursor + 1) % n,
+            KeyCode::PageUp => self.scursor = self.scursor.saturating_sub(5),
+            KeyCode::PageDown if n > 0 => self.scursor = (self.scursor + 5).min(n - 1),
+            KeyCode::Enter => return self.jump(self.scursor),
+            _ => {
+                self.search.key(k);
+                self.refresh_hits();
+            }
+        }
+        Action::None
     }
 
     fn visible(&self) -> Vec<usize> {
@@ -263,6 +346,7 @@ impl Menu {
         match self.tab {
             Tab::Quick => self.quick_key(k),
             Tab::Threads => self.threads_key(k),
+            Tab::Search => self.search_key(k),
             Tab::Tokens => {
                 match k.code {
                     KeyCode::Up | KeyCode::Char('k') => self.dscroll = self.dscroll.saturating_sub(1),
@@ -284,15 +368,20 @@ impl Menu {
             KeyCode::Up | KeyCode::Char('k') => self.qcursor = (self.qcursor + n - 1) % n,
             KeyCode::Down | KeyCode::Char('j') => self.qcursor = (self.qcursor + 1) % n,
             KeyCode::Char('n') => return Action::Home(Home::New),
+            KeyCode::Char('f') => self.tab = Tab::Search,
             KeyCode::Enter => return self.run_item(self.qcursor),
             _ => {}
         }
         Action::None
     }
 
-    fn run_item(&self, i: usize) -> Action {
+    fn run_item(&mut self, i: usize) -> Action {
         match self.items.get(i).map(|it| it.id) {
             Some(usize::MAX) => Action::Home(Home::New),
+            Some(id) if id == usize::MAX - 2 => {
+                self.tab = Tab::Search;
+                Action::None
+            }
             Some(id) if id == usize::MAX - 1 => Action::Home(Home::Settings),
             Some(id) => Action::Command(id),
             None => Action::None,
@@ -401,6 +490,10 @@ impl Menu {
                         }
                         return Action::Open(self.cards[i].clone());
                     }
+                    Tab::Search => {
+                        self.scursor = i;
+                        return self.jump(i);
+                    }
                     Tab::Tokens => {}
                     Tab::Agents => {
                         if let Some(c) = self.adding {
@@ -424,6 +517,8 @@ impl Menu {
                 }
             }
             MouseEventKind::ScrollUp if self.tab == Tab::Threads => self.tcursor = self.tcursor.saturating_sub(1),
+            MouseEventKind::ScrollDown if self.tab == Tab::Search => self.scursor = (self.scursor + 1).min(self.hits.len().saturating_sub(1)),
+            MouseEventKind::ScrollUp if self.tab == Tab::Search => self.scursor = self.scursor.saturating_sub(1),
             MouseEventKind::ScrollDown if self.tab == Tab::Tokens => self.dscroll = self.dscroll.saturating_add(1),
             MouseEventKind::ScrollUp if self.tab == Tab::Tokens => self.dscroll = self.dscroll.saturating_sub(1),
             _ => {}
@@ -482,6 +577,10 @@ impl Menu {
             Tab::Threads => {
                 self.draw_threads(f, body);
                 &[("type", "filter"), ("↑↓", "move"), ("enter", "open"), ("←→", "tabs"), ("esc tab", "close")]
+            }
+            Tab::Search => {
+                self.draw_search(f, body);
+                &[("type", "search"), ("↑↓", "move"), ("enter", "jump to it"), ("←→", "tabs"), ("esc tab", "close")]
             }
             Tab::Tokens => {
                 self.draw_tokens(f, body);
@@ -576,6 +675,66 @@ impl Menu {
             let text = format!("{}↑ · {more}↓", self.toffset);
             f.render_widget(Paragraph::new(Span::styled(text, theme::muted())).right_aligned(), Rect { y: body.y, height: 1, ..body });
         }
+    }
+
+    /// Rows per search hit: who · thread · time, the snippet, a gap.
+    const HIT_H: u16 = 3;
+
+    fn draw_search(&mut self, f: &mut Frame, body: Rect) {
+        let fr = Rect { height: 1, ..body };
+        f.render_widget(Paragraph::new(Span::styled("› ", theme::accent())), Rect { width: 2, ..fr });
+        self.search.render(f, Rect { x: fr.x + 2, width: fr.width.saturating_sub(2), ..fr }, true);
+        let list = Rect { y: body.y + 2, height: body.height.saturating_sub(2), ..body };
+        let q = self.search.text();
+        let Some(msgs) = self.msgs.as_ref() else {
+            f.render_widget(Paragraph::new(Span::styled("reading messages…", theme::muted())), Rect { height: 1, ..list });
+            return;
+        };
+        if self.hits.is_empty() {
+            let msg = if q.trim().is_empty() { format!("{} messages · type to search", msgs.len()) } else { "0 messages match".into() };
+            f.render_widget(Paragraph::new(Span::styled(msg, theme::muted())), Rect { height: 1, ..list });
+            return;
+        }
+        let n = self.hits.len();
+        self.scursor = self.scursor.min(n - 1);
+        let fits = (list.height / Self::HIT_H).max(1) as usize;
+        if self.scursor < self.soffset {
+            self.soffset = self.scursor;
+        }
+        if self.scursor >= self.soffset + fits {
+            self.soffset = self.scursor + 1 - fits;
+        }
+        let w = list.width as usize;
+        let mut rows: Vec<(Rect, usize)> = Vec::new();
+        for (slot, &mi) in self.hits.iter().enumerate().skip(self.soffset).take(fits) {
+            let m = &msgs[mi];
+            let y = list.y + (slot - self.soffset) as u16 * Self::HIT_H;
+            let r = Rect { y, height: 2, ..list };
+            let hl = slot == self.scursor;
+            let bg = if hl { Style::default().bg(theme::pal().panel) } else { Style::default() };
+            let who = if m.from == "owner" { "you".to_string() } else { m.from.clone() };
+            let here = self.thread.as_deref() == Some(m.thread.as_str());
+            let place = if here { "this thread".to_string() } else { m.title.clone() };
+            let when = format!("{} · {}", crate::stream::clock(m.ts), nav::ago(m.ts));
+            let room = w.saturating_sub(who.chars().count() + when.chars().count() + 8);
+            let mark = if hl { "▌ " } else { "  " };
+            let head = Line::from(vec![
+                Span::styled(mark, theme::accent()),
+                Span::styled(who, if m.from == "owner" { theme::text().add_modifier(Modifier::BOLD) } else { Style::default().fg(crate::agents::color(self.roster.iter().find(|a| a.name == m.from).and_then(|a| a.color.as_deref()))).add_modifier(Modifier::BOLD) }),
+                Span::styled(format!(" · {} · ", nav::fit(&place, room)), theme::muted()),
+                Span::styled(when, theme::muted()),
+            ]);
+            let (snip, marks) = crate::search::snippet(m, &q, w.saturating_sub(2));
+            let mut body_spans = vec![Span::styled(mark, theme::accent())];
+            body_spans.extend(crate::fuzzy::spans(&snip, &marks, theme::text(), theme::accent_bold().add_modifier(Modifier::UNDERLINED)));
+            f.render_widget(Paragraph::new(vec![head, Line::from(body_spans)]).style(bg), r);
+            rows.push((r, slot));
+        }
+        self.rows = rows;
+        let more = n.saturating_sub(self.soffset + fits);
+        let cap = if n >= crate::search::MAX { "+" } else { "" };
+        let text = format!("{n}{cap} · {}↑ · {more}↓", self.soffset);
+        f.render_widget(Paragraph::new(Span::styled(text, theme::muted())).right_aligned(), Rect { y: body.y + 1, height: 1, ..body });
     }
 
     fn draw_tokens(&mut self, f: &mut Frame, body: Rect) {
@@ -695,6 +854,8 @@ mod tests {
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Threads);
         m.key(k(KeyCode::Right));
+        assert_eq!(m.tab, Tab::Search);
+        m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Tokens);
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Agents);
@@ -714,9 +875,39 @@ mod tests {
         m.key(k(KeyCode::Down));
         assert_eq!(m.key(k(KeyCode::Enter)), Action::Home(Home::Settings));
         m.key(k(KeyCode::Down));
+        assert_eq!(m.key(k(KeyCode::Enter)), Action::None);
+        assert_eq!(m.tab, Tab::Search);
+        m.tab = Tab::Quick;
+        m.key(k(KeyCode::Down));
         assert_eq!(m.key(k(KeyCode::Enter)), Action::Command(7));
         m.key(k(KeyCode::Down));
         assert_eq!(m.key(k(KeyCode::Enter)), Action::Home(Home::New));
+    }
+
+    #[test]
+    fn search_finds_messages_moves_and_jumps() {
+        use crate::search::Msg;
+        let mut m = menu();
+        // f: the search tab, its filter takes every letter (f too)
+        m.key(k(KeyCode::Char('f')));
+        assert_eq!(m.tab, Tab::Search);
+        m.set_msgs(vec![Msg::new("t1", "first", "owner", 10, "fix the deploy"), Msg::new("t2", "deploy fix", "ada", 20, "deploy runs, the deploy is fixed")]);
+        for c in "deploy".chars() {
+            m.key(k(KeyCode::Char(c)));
+        }
+        // 2 hits for the 2nd message: it ranks first
+        assert!(matches!(m.key(k(KeyCode::Enter)), Action::Jump(c, 20) if c.id == "t2"));
+        m.key(k(KeyCode::Down));
+        assert!(matches!(m.key(k(KeyCode::Enter)), Action::Jump(c, 10) if c.id == "t1"));
+        let s = {
+            let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 30)).unwrap();
+            t.draw(|f| m.render(f, f.area(), f.area())).unwrap();
+            let b = t.backend().buffer().clone();
+            (0..30).map(|y| (0..90).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
+        };
+        assert!(s.contains(" search ") && s.contains("you · this thread") && s.contains("ada · deploy fix") && s.contains("fix the deploy"), "{s}");
+        m.key(k(KeyCode::Char('x')));
+        assert!(matches!(m.key(k(KeyCode::Enter)), Action::None));
     }
 
     #[test]

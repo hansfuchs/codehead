@@ -20,7 +20,7 @@ pub fn ensure(id: &str) -> Result<(), String> {
     if alive(id) {
         return Ok(());
     }
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = super::exe();
     let logs = super::logs_dir();
     std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
     let log = logs.join(format!("host-{id}.log"));

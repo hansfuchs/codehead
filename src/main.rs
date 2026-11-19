@@ -37,6 +37,7 @@ mod picker;
 mod portless;
 mod preview;
 mod rank;
+mod search;
 mod review;
 mod render;
 mod settings;
@@ -377,11 +378,12 @@ fn wake(id: &str) {
 /// Thread view.
 /// Esc esc: the retained start screen in HOME, without another process. Some(tab): the menu asked
 /// for that tab of the start screen.
-fn open_view(term: &mut Term, tty: &mut Tty, out: &mut Stdout, id: &str, cwd: &Path, title: &str, home: &Path) -> Option<menu::Home> {
+#[allow(clippy::too_many_arguments)]
+fn open_view(term: &mut Term, tty: &mut Tty, out: &mut Stdout, id: &str, cwd: &Path, title: &str, home: &Path, note: Option<String>) -> Option<menu::Home> {
     let (mut id, mut cwd, mut title) = (id.to_string(), cwd.to_path_buf(), title.to_string());
     // the thread header keeps the thread opened first at index 0
     let first = id.clone();
-    let mut note = None;
+    let mut note = note;
     let _ = terminal::enable_raw_mode();
     let _ = execute!(out, EnableMouseCapture, EnableBracketedPaste);
     loop {
@@ -500,6 +502,15 @@ fn start(args: Args) {
 
     restore_on_panic();
     catch_signals();
+    // agents stopped on a usage limit whose host is gone (a reboot, a kill): their host again,
+    // it resumes them at the reset
+    if !args.dry {
+        std::thread::spawn(|| {
+            for t in engine::store::all().into_iter().filter(|t| !t.resume.is_empty()) {
+                let _ = engine::client::ensure(&t.id);
+            }
+        });
+    }
     let mut out = io::stdout();
     let mut tty = Tty { enhanced: false };
     if let Err(e) = tty.enter(&mut out) {
@@ -527,7 +538,7 @@ fn start(args: Args) {
         if args.view.is_some() {
             wake(&t.id);
         }
-        let tab = open_view(&mut term, &mut tty, &mut out, &t.id, &dir, &t.title, &cwd);
+        let tab = open_view(&mut term, &mut tty, &mut out, &t.id, &dir, &t.title, &cwd, None);
         app.return_from_thread();
         if let Some(tab) = tab { app.go_home(tab); }
     }
@@ -727,14 +738,18 @@ fn start(args: Args) {
                 tty.leave(&mut out);
                 fail(&e, 1)
             }
-            // the task to every picked agent; the host starts with it
-            if let Err(e) = engine::client::call(&t.id, &serde_json::json!({"op": "prompt", "to": picked, "text": message})) {
-                tty.leave(&mut out);
-                fail(&format!("{e}\nthread made: codehead --view {}", t.id), 1)
-            }
-            // the thread has the message: the draft's job ends, the form starts empty again
+            // the task to every picked agent; the host starts with it. 0 host (a failed start):
+            // the thread opens with the task as its prompt draft, never lost
+            let note = match engine::client::call(&t.id, &serde_json::json!({"op": "prompt", "to": picked, "text": message})) {
+                Ok(_) => None,
+                Err(e) => {
+                    view::save_prompt_draft(&t.id, &message);
+                    Some(format!("task not sent: {} · the task waits in the prompt · ctrl+enter: send", e.lines().next().unwrap_or_default()))
+                }
+            };
+            // the thread has the message (or its draft): the form starts empty again
             app.clear_task();
-            open_view(&mut term, &mut tty, &mut out, &t.id, &t.work_dir(), &title, &cwd)
+            open_view(&mut term, &mut tty, &mut out, &t.id, &t.work_dir(), &title, &cwd, note)
         }
         Outcome::Resume(w) => {
             let Some(t) = w.thread.clone() else { return tty.leave(&mut out) };
@@ -745,7 +760,7 @@ fn start(args: Args) {
                 return;
             }
             wake(&t.id);
-            open_view(&mut term, &mut tty, &mut out, &t.id, &dir, &t.title, &cwd)
+            open_view(&mut term, &mut tty, &mut out, &t.id, &dir, &t.title, &cwd, None)
         }
     };
     app.return_from_thread();

@@ -81,6 +81,41 @@ struct Host {
     /// Subagents of the agents (their start, steps, end into the log).
     subagents: super::subagents::Tracker,
     sub_scan: Instant,
+    /// Agents stopped on a usage limit: when each gets `continue` (unix ms; thread.json keeps it).
+    resume: HashMap<String, u64>,
+}
+
+/// The text an agent gets when its usage window reset.
+pub const RESUME_TEXT: &str = "[codehead: your usage limit window reset. Continue the task where you stopped.]";
+
+/// When a usage limit of error ERR ends (unix ms): the claude plan window at 100 % that resets
+/// last, else the `resets 1:50pm` of ERR (local time, the next one), else 30 min; + 1 min.
+pub fn resume_at(err: &str, now: u64) -> u64 {
+    let full = super::limits::read().into_iter().filter(|w| w.harness == "claude" && w.pct >= 99.5).filter_map(|w| w.resets).map(|r| r * 1000).filter(|&r| r > now).max();
+    let parsed = || {
+        static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let c = RE.get_or_init(|| regex::Regex::new(r"(?i)resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?").expect("valid regex")).captures(err)?;
+        let mut h: i32 = c[1].parse().ok()?;
+        let m: i32 = c.get(2).map_or(Some(0), |m| m.as_str().parse().ok())?;
+        match c.get(3).map(|x| x.as_str().to_ascii_lowercase()) {
+            Some(ap) if ap == "pm" && h < 12 => h += 12,
+            Some(ap) if ap == "am" && h == 12 => h = 0,
+            _ => {}
+        }
+        let secs = (now / 1000) as libc::time_t;
+        // SAFETY: localtime_r / mktime read and write only TM.
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::localtime_r(&secs, &mut tm) };
+        tm.tm_hour = h;
+        tm.tm_min = m;
+        tm.tm_sec = 0;
+        let mut at = unsafe { libc::mktime(&mut tm) } as i64 * 1000;
+        if at <= now as i64 {
+            at += 86_400_000;
+        }
+        u64::try_from(at).ok()
+    };
+    full.or_else(parsed).unwrap_or(now + 30 * 60_000) + 60_000
 }
 
 /// @names in TEXT that name an active agent, in order, once each.
@@ -154,6 +189,42 @@ impl Host {
         Ok(())
     }
 
+    /// AGENT stopped on usage limit ERR: `continue` at the window's reset.
+    fn schedule_resume(&mut self, agent: &str, err: &str) {
+        let at = resume_at(err, super::now_ms());
+        self.resume.insert(agent.to_string(), at);
+        let a = agent.to_string();
+        let _ = store::update(&self.id, move |t| {
+            t.resume.insert(a, at);
+        });
+        self.log(Some(agent), Kind::Resume { at });
+    }
+
+    /// A message for AGENT came first: its resume is off.
+    fn cancel_resume(&mut self, agent: &str) {
+        if self.resume.remove(agent).is_some() {
+            let a = agent.to_string();
+            let _ = store::update(&self.id, move |t| {
+                t.resume.remove(&a);
+            });
+            self.log(Some(agent), Kind::Resume { at: 0 });
+        }
+    }
+
+    /// Resumes due: `continue` to each agent (a message of codehead in the log).
+    fn run_resumes(&mut self) {
+        let now = super::now_ms();
+        let due: Vec<String> = self.resume.iter().filter(|(_, at)| **at <= now).map(|(a, _)| a.clone()).collect();
+        for agent in due {
+            self.cancel_resume(&agent);
+            self.last = Instant::now();
+            self.log(None, Kind::Prompt { from: "codehead".into(), to: vec![agent.clone()], text: "continue · the usage limit window reset".into() });
+            if let Err(e) = self.deliver(&agent, RESUME_TEXT) {
+                self.log(Some(&agent), Kind::Error { message: format!("auto resume: {e}") });
+            }
+        }
+    }
+
     fn deliver(&mut self, agent: &str, text: &str) -> Result<(), String> {
         // the worktree setup runs: the message waits for its end
         if self.setup_running {
@@ -215,6 +286,9 @@ impl Host {
                     to = t.lead().map(|l| vec![l.to_string()]).ok_or("thread has 0 agents")?;
                 }
                 self.log(None, Kind::Prompt { from: "owner".into(), to: to.clone(), text: text.clone() });
+                for a in &to {
+                    self.cancel_resume(a);
+                }
                 if t.state != "open" {
                     store::update(&self.id, |t| t.state = "open".into())?;
                 }
@@ -235,6 +309,9 @@ impl Host {
                     roster::get(a).filter(|a| !a.archived).ok_or_else(|| format!("no agent {a}"))?;
                 }
                 self.log(Some(&from), Kind::Prompt { from: from.clone(), to: to.clone(), text: text.clone() });
+                for a in &to {
+                    self.cancel_resume(a);
+                }
                 for a in &to {
                     self.deliver(a, &format!("[from @{from}] {text}"))?;
                 }
@@ -371,6 +448,8 @@ impl Host {
         self.last = Instant::now();
         match o {
             Out::Event(mut kind) => {
+                // a usage limit ended the turn: the resume goes in the log after the turn end
+                let mut pending_resume: Option<String> = None;
                 if matches!(kind, Kind::Text { .. } | Kind::Tool { .. } | Kind::TurnEnd { .. }) {
                     self.live.remove(&agent);
                 }
@@ -403,9 +482,16 @@ impl Host {
                             self.log(Some(&agent), Kind::TurnStart);
                         }
                     }
-                    Kind::TurnEnd { .. } => {
+                    Kind::TurnEnd { cost, error, .. } => {
                         if let Some(l) = self.sessions.get_mut(&agent) {
                             l.busy = false;
+                        }
+                        if let Some(e) = error.as_deref().filter(|e| crate::stream::usage_limit(e)) {
+                            pending_resume = Some(e.to_string());
+                        }
+                        // Claude's $: the base of the $ per % of its plan windows
+                        if roster::get(&agent).is_some_and(|a| a.harness.split('/').next() == Some("claude")) {
+                            super::limits::add_cost(*cost);
                         }
                         // a turn ends: its open asks are moot (the view drops them too)
                         self.asks.retain(|_, (a, _)| *a != agent);
@@ -423,23 +509,16 @@ impl Host {
                 for (a, k) in subs {
                     self.log(Some(&a), k);
                 }
+                if let Some(e) = pending_resume {
+                    self.schedule_resume(&agent, &e);
+                }
             }
             Out::Delta(text) => {
                 self.push(&json!({"op": "delta", "agent": agent, "text": text}));
                 self.live.entry(agent).or_default().push_str(&text);
             }
-            Out::Limits(l) => {
-                // 1 file for every host: the plan's windows are the account's, not the thread's
-                // hosts of other threads write it too: under its lock
-                let path = super::data_dir().join("limits.json");
-                let _ = super::locked(&super::data_dir().join("limits.lock"), || {
-                    let mut v: Value = std::fs::read(&path).ok().and_then(|t| serde_json::from_slice(&t).ok()).unwrap_or_else(|| json!({}));
-                    for (w, pct, resets) in l {
-                        v["claude"][w] = json!({"pct": pct, "resets": resets});
-                    }
-                    super::write_atomic(&path, v.to_string().as_bytes())
-                });
-            }
+            // the plan's windows are the account's: 1 file for every host
+            Out::Limits(l) => super::limits::record("claude", &l),
             Out::Mcp(harness, rows) => super::servers::record(&harness, rows),
             Out::Control(id, req) => {
                 // ACP agents: the mode decides what runs without the owner, auto-allowed MCP
@@ -678,8 +757,8 @@ pub fn run(id: &str) -> ! {
             std::thread::spawn(move || serve(conn, tx));
         }
     });
-    let exe = std::env::current_exe().unwrap_or_else(|_| Path::new("codehead").to_path_buf());
-    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now() };
+    let exe = super::exe();
+    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
     catch_signals();
     h.close_open_turns();
     // subagents the log has open ran in a process that is gone
@@ -716,9 +795,10 @@ pub fn run(id: &str) -> ! {
         if h.subagents.any() && h.sub_scan.elapsed() >= Duration::from_secs(2) {
             h.scan_subs();
         }
+        h.run_resumes();
         let busy = h.sessions.values().any(|l| l.busy);
-        // running subagents keep the host (and their harness process) alive
-        if !busy && !h.subagents.any() && !h.setup_running && h.asks.is_empty() && h.last.elapsed() >= IDLE {
+        // running subagents keep the host (and their harness process) alive; a resume waits too
+        if !busy && !h.subagents.any() && !h.setup_running && h.asks.is_empty() && h.resume.is_empty() && h.last.elapsed() >= IDLE {
             break;
         }
         // the thread was deleted: end with it
@@ -749,7 +829,7 @@ mod tests {
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now() };
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
         let (tx, rx) = mpsc::channel();
         h.start_setup(&t, tx);
         assert!(h.setup_running);
@@ -774,7 +854,7 @@ mod tests {
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now() };
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
         h.harness("ada".into(), Out::Event(Kind::Tool { id: "t1".into(), name: "Agent".into(), input: json!({"description": "scan", "run_in_background": true, "prompt": "scan it"}) }));
         h.harness("ada".into(), Out::Event(Kind::ToolResult { id: "t1".into(), ok: true, output: "Async agent launched\nagentId: a1".into() }));
         // the master's turn ended: the subagent keeps the host alive, the master counts as busy
@@ -799,7 +879,7 @@ mod tests {
         writeln!(w, "{}", json!({"op": "subscribe"})).unwrap();
         let Ok(Input::Subscribe(s)) = rx.recv() else { panic!("0 subscribe") };
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: "t".into(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now() };
+        let mut h = Host { id: "t".into(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: HashMap::new() };
         h.live.insert("ada".into(), "Hel".into());
         h.subscribe(s);
         h.harness("ada".into(), Out::Delta("lo".into()));
@@ -824,5 +904,22 @@ mod tests {
         assert_eq!(mentions("mail me@ada.dev", &names), Vec::<String>::new());
         assert_eq!(mentions("ask @r2-d2!", &names), vec!["r2-d2"]);
         assert!(mentions("@carol", &names).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+
+    #[test]
+    fn the_resume_time_comes_from_the_reset_in_the_error() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 0 limits file in the test data dir: the error's `resets 1:50pm`
+        let now = crate::engine::now_ms();
+        let at = resume_at("You've hit your 5-hour limit · resets 1:50pm (Europe/Berlin)", now);
+        assert!(at > now && at <= now + 86_400_000 + 60_000, "{at} {now}");
+        assert_eq!(crate::stream::clock(at - 60_000), "13:50");
+        // 0 reset in the text: 30 min (+ 1)
+        assert_eq!(resume_at("usage limit reached", now), now + 31 * 60_000);
     }
 }

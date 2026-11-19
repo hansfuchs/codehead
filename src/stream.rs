@@ -139,6 +139,8 @@ pub struct Thread {
     thought_keys: usize,
     /// The subagents of the agents, in start order.
     pub subs: Vec<Sub>,
+    /// Per agent stopped on a usage limit: when the host resumes it (unix ms).
+    pub resumes: HashMap<String, u64>,
 }
 
 impl Thread {
@@ -147,6 +149,10 @@ impl Thread {
         match &e.kind {
             Kind::Prompt { from, to, text } => {
                 self.open_run.remove(from);
+                // a message to a stopped agent: its turn, 0 auto resume
+                for a in to {
+                    self.resumes.remove(a);
+                }
                 self.items.push(Item::Prompt { from: from.clone(), to: to.clone(), text: text.clone(), ts: e.ts });
             }
             Kind::Text { text } => {
@@ -199,7 +205,15 @@ impl Thread {
                 }
             }
             Kind::TurnStart => {
+                self.resumes.remove(&agent);
                 self.busy.insert(agent);
+            }
+            Kind::Resume { at } => {
+                if *at == 0 {
+                    self.resumes.remove(&agent);
+                } else {
+                    self.resumes.insert(agent, *at);
+                }
             }
             Kind::TurnEnd { error, .. } => {
                 // thoughts at the turn's end: into its open run, else a message of their own
@@ -578,6 +592,24 @@ pub fn needs_harness(text: &str) -> Option<(String, String)> {
     Some((c[1].to_ascii_lowercase(), c.get(2).map_or("", |m| m.as_str()).trim().to_string()))
 }
 
+/// The auto resume time of note ITEM: the last usage-limit note of an agent the host resumes.
+fn resume_of(t: &Thread, item: &Item) -> Option<u64> {
+    let Item::Note { agent, .. } = item else { return None };
+    let at = *t.resumes.get(agent)?;
+    let last = t.items.iter().rev().find(|it| matches!(it, Item::Note { agent: a, text, .. } if a == agent && usage_limit(text)))?;
+    std::ptr::eq(last, item).then_some(at)
+}
+
+/// MS as `1h 05m 12s`, `12m 30s`, `45s`.
+pub fn countdown(ms: u64) -> String {
+    let s = ms.div_ceil(1000);
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m {:02}s", s / 60, s % 60),
+        _ => format!("{}h {:02}m {:02}s", s / 3600, s / 60 % 60, s % 60),
+    }
+}
+
 /// A usage or rate limit in an error text.
 pub fn usage_limit(msg: &str) -> bool {
     let msg = msg.to_ascii_lowercase();
@@ -595,11 +627,16 @@ fn agents_on<'a>(roster: &'a [(String, String)], harness: &str, same: bool, skip
 }
 
 /// The hint rows of an error: what to do next, which agents can go on.
-fn error_hint(agent: &str, text: &str, roster: &[(String, String)]) -> Vec<String> {
+fn error_hint(agent: &str, text: &str, roster: &[(String, String)], resume: Option<u64>) -> Vec<String> {
     let harness = roster.iter().find(|(n, _)| n == agent).map(|r| r.1.clone()).unwrap_or_default();
     if usage_limit(text) {
         let alt = agents_on(roster, &harness, false, agent);
         let mut v = vec![format!("{agent} stopped: {} usage limit reached.", crate::engine::harnesses::get(&harness).map_or(harness.as_str(), |h| h.label))];
+        if let Some(at) = resume {
+            let now = crate::engine::now_ms();
+            let left = if at > now { countdown(at - now) } else { "now".into() };
+            v.push(format!("Resumes automatically in {left} ({}), codehead open or not · a message from you: resume off.", clock(at)));
+        }
         if alt.is_empty() {
             v.push("Agents on other harnesses: none".into());
         } else {
@@ -704,6 +741,13 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
     let mut d = Drawn::default();
     let blank = |d: &mut Drawn| d.rows.push(Row::plain(Line::raw("")));
     let mut last_agent: Option<String> = None;
+    // the minute of the last item of LAST_AGENT: a later one gets `│ ── 13:42`
+    let mut minute = String::new();
+    let divider = |d: &mut Drawn, c: Color, at: &str| {
+        let fill = w.saturating_sub(2 + at.width() + 1);
+        d.rows.push(Row::plain(Line::from(vec![Span::styled("│ ", Style::default().fg(c)), Span::styled("─".repeat(fill), theme::line()), Span::styled(format!(" {at}"), theme::muted())])));
+        d.rows.push(Row::plain(Line::from(Span::styled("│", Style::default().fg(c)))));
+    };
     for item in &t.items {
         d.starts.push(d.rows.len());
         match item {
@@ -767,9 +811,13 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                 if last_agent.as_deref() != Some(agent) {
                     blank(&mut d);
                     d.rows.push(Row::plain(Line::from(badge(agent, c, *ts))));
+                } else if minute != clock(*ts) {
+                    blank(&mut d);
+                    divider(&mut d, c, &clock(*ts));
                 } else {
                     blank(&mut d);
                 }
+                minute = clock(*ts);
                 let bar = [Span::styled("│ ", Style::default().fg(c))];
                 thought_rows(&mut d, thoughts, *key, fold, w, &bar);
                 d.rows.extend(memo::markdown(text, w, &bar));
@@ -790,7 +838,11 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                     blank(&mut d);
                     d.rows.push(Row::plain(Line::from(badge(agent, c, *start))));
                     last_agent = Some(agent.clone());
+                } else if minute != clock(*start) {
+                    blank(&mut d);
+                    divider(&mut d, c, &clock(*start));
                 }
+                minute = clock(*start);
                 let shown = fold.run(*key);
                 let running = calls.iter().any(|c| c.output.is_none()) && t.busy.contains(agent);
                 let mark = if shown { "▾ " } else if running { "◦ " } else { "▸ " };
@@ -844,7 +896,7 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                 let pre = [Span::styled("● ", Style::default().fg(*color)), Span::styled(format!("{agent} "), Style::default().fg(c))];
                 d.rows.extend(render::plain(text, w, Style::default().fg(*color), &pre));
                 if *color == theme::pal().danger {
-                    for h in error_hint(agent, text, roster) {
+                    for h in error_hint(agent, text, roster, resume_of(t, item)) {
                         d.rows.extend(render::plain(&h, w, theme::muted(), &[Span::raw("  ")]));
                     }
                 }
@@ -1125,6 +1177,15 @@ struct Open {
     start: usize,
     border: Style,
     agent: Option<String>,
+    /// The minute (local clock `HH:MM`) of the box's last item: an item of a later minute gets a
+    /// divider with its time.
+    minute: String,
+}
+
+/// A divider in an agent's box: `│ ──────── 13:42 ` (the box's right border comes on close).
+fn minute_divider(w: usize, border: Style, at: &str) -> Row {
+    let fill = w.saturating_sub(3 + at.width() + 2);
+    Row::plain(Line::from(vec![Span::styled("│ ", border), Span::styled("─".repeat(fill), border), Span::styled(format!(" {at} "), theme::muted())]))
 }
 
 /// Top border of width W: `┌─ ` LEFT ` ─────── ` RIGHT ` ─┐`. Returns the row and the
@@ -1203,7 +1264,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                 let what = if *permission { " asked to run" } else { " asked" };
                 let name = vec![Span::styled(agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD)), Span::styled(what, theme::muted())];
                 let (top, _) = top_border(w, border, name, false, &clock(*asked));
-                cur = Some(Open { start: d.rows.len(), border, agent: None });
+                cur = Some(Open { start: d.rows.len(), border, agent: None, minute: String::new() });
                 d.rows.push(top);
                 let bar = [Span::styled("│ ", border)];
                 d.rows.push(Row::plain(Line::from(bar.to_vec())));
@@ -1227,7 +1288,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                 let border = Style::default().fg(theme::desaturate(c, 0.4));
                 let name = vec![Span::styled(from.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD)), Span::styled(format!(" → {}", to.join(", ")), theme::muted())];
                 let (top, _) = top_border(w, border, name, false, &clock(*ts));
-                cur = Some(Open { start: d.rows.len(), border, agent: None });
+                cur = Some(Open { start: d.rows.len(), border, agent: None, minute: String::new() });
                 d.rows.push(top);
                 let bar = [Span::styled("│ ", border)];
                 d.rows.push(Row::plain(Line::from(bar.to_vec())));
@@ -1243,23 +1304,22 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                 if cur.as_ref().and_then(|o| o.agent.as_deref()) != Some(agent.as_str()) {
                     close(&mut d, &mut cur);
                     gap(&mut d);
-                    // the box's time: its last item's
-                    let mut end_ts = *ts;
-                    for it in &t.items[idx..] {
-                        match it {
-                            Item::Text { agent: a, ts, .. } | Item::Sub { agent: a, ts, .. } if a == agent => end_ts = *ts,
-                            Item::Run { agent: a, end, .. } if a == agent => end_ts = *end,
-                            _ => break,
-                        }
-                    }
+                    // the box's time: its 1st item's (a later minute: a divider with its time)
                     let busy = t.working(agent) && last_of.get(agent.as_str()).is_some_and(|&l| l >= idx && t.items[idx..=l].iter().all(|it| matches!(it, Item::Text { agent: a, .. } | Item::Run { agent: a, .. } | Item::Sub { agent: a, .. } if a == agent)));
                     let name = vec![Span::styled(agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD))];
-                    let (top, wave_at) = top_border(w, border, name, busy, &clock(end_ts));
+                    let (top, wave_at) = top_border(w, border, name, busy, &clock(*ts));
                     if busy {
                         d.waves.push((d.rows.len(), wave_at, c));
                     }
-                    cur = Some(Open { start: d.rows.len(), border, agent: Some(agent.clone()) });
+                    cur = Some(Open { start: d.rows.len(), border, agent: Some(agent.clone()), minute: clock(*ts) });
                     d.rows.push(top);
+                } else if let Some(o) = cur.as_mut()
+                    && o.minute != clock(*ts)
+                {
+                    // a new minute in the same box: blank, `── 13:42`, blank (the item's own)
+                    o.minute = clock(*ts);
+                    d.rows.push(Row::plain(Line::from(bar.to_vec())));
+                    d.rows.push(minute_divider(w, border, &o.minute));
                 }
                 d.rows.push(Row::plain(Line::from(bar.to_vec())));
                 match item {
@@ -1341,7 +1401,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                 let pre = [Span::styled("● ", Style::default().fg(*color)), Span::styled(format!("{agent} "), Style::default().fg(c))];
                 d.rows.extend(render::plain(text, w, Style::default().fg(*color), &pre));
                 if *color == theme::pal().danger {
-                    for h in error_hint(agent, text, roster) {
+                    for h in error_hint(agent, text, roster, resume_of(t, item)) {
                         d.rows.extend(render::plain(&h, w, theme::muted(), &[Span::raw("  ")]));
                     }
                 }
@@ -1360,7 +1420,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
         let what = if a.questions().is_empty() { "asks to run" } else { "asks" };
         let name = vec![Span::styled(a.agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD)), Span::styled(format!(" {what}{more}"), border)];
         let (top, _) = top_border(w, border, name, false, "");
-        cur = Some(Open { start: d.rows.len(), border, agent: None });
+        cur = Some(Open { start: d.rows.len(), border, agent: None, minute: String::new() });
         d.rows.push(top);
         let bar = [Span::styled("│ ", border)];
         d.rows.push(Row::plain(Line::from(bar.to_vec())));
@@ -1411,6 +1471,36 @@ mod tests {
             }
         }
         panic!("0 {at}: {:?}", rows.iter().map(|r| &r.0).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_box_of_one_agent_splits_by_minute_with_a_timed_divider() {
+        let mut t = Thread::default();
+        let at = |ts: u64, text: &str| Event { ts, agent: Some("ada".into()), kind: Kind::Text { text: text.into() } };
+        let base = 1_795_090_200_000;
+        t.push(&at(base, "first"));
+        t.push(&at(base + 20_000, "same minute"));
+        t.push(&at(base + 65_000, "next minute"));
+        let none = HashSet::new();
+        let fold = Fold { runs: &none, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &none, all_thoughts: false };
+        for look in [Look::Bubbles, Look::Lines] {
+            let s = text(&draw(&t, look, 60, &Colors::new(), &[], &fold, &Picker::default()));
+            let rows: Vec<&str> = s.lines().collect();
+            let (m0, m1) = (clock(base), clock(base + 65_000));
+            // 1 box (bubbles: 1 top border), its time the 1st item's; 1 divider: the 2nd minute
+            if look == Look::Bubbles {
+                assert_eq!(rows.iter().filter(|r| r.starts_with('┌')).count(), 1, "{s}");
+                assert!(rows[0].contains(&m0), "{s}");
+            }
+            let div: Vec<usize> = rows.iter().enumerate().filter(|(_, r)| r.contains("──") && !r.starts_with('┌') && !r.starts_with('└')).map(|(i, _)| i).collect();
+            assert_eq!(div.len(), 1, "{look:?}\n{s}");
+            let i = div[0];
+            assert!(rows[i].contains(&m1), "{look:?}\n{s}");
+            // blank rows above and below the divider
+            let blank = |r: &str| r.trim_matches(|c: char| c == '│' || c == ' ').is_empty();
+            assert!(blank(rows[i - 1]) && blank(rows[i + 1]), "{look:?}\n{s}");
+            assert!(rows[..i].iter().any(|r| r.contains("same minute")) && rows[i..].iter().any(|r| r.contains("next minute")), "{look:?}\n{s}");
+        }
     }
 
     #[test]
@@ -1735,5 +1825,37 @@ mod bench {
                 eprintln!("{look:?} {name}: {} items, {rows} rows, ms per draw: {:.1} / {:.1} / {:.1}", t.items.len(), ms[0], ms[1], ms[2]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+    use crate::engine::store::Event;
+
+    #[test]
+    fn the_last_limit_note_counts_down_until_a_message_or_a_turn() {
+        let mut t = Thread::default();
+        let ev = |agent: Option<&str>, kind: Kind| Event { ts: 1, agent: agent.map(String::from), kind };
+        let end = |err: &str| Kind::TurnEnd { cost: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0, ctx: 0, window: 0, ms: 0, error: Some(err.into()) };
+        t.push(&ev(Some("ada"), end("You've hit your 5-hour limit · resets 1:50pm")));
+        t.push(&ev(Some("ada"), end("You've hit your 5-hour limit · resets 6:50pm")));
+        let at = crate::engine::now_ms() + 12 * 60_000 + 30_000;
+        t.push(&ev(Some("ada"), Kind::Resume { at }));
+        let none = HashSet::new();
+        let fold = Fold { runs: &none, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &none, all_thoughts: false };
+        let roster = vec![("ada".to_string(), "claude".to_string())];
+        let s = text(&draw(&t, Look::Bubbles, 120, &Colors::new(), &roster, &fold, &Picker::default()));
+        assert_eq!(s.matches("Resumes automatically in 12m 30s").count() + s.matches("Resumes automatically in 12m 29s").count(), 1, "{s}");
+        let last = s.rfind("6:50pm").unwrap();
+        assert!(s.rfind("Resumes automatically").unwrap() > last, "the last note: {s}");
+        // the owner writes: 0 resume
+        t.push(&ev(None, Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text: "go".into() }));
+        assert!(t.resumes.is_empty());
+        assert_eq!(countdown(3_725_000), "1h 02m 05s");
+    }
+
+    fn text(d: &Drawn) -> String {
+        d.rows.iter().map(|r| r.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>() + "\n").collect()
     }
 }

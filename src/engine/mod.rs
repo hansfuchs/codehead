@@ -16,6 +16,7 @@ pub mod guard;
 pub mod harness;
 pub mod harnesses;
 pub mod host;
+pub mod limits;
 pub mod mcp;
 pub mod roster;
 pub mod servers;
@@ -69,6 +70,27 @@ pub fn run_dir() -> PathBuf {
         // SAFETY: getuid has 0 failure modes.
         None => std::env::temp_dir().join(format!("codehead-{}", unsafe { libc::getuid() })),
     }
+}
+
+/// The codehead binary to start hosts and MCP servers with. A rebuild while codehead runs
+/// deletes the running file (Linux: `current_exe` ends in " (deleted)"): then the binary at the
+/// same path, else `codehead` on $PATH.
+pub fn exe() -> PathBuf {
+    let cur = std::env::current_exe().ok();
+    if let Some(p) = &cur
+        && p.exists()
+    {
+        return p.clone();
+    }
+    if let Some(p) = cur.as_ref().and_then(|p| p.to_str()).and_then(|s| s.strip_suffix(" (deleted)")).map(PathBuf::from)
+        && p.exists()
+    {
+        return p;
+    }
+    if let Some(p) = std::env::var_os("PATH").into_iter().flat_map(|v| std::env::split_paths(&v).collect::<Vec<_>>()).map(|d| d.join("codehead")).find(|p| p.is_file()) {
+        return p;
+    }
+    cur.unwrap_or_else(|| PathBuf::from("codehead"))
 }
 
 /// Milliseconds since the epoch.

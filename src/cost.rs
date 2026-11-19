@@ -30,15 +30,13 @@ struct AgentRow {
     live: bool,
     /// Saved in the agent prompt, else the stable pool pick (agents::sprite).
     sprite: Option<crate::sprites::Sprite>,
+    /// Context tokens of the latest session: the least a next message sends.
+    ctx_tokens: u64,
+    /// $ per token of the last turn (every kind, cache incl.).
+    usd_per_token: f64,
 }
 
-#[derive(Default)]
-struct Limit {
-    harness: String,
-    window: String,
-    pct: f64,
-    resets: Option<u64>,
-}
+type Limit = crate::engine::limits::Window;
 
 #[derive(Default)]
 pub struct Snap {
@@ -67,19 +65,7 @@ fn window_of(model: &str) -> u64 {
 
 /// Plan limits the hosts saw last: (harness, window, used %, resets at).
 pub fn limits() -> Vec<(String, String, f64, Option<u64>)> {
-    let Ok(text) = std::fs::read(crate::engine::data_dir().join("limits.json")) else { return Vec::new() };
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&text) else { return Vec::new() };
-    let mut out = Vec::new();
-    for (h, ws) in v.as_object().into_iter().flatten() {
-        for (w, l) in ws.as_object().into_iter().flatten() {
-            // `seven_day_overage_included`: the 7d window again, with overage: 0 own row
-            if w.ends_with("_overage_included") {
-                continue;
-            }
-            out.push((h.clone(), w.clone(), l["pct"].as_f64().unwrap_or(0.0), l["resets"].as_u64()));
-        }
-    }
-    out
+    crate::engine::limits::read().into_iter().map(|w| (w.harness, w.window, w.pct, w.resets)).collect()
 }
 
 /// Per agent of thread ID, from its turn ends; live agents from its host.
@@ -111,6 +97,10 @@ pub fn uses(id: &str) -> Vec<AgentUse> {
                 a.cache_write += cache_write;
                 a.turns += 1;
                 a.usd += cost;
+                let all = input + output + cache_read + cache_write;
+                if all > 0 {
+                    a.usd_per_token = cost / all as f64;
+                }
                 if ctx > 0 {
                     // the harness' window; older events: a guess from the model name
                     let size = if window > 0 { window } else { window_of(model.get(&name).map_or("", String::as_str)) };
@@ -156,9 +146,11 @@ fn fetch(id: &str, names: &Names) -> Snap {
             ctx: u.ctx.filter(|c| c.1 > 0).map(|(used, size)| used * 100 / size),
             samples: u.samples.into_iter().filter(|(at, _)| *at > hour).collect(),
             live: u.live,
+            ctx_tokens: u.ctx.map_or(0, |c| c.0),
+            usd_per_token: u.usd_per_token,
         });
     }
-    snap.limits = limits().into_iter().map(|(harness, window, pct, resets)| Limit { harness, window, pct, resets }).collect();
+    snap.limits = crate::engine::limits::read();
     snap
 }
 
@@ -210,16 +202,52 @@ fn until(t: u64, now: u64) -> String {
     }
 }
 
-/// The cost box in AREA.
-pub fn draw_in(f: &mut Frame, area: Rect, s: &Snap, age: Duration) {
-    draw_at(f, area, s, age, now())
+/// The next message of the thread view: its recipients, its length (chars).
+#[derive(Clone, Debug, Default)]
+pub struct Next {
+    pub to: Vec<String>,
+    pub chars: usize,
+}
+
+/// The next message's least cost: (tokens, $). Each recipient reads its context + the message
+/// (1 model call; tools add more). 0 recipient with a known context: None.
+fn next_cost(s: &Snap, n: &Next) -> Option<(u64, f64)> {
+    let msg = (n.chars as u64).div_ceil(4);
+    let rows: Vec<&AgentRow> = s.agents.iter().filter(|a| n.to.contains(&a.name) && a.ctx_tokens > 0).collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let tok = rows.iter().map(|a| a.ctx_tokens + msg).sum();
+    let usd = rows.iter().map(|a| (a.ctx_tokens + msg) as f64 * a.usd_per_token).sum();
+    Some((tok, usd))
+}
+
+/// Window L as a bar of WIDTH cells: the used % a solid bg, the share of the next message `▒`,
+/// the rest dithered (`░`).
+fn bar(pct: f64, next: f64, width: usize) -> Vec<Span<'static>> {
+    let col = if pct >= 90.0 { theme::pal().danger } else if pct >= 70.0 { theme::pal().warn } else { theme::pal().muted };
+    let cells = |p: f64| ((p.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
+    let used = cells(pct).min(width);
+    // a share > 0: 1 cell at least (visible)
+    let share = if next > 0.0 { cells(next).max(1).min(width - used) } else { 0 };
+    let rest = width - used - share;
+    vec![
+        Span::styled(" ".repeat(used), Style::default().bg(col)),
+        Span::styled("▒".repeat(share), theme::accent()),
+        Span::styled("░".repeat(rest), theme::line()),
+    ]
+}
+
+/// The cost box in AREA. NEXT: the next message (its cost line, its share in the window bars).
+pub fn draw_in(f: &mut Frame, area: Rect, s: &Snap, age: Duration, next: &Next) {
+    draw_at(f, area, s, age, now(), next)
 }
 
 fn draw(f: &mut Frame, s: &Snap, age: Duration, now: u64) {
-    draw_at(f, f.area(), s, age, now)
+    draw_at(f, f.area(), s, age, now, &Next::default())
 }
 
-fn draw_at(f: &mut Frame, area: Rect, s: &Snap, age: Duration, now: u64) {
+fn draw_at(f: &mut Frame, area: Rect, s: &Snap, age: Duration, now: u64, next: &Next) {
     f.render_widget(Paragraph::new("").style(theme::text()), area);
     let inner = Rect { x: area.x + 1, width: area.width.saturating_sub(2), ..area };
     let w = inner.width as usize;
@@ -289,33 +317,56 @@ fn draw_at(f: &mut Frame, area: Rect, s: &Snap, age: Duration, now: u64) {
             Span::styled(format!("{:>9}", format!("${:.2}", s.cost)), theme::text()),
         ]));
     }
-    lines.push(Line::styled(format!("{} turns · cache {} read, {} write", s.turns, human(s.cache_read), human(s.cache_write)), theme::muted()));
+    // compact: the room goes to the window bars and the next message
+    if !compact {
+        lines.push(Line::styled(format!("{} turns · cache {} read, {} write", s.turns, human(s.cache_read), human(s.cache_write)), theme::muted()));
+    }
+    let cost_next = next_cost(s, next);
     if !s.limits.is_empty() {
         if !compact {
             lines.push(Line::raw(""));
             lines.push(Line::styled("plan limits", theme::muted()));
         }
-        let hw = s.limits.iter().map(|l| l.harness.chars().count() + 1).max().unwrap_or(0).max(name_w);
-        let mut by: Vec<(String, Vec<Span>)> = Vec::new();
+        // the harness in the label: 2+ harnesses only
+        let many = s.limits.iter().any(|l| l.harness != s.limits[0].harness);
+        let label = |l: &Limit| if many { format!("{} {}", l.harness, window(&l.window)) } else { window(&l.window) };
+        let lw = s.limits.iter().map(|l| label(l).chars().count()).max().unwrap_or(0).max(name_w.saturating_sub(1));
         for l in &s.limits {
-            if !by.iter().any(|(h, _)| *h == l.harness) {
-                by.push((l.harness.clone(), vec![Span::styled(format!("{:hw$}", l.harness), theme::muted())]));
-            }
-            let spans = &mut by.iter_mut().find(|(h, _)| *h == l.harness).expect("pushed above").1;
-            let col = if l.pct >= 90.0 { theme::pal().danger } else if l.pct >= 70.0 { theme::pal().warn } else { theme::pal().text };
-            spans.push(Span::styled(format!("{} ", window(&l.window)), theme::muted()));
-            match l.resets {
-                // window reset since the last report: "new"
-                Some(r) if r <= now => spans.push(Span::styled("new", theme::muted())),
-                Some(r) => {
-                    spans.push(Span::styled(format!("{:.0}%", l.pct), Style::default().fg(col)));
-                    spans.push(Span::styled(format!(" ({})", until(r, now)), theme::muted()));
-                }
-                None => spans.push(Span::styled(format!("{:.0}%", l.pct), Style::default().fg(col))),
-            }
-            spans.push(Span::raw("  "));
+            // window reset since the last report: 0 %
+            let fresh = l.resets.is_some_and(|r| r <= now);
+            let pct = if fresh { 0.0 } else { l.pct };
+            let share = match (cost_next, l.usd_per_pct) {
+                (Some((_, usd)), Some(rate)) if rate > 0.0 => usd / rate,
+                _ => 0.0,
+            };
+            let tail = match l.resets {
+                _ if fresh => " new".to_string(),
+                Some(r) => format!(" {:>3.0}% {:>3}", pct, until(r, now)),
+                None => format!(" {:>3.0}%", pct),
+            };
+            let bw = w.saturating_sub(lw + 1 + 9).max(4);
+            let mut spans = vec![Span::styled(format!("{:lw$} ", label(l)), theme::muted())];
+            spans.extend(bar(pct, share, bw));
+            spans.push(Span::styled(tail, theme::muted()));
+            lines.push(Line::from(spans));
         }
-        lines.extend(by.into_iter().map(|(_, s)| Line::from(s)));
+    }
+    // the next message (thread view only): tokens, $, its share of each window
+    let mut spans = vec![Span::styled(format!("{:lw$} ", "next", lw = name_w.saturating_sub(1)), theme::muted())];
+    match cost_next {
+        Some((tok, usd)) => {
+            spans.push(Span::styled(format!("≥{} tok", human(tok)), theme::text()));
+            spans.push(Span::styled(format!(" ~${usd:.2}"), theme::muted()));
+            for l in &s.limits {
+                let share = l.usd_per_pct.filter(|r| *r > 0.0).map_or("?".into(), |r| format!("+{:.1}%", usd / r));
+                spans.push(Span::styled(format!(" · {} ", window(&l.window)), theme::muted()));
+                spans.push(Span::styled(share, theme::accent()));
+            }
+        }
+        None => spans.push(Span::styled("· (0 context yet)", theme::muted())),
+    }
+    if !next.to.is_empty() {
+        lines.push(Line::from(spans));
     }
     if !s.status.is_empty() {
         lines.push(Line::styled(s.status.clone(), theme::muted()));
@@ -436,10 +487,13 @@ mod tests {
             cache_write: 534_032,
             turns: 9,
             agents: vec![
-                AgentRow { name: "amon".into(), color: Some("orange".into()), tokens: 98_000, usd: 26.87, ctx: Some(19), samples: vec![(now - 60, 500)], live: true, sprite: Some(crate::sprites::default_for("amon")) },
+                AgentRow { name: "amon".into(), color: Some("orange".into()), tokens: 98_000, usd: 26.87, ctx: Some(19), samples: vec![(now - 60, 500)], live: true, sprite: Some(crate::sprites::default_for("amon")), ctx_tokens: 38_000, usd_per_token: 0.000_01 },
                 AgentRow { name: "lilith".into(), tokens: 92, usd: 1.6, ..Default::default() },
             ],
-            limits: vec![Limit { harness: "claude".into(), window: "five_hour".into(), pct: 13.0, resets: Some(now + 7200) }],
+            limits: vec![
+                Limit { harness: "claude".into(), window: "five_hour".into(), pct: 13.0, resets: Some(now + 7200), usd_per_pct: Some(2.0) },
+                Limit { harness: "claude".into(), window: "seven_day".into(), pct: 95.0, resets: Some(now + 3 * 86_400), usd_per_pct: None },
+            ],
         };
         let (w, h) = (56, 16);
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
@@ -451,18 +505,26 @@ mod tests {
         assert!(text.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)), "sprite row");
         assert!(text.contains("$26.87"));
         assert!(text.contains("19%"));
-        assert!(text.contains("5h 13% (2h)"));
-        // compact: the thread view's header (5 rows)
-        let (w, h) = (56, 5);
+        assert!(text.contains(" 13%  2h") && text.contains(" 95%  3d"), "{text}");
+        // compact: the thread view's header, a 400-char message to amon
+        let (w, h) = (56, 7);
+        let next = Next { to: vec!["amon".into()], chars: 400 };
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-        t.draw(|f| draw(f, &s, Duration::from_secs(1), now)).unwrap();
+        t.draw(|f| draw_at(f, f.area(), &s, Duration::from_secs(1), now, &next)).unwrap();
         let b = t.backend().buffer().clone();
         let text: String = (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string() + "\n").collect();
         println!("{text}");
         let first = text.lines().next().unwrap();
         assert!(first.contains("tok") && first.ends_with("$28.47 thread"), "{text}");
-        assert!(text.contains("$26.87") && text.contains("9 turns"), "{text}");
+        assert!(text.contains("$26.87") && !text.contains("9 turns"), "{text}");
         assert!(!text.contains("q close") && !text.contains("◆"), "{text}");
+        // the bars: used part solid (bg), the next message's share ▒, the rest dithered ░
+        let row = text.lines().position(|l| l.starts_with(" 5h")).expect("5h row");
+        let cells: Vec<_> = (0..w).map(|x| b[(x, row as u16)].clone()).collect();
+        assert!(cells.iter().any(|c| c.symbol() == " " && c.bg == theme::pal().muted), "used part");
+        assert!(text.lines().nth(row).unwrap().contains('▒') && text.contains('░'), "{text}");
+        // the next message: ≥ context + text tokens, $, share per window (0 rate: ?)
+        assert!(text.contains("≥38.1k tok ~$0.38 · 5h +0.2% · 7d ?"), "{text}");
     }
 }
 
@@ -485,6 +547,8 @@ pub struct AgentUse {
     pub ctx: Option<(u64, u64)>,
     /// Last 24h: (unix time, tokens).
     pub samples: Vec<(u64, u64)>,
+    /// $ per token of the last turn (every kind, cache incl.).
+    pub usd_per_token: f64,
 }
 
 /// The tokens tab: the thread in view (None: start screen), every thread's cost, plan limits.
@@ -550,12 +614,6 @@ fn spark_over(samples: &[(u64, u64)], buckets: usize, span: u64, now: u64) -> St
     }
     let max = b.iter().copied().max().unwrap_or(0).max(1);
     b.iter().map(|&v| if v == 0 { '·' } else { SPARK[((v * 7) / max) as usize] }).collect()
-}
-
-/// `[████░░░░] 42%` bar of W cells.
-fn bar(pct: f64, w: usize) -> String {
-    let full = ((pct.clamp(0.0, 100.0) / 100.0) * w as f64).round() as usize;
-    format!("{}{}", "█".repeat(full), "░".repeat(w - full.min(w)))
 }
 
 /// Lines of the tokens tab, W columns wide. NAMES: agent → (name, color); TITLES: thread id → title.
@@ -631,12 +689,11 @@ pub fn detail_lines(d: &Detail, here: Option<&str>, names: &HashMap<String, (Str
                 Some(r) => format!(" · resets in {}", until(*r, now)),
                 None => String::new(),
             };
-            lines.push(Line::from(vec![
-                Span::styled(format!("{:<10}", format!("{h} {}", window(win))), theme::muted()),
-                Span::styled(bar(*pct, 20), Style::default().fg(col)),
-                Span::styled(format!(" {pct:.0}%"), Style::default().fg(col)),
-                Span::styled(reset, theme::muted()),
-            ]));
+            let mut spans = vec![Span::styled(format!("{:<10}", format!("{h} {}", window(win))), theme::muted())];
+            spans.extend(bar(*pct, 0.0, 20));
+            spans.push(Span::styled(format!(" {pct:.0}%"), Style::default().fg(col)));
+            spans.push(Span::styled(reset, theme::muted()));
+            lines.push(Line::from(spans));
         }
     }
     lines

@@ -64,7 +64,7 @@ const MAX_COST_BOX: u16 = 66;
 const SQUEEZED_COST_BOX: u16 = 30;
 /// Header: the sprite rows + its top border at least, max. this many rows.
 const HEADER_H: u16 = crate::sprites::H as u16 + 1;
-const MAX_HEADER_H: u16 = 10;
+const MAX_HEADER_H: u16 = 12;
 /// Below this height: 0 header.
 const MIN_HEADER_SCREEN: u16 = 24;
 /// Handoff to a replacing agent: the replaced agent's last messages, max. this many chars.
@@ -144,6 +144,11 @@ struct View {
     history: Vec<String>,
     hist_at: Option<usize>,
     draft: String,
+    /// A search result to scroll to (its message time); the item it found, marked until a key.
+    jump: Option<u64>,
+    flash: Option<usize>,
+    /// The prompt draft as last written to disk (`prompt_path`): 0 write without a change.
+    prompt_saved: String,
     /// `@new` picked with "replace OLD": on send, OLD leaves and NEW gets the handoff.
     replace: Option<(String, String)>,
     /// A replace waiting for OLD's turn to end: (new, old, message).
@@ -251,6 +256,9 @@ impl View {
             history: Vec::new(),
             hist_at: None,
             draft: String::new(),
+            prompt_saved: String::new(),
+            jump: crate::search::take_jump(id),
+            flash: None,
             replace: None,
             queued: None,
             pending: Vec::new(),
@@ -291,7 +299,70 @@ impl View {
         };
         v.set_roster(roster);
         v.read();
+        v.load_prompt();
         v
+    }
+
+    // ---------- the prompt draft on disk ----------
+
+    /// The unsent prompt: the draft a comment or a commit message borrowed the prompt from, the
+    /// draft under a history step, else the prompt's text; with its pasted files.
+    fn prompt_draft(&self) -> String {
+        let text = match (&self.committing, &self.commenting, self.hist_at) {
+            (Some(d), _, _) | (None, Some((_, d)), _) => d.clone(),
+            (None, None, Some(_)) => self.draft.clone(),
+            (None, None, None) => self.input.text(),
+        };
+        // sent, not in the log yet: a crash before the host has it loses 0 messages
+        let unsent: Vec<&str> = self.pending.iter().map(|(t, ..)| t.as_str()).collect();
+        if text.trim().is_empty() && unsent.is_empty() {
+            return String::new();
+        }
+        let files: Vec<Value> = self.attachments.iter().filter(|(m, _)| text.contains(m.as_str())).map(|(m, p)| json!([m, p])).collect();
+        json!({"text": text, "attachments": files, "unsent": unsent}).to_string()
+    }
+
+    /// After every key, paste, click: the unsent prompt to disk, if it changed (0 text: 0 file).
+    /// A crash, a closed terminal, a kill: the next view of the thread has it back.
+    fn save_prompt(&mut self) {
+        let d = self.prompt_draft();
+        if d == self.prompt_saved {
+            return;
+        }
+        let p = prompt_path(&self.id);
+        let r = if d.is_empty() { std::fs::remove_file(&p).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) } else { crate::engine::write_atomic(&p, d.as_bytes()) };
+        match r {
+            Ok(()) => self.prompt_saved = d,
+            Err(e) => self.toast(format!("prompt draft not saved: {e}")),
+        }
+    }
+
+    /// The view opens: the unsent prompt of its last view back in the prompt.
+    fn load_prompt(&mut self) {
+        let Ok(raw) = std::fs::read_to_string(prompt_path(&self.id)) else { return };
+        let Ok(v) = serde_json::from_str::<Value>(&raw) else { return };
+        // messages the log never got (a crash right after the send): back in the prompt
+        let sent = self.thread.sent();
+        let mut parts: Vec<String> = v["unsent"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|u| !sent.iter().any(|t| t.starts_with(u) || u.starts_with(t.as_str())))
+            .map(String::from)
+            .collect();
+        let text = v["text"].as_str().unwrap_or_default();
+        if !text.trim().is_empty() {
+            parts.push(text.to_string());
+        }
+        if parts.is_empty() {
+            return;
+        }
+        let text = parts.join("\n\n");
+        self.input.set_text(&text);
+        self.input.move_end();
+        self.attachments = v["attachments"].as_array().into_iter().flatten().filter_map(|a| Some((a[0].as_str()?.to_string(), PathBuf::from(a[1].as_str()?)))).collect();
+        self.prompt_saved = raw;
     }
 
     /// The agents (each 5 s, join, leave): the stream redraws only when its inputs changed.
@@ -793,6 +864,10 @@ impl View {
 
     /// True: the view ends (EXIT set).
     fn key(&mut self, k: KeyEvent) -> bool {
+        // a key after a search jump: the mark goes
+        if self.menu.is_none() && self.flash.take().is_some() {
+            self.dirty = true;
+        }
         if let Some(m) = self.menu.as_mut() {
             let a = m.key(k);
             return self.menu_action(a);
@@ -1215,6 +1290,17 @@ impl View {
                 self.exit = Exit::Open { id: c.id.clone(), dir: c.dir.clone().unwrap_or_else(|| self.cwd.clone()), title: c.title, note: String::new() };
                 return true;
             }
+            Action::Jump(c, ts) => {
+                self.menu = None;
+                if c.id == self.id {
+                    self.jump = Some(ts);
+                    self.dirty = true;
+                    return false;
+                }
+                crate::search::jump_to(&c.id, ts);
+                self.exit = Exit::Open { id: c.id.clone(), dir: c.dir.clone().unwrap_or_else(|| self.cwd.clone()), title: c.title, note: String::new() };
+                return true;
+            }
             Action::Command(1) => {
                 self.all_runs = !self.all_runs;
                 self.dirty = true;
@@ -1561,6 +1647,16 @@ impl View {
             if let Some(a) = anchor {
                 self.back = back_for(&self.drawn.starts, self.drawn.rows.len(), a, h);
             }
+            // a search result: its message 2 rows below the top, marked
+            if let Some(ts) = self.jump.take() {
+                match self.thread.items.iter().position(|it| item_ts(it) == Some(ts)) {
+                    Some(i) => {
+                        self.back = back_for(&self.drawn.starts, self.drawn.rows.len(), (i, 0), h).saturating_add(2).min(self.drawn.rows.len().saturating_sub(h));
+                        self.flash = Some(i);
+                    }
+                    None => self.toast("search: the message is gone from the stream"),
+                }
+            }
         }
         // sends the log does not show yet, a queued replace: below the stream
         let mut extra: Vec<Line<'static>> = Vec::new();
@@ -1595,7 +1691,25 @@ impl View {
         self.back = self.back.min(total.saturating_sub(h));
         let end = total - self.back;
         let start = end.saturating_sub(h);
-        let mut lines: Vec<Line> = self.drawn.rows[start..end].iter().map(|r| r.line.clone()).collect();
+        let flash = self.flash.and_then(|i| Some((*self.drawn.starts.get(i)?, self.drawn.starts.get(i + 1).copied().unwrap_or(total))));
+        let mut lines: Vec<Line> = self.drawn.rows[start..end]
+            .iter()
+            .enumerate()
+            .map(|(n, r)| match flash {
+                // the found message: a marker in the left column
+                Some((a, b)) if (a..b).contains(&(start + n)) => {
+                    let mut l = r.line.clone();
+                    l.spans.insert(0, Span::styled("▌", theme::accent()));
+                    if let Some(s) = l.spans.get_mut(1)
+                        && let Some(rest) = s.content.strip_prefix(|c: char| c == ' ' || c == '│' || c == '┌' || c == '└').map(String::from)
+                    {
+                        s.content = rest.into();
+                    }
+                    l
+                }
+                _ => r.line.clone(),
+            })
+            .collect();
         let mut cut = 0;
         if self.back == 0 && !extra.is_empty() {
             lines.extend(extra);
@@ -1845,7 +1959,8 @@ impl View {
                 });
             }
             if let Some(s) = &self.cost {
-                crate::cost::draw_in(f, cost, s, self.cost_at.elapsed());
+                let next = crate::cost::Next { to: self.recipients(), chars: self.input.text().chars().count() };
+                crate::cost::draw_in(f, cost, s, self.cost_at.elapsed(), &next);
             }
         }
 
@@ -1969,7 +2084,8 @@ fn cards_w(cards: &[Card]) -> u16 {
 /// Header rows (inside its frame + its top border) for N agents.
 fn header_rows(n: usize) -> u16 {
     let n = n.max(1) as u16;
-    (3 + n + u16::from(n > 1)).clamp(HEADER_H, MAX_HEADER_H)
+    // tokens box: column names, agents, all (2+), 2 plan windows, the next message
+    (5 + n + u16::from(n > 1)).clamp(HEADER_H, MAX_HEADER_H)
 }
 
 /// Width of the input in its bubble: `│ ` left, ` │` right.
@@ -2122,6 +2238,24 @@ fn subscribe(id: &str, tx: Sender<Msg>) -> Unsub {
     Unsub(stop)
 }
 
+/// The time of a stream item (a search hit names a message by its time).
+fn item_ts(it: &stream::Item) -> Option<u64> {
+    match it {
+        stream::Item::Prompt { ts, .. } | stream::Item::Text { ts, .. } => Some(*ts),
+        _ => None,
+    }
+}
+
+/// The unsent prompt of thread ID (JSON: text, attachments).
+fn prompt_path(id: &str) -> PathBuf {
+    store::thread_dir(id).join("prompt.json")
+}
+
+/// TEXT as the prompt draft of thread ID: its next view opens with it.
+pub fn save_prompt_draft(id: &str, text: &str) {
+    let _ = crate::engine::write_atomic(&prompt_path(id), json!({"text": text, "attachments": []}).to_string().as_bytes());
+}
+
 pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str, note: Option<&str>, _first: &str) -> Result<Exit, String> {
     if store::load(id).is_none() {
         return Err(format!("no thread {id}"));
@@ -2139,6 +2273,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     if let Some(n) = note.filter(|n| !n.is_empty()) {
         v.toast(n.to_string());
     }
+    v.save_prompt();
     crate::nav::mark_seen_now(id);
     let mut roster_at = Instant::now();
     let mut drawn = Instant::now() - Duration::from_secs(1);
@@ -2146,6 +2281,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     // the tail: on a `wake` of the host; each second as a fallback (0 host, a lost line)
     let mut wake = true;
     let mut read_at = Instant::now();
+    let mut count_sec = 0;
     loop {
         // a frame on change; animations (wave, spinners, toast) at 150 ms; else 1 per second
         // (clock, cost box, sending timer)
@@ -2172,6 +2308,8 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
                 _ => false,
             };
             crate::textarea::stamp(None);
+            // every change to disk before the next event: a crash loses 0 keys
+            v.save_prompt();
             if done {
                 crate::nav::mark_seen_now(id);
                 return Ok(std::mem::replace(&mut v.exit, Exit::Back));
@@ -2202,8 +2340,20 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
             dirty = true;
             match m {
                 Msg::Done("send", Err(e)) => {
-                    if let Some(p) = v.pending.iter_mut().rev().find(|p| p.2.is_none()) {
-                        p.2 = Some(e.lines().next().unwrap_or_default().to_string());
+                    let e = e.lines().next().unwrap_or_default().to_string();
+                    // an empty prompt: the message back in it (never lost), else marked failed
+                    if v.input.text().trim().is_empty()
+                        && v.committing.is_none()
+                        && v.commenting.is_none()
+                        && let Some(i) = v.pending.iter().rposition(|p| p.2.is_none())
+                    {
+                        let (text, ..) = v.pending.remove(i);
+                        v.input.set_text(&text);
+                        v.input.move_end();
+                        v.save_prompt();
+                        v.toast(format!("not sent: {e} · the message is back in the prompt"));
+                    } else if let Some(p) = v.pending.iter_mut().rev().find(|p| p.2.is_none()) {
+                        p.2 = Some(e);
                     }
                 }
                 // the answer failed: the picker takes keys again
@@ -2239,6 +2389,13 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
             }
         }
         dirty |= v.tick_esc();
+        // an auto resume pending: its countdown in the stream, 1 redraw per second
+        let sec = crate::engine::now_ms() / 1000;
+        if !v.thread.resumes.is_empty() && sec != count_sec {
+            count_sec = sec;
+            v.dirty = true;
+            dirty = true;
+        }
         if wake || read_at.elapsed() >= Duration::from_secs(1) {
             wake = false;
             read_at = Instant::now();
@@ -2785,5 +2942,34 @@ mod subagent_tests {
         let text = last["text"].as_str().unwrap_or_default();
         assert_eq!(last["to"], serde_json::json!(["ada"]));
         assert!(text.contains("“fix the build”") && text.contains("/x/agent-2.jsonl") && text.contains("> do fix the build"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod prompt_draft_tests {
+    use super::*;
+
+    #[test]
+    fn the_unsent_prompt_and_unlogged_sends_survive_a_new_view() {
+        let id = "drafttest-0000";
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(id, Path::new("/tmp"), "t", tx.clone());
+        v.input.set_text("half a message");
+        v.save_prompt();
+        // a send the host never logged (the process died before the reply)
+        v.pending.push(("sent, never logged".into(), Instant::now(), None));
+        v.save_prompt();
+        drop(v);
+        let mut v = View::new(id, Path::new("/tmp"), "t", tx.clone());
+        assert_eq!(v.input.text(), "sent, never logged\n\nhalf a message");
+        // an emptied prompt: 0 file
+        v.input.set_text("");
+        v.save_prompt();
+        assert!(!prompt_path(id).exists());
+        // a failed new-thread start: the task waits in the prompt
+        save_prompt_draft(id, "the task");
+        let v = View::new(id, Path::new("/tmp"), "t", tx);
+        assert_eq!(v.input.text(), "the task");
+        let _ = std::fs::remove_dir_all(store::thread_dir(id));
     }
 }
