@@ -281,8 +281,14 @@ impl Menu {
         Action::None
     }
 
+    /// The threads tab's cards (filter + repo applied); the current thread always on top.
     fn visible(&self) -> Vec<usize> {
-        nav::filter(&self.cards, &self.filter.text()).into_iter().filter(|&i| self.repo.keeps(self.cards[i].repo.as_deref())).collect()
+        let mut v: Vec<usize> = nav::filter(&self.cards, &self.filter.text()).into_iter().filter(|&i| self.repo.keeps(self.cards[i].repo.as_deref())).collect();
+        if let Some(p) = v.iter().position(|&i| self.thread.as_deref() == Some(self.cards[i].id.as_str())) {
+            let here = v.remove(p);
+            v.insert(0, here);
+        }
+        v
     }
 
     /// Repo dropdown options: the repos of every card (0 filter applied).
@@ -992,6 +998,25 @@ mod tests {
             m.key(k(KeyCode::Char(c)));
         }
         assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "t1"));
+    }
+
+    #[test]
+    fn threads_tab_has_the_current_thread_on_top() {
+        let cards = vec![card("t1", "newest"), card("t2", "older"), card("t3", "this one")];
+        let mut m = Menu::new(Vec::new(), Some("t3".into()), Vec::new(), Vec::new(), cards);
+        m.key(k(KeyCode::Right));
+        let ids = |m: &Menu| m.visible().iter().map(|&i| m.cards[i].id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&m), ["t3", "t1", "t2"]);
+        assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "t3"));
+        // a filter that keeps it: on top too; one that drops it: the rest in order
+        for c in "o".chars() {
+            m.key(k(KeyCode::Char(c)));
+        }
+        assert_eq!(ids(&m)[0], "t3");
+        for c in "lder".chars() {
+            m.key(k(KeyCode::Char(c)));
+        }
+        assert_eq!(ids(&m), ["t2"]);
     }
 
     #[test]
