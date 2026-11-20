@@ -33,6 +33,10 @@ pub struct Thread {
     /// `failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<String>,
+    /// A thread on main / master in an existing checkout: the host pulls (`git pull --ff-only`)
+    /// before the 1st turn; false once done.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pull: bool,
     /// The thread this one continues (`> handoff`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,

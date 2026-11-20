@@ -55,6 +55,7 @@ mod sprites;
 mod stream;
 mod subagents;
 mod styles;
+mod tabgroup;
 mod textarea;
 mod theme;
 mod threads;
@@ -94,6 +95,7 @@ usage: codehead                    the thread updated last (0 threads: the start
 config:  ~/.config/codehead.toml ($CODEHEAD_CONFIG overrides). keys, each overridden by its env var:
            notes  = \"~/notes\"   notes root ($CODEHEAD_NOTES; default: notes/ of the codehead app dir)
            styles = \"~/styles\"  output styles ($CODEHEAD_STYLES; default: output-styles/ of the app dir)
+           repo   = \"~/app\"     repo of the new tab's where rows ($CODEHEAD_REPO; default: the start dir's)
            agent  = \"amon\"      default agent ($CODEHEAD_AGENT)
            prefix = \"task\"      branch prefix ($CODEHEAD_PREFIX)
            models = \"fable,opus,sonnet,haiku\"  Claude models ($CODEHEAD_MODELS)
@@ -117,7 +119,8 @@ project: git repo of the current directory. the task's where rows: repo (enter: 
          (main checkout, git switch -c, 0 worktrees), or a new branch + worktree (-b sets this).
          below it: checkout the picked branch (else the main checkout works as is), stash local
          changes that block the checkout (git stash). a start on main / master in an existing
-         checkout: git pull --ff-only first (a failed pull: a toast, the thread starts anyway).
+         checkout: git pull --ff-only in the thread before the 1st turn (a failed pull: a note
+         to the agents, the thread goes on). setting repo: the where rows start on that repo.
          0 git repos: the current directory itself (thread works in place)
 prompt:  @: agent names. >: commands, in dropdowns above the prompt box (never over it; a submenu
          beside its parent, 0 room there: above them). max. 10 rows, ▲ ▼ on the right border: more rows.
@@ -504,7 +507,7 @@ fn start(args: Args) {
         fail(&e, 2);
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let repo = std::env::var_os("CODEHEAD_REPO").filter(|s| !s.is_empty()).map(PathBuf::from).or_else(|| threads::repo_of(&cwd));
+    let repo = threads::repo_of(&cwd);
     if engine::harnesses::installed().is_empty() {
         let list: Vec<String> = engine::harnesses::ALL.iter().map(|h| format!("  {} ({}): {}", h.label, h.bin, h.install)).collect();
         fail(&format!("0 harnesses on PATH: codehead's agents run on one of these:\n{}", list.join("\n")), 1);
@@ -538,6 +541,12 @@ fn start(args: Args) {
     };
     engine::trace("app new …");
     let mut app = App::new(cfg, &args.title);
+    // -b names a branch of the start dir's repo: the setting `repo` stays off then
+    if args.branch.is_none()
+        && let Some(r) = config::default_repo()
+    {
+        app.use_default_repo(&r);
+    }
     engine::trace("app new");
 
     restore_on_panic();
@@ -672,6 +681,7 @@ fn start(args: Args) {
             break 'screens;
         }
         Outcome::New { message, target, agents: picked, clone } => {
+            engine::trace("start: submit");
             // a home repo not on disk yet: clone it first
             if let Some((url, path)) = &clone {
                 let _ = term.draw(|f| app::draw_status(f, &format!("cloning {url}…"), 0));
@@ -755,19 +765,12 @@ fn start(args: Args) {
                     fail(&e, 1)
                 }
             }
-            // a thread on main in an existing checkout: main up to date first (ff only); a
-            // failed pull: the thread starts anyway, the view toasts why
-            let mut pull_note = None;
-            if worktree.is_none() && matches!(target, Target::Checkout { .. } | Target::Worktree { .. }) {
-                if label == "main" || label == "master" {
-                    let _ = term.draw(|f| app::draw_status(f, &format!("updating {label} (git pull --ff-only)…"), 0));
-                }
-                if let Some(Err(e)) = threads::update_default(&dir) {
-                    pull_note = Some(format!("{label} not updated: {e}"));
-                }
-            }
+            engine::trace("start: git ready");
             let _ = term.draw(|f| app::draw_status(f, &format!("starting {label} · {}…", picked.join(", ")), 0));
             let mut t = engine::store::Thread::new(&title, &message, &dir, picked.clone());
+            // a thread on main in an existing checkout: the host pulls main (ff only) before the
+            // 1st turn, the view opens at once; a failed pull: the agents get a note on it
+            t.pull = worktree.is_none() && matches!(target, Target::Checkout { .. } | Target::Worktree { .. }) && (label == "main" || label == "master");
             if let Some(b) = &worktree {
                 match threads::add_worktree(&repo, b) {
                     Ok(p) => {
@@ -792,15 +795,17 @@ fn start(args: Args) {
                 tty.leave(&mut out);
                 fail(&e, 1)
             }
+            engine::trace("start: thread saved");
             // the task to every picked agent; the host starts with it. 0 host (a failed start):
             // the thread opens with the task as its prompt draft, never lost
             let note = match engine::client::call(&t.id, &serde_json::json!({"op": "prompt", "to": picked, "text": message})) {
-                Ok(_) => pull_note,
+                Ok(_) => None,
                 Err(e) => {
                     view::save_prompt_draft(&t.id, &message);
                     Some(format!("task not sent: {} · the task waits in the prompt · ctrl+enter: send", e.lines().next().unwrap_or_default()))
                 }
             };
+            engine::trace("start: task sent");
             // the thread has the message (or its draft): the form starts empty again
             app.clear_task();
             open_view(&mut term, &mut tty, &mut out, &t.id, &t.work_dir(), &title, &cwd, note)

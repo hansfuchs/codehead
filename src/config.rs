@@ -11,6 +11,8 @@ pub struct File {
     pub notes: Option<String>,
     /// Home repo: a git repo with AGENTS.md (steering, notes, other repos) every agent reads.
     pub home: Option<String>,
+    /// Repo of the new tab's where row; unset: the repo of the dir codehead starts in.
+    pub repo: Option<String>,
     pub styles: Option<String>,
     pub agent: Option<String>,
     pub prefix: Option<String>,
@@ -138,6 +140,7 @@ fn parse(text: &str) -> Result<File, String> {
         match k.as_str() {
             "notes" => f.notes = Some(s),
             "home" => f.home = Some(s),
+            "repo" => f.repo = Some(s),
             "styles" => f.styles = Some(s),
             "agent" => f.agent = Some(s),
             "prefix" => f.prefix = Some(s),
@@ -316,6 +319,7 @@ fn document(base: &str, file: &File) -> Result<String, String> {
     for (key, value) in [
         ("notes", &file.notes),
         ("home", &file.home),
+        ("repo", &file.repo),
         ("styles", &file.styles),
         ("agent", &file.agent),
         ("prefix", &file.prefix),
@@ -477,6 +481,7 @@ impl File {
         match key {
             "notes" => self.notes.clone(),
             "home" => self.home.clone(),
+            "repo" => self.repo.clone(),
             "styles" => self.styles.clone(),
             "agent" => self.agent.clone(),
             "prefix" => self.prefix.clone(),
@@ -504,6 +509,7 @@ impl File {
         match key {
             "notes" => self.notes = v,
             "home" => self.home = v,
+            "repo" => self.repo = v,
             "styles" => self.styles = v,
             "agent" => self.agent = v,
             "prefix" => self.prefix = v,
@@ -655,6 +661,14 @@ pub fn home_repo() -> Option<PathBuf> {
     env("CODEHEAD_HOME_REPO")
         .map(PathBuf::from)
         .or_else(|| get().home.as_deref().filter(|s| !s.is_empty()).map(expand))
+        .filter(|p| p.is_dir())
+}
+
+/// The new tab's default repo: $CODEHEAD_REPO, else `repo`. None: unset or 0 dir.
+pub fn default_repo() -> Option<PathBuf> {
+    env("CODEHEAD_REPO")
+        .map(PathBuf::from)
+        .or_else(|| get().repo.as_deref().filter(|s| !s.is_empty()).map(expand))
         .filter(|p| p.is_dir())
 }
 

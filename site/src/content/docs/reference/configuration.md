@@ -12,6 +12,7 @@ to its default. `esc` undoes the edit of the field (0 apply); `tab` / `shift+tab
 notes  = "~/notes"                    # $CODEHEAD_NOTES
 styles = "~/styles"                   # $CODEHEAD_STYLES
 home   = "~/home"                     # $CODEHEAD_HOME_REPO
+repo   = "~/projects/app"             # $CODEHEAD_REPO
 agent  = "amon"                       # $CODEHEAD_AGENT
 prefix = "task"                       # $CODEHEAD_PREFIX
 models = "fable,opus,sonnet,haiku"    # $CODEHEAD_MODELS
@@ -39,6 +40,7 @@ accent = "#FF7565"                    # overrides 1 color of the scheme
 | --- | --- | --- |
 | `notes` | `notes/` of the app dir | notes root |
 | `home` | unset | Home repo: a git repo with `AGENTS.md` (notes, other repos). Every agent gets its path in the system prompt and `$CODEHEAD_HOME_REPO`, so each harness reads the same rules |
+| `repo` | unset | The repo the new tab's where rows start on, as if picked in the repo picker (a new branch + worktree first). Unset, or a dir in the repo codehead starts in: that repo, its current branch first. `-b` ignores it |
 | `styles` | `output-styles/` of the app dir | output styles folder |
 | `agent` | `amon`, else the first agent | default agent |
 | `prefix` | `task` | branch prefix for new branches |

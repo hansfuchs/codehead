@@ -49,6 +49,8 @@ enum Input {
     Harness(String, Out),
     /// The worktree setup ended: its label, ok, output.
     Setup(String, bool, String),
+    /// The pull of main before the 1st turn ended: ok, its last line.
+    Pull(bool, String),
 }
 
 struct Live {
@@ -77,9 +79,13 @@ struct Host {
     live: HashMap<String, String>,
     /// Per agent in a turn: its tokens so far (`ping` gives them to the cost box).
     turn_use: HashMap<String, super::harness::TurnUse>,
-    /// The worktree setup runs: messages wait in QUEUE (agent, text) until it ends.
+    /// The worktree setup (or the pull of main) runs: messages wait in QUEUE (agent, text)
+    /// until it ends.
     setup_running: bool,
     queue: Vec<(String, String)>,
+    /// Messages of the last command (agent, text): delivered after its reply. A harness start
+    /// and the edits snapshot take a second in a big repo; the sender never waits for them.
+    later: Vec<(String, String)>,
     /// Subagents of the agents (their start, steps, end into the log).
     subagents: super::subagents::Tracker,
     sub_scan: Instant,
@@ -299,9 +305,7 @@ impl Host {
                 // CONTEXT (the owner's shell commands since the last message): for the agents only
                 let ctx = s("context");
                 let full = if ctx.trim().is_empty() { text.clone() } else { format!("{text}\n\n{ctx}") };
-                for a in &to {
-                    self.deliver(a, &full)?;
-                }
+                self.later.extend(to.iter().map(|a| (a.clone(), full.clone())));
                 Ok(json!({"to": to}))
             }
             "send" => {
@@ -626,8 +630,51 @@ impl Host {
         self.setup_running = false;
         self.log(Some("setup"), Kind::ToolResult { id: "setup".into(), ok, output: out });
         let _ = store::update(&self.id, |t| t.setup = Some(if ok { "done" } else { "failed" }.into()));
+        let note = (!ok).then(|| format!("[codehead: the worktree setup (`{label}`) failed; its output is in the thread. Make the environment work first.]"));
+        self.release_queue(note.as_deref());
+    }
+
+    /// A thread on main: `git pull --ff-only` off the host loop; messages wait for its end.
+    fn start_pull(&mut self, t: &store::Thread, tx: Sender<Input>) {
+        self.setup_running = true;
+        self.log(Some("setup"), Kind::Tool { id: "pull".into(), name: "Bash".into(), input: json!({"command": "git pull --ff-only", "description": "main up to date: the 1st turn waits for it"}) });
+        let dir = t.work_dir();
+        std::thread::spawn(move || {
+            let (ok, out) = match crate::threads::update_default(&dir) {
+                None => (true, "0 pull: not on main / master with an upstream".to_string()),
+                Some(Ok(b)) => (true, format!("{b} up to date")),
+                Some(Err(e)) => (false, e),
+            };
+            let _ = tx.send(Input::Pull(ok, out));
+        });
+    }
+
+    /// The pull ended: its result in the log, the waiting messages go out (a failed pull: with a
+    /// note on it, the agents work on the local main).
+    fn pull_done(&mut self, ok: bool, out: String) {
+        self.setup_running = false;
+        self.log(Some("setup"), Kind::ToolResult { id: "pull".into(), ok, output: out });
+        let _ = store::update(&self.id, |t| t.pull = false);
+        let note = (!ok).then_some("[codehead: `git pull --ff-only` of main failed (output in the thread): main may be behind its upstream.]");
+        self.release_queue(note);
+    }
+
+    /// The waiting messages go out, each with NOTE on top.
+    fn release_queue(&mut self, note: Option<&str>) {
         for (agent, text) in std::mem::take(&mut self.queue) {
-            let text = if ok { text } else { format!("[codehead: the worktree setup (`{label}`) failed; its output is in the thread. Make the environment work first.]\n\n{text}") };
+            let text = match note {
+                Some(n) => format!("{n}\n\n{text}"),
+                None => text,
+            };
+            if let Err(e) = self.deliver(&agent, &text) {
+                self.log(Some(&agent), Kind::Error { message: e });
+            }
+        }
+    }
+
+    /// The messages of the last command go out (its reply went first).
+    fn deliver_later(&mut self) {
+        for (agent, text) in std::mem::take(&mut self.later) {
             if let Err(e) = self.deliver(&agent, &text) {
                 self.log(Some(&agent), Kind::Error { message: e });
             }
@@ -775,7 +822,7 @@ pub fn run(id: &str) -> ! {
         }
     });
     let exe = super::exe();
-    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
+    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
     catch_signals();
     h.close_open_turns();
     // subagents the log has open ran in a process that is gone
@@ -786,6 +833,8 @@ pub fn run(id: &str) -> ! {
     }
     if t.setup.as_deref() == Some("pending") {
         h.start_setup(&t, tx.clone());
+    } else if t.pull {
+        h.start_pull(&t, tx.clone());
     }
     loop {
         // 1 s: a signal ends the host within a second
@@ -799,10 +848,12 @@ pub fn run(id: &str) -> ! {
                     Err(e) => json!({"ok": false, "error": e}),
                 };
                 let _ = reply.send(r);
+                h.deliver_later();
             }
             Ok(Input::Subscribe(s)) => h.subscribe(s),
             Ok(Input::Harness(a, o)) => h.harness(a, o),
             Ok(Input::Setup(label, ok, out)) => h.setup_done(label, ok, out),
+            Ok(Input::Pull(ok, out)) => h.pull_done(ok, out),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -832,6 +883,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_prompt_replies_first_and_a_pending_pull_holds_the_first_turn() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("codehead-host-pull-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let sh = |c: &str| assert!(std::process::Command::new("sh").arg("-c").arg(c).current_dir(&base).output().unwrap().status.success(), "{c}");
+        let cfg = "git config user.email t@t && git config user.name t";
+        sh(&format!("git init -q --bare -b main origin.git && git clone -q origin.git a && cd a && {cfg} && git commit -q --allow-empty -m 1 && git push -q origin main"));
+        sh(&format!("git clone -q origin.git b && cd b && {cfg} && git commit -q --allow-empty -m 2 && git push -q origin main"));
+        let a = base.join("a");
+        let mut t = store::Thread::new("pull test", "task", &a, vec!["nobody-agent".into()]);
+        t.pull = true;
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (htx, _hrx) = mpsc::channel();
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: HashMap::new() };
+        let (tx, rx) = mpsc::channel();
+        h.start_pull(&t, tx);
+        // the reply comes before any delivery: the message waits in LATER
+        let r = h.cmd(&json!({"op": "prompt", "to": ["nobody-agent"], "text": "go"})).unwrap();
+        assert_eq!(r["to"], json!(["nobody-agent"]));
+        assert_eq!((h.later.len(), h.queue.len()), (1, 0));
+        // after the reply: the pull still runs, so the message waits for it
+        h.deliver_later();
+        assert_eq!((h.later.len(), h.queue.len()), (0, 1));
+        let Ok(Input::Pull(ok, out)) = rx.recv_timeout(Duration::from_secs(10)) else { panic!("0 pull end") };
+        assert_eq!((ok, out.as_str()), (true, "main up to date"));
+        h.pull_done(ok, out);
+        assert!(!h.setup_running && h.queue.is_empty());
+        assert!(!store::load(&t.id).unwrap().pull);
+        let rev = |d: &str| String::from_utf8(std::process::Command::new("git").args(["-C", d, "rev-parse", "HEAD"]).current_dir(&base).output().unwrap().stdout).unwrap();
+        assert_eq!(rev("a"), rev("b"), "main pulled");
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn a_pending_setup_runs_first_and_messages_wait_for_it() {
         // the data dir stays put while this runs
         let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -846,7 +934,7 @@ mod tests {
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
         let (tx, rx) = mpsc::channel();
         h.start_setup(&t, tx);
         assert!(h.setup_running);
@@ -871,7 +959,7 @@ mod tests {
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
         h.harness("ada".into(), Out::Event(Kind::Tool { id: "t1".into(), name: "Agent".into(), input: json!({"description": "scan", "run_in_background": true, "prompt": "scan it"}) }));
         h.harness("ada".into(), Out::Event(Kind::ToolResult { id: "t1".into(), ok: true, output: "Async agent launched\nagentId: a1".into() }));
         // the master's turn ended: the subagent keeps the host alive, the master counts as busy
@@ -896,7 +984,7 @@ mod tests {
         writeln!(w, "{}", json!({"op": "subscribe"})).unwrap();
         let Ok(Input::Subscribe(s)) = rx.recv() else { panic!("0 subscribe") };
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: "t".into(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: HashMap::new() };
+        let mut h = Host { id: "t".into(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: HashMap::new() };
         h.live.insert("ada".into(), "Hel".into());
         h.subscribe(s);
         h.harness("ada".into(), Out::Delta("lo".into()));

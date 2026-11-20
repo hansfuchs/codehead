@@ -158,9 +158,15 @@ struct Choices {
 /// Choices of REPO (CWD: the dir codehead runs in): current branch, new branch, new branch +
 /// worktree, default branch (main, else master), the other branches (newest commit first).
 fn where_choices(repo: &Path, cwd: &Path) -> Choices {
-    let bs = threads::branches(repo);
-    let here_branch = threads::current_branch(cwd);
-    let mut here_dir = threads::git(cwd, &["rev-parse", "--show-toplevel"]).1.trim().to_string();
+    // 5 git runs at once (~20 ms each in a big repo): the start screen waits for them
+    let (bs, here_branch, mut here_dir, checkouts, repo_branch) = std::thread::scope(|s| {
+        let bs = s.spawn(|| threads::branches(repo));
+        let here = s.spawn(|| threads::current_branch(cwd));
+        let top = s.spawn(|| threads::git(cwd, &["rev-parse", "--show-toplevel"]).1.trim().to_string());
+        let checkouts = s.spawn(|| threads::checkouts(repo));
+        let repo_branch = threads::current_branch(repo);
+        (bs.join().unwrap_or_default(), here.join().unwrap_or_default(), top.join().unwrap_or_default(), checkouts.join().unwrap_or_default(), repo_branch)
+    });
     if here_dir.is_empty() {
         here_dir = repo.display().to_string();
     }
@@ -170,7 +176,7 @@ fn where_choices(repo: &Path, cwd: &Path) -> Choices {
         wheres.push(Where::Branch(d.clone()));
     }
     wheres.extend(bs.into_iter().filter(|b| *b != here_branch && Some(b) != default.as_ref()).map(Where::Branch));
-    Choices { wheres, checkouts: threads::checkouts(repo), repo_branch: threads::current_branch(repo), here_branch, here_dir }
+    Choices { wheres, checkouts, repo_branch, here_branch, here_dir }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -726,6 +732,7 @@ fn worktree_of(c: &crate::nav::Card) -> Worktree {
         branch: (!c.branch.is_empty()).then(|| c.branch.clone()),
         dir: Some(path.clone()),
         busy: c.busy,
+        needs: c.blocked.then(|| "question".to_string()),
         ..Default::default()
     };
     Worktree { path, branch: if c.branch.is_empty() { "in place".into() } else { c.branch.clone() }, thread: Some(thread), unpushed: 0, when: String::new(), linked: !c.branch.is_empty(), repo: c.repo.clone() }
@@ -804,7 +811,9 @@ fn tilde(p: &str) -> String {
 
 impl App {
     pub fn new(cfg: Config, title: &str) -> App {
-        let notes = Notes::load(&cfg.notes);
+        // the notes tree (20k+ entries in a big notes root): read in the background, after the
+        // 1st frame; tests: at once
+        let notes = if cfg!(test) { Notes::load(&cfg.notes) } else { Notes::empty(&cfg.notes) };
         let mut t = TextArea::new(true, "what the thread is about (also names the worktree)");
         t.set_text(title);
         let p = TextArea::new(false, "free text for the agents, sent below the list of notes");
@@ -945,6 +954,9 @@ impl App {
         }
         app.refresh_threads();
         app.refresh_agents();
+        if !cfg!(test) {
+            app.reload_notes();
+        }
         app
     }
 
@@ -1445,6 +1457,17 @@ impl App {
         self.where_i = if start { 0 } else { self.wheres.iter().position(|w| *w == Where::NewWorktree).unwrap_or(0) };
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.repo = Some(crate::home::Repo { name, path: root, url: e.clone });
+    }
+
+    /// The setting `repo` (DIR): the where row starts on DIR's repo, as if picked. DIR in the
+    /// repo codehead started in: 0 change.
+    pub fn use_default_repo(&mut self, dir: &Path) {
+        let Some(root) = threads::repo_root(dir) else { return };
+        if self.cfg.repo.as_ref() == Some(&root) {
+            return;
+        }
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.set_repo(crate::repopick::Entry { name, path: root, git: true, clone: None });
     }
 
     /// Keys of the open repo picker.
@@ -2191,7 +2214,7 @@ impl App {
                     ("↑↓ / j k", "move: PRs; in a PR: the things to act on"),
                     ("enter", "open the PR · act (edit, dropdown, merge, update)"),
                     ("ctrl+enter / ctrl+click", "open on GitHub"),
-                    ("s", "state filter: all, open, merged, closed"),
+                    ("←→", "state tabs: open, merged, closed, all"),
                     ("[ ] · < >", "previous / next PR · overview / changes"),
                     ("i", "prompt: a new thread with this task"),
                     ("esc", "back to the list"),
@@ -4740,6 +4763,39 @@ mod render_tests {
         a.worktrees = Some(Vec::new());
         a.sessions.clear();
         a
+    }
+
+    #[test]
+    fn the_repo_setting_starts_the_where_rows_on_its_repo() {
+        let base = std::env::temp_dir().join(format!("ch-default-repo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mk = |n: &str| {
+            let d = base.join(n);
+            std::fs::create_dir_all(&d).unwrap();
+            assert!(std::process::Command::new("sh").arg("-c").arg("git init -q -b main && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m i && mkdir sub").current_dir(&d).status().unwrap().success());
+            d
+        };
+        let (start, other) = (mk("start"), mk("other"));
+        let mut a = app();
+        a.start_cwd = start.clone();
+        a.set_repo(crate::repopick::Entry { name: "start".into(), path: start.clone(), git: true, clone: None });
+        // a dir in the start repo: 0 change, the current branch stays first
+        a.use_default_repo(&start.join("sub"));
+        assert_eq!((a.cfg.repo.as_deref(), a.where_i), (Some(start.as_path()), 0));
+        // a dir in another repo: that repo, a new worktree first
+        a.use_default_repo(&other.join("sub"));
+        assert_eq!(a.cfg.repo.as_deref(), Some(other.as_path()));
+        assert_eq!(a.wheres.get(a.where_i), Some(&Where::NewWorktree));
+        // codehead started outside of a git repo: the setting's repo all the same
+        let mut b = app();
+        b.start_cwd = base.clone();
+        b.cfg.repo = None;
+        b.use_default_repo(&other);
+        assert_eq!((b.here_branch.as_str(), b.wheres.get(b.where_i)), ("main", Some(&Where::NewWorktree)));
+        // 0 git repo: 0 change
+        a.use_default_repo(&base);
+        assert_eq!(a.cfg.repo.as_deref(), Some(other.as_path()));
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

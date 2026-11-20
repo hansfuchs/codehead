@@ -14,6 +14,8 @@ pub struct Card {
     pub live: usize,
     /// An agent works (session running / starting, or a Claude transcript mid-turn).
     pub busy: bool,
+    /// A question (an ask) waits on the owner: blocked, also while its turn runs.
+    pub blocked: bool,
     pub unread: bool,
     /// Last activity, unix ms: the last agent item, else the thread's update time.
     pub activity: u64,
@@ -120,6 +122,7 @@ pub fn load() -> Vec<Card> {
             Card {
                 repo: crate::threads::repo_of_thread(&t),
                 busy: t.busy,
+                blocked: t.needs.as_deref() == Some("question"),
                 unread,
                 activity: last.unwrap_or(0).max(t.updated * 1000),
                 dir,
@@ -206,7 +209,9 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
     block.render(r, buf);
     let w = inner.width.saturating_sub(2) as usize;
     let title_st = if c.unread || cur { theme::bold() } else { theme::text() };
-    let mut status: Vec<Span> = if c.busy {
+    let mut status: Vec<Span> = if c.blocked {
+        vec![Span::styled("? blocked", Style::default().fg(theme::pal().warn))]
+    } else if c.busy {
         vec![Span::styled(format!("{} ", WAVE[tick % WAVE.len()]), theme::accent()), Span::styled("working…", theme::muted())]
     } else if c.live == 0 {
         vec![Span::styled("◦ ended", theme::muted())]
@@ -235,6 +240,16 @@ mod tests {
 
     fn card(id: &str, state: &str, activity: u64) -> Card {
         Card { id: id.into(), title: id.into(), state: state.into(), activity, ..Default::default() }
+    }
+
+    #[test]
+    fn a_card_with_an_open_question_shows_blocked_also_while_its_turn_runs() {
+        let c = Card { busy: true, blocked: true, live: 1, ..card("t", "open", 0) };
+        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, CARD_H));
+        let area = buf.area;
+        draw_card(&mut buf, area, &c, false, false, false, 0);
+        let text: String = (0..CARD_H).flat_map(|y| (0..40).map(move |x| (x, y))).map(|p| buf[p].symbol().to_string()).collect();
+        assert!(text.contains("? blocked") && !text.contains("working"), "{text}");
     }
 
     #[test]

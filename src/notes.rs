@@ -31,6 +31,11 @@ impl Row {
 }
 
 impl Notes {
+    /// 0 files yet: the background read brings them.
+    pub fn empty(root: &Path) -> Notes {
+        Notes { root: root.to_path_buf(), files: Vec::new(), mtimes: HashMap::new() }
+    }
+
     pub fn load(root: &Path) -> Notes {
         let mut files = Vec::new();
         let mut mtimes = HashMap::new();
