@@ -114,6 +114,10 @@ pub fn uses(id: &str) -> Vec<AgentUse> {
             _ => {}
         }
     }
+    // 0 turn end with a $ in this thread yet: the agent's $ per token from its other threads
+    for a in by.iter_mut().filter(|a| a.usd_per_token == 0.0) {
+        a.usd_per_token = past_rate(&a.agent, id);
+    }
     for (name, u) in st.usage {
         let Some(a) = by.iter_mut().find(|a| a.agent == name) else { continue };
         add_running(a, &u, model.get(&name).map_or("", String::as_str), now());
@@ -137,6 +141,42 @@ fn add_running(a: &mut AgentUse, u: &crate::engine::harness::TurnUse, model: &st
     if u.input + u.output > 0 {
         a.samples.push((now, u.input + u.output));
     }
+}
+
+/// Threads read at most for [`past_rate`] (newest first; the last 256 KB of each log).
+const RATE_THREADS: usize = 40;
+
+/// $ per token of AGENT's last turn with a $ in another thread than SKIP (newest threads first).
+/// 0: none. Kept per process (a miss: read again after 60 s).
+fn past_rate(agent: &str, skip: &str) -> f64 {
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashMap<String, (f64, Instant)>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    if let Some(&(r, at)) = seen.lock().ok().as_ref().and_then(|m| m.get(agent))
+        && (r > 0.0 || at.elapsed() < Duration::from_secs(60))
+    {
+        return r;
+    }
+    let rate = crate::engine::store::all()
+        .into_iter()
+        .filter(|t| t.id != skip)
+        .take(RATE_THREADS)
+        .find_map(|t| last_rate(&crate::engine::store::events_tail(&t.id, 256 * 1024), agent))
+        .unwrap_or(0.0);
+    if let Ok(mut m) = seen.lock() {
+        m.insert(agent.to_string(), (rate, Instant::now()));
+    }
+    rate
+}
+
+/// $ per token of AGENT's last turn end with a $ in EVENTS.
+fn last_rate(events: &[crate::engine::store::Event], agent: &str) -> Option<f64> {
+    events.iter().rev().filter(|e| e.agent.as_deref() == Some(agent)).find_map(|e| match e.kind {
+        crate::engine::store::Kind::TurnEnd { cost, input, output, cache_read, cache_write, .. } if cost > 0.0 && input + output + cache_read + cache_write > 0 => {
+            Some(cost / (input + output + cache_read + cache_write) as f64)
+        }
+        _ => None,
+    })
 }
 
 type Names = HashMap<String, (String, Option<String>, crate::sprites::Sprite)>;
@@ -599,6 +639,15 @@ mod tests {
         assert_eq!(window("seven_day"), "7d");
         assert_eq!(window("seven_day_opus"), "7d opus");
         assert_eq!(window("other_window"), "other window");
+    }
+
+    #[test]
+    fn the_rate_comes_from_the_agents_last_paid_turn() {
+        use crate::engine::store::{Event, Kind};
+        let end = |cost: f64, input: u64| Event::new(Some("pk"), Kind::TurnEnd { cost, input, output: 0, cache_read: 0, cache_write: 0, ctx: 0, window: 0, ms: 0, error: None });
+        let evs = vec![end(1.0, 100), end(3.0, 100), end(0.0, 50), Event::new(Some("ada"), Kind::TurnEnd { cost: 9.0, input: 1, output: 0, cache_read: 0, cache_write: 0, ctx: 0, window: 0, ms: 0, error: None })];
+        assert_eq!(last_rate(&evs, "pk"), Some(0.03));
+        assert_eq!(last_rate(&evs, "zed"), None);
     }
 
     #[test]

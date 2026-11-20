@@ -659,7 +659,7 @@ impl View {
     /// TYPED (`~/x`, `/x`, `x` from the dir now): shell mode's dir, kept for the thread. False: 0
     /// such dir.
     fn set_shell_cwd(&mut self, typed: &str) -> bool {
-        let t = typed.trim();
+        let t = typed.trim().trim_matches('"');
         let p = if t == "~" {
             crate::config::home()
         } else if let Some(rest) = t.strip_prefix("~/") {
@@ -685,7 +685,9 @@ impl View {
         let mut ta = TextArea::new(true, "a dir");
         ta.style = Some(theme::text());
         let t = tilde(&self.shell_cwd);
-        ta.set_text(&if t.ends_with('/') { t } else { format!("{t}/") });
+        let t = if t.ends_with('/') { t } else { format!("{t}/") };
+        // a space in the path: quoted (the dropdown goes on inside the quote)
+        ta.set_text(&if t.contains(char::is_whitespace) { format!("\"{t}") } else { t });
         self.cwd_paths = crate::paths::Paths::directory(&self.shell_cwd);
         self.cwd_paths.dirs_only = true;
         self.cwd_edit = Some(ta);
@@ -757,11 +759,11 @@ impl View {
         let more = if cut.len() < output.len() { "\n… (cut)" } else { "" };
         self.shell_ctx.push(format!("$ {command}  (exit {code}, in {})\n```\n{}{more}\n```", dir.display(), cut.trim_end()));
         #[cfg(not(test))]
-        if let Err(e) = store::append(&self.id, &store::Event::new(None, store::Kind::Shell { command, output, code })) {
+        if let Err(e) = store::append(&self.id, &store::Event::new(None, store::Kind::Shell { command, output, code, dir: Some(dir.display().to_string()) })) {
             self.toast(format!("shell: {e}"));
         }
         #[cfg(test)]
-        self.thread.items.push(stream::Item::Shell { command, output, code, ts: 0 });
+        self.thread.items.push(stream::Item::Shell { command, output, code, ts: 0, dir: Some(dir.display().to_string()) });
         self.dirty = true;
     }
 
@@ -3114,7 +3116,7 @@ mod comment_tests {
         assert!(out.contains("hi") && out.contains("oops"), "{out}");
         v.shell_done(cmd, out, code, &dir);
         t.draw(|f| v.draw(f)).unwrap();
-        assert!(shown(&t).contains("exit 3") && shown(&t).contains("⎿ hi"), "{}", shown(&t));
+        assert!(shown(&t).contains("exit 3") && shown(&t).contains("⎿ hi") && shown(&t).contains("in /tmp"), "{}", shown(&t));
         // the next message takes the output along (for the agents only), once
         v.input.set_text("why does it fail?");
         v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
@@ -3139,7 +3141,7 @@ mod comment_tests {
         key(&mut v, KeyCode::Char('!'));
         assert_eq!(v.input.text(), "! ");
         for c in ["ls", "pwd", "ls"] {
-            v.thread.items.push(stream::Item::Shell { command: c.into(), output: String::new(), code: 0, ts: 0 });
+            v.thread.items.push(stream::Item::Shell { command: c.into(), output: String::new(), code: 0, ts: 0, dir: None });
         }
         v.input.set_text("! gi");
         // ↑: newest first (a repeat once), ↓ back to the draft
@@ -3182,6 +3184,7 @@ mod comment_tests {
         assert_eq!(cd_target("cd src && ls"), None);
         assert_eq!(cd_target("cdk deploy"), None);
         assert_eq!(cd_target("cd a b"), None);
+        assert_eq!(cd_target("cd \"My Notes/x\""), Some("My Notes/x"));
     }
 
     #[test]
@@ -3603,6 +3606,10 @@ fn shell(dir: &Path, command: &str) -> (String, i32) {
 fn cd_target(command: &str) -> Option<&str> {
     let c = command.trim();
     let rest = c.strip_prefix("cd").filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))?.trim();
+    // 1 quoted dir: spaces in it
+    if let Some(q) = rest.strip_prefix('"').and_then(|r| r.strip_suffix('"')).or_else(|| rest.strip_prefix('\'').and_then(|r| r.strip_suffix('\''))) {
+        return (!q.contains(['"', '\''])).then_some(q);
+    }
     if rest.chars().any(|ch| matches!(ch, ';' | '&' | '|' | '$' | '`' | '>' | '<' | '(' | ')')) || rest.split_whitespace().count() > 1 {
         return None;
     }

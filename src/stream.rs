@@ -33,7 +33,7 @@ pub enum Item {
     Run { agent: String, key: usize, calls: Vec<Call>, start: u64, end: u64, thoughts: Vec<(usize, String)> },
     Note { agent: String, text: String, color: Color },
     /// The owner's shell command (`!` in the prompt): its output, its exit code.
-    Shell { command: String, output: String, code: i32, ts: u64 },
+    Shell { command: String, output: String, code: i32, ts: u64, dir: Option<String> },
     /// An answered ask: what AGENT asked (QUESTION), the owner's ANSWER (allow false: declined /
     /// denied). ASKED, TS: the times of the ask and of the answer.
     Settled { agent: String, question: String, answer: String, allow: bool, permission: bool, asked: u64, ts: u64 },
@@ -258,7 +258,7 @@ impl Thread {
                 self.items.push(Item::Note { agent, text: "left the thread".into(), color: theme::pal().muted });
             }
             Kind::Error { message } => self.items.push(Item::Note { agent, text: message.clone(), color: theme::pal().danger }),
-            Kind::Shell { command, output, code } => self.items.push(Item::Shell { command: command.clone(), output: output.clone(), code: *code, ts: e.ts }),
+            Kind::Shell { command, output, code, dir } => self.items.push(Item::Shell { command: command.clone(), output: output.clone(), code: *code, ts: e.ts, dir: dir.clone() }),
             Kind::Edits { summary } => self.items.push(Item::Note { agent, text: format!("got the edits since its last turn · {summary}"), color: theme::pal().muted }),
             Kind::SubStart { id, parent, description, agent_type, background, prompt } => {
                 if !self.subs.iter().any(|s| &s.id == id) {
@@ -901,9 +901,9 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                 }
                 last_agent = None;
             }
-            Item::Shell { command, output, code, ts } => {
+            Item::Shell { command, output, code, ts, dir } => {
                 blank(&mut d);
-                d.rows.extend(shell_rows(command, output, *code, *ts, w));
+                d.rows.extend(shell_rows(command, output, *code, *ts, dir.as_deref(), w));
                 last_agent = None;
             }
             Item::Note { agent, text, color } => {
@@ -1414,10 +1414,10 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                     _ => {}
                 }
             }
-            Item::Shell { command, output, code, ts } => {
+            Item::Shell { command, output, code, ts, dir } => {
                 close(&mut d, &mut cur);
                 gap(&mut d);
-                d.rows.extend(shell_rows(command, output, *code, *ts, w));
+                d.rows.extend(shell_rows(command, output, *code, *ts, dir.as_deref(), w));
             }
             Item::Note { agent, text, color } => {
                 close(&mut d, &mut cur);
@@ -1893,9 +1893,18 @@ mod resume_tests {
 const SHELL_LINES: usize = 20;
 
 /// The rows of the owner's shell COMMAND: `! command · 13:42 · exit 1`, its OUTPUT under it.
-fn shell_rows(command: &str, output: &str, code: i32, ts: u64, w: usize) -> Vec<Row> {
+fn shell_rows(command: &str, output: &str, code: i32, ts: u64, dir: Option<&str>, w: usize) -> Vec<Row> {
     let sh = Style::default().fg(theme::shell());
     let mut head = vec![Span::styled("! ", sh.add_modifier(Modifier::BOLD)), Span::styled(command.to_string(), theme::bold()), Span::styled(format!("  {}", clock(ts)), theme::muted())];
+    if let Some(d) = dir {
+        let home = crate::config::home().display().to_string();
+        let d = match d.strip_prefix(&home) {
+            Some("") => "~".to_string(),
+            Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+            _ => d.to_string(),
+        };
+        head.push(Span::styled(format!(" · in {d}"), theme::muted()));
+    }
     if code != 0 {
         let what = if code < 0 { "killed".to_string() } else { format!("exit {code}") };
         head.push(Span::styled(format!(" · {what}"), Style::default().fg(theme::pal().danger)));

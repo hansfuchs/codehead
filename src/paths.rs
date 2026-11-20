@@ -53,6 +53,8 @@ struct Open {
     word_at: Pos,
     dir: String,
     entries: Vec<(String, bool)>,
+    /// The word sits after an open `"` (spaces allowed).
+    quoted: bool,
 }
 
 /// WORD → (directory part with its last `/`, name part): `src/ap` → (`src/`, `ap`).
@@ -142,11 +144,11 @@ impl Paths {
     }
 
     fn open(&mut self, ta: &TextArea) -> Option<Open> {
-        let found = ta.path_word();
+        let found = ta.path_word_quoted();
         if found.is_none() {
             self.closed = None;
         }
-        let (word_at, word) = found.filter(|(at, _)| self.closed != Some(*at))?;
+        let (word_at, word, quoted) = found.filter(|(at, _, _)| self.closed != Some(*at))?;
         let (dir, name) = split(&word);
         // `/` alone (a slash in a sentence), `//`: not a path yet
         if dir == "/" && name.is_empty() || dir.contains("//") {
@@ -171,7 +173,7 @@ impl Paths {
         }
         self.cursor = self.cursor.min(entries.len() - 1);
         let at = Pos { row: word_at.row, col: word_at.col + dir.chars().count() };
-        Some(Open { at, word_at, dir: dir.to_string(), entries })
+        Some(Open { at, word_at, dir: dir.to_string(), entries, quoted })
     }
 
     #[cfg(test)]
@@ -179,10 +181,17 @@ impl Paths {
         self.open(ta).map(|o| o.entries.into_iter().map(|(n, d)| if d { format!("{n}/") } else { n }).collect()).unwrap_or_default()
     }
 
-    /// The entry into the text: a dir with `/` (its entries show next), a file with a space.
+    /// The entry into the text: a dir with `/` (its entries show next), a file with a space. A
+    /// name with a space (or a quote char): the path gets a `"` in front (a file: one after it).
     fn pick(&mut self, ta: &mut TextArea, o: &Open, i: usize) {
         let Some((name, dir)) = o.entries.get(i) else { return };
-        ta.replace_to_cursor(o.at, &format!("{name}{}", if *dir { "/" } else { " " }));
+        let end = if *dir { "/" } else if o.quoted { "\" " } else { " " };
+        if o.quoted || !name.chars().any(|c| c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | '\'' | '`' | '<' | '>' | ',')) {
+            ta.replace_to_cursor(o.at, &format!("{name}{end}"));
+        } else {
+            let end = if *dir { "/" } else { "\" " };
+            ta.replace_to_cursor(o.word_at, &format!("\"{}{name}{end}", o.dir));
+        }
     }
 
     /// Key for the dropdown. true: used (the input must not see it).
@@ -297,6 +306,29 @@ mod tests {
     fn typed(ta: &mut TextArea, text: &str) {
         ta.set_text(text);
         ta.move_end();
+    }
+
+    #[test]
+    fn a_name_with_a_space_gets_quotes_and_the_dropdown_goes_on_inside() {
+        let dir = std::env::temp_dir().join(format!("codehead-quoted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("My Notes/sub dir")).unwrap();
+        std::fs::write(dir.join("My Notes/a b.md"), "x").unwrap();
+        let mut p = Paths::new(&dir);
+        let mut ta = TextArea::new(false, "");
+        typed(&mut ta, "see ./M");
+        assert!(key(&mut p, &mut ta, KeyCode::Tab));
+        assert_eq!(ta.text(), "see \"./My Notes/");
+        // inside the quote: the entries of the dir with the space
+        assert_eq!(p.names(&ta), ["sub dir/", "a b.md"]);
+        key(&mut p, &mut ta, KeyCode::Down);
+        assert!(key(&mut p, &mut ta, KeyCode::Tab));
+        assert_eq!(ta.text(), "see \"./My Notes/a b.md\" ");
+        // dirs only: 0 files
+        p.dirs_only = true;
+        typed(&mut ta, "\"./My Notes/");
+        assert_eq!(p.names(&ta), ["sub dir/"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

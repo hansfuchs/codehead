@@ -343,11 +343,26 @@ impl TextArea {
     /// A path being typed: the word that ends at the cursor (0 spaces, quotes, brackets in it; the
     /// next char: none or a space / closer), if it holds a `/`. Its start + the word. Words of the
     /// `@` and `>` dropdowns: not paths. For the path dropdown.
+    #[cfg(test)]
     pub fn path_word(&self) -> Option<(Pos, String)> {
+        self.path_word_quoted().map(|(p, w, _)| (p, w))
+    }
+
+    /// [`path_word`], with spaces after an open `"` (`"~/My Notes/a`): the word starts after
+    /// the quote. The 3rd value: inside such a quote.
+    pub fn path_word_quoted(&self) -> Option<(Pos, String, bool)> {
         if self.range().is_some() {
             return None;
         }
         let line = &self.lines[self.cur.row];
+        let before = &line[..self.cur.col];
+        if before.iter().filter(|&&c| c == '"').count() % 2 == 1
+            && let Some(q) = before.iter().rposition(|&c| c == '"')
+            && line.get(self.cur.col).is_none_or(|&c| c.is_whitespace() || c == '"')
+        {
+            let word: String = line[q + 1..self.cur.col].iter().collect();
+            return word.contains('/').then_some((Pos { row: self.cur.row, col: q + 1 }, word, true));
+        }
         let edge = |c: char| c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | '"' | '\'' | '`' | '<' | '>' | ',');
         if line.get(self.cur.col).is_some_and(|&c| !edge(c)) {
             return None;
@@ -360,7 +375,7 @@ impl TextArea {
         if !word.contains('/') || word.starts_with('@') || (c > 0 && line[c - 1] == crate::config::command_key()) {
             return None;
         }
-        Some((Pos { row: self.cur.row, col: c }, word))
+        Some((Pos { row: self.cur.row, col: c }, word, false))
     }
 
     /// MARK + query (chars that pass QUERY) right before the cursor; MARK at a line start or after

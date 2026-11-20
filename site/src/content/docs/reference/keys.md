@@ -40,8 +40,13 @@ description: Every key, per screen.
 | --- | --- |
 | `ctrl+enter` | send (`⌘enter`, `alt+enter`); `ctrl+s` never sends |
 | `enter` | new line; a question open: answer |
-| `!` (1st char of the prompt) | shell mode: `enter` runs the command in the thread's worktree (`$SHELL -c`, max. 120 s); the thread shows its output, your next message takes it to the agents |
-| `↑` `↓` | a question open: its choices; else sent messages |
+| `!` (1st char of the prompt) | shell mode (`! ` with a space): `enter` runs the command (`$SHELL -c`, max. 120 s) in the shell dir; the thread shows its output and dir, your next message takes them to the agents |
+| shell dir | the thread's checkout with the most line changes (uncommitted + commits since the thread began); your pick stays per thread. `cd DIR` alone (0 `&&` `;` `\|`) sets it, 0 command run |
+| `↑` `↓` (shell mode) | the thread's shell commands, newest first, like a terminal; `↓` below the newest: back to your draft |
+| `↓` (shell mode, on your draft) | edit the shell dir (`in …` below the prompt): a dropdown of its dirs as you type, `tab` completes, `enter` sets it, `esc` / `↑` back to the prompt |
+| `ctrl+r` (shell mode) | search the thread's commands and your shell history (fzf, else a built-in fuzzy filter): the best match at the bottom, right above the prompt; `↑` / `ctrl+r` / `ctrl+p` worse matches, `↓` / `ctrl+n` better ones, `enter` / `tab` take it, `esc` closes |
+| `↑` `↓` | a question open: its choices; else sent messages (an empty prompt too: shell commands only in shell mode) |
+| a path (`src/`, `~/x/`, `/usr/`) | a dropdown of that dir's entries; a name with a space gets a `"` in front (a file: one after it too), the dropdown goes on inside the quote |
 | `1`-`9`, `space` | a question: pick (several: toggle); letters: the **Other** answer |
 | `←` `→` | a question with several parts: previous / next part |
 | `esc` | back to live, else interrupt the running turns (after 0.5 s: a 2nd `esc` in time means back) |
