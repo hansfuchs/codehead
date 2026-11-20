@@ -69,9 +69,11 @@ pub fn limits() -> Vec<(String, String, f64, Option<u64>)> {
     crate::engine::limits::read().into_iter().map(|w| (w.harness, w.window, w.pct, w.resets)).collect()
 }
 
-/// Per agent of thread ID, from its turn ends; live agents from its host.
+/// Per agent of thread ID, from its turn ends; live agents from its host, their running
+/// turns' tokens so far (the $ of a running turn: at the agent's last $ per token).
 pub fn uses(id: &str) -> Vec<AgentUse> {
-    let (live, _) = if crate::engine::client::alive(id) { crate::engine::client::state(id) } else { Default::default() };
+    let st = if crate::engine::client::alive(id) { crate::engine::client::state_full(id) } else { Default::default() };
+    let live = st.live;
     let mut by: Vec<AgentUse> = Vec::new();
     let mut model: HashMap<String, String> = HashMap::new();
     for e in crate::engine::store::events(id) {
@@ -112,9 +114,29 @@ pub fn uses(id: &str) -> Vec<AgentUse> {
             _ => {}
         }
     }
+    for (name, u) in st.usage {
+        let Some(a) = by.iter_mut().find(|a| a.agent == name) else { continue };
+        add_running(a, &u, model.get(&name).map_or("", String::as_str), now());
+    }
     by.retain(|a| a.turns > 0 || a.live);
     by.sort_by(|a, b| b.usd.total_cmp(&a.usd));
     by
+}
+
+/// Running turn U of agent A (model MODEL) at NOW: its tokens, $ (at the last $ per token), ctx.
+fn add_running(a: &mut AgentUse, u: &crate::engine::harness::TurnUse, model: &str, now: u64) {
+    a.input += u.input;
+    a.output += u.output;
+    a.cache_read += u.cache_read;
+    a.cache_write += u.cache_write;
+    a.usd += a.usd_per_token * (u.input + u.output + u.cache_read + u.cache_write) as f64;
+    if u.ctx > 0 {
+        let size = a.ctx.map_or_else(|| window_of(model), |c| c.1);
+        a.ctx = Some((u.ctx, size));
+    }
+    if u.input + u.output > 0 {
+        a.samples.push((now, u.input + u.output));
+    }
 }
 
 type Names = HashMap<String, (String, Option<String>, crate::sprites::Sprite)>;
@@ -515,7 +537,7 @@ fn names() -> Names {
     agents::load()
         .into_iter()
         .map(|a| {
-            let sp = agents::sprite(&a);
+            let sp = agents::sprite(&a).desynced(&a.name);
             (a.name.clone(), (a.name, a.color, sp))
         })
         .collect()
@@ -577,6 +599,17 @@ mod tests {
         assert_eq!(window("seven_day"), "7d");
         assert_eq!(window("seven_day_opus"), "7d opus");
         assert_eq!(window("other_window"), "other window");
+    }
+
+    #[test]
+    fn a_running_turn_counts_at_once() {
+        let mut a = AgentUse { input: 100, output: 50, usd: 1.0, usd_per_token: 0.01, ctx: Some((1000, 200_000)), turns: 1, ..Default::default() };
+        let u = crate::engine::harness::TurnUse { input: 10, output: 20, cache_read: 70, cache_write: 0, ctx: 5000 };
+        add_running(&mut a, &u, "", 42);
+        assert_eq!((a.input, a.output, a.cache_read), (110, 70, 70));
+        assert!((a.usd - 2.0).abs() < 1e-9);
+        assert_eq!(a.ctx, Some((5000, 200_000)));
+        assert_eq!(a.samples, vec![(42, 30)]);
     }
 
     #[test]

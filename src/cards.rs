@@ -167,7 +167,7 @@ pub fn draw(f: &mut Frame, r: Rect, a: &Agent, rows: &[String], look: Look) {
         .enumerate()
         .map(|(i, t)| vec![Span::styled(format!("  {}", crate::nav::fit(t, room)), if i == 0 { name_st } else { theme::muted() })])
         .collect();
-    let sprite = agents::sprite(a);
+    let sprite = agents::sprite(a).desynced(&a.name);
     let lines: Vec<Line> = crate::sprites::lines(&sprite, if lit { color } else { theme::pal().muted }, side);
     f.render_widget(Paragraph::new(lines).style(base), inner);
 }

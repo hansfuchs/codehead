@@ -272,6 +272,12 @@ impl State {
                 self.result_of(u);
             }
             "tool_call_update" => self.result_of(u),
+            // the context so far (ACP `usage_update`: used / size)
+            "usage_update" => {
+                if let Some(used) = u["used"].as_u64().filter(|n| *n > 0) {
+                    self.out(Out::Usage(super::harness::TurnUse { ctx: used, ..Default::default() }));
+                }
+            }
             _ => {}
         }
     }

@@ -29,6 +29,19 @@ pub enum Out {
     Exit(String),
     /// MCP servers as a harness saw them (harness, rows): for the settings' MCP tab.
     Mcp(String, Vec<(String, super::servers::Status)>),
+    /// Tokens of the running turn so far: the cost box shows them live, the turn end replaces
+    /// them with its final numbers.
+    Usage(TurnUse),
+}
+
+/// Tokens of a running turn so far. CTX: the context of the last model call (0: unknown).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TurnUse {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub ctx: u64,
 }
 
 /// codehead servers the harness did not get (ERRORS: server, why) → status rows, via TX.
@@ -375,6 +388,8 @@ pub struct Parser {
     ctx: u64,
     /// Model of the session (`init` line): its `modelUsage` entry gives the context window.
     model: String,
+    /// The running turn: usage per model call (message id; the blocks of 1 message repeat it).
+    turn: Vec<(String, TurnUse)>,
 }
 
 /// Context window of the result's `modelUsage`: the session model's entry, else the largest
@@ -408,6 +423,19 @@ fn cap(mut s: String) -> String {
 }
 
 impl Parser {
+    /// The running turn's tokens: the sum of its model calls, the last call's context.
+    fn turn_use(&self) -> TurnUse {
+        let mut t = self.turn.iter().fold(TurnUse::default(), |a, (_, c)| TurnUse {
+            input: a.input + c.input,
+            output: a.output + c.output,
+            cache_read: a.cache_read + c.cache_read,
+            cache_write: a.cache_write + c.cache_write,
+            ctx: 0,
+        });
+        t.ctx = self.ctx;
+        t
+    }
+
     pub fn line(&mut self, v: &Value) -> Vec<Out> {
         let mut out = Vec::new();
         match v["type"].as_str().unwrap_or_default() {
@@ -427,6 +455,15 @@ impl Parser {
                 let ctx = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].iter().map(|k| u[k].as_u64().unwrap_or(0)).sum::<u64>();
                 if ctx > 0 {
                     self.ctx = ctx;
+                }
+                if let Some(id) = v["message"]["id"].as_str().filter(|_| u.is_object()) {
+                    let n = |k: &str| u[k].as_u64().unwrap_or(0);
+                    let call = TurnUse { input: n("input_tokens"), output: n("output_tokens"), cache_read: n("cache_read_input_tokens"), cache_write: n("cache_creation_input_tokens"), ctx };
+                    match self.turn.iter_mut().find(|(i, _)| i == id) {
+                        Some((_, c)) => *c = call,
+                        None => self.turn.push((id.into(), call)),
+                    }
+                    out.push(Out::Usage(self.turn_use()));
                 }
                 for b in v["message"]["content"].as_array().into_iter().flatten() {
                     match b["type"].as_str() {
@@ -464,6 +501,7 @@ impl Parser {
                 }
             }
             "result" => {
+                self.turn.clear();
                 let total = v["total_cost_usd"].as_f64().unwrap_or(0.0);
                 // a running total; a new process (or a smaller total) starts over
                 let cost = if total >= self.cost_total { total - self.cost_total } else { total };
@@ -637,6 +675,20 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert!(!alive(), "grandchild {grandchild} still runs");
+    }
+
+    #[test]
+    fn a_running_turn_reports_its_tokens_per_model_call() {
+        let mut p = Parser::default();
+        let use_of = |o: Vec<Out>| o.into_iter().find_map(|o| if let Out::Usage(u) = o { Some(u) } else { None });
+        let msg = |id: &str, out: u64| json!({"type": "assistant", "parent_tool_use_id": null, "message": {"id": id, "usage": {"input_tokens": 2, "output_tokens": out, "cache_read_input_tokens": 100}, "content": []}});
+        assert_eq!(use_of(p.line(&msg("m1", 5))), Some(TurnUse { input: 2, output: 5, cache_read: 100, cache_write: 0, ctx: 102 }));
+        // the next block of the same message: its usage again, 0 double count
+        assert_eq!(use_of(p.line(&msg("m1", 9))).map(|u| u.output), Some(9));
+        assert_eq!(use_of(p.line(&msg("m2", 1))).map(|u| (u.input, u.output, u.cache_read)), Some((4, 10, 200)));
+        // the turn end: a new turn starts at 0
+        p.line(&json!({"type": "result", "subtype": "success", "usage": {}}));
+        assert_eq!(use_of(p.line(&msg("m3", 1))).map(|u| u.output), Some(1));
     }
 
     #[test]

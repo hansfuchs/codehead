@@ -42,6 +42,8 @@ pub struct Paths {
     /// Rows of the last draw (mouse): area, row.
     rows: Vec<(Rect, usize)>,
     area: Rect,
+    /// Dirs only (a dir input: shell mode's dir).
+    pub dirs_only: bool,
 }
 
 /// The open dropdown: where the name starts, the directory (as typed), the matching entries.
@@ -151,7 +153,10 @@ impl Paths {
             return None;
         }
         let path = self.resolve(dir)?;
-        let all = self.entries(&path);
+        let mut all = self.entries(&path);
+        if self.dirs_only {
+            all.retain(|e| e.1);
+        }
         // `/name` can be a slash command: only names that start like it
         let entries: Vec<(String, bool)> = if dir == "/" { filter(&all, name).into_iter().filter(|(n, _)| n.to_lowercase().starts_with(&name.to_lowercase())).collect() } else { filter(&all, name) };
         // 0 matches, or the word is 1 file's full name already: nothing to offer

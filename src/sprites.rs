@@ -28,6 +28,14 @@ impl Sprite {
         Sprite { id: avatar.id(), avatar, rows: avatar.rows(Status::Idle, 0.0) }
     }
 
+    /// The sprite of agent NAME on a screen with other agents: its float speed ±6 % (stable per
+    /// name), so 2 agents never move in sync. The saved id stays.
+    pub fn desynced(mut self, name: &str) -> Sprite {
+        let k = (fnv(name) % 1001) as f32 / 1000.0;
+        self.avatar.speed *= 0.94 + 0.12 * k;
+        self
+    }
+
     /// The live frame for status S.
     pub fn frame(&self, s: Status) -> [String; H] {
         self.avatar.rows(s, crate::avatar::now())
@@ -78,6 +86,13 @@ pub fn lines(s: &Sprite, color: Color, side: Vec<Vec<Span<'static>>>) -> Vec<Lin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agents_float_at_their_own_speed() {
+        let (a, b) = (default_for("x").desynced("gigas"), default_for("x").desynced("ada"));
+        assert!(a.avatar.speed != b.avatar.speed);
+        assert!((0.94..=1.06).contains(&a.avatar.speed) && a.id == default_for("x").id);
+    }
     use unicode_width::UnicodeWidthStr;
 
     #[test]

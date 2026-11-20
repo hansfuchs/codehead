@@ -1,7 +1,8 @@
 //! ctrl+r in shell mode: the command history, searched by fzf in the background (`fzf --filter`:
-//! 0 TTY, 0 suspend), the matches in a dropdown above the input. The input after `!` is the
-//! query; every change runs fzf again (an older run's result is dropped). ↑↓ move, enter / tab
-//! put the match into the input, esc closes. 0 fzf on PATH: the built-in fuzzy filter.
+//! 0 TTY, 0 suspend), the matches in a dropdown above the input, the best one at the bottom
+//! (right above the input). The input after `!` is the query; every change runs fzf again (an
+//! older run's result is dropped). ↑ (ctrl+r, ctrl+p) worse matches, ↓ (ctrl+n) better ones,
+//! enter / tab put the match into the input, esc closes. 0 fzf on PATH: the built-in fuzzy filter.
 //!
 //! The history: the thread's `!commands` (newest first), then the shell's own history file
 //! (fish, zsh, bash; newest first), 1 row per command.
@@ -109,16 +110,17 @@ impl HistSearch {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
             KeyCode::Esc => self.close(),
-            KeyCode::Up => self.cursor = self.cursor.saturating_sub(1),
-            KeyCode::Char('p') if ctrl => self.cursor = self.cursor.saturating_sub(1),
+            // the best match sits at the bottom (right above the input): ↑ goes to worse ones
+            KeyCode::Down => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Char('n') if ctrl => self.cursor = self.cursor.saturating_sub(1),
             // ctrl+r again: the next (older) match, like a shell
-            KeyCode::Down | KeyCode::Char('r') if k.code == KeyCode::Down || ctrl => self.cursor = (self.cursor + 1).min(self.matches.len().saturating_sub(1)),
-            KeyCode::Char('n') if ctrl => self.cursor = (self.cursor + 1).min(self.matches.len().saturating_sub(1)),
-            KeyCode::PageUp => self.cursor = self.cursor.saturating_sub(dropdown::MAX_ROWS),
-            KeyCode::PageDown => self.cursor = (self.cursor + dropdown::MAX_ROWS).min(self.matches.len().saturating_sub(1)),
+            KeyCode::Up => self.cursor = (self.cursor + 1).min(self.matches.len().saturating_sub(1)),
+            KeyCode::Char('p' | 'r') if ctrl => self.cursor = (self.cursor + 1).min(self.matches.len().saturating_sub(1)),
+            KeyCode::PageDown => self.cursor = self.cursor.saturating_sub(dropdown::MAX_ROWS),
+            KeyCode::PageUp => self.cursor = (self.cursor + dropdown::MAX_ROWS).min(self.matches.len().saturating_sub(1)),
             KeyCode::Enter | KeyCode::Tab => {
                 if let Some(m) = self.matches.get(self.cursor) {
-                    self.picked = Some(format!("!{m}"));
+                    self.picked = Some(format!("! {m}"));
                 }
                 self.close();
             }
@@ -134,6 +136,7 @@ impl HistSearch {
         }
         match text.strip_prefix('!') {
             Some(q) if !q.contains('\n') => {
+                let q = q.trim_start();
                 if q != self.query {
                     self.cursor = 0;
                     self.search(q);
@@ -152,9 +155,11 @@ impl HistSearch {
         let anchor = Rect { x: input.x, y: input.y, width: w, height: 1 };
         let Some(r) = dropdown::place(anchor, w, self.matches.len(), bounds, true) else { return };
         let words: Vec<&str> = self.query.split_whitespace().collect();
+        // best match last: at the bottom, right above the input (fzf's default layout)
         let rows: Vec<dropdown::Row> = self
             .matches
             .iter()
+            .rev()
             .map(|m| {
                 let text = m.replace('\n', " ⏎ ");
                 let mut marks: Vec<usize> = words.iter().filter_map(|q| crate::fuzzy::word(q, &text)).flat_map(|(_, p)| p).collect();
@@ -164,7 +169,11 @@ impl HistSearch {
             })
             .collect();
         let note = format!("{} · {} ", self.matches.len(), if self.fzf { "fzf" } else { "fuzzy" });
-        let (off, _) = dropdown::list(f, r, "history · ctrl+r", &note, &rows, self.cursor, self.offset, "0 matches");
+        let n = rows.len();
+        let cur = n.saturating_sub(1).saturating_sub(self.cursor);
+        // a new list: scrolled to its bottom (fit keeps the cursor in view)
+        let offset = if self.cursor == 0 { n } else { self.offset };
+        let (off, _) = dropdown::list(f, r, "history · ctrl+r", &note, &rows, cur, offset, "0 matches");
         self.offset = off;
     }
 }
@@ -269,7 +278,7 @@ mod tests {
         h.poll();
         assert_eq!(h.matches.first().map(String::as_str), Some("cargo test"));
         assert!(h.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert_eq!(h.picked.as_deref(), Some("!cargo test"));
+        assert_eq!(h.picked.as_deref(), Some("! cargo test"));
         assert!(!h.is_open());
     }
 

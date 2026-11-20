@@ -74,7 +74,22 @@ pub fn call(id: &str, c: &Value) -> Result<Value, String> {
 
 /// Live and busy agents of thread ID (empty: 0 host).
 pub fn state(id: &str) -> (Vec<String>, Vec<String>) {
-    let Ok(v) = send_within(id, &serde_json::json!({"op": "ping"}), Duration::from_millis(500)) else { return Default::default() };
+    let s = state_full(id);
+    (s.live, s.busy)
+}
+
+/// The host's state of thread ID (empty: 0 host).
+#[derive(Default)]
+pub struct State {
+    pub live: Vec<String>,
+    pub busy: Vec<String>,
+    /// Per agent in a turn: its tokens so far.
+    pub usage: std::collections::HashMap<String, super::harness::TurnUse>,
+}
+
+/// Live and busy agents of thread ID, the running turns' tokens (1 ping).
+pub fn state_full(id: &str) -> State {
+    let Ok(v) = send_within(id, &serde_json::json!({"op": "ping"}), Duration::from_millis(500)) else { return State::default() };
     let names = |k: &str| v[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
-    (names("live"), names("busy"))
+    State { live: names("live"), busy: names("busy"), usage: serde_json::from_value(v["usage"].clone()).unwrap_or_default() }
 }

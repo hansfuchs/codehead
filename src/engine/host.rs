@@ -75,6 +75,8 @@ struct Host {
     subs: std::cell::RefCell<Vec<Sender<String>>>,
     /// Per agent: live text since its last logged message: a new subscriber gets it first.
     live: HashMap<String, String>,
+    /// Per agent in a turn: its tokens so far (`ping` gives them to the cost box).
+    turn_use: HashMap<String, super::harness::TurnUse>,
     /// The worktree setup runs: messages wait in QUEUE (agent, text) until it ends.
     setup_running: bool,
     queue: Vec<(String, String)>,
@@ -271,6 +273,7 @@ impl Host {
                 // busy: in a turn, or waiting on running subagents
                 "busy": self.sessions.iter().filter(|(n, l)| l.busy || self.subagents.masters().contains(*n)).map(|(n, _)| n).collect::<Vec<_>>(),
                 "asks": self.asks.len(),
+                "usage": self.turn_use,
             })),
             "prompt" => {
                 let text = s("text");
@@ -493,6 +496,7 @@ impl Host {
                         }
                     }
                     Kind::TurnEnd { cost, error, .. } => {
+                        self.turn_use.remove(&agent);
                         if let Some(l) = self.sessions.get_mut(&agent) {
                             l.busy = false;
                         }
@@ -530,6 +534,9 @@ impl Host {
             // the plan's windows are the account's: 1 file for every host
             Out::Limits(l) => super::limits::record("claude", &l),
             Out::Mcp(harness, rows) => super::servers::record(&harness, rows),
+            Out::Usage(u) => {
+                self.turn_use.insert(agent, u);
+            }
             Out::Control(id, req) => {
                 // ACP agents: the mode decides what runs without the owner, auto-allowed MCP
                 // servers run always
@@ -768,7 +775,7 @@ pub fn run(id: &str) -> ! {
         }
     });
     let exe = super::exe();
-    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
+    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
     catch_signals();
     h.close_open_turns();
     // subagents the log has open ran in a process that is gone
@@ -839,7 +846,7 @@ mod tests {
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
         let (tx, rx) = mpsc::channel();
         h.start_setup(&t, tx);
         assert!(h.setup_running);
@@ -864,7 +871,7 @@ mod tests {
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
         h.harness("ada".into(), Out::Event(Kind::Tool { id: "t1".into(), name: "Agent".into(), input: json!({"description": "scan", "run_in_background": true, "prompt": "scan it"}) }));
         h.harness("ada".into(), Out::Event(Kind::ToolResult { id: "t1".into(), ok: true, output: "Async agent launched\nagentId: a1".into() }));
         // the master's turn ended: the subagent keeps the host alive, the master counts as busy
@@ -889,7 +896,7 @@ mod tests {
         writeln!(w, "{}", json!({"op": "subscribe"})).unwrap();
         let Ok(Input::Subscribe(s)) = rx.recv() else { panic!("0 subscribe") };
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: "t".into(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: HashMap::new() };
+        let mut h = Host { id: "t".into(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: HashMap::new() };
         h.live.insert("ada".into(), "Hel".into());
         h.subscribe(s);
         h.harness("ada".into(), Out::Delta("lo".into()));
