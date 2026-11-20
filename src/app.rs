@@ -4315,7 +4315,16 @@ impl App {
         let drafts_h = if self.drafts.is_empty() { 0 } else { 2 };
         let available = area.height.saturating_sub(drafts_h + title_rows + opts_h + note_rows + branch_h + 14);
         let agents_h = if self.agents.is_empty() { 1 } else {
-            self.agent_grid(area.width).height.min(2 * (CARD_H as usize + 1)).min(available.max(CARD_H + 1) as usize) as u16
+            let g = self.agent_grid(area.width);
+            let view = g.height.min(2 * (CARD_H as usize + 1)).min(available.max(CARD_H + 1) as usize);
+            // only the rows the cards fill: the rest goes to the prompt
+            match g.places.iter().find(|&&(i, _, _)| i == self.pick_cursor).or(g.places.first()) {
+                Some(&(_, _, top)) => {
+                    let off = crate::cards::scroll(&g, top, CARD_H, self.pick_offset, view);
+                    crate::cards::used(&g, CARD_H, off, view).max(1) as u16
+                }
+                None => view as u16,
+            }
         };
         if drafts_h == 0 && self.field == Field::Drafts {
             self.field = Field::Prompt;

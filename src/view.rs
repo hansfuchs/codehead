@@ -65,8 +65,10 @@ impl Pane {
 }
 
 
-/// The changes view gets the chat left of it from this many columns.
-const SPLIT_MIN: u16 = 200;
+/// From this many columns, a thread opens in the changes view with the chat right of it: the
+/// changes left at full height, the agents, the stream and the prompt right. Narrower (a window
+/// that shrinks when the editor opens next to it): the chat alone.
+const SPLIT_MIN: u16 = 160;
 /// 2 Esc presses within this time: back to the start screen. A single Esc interrupts once this time ends without a 2nd one.
 const DOUBLE_ESC: Duration = Duration::from_millis(500);
 /// Most rows the prompt grows to; longer text scrolls.
@@ -217,8 +219,13 @@ struct View {
     outside: Option<Vec<std::ffi::OsString>>,
     prompt_focus: bool,
     bar_rects: Vec<(Rect, Pane)>,
-    /// The changes view with the chat left of it (wide terminals; alt+\ toggles); the view's area.
+    /// The changes view with the chat right of it (wide terminals; alt+\ toggles); the view's area.
     split: bool,
+    /// The view follows the width (changes + chat when wide, chat when narrow) until the owner
+    /// picks a view.
+    auto_pane: bool,
+    /// The last draw had the changes + chat side by side.
+    wide_split: bool,
     view_rect: Rect,
     /// portless: the live URLs of this thread's worktree (read every 5 s), the read on its way, the
     /// link on row 0.
@@ -344,6 +351,8 @@ impl View {
             prompt_focus: false,
             bar_rects: Vec::new(),
             split: true,
+            auto_pane: true,
+            wide_split: false,
             view_rect: Rect::default(),
             urls: Vec::new(),
             urls_read: None,
@@ -1187,7 +1196,7 @@ impl View {
         if alt && !ctrl && k.code == KeyCode::Char('\\') {
             self.split = !self.split;
             self.dirty = true;
-            self.toast(if self.split { "changes: the chat on the left (≥ 200 columns)" } else { "changes: full width" });
+            self.toast(if self.split { "changes: the chat on the right (≥ 160 columns)" } else { "changes: full width" });
             return false;
         }
         if alt && !ctrl && let KeyCode::Char(c @ '1'..='9') = k.code {
@@ -1293,8 +1302,9 @@ impl View {
                 self.open_menu();
                 return false;
             }
-            // the prompt in the changes view: esc gives the keys back to the view
-            KeyCode::Esc if self.pane != Pane::Chat && self.prompt_focus => {
+            // the prompt in the changes view: esc gives the keys back to the view (side by side
+            // with the chat: an agent at work gets interrupted first, as in the chat)
+            KeyCode::Esc if self.pane != Pane::Chat && self.prompt_focus && !(self.wide_split && (!self.thread.busy.is_empty() || self.queued.is_some() || self.back > 0)) => {
                 self.prompt_focus = false;
                 return false;
             }
@@ -1438,8 +1448,32 @@ impl View {
         false
     }
 
-    /// Switch to view P of the thread. The changes view: git read at once, keys to the view.
+    /// Switch to view P of the thread (the owner's pick: the view stops following the width).
     fn set_pane(&mut self, p: Pane) {
+        self.auto_pane = false;
+        self.switch_pane(p);
+    }
+
+    /// The view follows the width of AREA: wide (and a git checkout): changes + chat, the
+    /// prompt has the keys; narrow: the chat.
+    fn follow_width(&mut self, area: Rect) {
+        if !self.auto_pane || !self.split {
+            return;
+        }
+        if self.checkouts.is_empty() {
+            self.load_checkouts();
+        }
+        let wide = area.width >= SPLIT_MIN && !self.checkouts.is_empty();
+        let want = if wide { Pane::Changes } else { Pane::Chat };
+        if self.pane != want && matches!(self.pane, Pane::Chat | Pane::Changes) {
+            self.switch_pane(want);
+            // typing goes to the prompt; alt (or esc) gives the keys to the changes
+            self.prompt_focus = wide;
+        }
+    }
+
+    /// Switch to view P. The changes view: git read at once, keys to the view.
+    fn switch_pane(&mut self, p: Pane) {
         if self.pane == p {
             return;
         }
@@ -2058,7 +2092,11 @@ impl View {
         let token_left = cost.x.saturating_sub(2);
         let fit = if cost.width > 0 { token_left + 1 } else { area.right() }.saturating_sub(area.x);
         let outer = if cost.width == 0 { area } else { Rect { width: cards_w(&cards).min(fit), ..area } };
-        let rows = Rect { y: area.y + 1, height: area.height.saturating_sub(2), ..area };
+        // the cards sit at the bottom, right above the prompt: a taller tokens box leaves its
+        // spare rows above them, not between them and the prompt
+        let card_h = crate::sprites::H as u16;
+        let y = (area.y + 1).max(area.bottom().saturating_sub(1 + card_h));
+        let rows = Rect { y, height: area.bottom().saturating_sub(1).saturating_sub(y), ..area };
         let mut x = area.x + 2;
         let mut slots = Vec::new();
         for ((sprite, color, side, w), name) in cards.into_iter().zip(&self.order) {
@@ -2273,6 +2311,21 @@ impl View {
             }
         }
         let area = Rect { y: below.y + sep, height: below.height - sep, ..below };
+        self.follow_width(area);
+        // wide changes view: the changes left at full height; the chat column right of it (the
+        // header, the stream, the prompt) is laid out below as the whole area
+        let wide = self.pane == Pane::Changes && self.split && area.width >= SPLIT_MIN;
+        self.wide_split = wide;
+        let (area, changes_left) = if wide {
+            let lw = area.width * 3 / 5;
+            let buf = f.buffer_mut();
+            for y in area.y..area.bottom() {
+                buf[(area.x + lw, y)].set_symbol("│").set_style(theme::line());
+            }
+            (Rect { x: area.x + lw + 1, width: area.width - lw - 1, ..area }, Some(Rect { width: lw, ..area }))
+        } else {
+            (area, None)
+        };
         // bottom up: footer, the bubble's hint row, the input bubble (its top border: the header's
         // bottom line), the header (agents + tokens box), the title row, monitors, the stream
         let foot = Rect { y: area.bottom().saturating_sub(1), height: 1, ..area };
@@ -2283,7 +2336,7 @@ impl View {
         let in_top = bubble_bottom.saturating_sub(n);
         let head_rows = header_rows(self.members.len());
         // the agents box + cost box: chat only (the changes view takes the room)
-        let head_h = if area.height >= MIN_HEADER_SCREEN && !self.members.is_empty() && self.pane == Pane::Chat { head_rows + 1 } else { 0 };
+        let head_h = if area.height >= MIN_HEADER_SCREEN && !self.members.is_empty() && (self.pane == Pane::Chat || wide) { head_rows + 1 } else { 0 };
         // the bubble's top border: the header's bottom line (shared), else a row of its own
         let bubble_top = in_top.saturating_sub(1);
         let header = Rect { y: (bubble_top + 1).saturating_sub(head_h), height: head_h, ..area };
@@ -2308,16 +2361,10 @@ impl View {
         } else if self.pane == Pane::Chat {
             self.draw_stream(f, st);
         } else {
-            // wide: the chat left, the changes right (alt+\ toggles)
-            let st = if self.split && st.width >= SPLIT_MIN {
-                let lw = st.width * 2 / 5;
-                let left = Rect { width: lw, ..st };
-                self.stream_rect = left;
-                self.draw_stream(f, left);
-                for y in st.y..st.bottom() {
-                    f.buffer_mut()[(st.x + lw, y)].set_symbol("│").set_style(theme::line());
-                }
-                Rect { x: st.x + lw + 1, width: st.width - lw - 1, ..st }
+            // wide: the stream in the chat column, the changes left (alt+\ toggles)
+            let st = if let Some(left) = changes_left {
+                self.draw_stream(f, st);
+                left
             } else {
                 st
             };
@@ -2504,7 +2551,7 @@ impl View {
             if i > 0 {
                 to.push(Span::styled(", ", theme::muted()));
             }
-            to.push(Span::styled(name.to_lowercase(), Style::default().fg(self.color(&name))));
+            to.push(Span::styled(name.clone(), Style::default().fg(self.color(&name))));
         }
         if self.members.is_empty() {
             to.clear();
@@ -3484,14 +3531,16 @@ mod split_tests {
     }
 
     #[test]
-    fn wide_changes_view_has_the_chat_left_and_alt_backslash_toggles() {
+    fn wide_changes_view_has_the_chat_right_and_alt_backslash_toggles() {
         let (tx, _rx) = mpsc::channel();
         let mut v = View::new("splittest-0000", Path::new("/tmp"), "t", tx);
         v.set_pane(Pane::Changes);
         let s = screen(&mut v, 220);
-        // the divider at 2/5 of the width, the stream's empty note left
-        assert!(s[2].chars().nth(88) == Some('│'), "{}", s[2]);
-        assert!(v.stream_rect.width == 88 && v.view_rect.x == 89, "{:?} {:?}", v.stream_rect, v.view_rect);
+        // the divider at 3/5 of the width: the changes left, the chat column right
+        assert!(s[2].chars().nth(132) == Some('│'), "{}", s[2]);
+        assert!(v.view_rect.x == 0 && v.view_rect.right() <= 132 && v.stream_rect.x == 133, "{:?} {:?}", v.stream_rect, v.view_rect);
+        // the prompt in the chat column
+        assert!(v.input_rect.x >= 133, "{:?}", v.input_rect);
         v.key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::ALT));
         screen(&mut v, 220);
         assert_eq!(v.view_rect.x, 0, "full width");
@@ -3499,6 +3548,14 @@ mod split_tests {
         v.key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::ALT));
         screen(&mut v, 150);
         assert_eq!(v.view_rect.x, 0);
+    }
+
+    #[test]
+    fn a_thread_outside_git_opens_in_the_chat_even_when_wide() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("splittest-0001", Path::new("/"), "t", tx);
+        screen(&mut v, 220);
+        assert_eq!(v.pane, Pane::Chat);
     }
 }
 

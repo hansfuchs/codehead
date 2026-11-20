@@ -85,14 +85,34 @@ fn grid_gap(groups: &[(String, Vec<usize>)], card_w: u16, card_h: u16, width: u1
 /// 1st virtual row to show so that the card at TOP (CARD_H rows) is in a VIEW of rows, its group
 /// heading too when it sits right above it. OFFSET: the last value.
 pub fn scroll(g: &Grid, top: usize, card_h: u16, offset: usize, view: usize) -> usize {
+    let bottom = top + card_h as usize;
     let top = if g.heads.iter().any(|&(h, _)| h + 1 == top) { top - 1 } else { top };
     let mut offset = offset;
     if top < offset {
         offset = top;
-    } else if top + card_h as usize + 1 > offset + view {
-        offset = (top + card_h as usize + 1).saturating_sub(view);
+    } else if bottom > offset + view {
+        offset = bottom.saturating_sub(view);
     }
-    offset.min(g.height.saturating_sub(view))
+    let offset = offset.min(g.height.saturating_sub(view));
+    // never start inside a card or a heading: `draw_grid` skips a cut card, its rows stay blank
+    starts(g).into_iter().find(|&s| s >= offset && s <= top).unwrap_or(offset)
+}
+
+/// The virtual rows where a heading or a row of cards starts, ascending.
+fn starts(g: &Grid) -> Vec<usize> {
+    let mut v: Vec<usize> = g.heads.iter().map(|&(y, _)| y).chain(g.places.iter().map(|&(_, _, y)| y)).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// Rows of a VIEW that `draw_grid` fills from OFFSET: the bottom of the last whole heading or card.
+pub fn used(g: &Grid, card_h: u16, offset: usize, view: usize) -> usize {
+    let fits = |vy: usize, h: usize| vy >= offset && vy + h <= offset + view;
+    // a heading counts with its 1st card row only: 0 dangling headings at the bottom
+    let heads = g.heads.iter().filter(|&&(y, _)| fits(y, 1 + card_h as usize)).map(|&(y, _)| y + 1);
+    let cards = g.places.iter().filter(|&&(_, _, y)| fits(y, card_h as usize)).map(|&(_, _, y)| y + card_h as usize);
+    heads.chain(cards).max().map_or(0, |b| b - offset)
 }
 
 /// Grid G in AREA from virtual row OFFSET: the headings (bold), each card in full view through
