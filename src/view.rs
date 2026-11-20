@@ -36,17 +36,32 @@ pub enum Exit {
     Open { id: String, dir: PathBuf, title: String, note: String },
 }
 
-/// Views of a thread: the view bar on row 0 (alt/option+←→: previous / next, alt+1-3).
+/// A PR for the merge tab of the next view of a thread: (thread, PR).
+static OPEN_PR: std::sync::Mutex<Option<(String, crate::gh::PrRef)>> = std::sync::Mutex::new(None);
+
+/// The next view of thread ID opens on its merge tab, PR in front.
+pub fn open_pr(id: &str, pr: &crate::gh::PrRef) {
+    *OPEN_PR.lock().unwrap_or_else(|e| e.into_inner()) = Some((id.to_string(), pr.clone()));
+}
+
+fn take_pr(id: &str) -> Option<crate::gh::PrRef> {
+    let mut g = OPEN_PR.lock().unwrap_or_else(|e| e.into_inner());
+    if g.as_ref().is_some_and(|(t, _)| t == id) { g.take().map(|x| x.1) } else { None }
+}
+
+/// Views of a thread: the view bar on row 0 (alt/option+←→: previous / next, alt+1-4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Pane {
     #[default]
     Chat,
     Changes,
+    /// The pull requests of the thread (merge.rs).
+    Merge,
     Files,
 }
 
 impl Pane {
-    const ALL: [Pane; 3] = [Pane::Chat, Pane::Changes, Pane::Files];
+    const ALL: [Pane; 4] = [Pane::Chat, Pane::Changes, Pane::Merge, Pane::Files];
 }
 
 
@@ -139,6 +154,14 @@ struct View {
     input: TextArea,
     input_rect: Rect,
     mention: Mention,
+    /// The thread's checkouts (its work dir 1st), the one the changes view shows.
+    checkouts: Vec<PathBuf>,
+    checkout: usize,
+    /// The merge tab: the thread's pull requests.
+    merge: crate::merge::Merge,
+    merge_sources_at: Option<Instant>,
+    /// ctrl+r in shell mode: the history search.
+    hist: crate::histsearch::HistSearch,
     command: crate::command::Command,
     paths: crate::paths::Paths,
     paster: Paster,
@@ -254,6 +277,11 @@ impl View {
             input,
             input_rect: Rect::default(),
             mention: Mention::default(),
+            checkouts: Vec::new(),
+            checkout: 0,
+            merge: crate::merge::Merge::for_thread(id),
+            merge_sources_at: None,
+            hist: Default::default(),
             command,
             paths: crate::paths::Paths::new(cwd),
             paster: Paster::new(crate::engine::data_dir().join("paste").join(id)),
@@ -624,6 +652,12 @@ impl View {
             text = format!("{text}\n\n{c}");
             self.mini_chat = true;
         }
+        // from the merge tab: the pull request in view
+        if self.pane == Pane::Merge
+            && let Some(c) = self.merge.context()
+        {
+            text = format!("{text}\n\n{c}");
+        }
         let files: Vec<String> = self.attachments.iter().filter(|(m, _)| text.contains(m.as_str())).map(|(_, p)| format!("- {}", p.display())).collect();
         if !files.is_empty() {
             text = format!("{text}\n\n{}\n{}", stream::ATTACHMENTS, files.join("\n"));
@@ -935,6 +969,7 @@ impl View {
             return false;
         }
         self.changes.no_tap();
+        self.merge.touch();
         // a key after a search jump: the mark goes
         if self.menu.is_none() && self.flash.take().is_some() {
             self.dirty = true;
@@ -959,7 +994,7 @@ impl View {
             return false;
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        // views of the thread: F1-F3 (alt+1-3 too)
+        // views of the thread: F1-F4 (alt+1-4 too)
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         if let KeyCode::F(n @ 1..=9) = k.code {
             if let Some(p) = Pane::ALL.get(usize::from(n - 1)) {
@@ -989,12 +1024,21 @@ impl View {
         // the changes view with the focus: its keys (esc, tab, ctrl+c and the menu key: as in chat)
         if self.pane != Pane::Chat && !self.prompt_focus {
             // the changes view's filter, selection: esc is the view's
-            let esc_here = self.pane == Pane::Changes && k.code == KeyCode::Esc && self.changes.takes_esc();
+            let esc_here = k.code == KeyCode::Esc && ((self.pane == Pane::Changes && self.changes.takes_esc()) || (self.pane == Pane::Merge && self.merge.takes_esc()));
             let tab = matches!(k.code, KeyCode::Tab | KeyCode::BackTab) && !ctrl;
             let through = ((k.code == KeyCode::Esc || tab) && !esc_here) || (ctrl && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('y'))) || crate::config::menu_key().matches(&k);
             if !through {
-                if k.code == KeyCode::Char('i') && !ctrl && !alt && !(self.pane == Pane::Changes && self.changes.typing()) {
+                if k.code == KeyCode::Char('i') && !ctrl && !alt && !(self.pane == Pane::Changes && self.changes.typing()) && !(self.pane == Pane::Merge && self.merge.typing()) {
                     self.prompt_focus = true;
+                    return false;
+                }
+                if self.pane == Pane::Merge {
+                    let act = self.merge.key(k);
+                    self.merge_act(act);
+                    return false;
+                }
+                if self.pane == Pane::Changes && ctrl && k.code == KeyCode::Char('w') && !self.changes.typing() {
+                    self.next_checkout();
                     return false;
                 }
                 if self.pane == Pane::Files {
@@ -1013,6 +1057,19 @@ impl View {
             if self.ask_act(act) {
                 return false;
             }
+        }
+        // ctrl+r in shell mode: the history search (its keys while open)
+        if self.hist.key(k) {
+            if let Some(t) = self.hist.picked.take() {
+                self.input.set_text(&t);
+            }
+            return false;
+        }
+        if k.code == KeyCode::Char('r') && k.modifiers.contains(KeyModifiers::CONTROL) && self.shell_mode() {
+            let cmds = self.thread.items.iter().filter_map(|i| if let stream::Item::Shell { command, .. } = i { Some(command.clone()) } else { None }).collect();
+            let text = self.input.text();
+            self.hist.open(cmds, text.strip_prefix('!').unwrap_or_default());
+            return false;
         }
         // dropdowns first: they own ↑↓, tab, enter, esc while open
         if self.mention.key(k, &mut self.input, &self.roster) {
@@ -1162,6 +1219,7 @@ impl View {
         } else if k.code == KeyCode::Enter {
             self.input.newline();
         }
+        self.hist.input_changed(&self.input.text());
         false
     }
 
@@ -1177,7 +1235,71 @@ impl View {
             self.files.refresh(true);
         }
         if p == Pane::Changes {
+            self.load_checkouts();
             self.changes.refresh(true);
+        }
+        if p == Pane::Merge {
+            self.merge_sources(true);
+        }
+    }
+
+    /// The merge tab's sources: the thread's checkouts (their repos' dirs), the PR links of its
+    /// log (NOW: even when read less than 60 s ago).
+    fn merge_sources(&mut self, now: bool) {
+        if !now && self.merge_sources_at.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            return;
+        }
+        self.merge_sources_at = Some(Instant::now());
+        let Some(t) = store::load(&self.id) else { return };
+        let checkouts: Vec<(PathBuf, Option<String>)> = t.all_checkouts().into_iter().map(|c| (PathBuf::from(c.dir), c.branch)).collect();
+        for (dir, _) in &checkouts {
+            if let Some(repo) = crate::gh::repo_of_dir(dir) {
+                self.merge.set_dir(&repo, dir.clone());
+            }
+        }
+        let log = std::fs::read_to_string(store::events_path(&self.id)).unwrap_or_default();
+        self.merge.set_sources(crate::merge::Sources { checkouts, links: crate::gh::pr_urls(&log) });
+    }
+
+    /// The thread's checkouts (more of them: an agent edited in another repo / worktree).
+    fn load_checkouts(&mut self) {
+        if let Some(t) = store::load(&self.id) {
+            self.checkouts = t.all_checkouts().into_iter().map(|c| PathBuf::from(c.dir)).filter(|d| d.is_dir()).collect();
+        }
+        self.checkout = self.checkout.min(self.checkouts.len().saturating_sub(1));
+    }
+
+    /// ctrl+w in the changes view: the thread's next checkout.
+    fn next_checkout(&mut self) {
+        self.load_checkouts();
+        if self.checkouts.len() < 2 {
+            self.toast("1 checkout: an agent's edit in another repo / worktree adds 1");
+            return;
+        }
+        self.checkout = (self.checkout + 1) % self.checkouts.len();
+        let dir = self.checkouts[self.checkout].clone();
+        self.changes = crate::changes::View::new(&self.id, &dir);
+        self.changes.refresh(true);
+        self.toast(format!("changes: {} ({}/{})", tilde(&dir), self.checkout + 1, self.checkouts.len()));
+    }
+
+    /// Show PR in the merge tab.
+    pub fn show_pr(&mut self, pr: &crate::gh::PrRef) {
+        self.set_pane(Pane::Merge);
+        self.merge.show(pr);
+    }
+
+    fn merge_act(&mut self, a: crate::merge::Act) {
+        match a {
+            crate::merge::Act::None => {}
+            crate::merge::Act::Toast(t) => self.toast(t),
+            crate::merge::Act::Open(file, line) => self.open_at(&file, line),
+            crate::merge::Act::Prompt(text) => {
+                self.back = 0;
+                let to = self.default_to().join(", ");
+                self.send_prompt(text);
+                self.toast(format!("sent to {to}"));
+            }
         }
     }
 
@@ -1335,6 +1457,21 @@ impl View {
                 self.exit = Exit::Home(h);
                 return true;
             }
+            Action::Pr(e) => {
+                self.menu = None;
+                match e.thread {
+                    Some(t) if t.id == self.id => self.show_pr(&e.item.pr),
+                    Some(t) => {
+                        open_pr(&t.id, &e.item.pr);
+                        self.exit = Exit::Open { id: t.id.clone(), dir: t.dir.clone(), title: t.title.clone(), note: String::new() };
+                        return true;
+                    }
+                    None => {
+                        self.exit = Exit::Home(crate::menu::Home::Merge(Some(e.item.pr.clone())));
+                        return true;
+                    }
+                }
+            }
             Action::Open(c) => {
                 self.menu = None;
                 if c.id == self.id {
@@ -1437,6 +1574,9 @@ impl View {
                 self.prompt_focus = self.prompt_focus && !click;
                 if self.pane == Pane::Files {
                     self.files.mouse(m);
+                } else if self.pane == Pane::Merge {
+                    let act = self.merge.mouse(m);
+                    self.merge_act(act);
                 } else {
                     let act = self.changes.mouse(m);
                     self.changes_act(act);
@@ -1888,6 +2028,12 @@ impl View {
 
         if self.pane == Pane::Files {
             self.files.draw(f, st);
+        } else if self.pane == Pane::Merge {
+            self.merge_sources(false);
+            self.merge.draw(f, st, !self.prompt_focus);
+            if let Some(n) = self.merge.note.take() {
+                self.toast(n);
+            }
         } else if self.pane == Pane::Chat {
             self.draw_stream(f, st);
         } else {
@@ -1958,7 +2104,17 @@ impl View {
                     let (done, all) = self.changes.progress();
                     let n = self.changes.comment_count();
                     let c = if n > 0 { format!("✎{n} ") } else { String::new() };
-                    if all == 0 { format!(" changes {c}") } else { format!(" changes {done}/{all} {c}") }
+                    let repo = if self.checkouts.len() > 1 {
+                        let name = self.checkouts[self.checkout].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        format!("{name} {}/{} ctrl+w · ", self.checkout + 1, self.checkouts.len())
+                    } else {
+                        String::new()
+                    };
+                    if all == 0 { format!(" changes {repo}{c}") } else { format!(" changes {repo}{done}/{all} {c}") }
+                }
+                Pane::Merge => {
+                    let n = self.merge.count();
+                    if n == 0 { " merge ".to_string() } else { format!(" merge {n} ") }
                 }
                 Pane::Files => {
                     let n = self.files.count();
@@ -2089,8 +2245,10 @@ impl View {
             to.push(Span::styled(format!("  · ! {} running", self.shell_running), Style::default().fg(theme::shell())));
         }
         f.render_widget(Paragraph::new(Line::from(to)), hint);
-        let keys = if shell {
-            "⏎ run · output: to the agents with your next message "
+        let keys = if self.hist.is_open() {
+            "↑↓ ctrl+r: pick · ⏎ take · esc close · type to filter "
+        } else if shell {
+            "⏎ run · ctrl+r history · output: to the agents with your next message "
         } else if self.input.is_empty() {
             "! for shell mode · ⌘/ctrl+⏎ send · ↑↓ history "
         } else {
@@ -2102,15 +2260,17 @@ impl View {
         let right = match &self.toast {
             Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Span::styled(format!("{m} "), theme::accent()),
             _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled(self.changes.hints(), theme::muted()),
+            _ if self.pane == Pane::Merge && !self.prompt_focus => Span::styled(self.merge.hints(), theme::muted()),
             _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · pgup pgdn: scroll · o: IDE · y: yazi · c: copy path · S: share · i: prompt ", theme::muted()),
-            _ if self.pane != Pane::Chat => Span::styled("esc: back to the view · F1-F3: views ", theme::muted()),
-            _ => Span::styled("tab: menu · F1-F3: views · esc: interrupt · esc esc: codehead ", theme::muted()),
+            _ if self.pane != Pane::Chat => Span::styled("esc: back to the view · F1-F4: views ", theme::muted()),
+            _ => Span::styled("tab: menu · F1-F4: views · esc: interrupt · esc esc: codehead ", theme::muted()),
         };
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), foot);
 
         // dropdowns over everything, then the menu
         if !menu_open {
             self.mention.render(f, &self.input, &self.roster, area);
+            self.hist.render(f, area, self.input_rect);
             self.command.render(f, &self.input, area, self.input_rect);
             self.paths.render(f, &self.input, area, self.input_rect);
         }
@@ -2335,6 +2495,10 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     crate::engine::trace("view new …");
     let mut v = View::new(id, cwd, title, tx);
     crate::engine::trace("view new");
+    // the menu's merge tab picked a PR of this thread: its merge tab on it
+    if let Some(pr) = take_pr(id) {
+        v.show_pr(&pr);
+    }
     // the view ends (any way): the base keyboard flags again
     struct AllKeysOff;
     impl Drop for AllKeysOff {
@@ -2416,6 +2580,8 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
             crate::nav::mark_seen_now(id);
             return Ok(std::mem::replace(&mut v.exit, Exit::Back));
         }
+        dirty |= v.hist.poll();
+        dirty |= v.merge.poll(v.pane == Pane::Merge);
         while let Ok(m) = rx.try_recv() {
             dirty = true;
             match m {
@@ -2680,7 +2846,7 @@ mod pane_tests {
         let s = screen(&mut v);
         // the changes label may carry a count (other tests share the thread id)
         assert!(s.contains(" chat   changes") && s.contains("files  │ thread p"), "{s}");
-        assert!(s.contains("F1-F3: views"), "{s}");
+        assert!(s.contains("F1-F4: views"), "{s}");
         // the view bar on row 0
         assert!(s.lines().next().unwrap().contains(" chat "), "{s}");
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
@@ -2884,10 +3050,30 @@ mod files_pane_tests {
     use super::*;
 
     #[test]
+    fn merge_is_the_3rd_view_its_keys_its_context() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("mergetest-0000", Path::new("/tmp"), "t", tx);
+        v.key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        assert_eq!(v.pane, Pane::Merge);
+        v.merge = crate::merge::tests::with(crate::merge::tests::pr());
+        // letters: the tab's keys (0 prompt text); i: the prompt
+        v.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(v.input.text(), "");
+        v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        assert!(v.prompt_focus);
+        for c in "fix the lint".chars() {
+            v.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        let sent = v.pending.last().map(|p| p.0.clone()).unwrap_or_default();
+        assert!(sent.starts_with("fix the lint") && sent.contains("[codehead: context from the merge tab]") && sent.contains("CI / lint"), "{sent}");
+    }
+
+    #[test]
     fn the_files_filter_takes_every_letter_and_esc() {
         let (tx, _rx) = mpsc::channel();
         let mut v = View::new("filesfilter-0000", Path::new("/tmp"), "t", tx);
-        v.key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
         assert_eq!(v.pane, Pane::Files);
         for c in "fix".chars() {
             v.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -2899,10 +3085,10 @@ mod files_pane_tests {
     }
 
     #[test]
-    fn files_is_the_3rd_view_with_its_keys() {
+    fn files_is_the_4th_view_with_its_keys() {
         let (tx, _rx) = mpsc::channel();
         let mut v = View::new("filestest-0000", Path::new("/tmp"), "t", tx);
-        v.key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::ALT));
+        v.key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::ALT));
         assert_eq!(v.pane, Pane::Files);
         // letters: view keys, 0 prompt text
         v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));

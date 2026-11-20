@@ -605,12 +605,6 @@ pub fn render(r: &Regi, s: usize, t: f32, look: &Look) -> Vec<Cell> {
     render_with(r, pat, s, t, look.speed, |k| lit(pat, r.talk, r.blink, s, t + r.phase, k))
 }
 
-/// R at rest: every dot on, idle colors, the pose at T 0. LOOK: the eye pattern (the agent's
-/// `eyes=` pick over the regi's own).
-pub fn rest(r: &Regi, look: &Look) -> Vec<Cell> {
-    render_with(r, look.pattern.unwrap_or(r.pattern), 2, 0.0, 1.0, |_| true)
-}
-
 fn render_with(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn(usize) -> bool) -> Vec<Cell> {
     let (eye_c, frame_c) = colors(s);
     cells(&dots_with(r, pat, s, t, speed, on), eye_c, frame_c)

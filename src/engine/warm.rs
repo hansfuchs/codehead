@@ -1,0 +1,89 @@
+//! Window warm-up: the new-thread view opens, a harness' short plan window (`five_hour`) is not
+//! running yet → 1 tiny message on the harness' weakest model starts it. The owner writes the
+//! task at their own pace; the window's clock already runs.
+//!
+//! "Not running": `limits.json` has 0 report of the window, or its reset time is past. 1 try per
+//! harness per [`GAP`] (every codehead process: the mark sits in `limits.json`). The reply's
+//! limit reports go into `limits.json`: the next check sees the new window.
+
+use std::process::{Command, Stdio};
+
+use serde_json::Value;
+
+/// The short window of the plans.
+const WINDOW: &str = "five_hour";
+/// Min. seconds between 2 tries per harness.
+const GAP: u64 = 600;
+
+/// A harness with a short plan window: its weakest model, the command of 1 message on it.
+struct Warm {
+    harness: &'static str,
+    cmd: fn() -> Vec<String>,
+}
+
+/// The harnesses that report a short window to codehead. Codex: its window goes over ACP
+/// without limit reports (0 entry until it reports one).
+const ALL: [Warm; 1] = [Warm {
+    harness: "claude",
+    // 0 tools, 0 MCP servers, 0 settings (0 hooks), 0 saved session
+    cmd: || ["claude", "-p", "hi", "--model", "haiku", "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--tools", "", "--strict-mcp-config", "--setting-sources", ""].map(String::from).to_vec(),
+}];
+
+/// The window of HARNESS in limits file V runs at NOW (unix s).
+fn running(v: &Value, harness: &str, now: u64) -> bool {
+    v[harness][WINDOW]["resets"].as_u64().is_some_and(|r| r > now)
+}
+
+/// A try of HARNESS at NOW is due: its window not running, its last try GAP+ ago.
+fn due(v: &Value, harness: &str, now: u64) -> bool {
+    !running(v, harness, now) && v["_warm"][harness].as_u64().is_none_or(|t| now.saturating_sub(t) >= GAP)
+}
+
+/// Start every short window that does not run (installed harnesses only), in the background.
+pub fn warm() {
+    if cfg!(test) {
+        return;
+    }
+    std::thread::spawn(|| {
+        let now = super::now_ms() / 1000;
+        for w in ALL.iter().filter(|w| super::harnesses::get(w.harness).is_some_and(|h| super::harnesses::on_path(h.bin))) {
+            if super::limits::claim_warm(w.harness, now, |v| due(v, w.harness, now)) {
+                run(w);
+            }
+        }
+    });
+}
+
+/// 1 message on W: its limit reports into `limits.json`.
+fn run(w: &Warm) {
+    let cmd = (w.cmd)();
+    let Ok(out) = Command::new(&cmd[0]).args(&cmd[1..]).current_dir(super::data_dir()).stdin(Stdio::null()).stderr(Stdio::null()).output() else { return };
+    let mut p = super::harness::Parser::default();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        for o in p.line(&v) {
+            if let super::harness::Out::Limits(l) = o {
+                super::limits::record(w.harness, &l);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_try_is_due_without_a_running_window_and_a_recent_try() {
+        // 0 report: due
+        assert!(due(&json!({}), "claude", 1000));
+        // window runs: 0 try
+        assert!(!due(&json!({"claude": {"five_hour": {"resets": 2000}}}), "claude", 1000));
+        // window over: due
+        assert!(due(&json!({"claude": {"five_hour": {"resets": 900}}}), "claude", 1000));
+        // a try 100 s ago: 0 try; 700 s ago: due
+        assert!(!due(&json!({"_warm": {"claude": 900}}), "claude", 1000));
+        assert!(due(&json!({"_warm": {"claude": 300}}), "claude", 1000));
+    }
+}

@@ -156,14 +156,6 @@ impl Avatar {
             }
         }
     }
-
-    /// The first frame (every eye on, idle, no motion): the shape a spawn forms.
-    fn rest(&self) -> Vec<glyph::Cell> {
-        match self.cat {
-            Cat::Regi => regi::rest(&regi::all()[self.idx], &self.look()),
-            Cat::Geo => self.cells(Status::Idle, 0.0),
-        }
-    }
 }
 
 fn rows(cells: &[glyph::Cell]) -> [String; H] {
@@ -309,14 +301,19 @@ impl Spawn {
         self.reveal() >= 1.0
     }
 
+    /// The shape the goo forms: the frame of status S at the snap (the 1st frame the status
+    /// animation shows after the spawn: 0 jump at the snap).
+    fn target(&self, a: &Avatar, s: Status) -> Vec<glyph::Cell> {
+        a.cells(s, self.start + spawn::timing(self.anim).2)
+    }
+
     /// The 13x6 canvas rows of A (the sprite at SPAWN_AT), status S after the snap. None: over.
     pub fn rows(&self, a: &Avatar, s: Status) -> Option<[String; SPAWN_H]> {
         if self.done() {
             return None;
         }
-        let rest = a.rest();
         let live = |_: f32| a.cells(s, now());
-        let cells = spawn::render(self.anim, &rest, &live, now() - self.start);
+        let cells = spawn::render(self.anim, &self.target(a, s), &live, now() - self.start);
         Some(std::array::from_fn(|r| cells[r * SPAWN_W..(r + 1) * SPAWN_W].iter().map(|c| c.ch).collect()))
     }
 }
@@ -357,15 +354,25 @@ mod tests {
     }
 
     #[test]
-    fn a_spawn_forms_the_agents_own_eyes() {
-        // every regi, every eye pick: the spawn's end (rest) has the agent's pattern, not the regi's
-        for idx in 0..Cat::Regi.count() {
-            let r = &regi::all()[idx];
-            for eyes in std::iter::once(None).chain((0..regi::PATTERNS.len()).map(Some)) {
-                let a = Avatar { cat: Cat::Regi, idx, eyes, speed: 1.0 };
-                let pat = eyes.map_or(r.pattern, |k| regi::PATTERNS[k]);
-                let want = regi::rest(r, &regi::Look { pattern: Some(pat), speed: 1.0 });
-                assert!(a.rest() == want, "regi {idx} eyes {eyes:?}: the spawn forms other eyes");
+    fn a_spawn_ends_on_the_first_frame_of_the_status() {
+        // the goo's last frame before the snap = the status animation's frame at the snap: 0 jump
+        let blank = |c: char| c == ' ' || c == '\u{2800}';
+        for (cat, idx, eyes) in [(Cat::Regi, 0, None), (Cat::Regi, 7, Some(3)), (Cat::Regi, 21, None), (Cat::Geo, 2, None)] {
+            let a = Avatar { cat, idx, eyes, speed: 1.0 };
+            for s in [Status::Idle, Status::Working, Status::Thinking, Status::Blocked, Status::Done] {
+                for anim in 0..spawn::count() {
+                    let sp = Spawn { anim, start: 3.7 };
+                    let end = spawn::timing(anim).2;
+                    let target = sp.target(&a, s);
+                    assert!(target == a.cells(s, sp.start + end));
+                    let goo = spawn::render(anim, &target, &|_| a.cells(s, sp.start + end), end - 0.01);
+                    let (ax, ay) = SPAWN_AT;
+                    let off = (0..W * H).filter(|&k| {
+                        let (g, t) = (goo[(ay + k / W) * SPAWN_W + ax + k % W].ch, target[k].ch);
+                        blank(g) != blank(t)
+                    });
+                    assert_eq!(off.count(), 0, "{cat:?} {idx} {s:?} anim {anim} ({})", spawn::name(anim));
+                }
             }
         }
     }

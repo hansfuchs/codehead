@@ -90,6 +90,8 @@ enum Tab {
     /// Sub-screen of task: enter on the notes field.
     Notes,
     Threads,
+    /// The owner's pull requests (mergetab.rs).
+    Merge,
     Agents,
     Settings,
 }
@@ -98,7 +100,8 @@ impl Tab {
     fn next(self) -> Tab {
         match self {
             Tab::New | Tab::Notes => Tab::Threads,
-            Tab::Threads => Tab::Agents,
+            Tab::Threads => Tab::Merge,
+            Tab::Merge => Tab::Agents,
             Tab::Agents => Tab::Settings,
             Tab::Settings => Tab::New,
         }
@@ -107,11 +110,15 @@ impl Tab {
         match self {
             Tab::New | Tab::Notes => Tab::Settings,
             Tab::Threads => Tab::New,
-            Tab::Agents => Tab::Threads,
+            Tab::Merge => Tab::Threads,
+            Tab::Agents => Tab::Merge,
             Tab::Settings => Tab::Agents,
         }
     }
 }
+
+/// The main tabs in order (F1-F5, alt+1-5).
+const MAIN_TABS: [Tab; 5] = [Tab::New, Tab::Threads, Tab::Merge, Tab::Agents, Tab::Settings];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -529,6 +536,11 @@ type AgentSnapshot = (Vec<Agent>, String, HashMap<String, Vec<Use>>);
 
 pub struct App {
     pub cfg: Config,
+    /// The merge tab: the owner's pull requests, 1 open.
+    merge_tab: crate::mergetab::MergeTab,
+    merge_area: Rect,
+    /// The new-thread view was open at the last tick (its windows warmed up: engine::warm).
+    warmed: bool,
     notes: Notes,
     collapsed: HashSet<String>,
     selected: Vec<String>,
@@ -855,6 +867,9 @@ impl App {
             filter_editing: false,
             filter_ta: TextArea::new(true, ""),
             hover: None,
+            warmed: false,
+            merge_tab: Default::default(),
+            merge_area: Rect::default(),
             tab: if cfg.copy_mode { Tab::Notes } else { Tab::New },
             settings: None,
             tabs_focus: false,
@@ -1158,6 +1173,19 @@ impl App {
     /// Background reads in. True: something on screen may change (a redraw is due).
     pub fn tick(&mut self) -> bool {
         let mut dirty = self.previews.poll();
+        // the new-thread view opens: the plan windows start now, the task can take its time
+        if self.screen == Screen::Pick && self.tab == Tab::Merge {
+            dirty |= self.merge_tab.poll();
+            if let Some(n) = self.merge_tab.take_note() {
+                self.toast(n, false);
+                dirty = true;
+            }
+        }
+        let compose = self.screen == Screen::Compose && !self.cfg.copy_mode;
+        if compose && !self.warmed {
+            crate::engine::warm::warm();
+        }
+        self.warmed = compose;
         // avatars on screen (agents tab, agent form, picker, menu): a frame every 150 ms
         if matches!(self.modal, Some(Modal::Agent(_))) || self.cur_tab() == Tab::Agents || self.menu.is_some() {
             use std::sync::atomic::{AtomicU64, Ordering};
@@ -2133,6 +2161,18 @@ impl App {
                     ("esc", "close local controls"),
                 ],
             ),
+            (Screen::Pick, Tab::Merge) => (
+                vec![c("r", "read the pull requests again", Act::Reload), c("q", "quit", Act::Quit)],
+                vec![
+                    ("↑↓ / j k", "move: PRs; in a PR: the things to act on"),
+                    ("enter", "open the PR · act (edit, dropdown, merge, update)"),
+                    ("ctrl+enter / ctrl+click", "open on GitHub"),
+                    ("s", "state filter: all, open, merged, closed"),
+                    ("[ ] · < >", "previous / next PR · overview / changes"),
+                    ("i", "prompt: a new thread with this task"),
+                    ("esc", "back to the list"),
+                ],
+            ),
             (Screen::Pick, Tab::Settings) => (
                 vec![c("ctrl+n", "add path alias", Act::AddAlias), c("ctrl+r", "reload file", Act::Reload), c("q", "quit", Act::Quit)],
                 vec![("↑↓", "field / alias box"), ("enter", "alias box: edit / done"), ("d", "delete the highlighted alias"), ("tab / shift+tab", "switch tab"), ("esc", "close path suggestions"), ("auto", "changes apply on leaving a field")],
@@ -2159,9 +2199,31 @@ impl App {
             Home::New => Tab::New,
             Home::Settings => Tab::Settings,
             Home::Agents => Tab::Agents,
+            Home::Merge(_) => Tab::Merge,
         });
         if h != Home::Settings {
             self.tabs_focus = false;
+        }
+        if let Home::Merge(Some(pr)) = &h {
+            self.merge_tab.open(pr);
+        }
+    }
+
+    /// What the merge tab asked for.
+    fn merge_out(&mut self, o: crate::mergetab::Out) {
+        use crate::mergetab::Out;
+        match o {
+            Out::None | Out::Back => {}
+            Out::Toast(t) => self.toast(t, false),
+            // 0 thread: the new-thread view, the task written; the owner sends it
+            Out::Compose(task) => {
+                self.prompt.set_text(&task);
+                self.prompt.move_end();
+                self.switch_tab(Tab::New);
+                self.tabs_focus = false;
+                self.field = Field::Prompt;
+                self.toast("the task is written: pick agents, send", false);
+            }
         }
     }
 
@@ -2172,6 +2234,14 @@ impl App {
             Action::Close | Action::Remove(_) | Action::Add(_) => {}
             Action::Home(h) => self.go_home(h),
             Action::Open(c) => self.outcome = Some(Outcome::Resume(Box::new(worktree_of(&c)))),
+            Action::Pr(e) => match e.thread {
+                Some(t) => {
+                    crate::view::open_pr(&t.id, &e.item.pr);
+                    let c = crate::nav::Card { id: t.id.clone(), title: t.title.clone(), dir: Some(t.dir.clone()), ..Default::default() };
+                    self.outcome = Some(Outcome::Resume(Box::new(worktree_of(&c))));
+                }
+                None => self.go_home(crate::menu::Home::Merge(Some(e.item.pr.clone()))),
+            },
             Action::Jump(c, ts) => {
                 crate::search::jump_to(&c.id, ts);
                 self.outcome = Some(Outcome::Resume(Box::new(worktree_of(&c))));
@@ -2279,6 +2349,10 @@ impl App {
             Act::Reload => {
                 match self.tab {
                     Tab::Threads => self.load_threads(),
+                    Tab::Merge => {
+                        let o = self.merge_tab.key(KeyEvent::from(KeyCode::Char('r')));
+                        return self.merge_out(o);
+                    }
                     Tab::Agents => self.load_agents(),
                     Tab::Notes | Tab::New => self.reload_notes(),
                     Tab::Settings => { self.settings_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)); return; }
@@ -2505,14 +2579,14 @@ impl App {
         }
         // F1-F4 (alt+1..4 too): the main tabs from every field (ctrl / alt+←→: word jumps); tab: the next field
         let main_tab = match k.code {
-            KeyCode::F(n @ 1..=4) => Some(usize::from(n - 1)),
-            KeyCode::Char(c @ '1'..='4') if k.modifiers.contains(KeyModifiers::ALT) && !ctrl => Some(usize::from(c as u8 - b'1')),
+            KeyCode::F(n @ 1..=5) => Some(usize::from(n - 1)),
+            KeyCode::Char(c @ '1'..='5') if k.modifiers.contains(KeyModifiers::ALT) && !ctrl => Some(usize::from(c as u8 - b'1')),
             _ => None,
         };
         if !self.cfg.copy_mode
             && let Some(i) = main_tab
         {
-            let to = [Tab::New, Tab::Threads, Tab::Agents, Tab::Settings][i];
+            let to = MAIN_TABS[i];
             self.switch_tab(to);
             // the keys: in the tab's content; settings: on its tabs row (0 path dropdown at entry)
             if to != Tab::Settings {
@@ -2528,7 +2602,7 @@ impl App {
                     self.settings_key(k);
                     return;
                 }
-                if self.preview_key(k) {
+                if self.tab != Tab::Merge && self.preview_key(k) {
                     return;
                 }
                 if self.tabs_focus {
@@ -2537,6 +2611,10 @@ impl App {
                     match self.tab {
                         Tab::Notes => self.notes_key(k),
                         Tab::Threads => self.threads_key(k),
+                        Tab::Merge => {
+                            let o = self.merge_tab.key(k);
+                            self.merge_out(o);
+                        }
                         Tab::Agents | Tab::New => self.agents_key(k),
                         Tab::Settings => self.settings_key(k),
                     }
@@ -2549,7 +2627,8 @@ impl App {
     /// for an Esc to close (modal, filter input, thread filter, the notes list of the task).
     fn at_start(&self) -> bool {
         let notes = self.screen == Screen::Pick && self.tab == Tab::Notes;
-        self.modal.is_none() && self.drafts_menu.is_none() && self.where_menu.is_none() && !notes && !self.trepo.is_open()
+        let pr_open = self.screen == Screen::Pick && self.tab == Tab::Merge && (self.merge_tab.is_detail() || self.merge_tab.typing());
+        self.modal.is_none() && self.drafts_menu.is_none() && self.where_menu.is_none() && !notes && !self.trepo.is_open() && !pr_open
             && !self.filter_editing && !self.tfilter_editing && !self.afilter_editing
             && !(self.screen == Screen::Pick && self.tab == Tab::Threads && self.tfilter.as_deref().is_some_and(|q| !q.is_empty()))
             && !(self.screen == Screen::Pick && self.tab == Tab::Agents && self.afilter.as_deref().is_some_and(|q| !q.is_empty()))
@@ -2667,6 +2746,9 @@ impl App {
         }
         if tab == Tab::Agents {
             self.refresh_agents();
+        }
+        if tab == Tab::Merge {
+            self.merge_tab.ensure();
         }
         if tab == Tab::Settings {
             self.settings_typed = false;
@@ -3298,6 +3380,10 @@ impl App {
             let a = menu.mouse(m);
             return self.menu_action(a);
         }
+        if self.modal.is_none() && self.screen == Screen::Pick && self.tab == Tab::Merge && self.merge_area.contains(at) {
+            let o = self.merge_tab.mouse(m);
+            return self.merge_out(o);
+        }
         let down = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
         if let Some(Modal::Agent(form)) = &mut self.modal {
             // harness / model: a click opens the dropdown; an open one takes the click
@@ -3622,7 +3708,7 @@ impl App {
         if self.screen == Screen::Pick && self.tab == Tab::Notes {
             spans.push(Span::styled(" new › notes ", theme::pill()));
         } else {
-            for (tab, label) in [(Tab::New, "new"), (Tab::Threads, "threads"), (Tab::Agents, "agents"), (Tab::Settings, "settings")] {
+            for (tab, label) in [(Tab::New, "new"), (Tab::Threads, "threads"), (Tab::Merge, "merge"), (Tab::Agents, "agents"), (Tab::Settings, "settings")] {
                 let active = self.cur_tab() == tab;
                 let focused = active && self.tabs_focus;
                 let (bg, fg) = match (active, focused) {
@@ -3667,6 +3753,12 @@ impl App {
     }
 
     fn draw_pick(&mut self, f: &mut Frame, area: Rect) {
+        self.merge_area = Rect::default();
+        if self.tab == Tab::Merge {
+            self.merge_area = area;
+            self.merge_tab.draw(f, area);
+            return;
+        }
         if self.tab == Tab::Settings {
             if let Some(settings) = &mut self.settings { settings.draw(f, area, !self.tabs_focus); }
             return;
@@ -3758,7 +3850,7 @@ impl App {
             Tab::Notes => self.draw_notes(f, list),
             Tab::Threads => self.draw_threads(f, list),
             Tab::Agents | Tab::New => self.draw_agents(f, list),
-            Tab::Settings => {}
+            Tab::Settings | Tab::Merge => {}
         }
     }
 
@@ -4242,25 +4334,29 @@ impl App {
     fn draw_footer(&mut self, f: &mut Frame, area: Rect) {
         let mut spans = vec![Span::raw(" ")];
         let cmd = crate::config::command_key().to_string();
+        if !self.tabs_focus && self.screen == Screen::Pick && self.tab == Tab::Merge {
+            spans.push(Span::styled(self.merge_tab.hints(), theme::muted()));
+        }
         let hints: &[(&str, &str)] = match self.screen {
+            _ if !self.tabs_focus && self.screen == Screen::Pick && self.tab == Tab::Merge => &[],
             _ if self.tabs_focus => &[("←→", "tab"), ("↓ / esc", "back"), ("q", "quit")],
             Screen::Compose if self.field == Field::Agents => &[("↑↓←→", "move"), ("space", "pick"), ("enter", "notes"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
             Screen::Compose if self.where_menu.is_some() => &[("↑↓", "move"), ("type", "filter"), ("enter", "pick"), ("esc", "close")],
             Screen::Compose if self.field == Field::Where => &[("enter", "choices"), ("r", "repo"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.field == Field::Opts => &[("space", "check / uncheck"), ("↑↓", "box · field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.drafts_menu.is_some() => &[("↑↓", "move"), ("enter", "load"), ("d", "delete"), ("esc", "back")],
-            Screen::Compose if self.field == Field::Drafts => &[("enter", "list drafts"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("F1-F4", "tabs")],
+            Screen::Compose if self.field == Field::Drafts => &[("enter", "list drafts"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("F1-F5", "tabs")],
             Screen::Compose if self.field == Field::Prompt => &[("@", "agents"), (cmd.as_str(), "commands"), ("dir/", "paths"), ("ctrl+v", "image"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("esc esc", "quit")],
             Screen::Compose if self.field == Field::Notes => &[("enter", "pick notes"), ("x", "drop"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
-            Screen::Compose => &[("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("tab", "next field"), ("F1-F4", "tabs"), ("esc esc", "quit")],
+            Screen::Compose => &[("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("tab", "next field"), ("F1-F5", "tabs"), ("esc esc", "quit")],
             Screen::Pick if self.tfilter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to list")],
             Screen::Pick if self.filter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter", "done"), ("esc", "clear")],
             Screen::Pick if self.tab == Tab::Notes && self.cfg.copy_mode => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "copy"), ("esc", "quit")],
             Screen::Pick if self.tab == Tab::Notes => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "confirm"), ("esc", "new"), ("tab", "back")],
-            Screen::Pick if self.tab == Tab::Threads => &[("↑↓", "move"), ("f", "filter"), ("space", "select"), ("c", "context"), ("enter", "open"), ("F1-F4", "tabs")],
+            Screen::Pick if self.tab == Tab::Threads => &[("↑↓", "move"), ("f", "filter"), ("space", "select"), ("c", "context"), ("enter", "open"), ("F1-F5", "tabs")],
             Screen::Pick if self.tab == Tab::Settings => self.settings.as_ref().map_or(&[], |s| s.help()),
             Screen::Pick if self.afilter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to cards")],
-            Screen::Pick => &[("↑↓←→", "move"), ("f", "filter"), ("enter", "edit"), ("F1-F4", "tabs")],
+            Screen::Pick => &[("↑↓←→", "move"), ("f", "filter"), ("enter", "edit"), ("F1-F5", "tabs")],
         };
         for (k, l) in hints {
             spans.extend(hint(k, l));
@@ -5527,7 +5623,7 @@ mod render_tests {
         std::fs::write(&a.settings_path, &config).unwrap();
 
         a.switch_tab(Tab::Agents);
-        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings && a.tabs_focus);
         let screen = dump(&mut a, 100, 36);
         assert!(!screen.contains("deploy.md"), "{screen}");
@@ -5535,7 +5631,7 @@ mod render_tests {
         assert!(a.screen == Screen::Compose);
         assert_eq!(std::fs::read_to_string(&a.settings_path).unwrap(), config);
 
-        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings && a.tabs_focus);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(!a.tabs_focus);
@@ -5547,11 +5643,11 @@ mod render_tests {
 
         // Re-entry must remove focus even after the path field was active.
         a.switch_tab(Tab::Agents);
-        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings && a.tabs_focus);
         let screen = dump(&mut a, 100, 36);
         assert!(!screen.contains("deploy.md"), "{screen}");
-        key(&mut a, KeyCode::Char('3'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Agents);
         assert_eq!(std::fs::read_to_string(&a.settings_path).unwrap(), config);
     }
@@ -5585,7 +5681,7 @@ mod render_tests {
         let s = crate::engine::servers::Server { name: "docs-x".into(), kind: "stdio".into(), command: Some("npx".into()), args: vec!["-y".into(), "docs".into()], auto_allow: true, ..Default::default() };
         crate::engine::servers::save(&[s]).unwrap();
         let mut a = app();
-        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         // ↑ from the 1st field: the sub-tab bar; → →: mcp servers
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
@@ -5620,7 +5716,7 @@ mod render_tests {
         let mut a = app();
         a.title.set_text("task title");
         a.prompt.set_text("task prompt");
-        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
@@ -5636,10 +5732,10 @@ mod render_tests {
         assert!(a.screen == Screen::Compose);
         assert_eq!(a.title.text(), "task title");
         assert_eq!(a.prompt.text(), "task prompt");
-        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
         let screen = dump(&mut a, 100, 24);
         assert!(screen.contains("~/notes/platform/"), "{screen}");
-        key(&mut a, KeyCode::Char('3'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Agents);
     }
 
@@ -5647,7 +5743,7 @@ mod render_tests {
     fn settings_esc_undoes_the_field_edit_and_never_applies() {
         let mut a = app();
         let before = std::fs::read_to_string(&a.settings_path).unwrap_or_default();
-        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.tab == Tab::Settings && !a.tabs_focus);
         // a plain field: typed, esc → the text at entry, 0 write
@@ -5688,7 +5784,7 @@ mod render_tests {
         alt(&mut a, '1');
         assert!(a.screen == Screen::Compose && a.field == Field::Prompt);
         // alt+2..4: threads, agents, settings
-        for (t, d) in [(Tab::Threads, '2'), (Tab::Agents, '3'), (Tab::Settings, '4')] {
+        for (t, d) in [(Tab::Threads, '2'), (Tab::Merge, '3'), (Tab::Agents, '4'), (Tab::Settings, '5')] {
             alt(&mut a, d);
             assert!(a.screen == Screen::Pick && a.tab == t);
         }
@@ -5949,7 +6045,7 @@ mod render_tests {
         println!("--- threads\n{}", dump(&mut a, 120, 14));
         key(&mut a, KeyCode::Char('3'), KeyModifiers::NONE);
         assert!(a.tab == Tab::Threads, "0 number keys for tabs");
-        key(&mut a, KeyCode::Char('3'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
         println!("--- agents\n{}", dump(&mut a, 120, 14));
         key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
         println!("--- new agent\n{}", dump(&mut a, 120, 42));

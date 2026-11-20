@@ -1048,6 +1048,8 @@ enum Body {
     Finding(usize, usize),
     /// Comment I, its text line K.
     Comment(usize, usize),
+    /// GitHub thread I of the pull request (PR mode), its line K.
+    Gh(usize, usize),
 }
 
 /// A row: what it shows, the file it belongs to, the new-side line it points at.
@@ -1247,9 +1249,102 @@ pub struct View {
     /// A git step on its way, and what the last one did (the thread view shows it).
     op: Option<Receiver<Result<String, String>>>,
     note: Option<String>,
+    /// A pull request's diff (the merge tab): read only, 0 git steps.
+    pub pr_src: Option<PrSrc>,
+}
+
+/// The pull request of a PR-mode view: its commits (the panel's picker), the picked 1 (None:
+/// every commit, against the merge base), its GitHub threads (under their lines).
+#[derive(Clone, Debug, Default)]
+pub struct PrSrc {
+    pub pr: crate::gh::PrRef,
+    pub base: String,
+    /// The head commit of the last read.
+    pub head: String,
+    pub commits: Vec<crate::gh::Commit>,
+    pub commit: Option<String>,
+    pub threads: Vec<crate::gh::Thread>,
+}
+
+/// The lines of GitHub thread T (head: the author row) in W columns: the 1st comment, then
+/// its replies, 6 text lines each at most.
+fn gh_lines(t: &crate::gh::Thread, w: usize) -> Vec<(bool, String)> {
+    let mut out = Vec::new();
+    for (k, c) in std::iter::once(&t.root).chain(&t.replies).enumerate() {
+        let mark = if k == 0 { "◈" } else { "  ↳" };
+        let state = if k == 0 && t.resolved { " · resolved" } else if k == 0 && t.outdated { " · outdated" } else { "" };
+        out.push((true, format!("{mark} {} · {}{state}", c.author, crate::gh::stamp(c.created))));
+        let indent = if k == 0 { "   " } else { "     " };
+        let body: Vec<&str> = c.body.lines().filter(|l| !l.trim().is_empty()).collect();
+        for l in body.iter().take(6) {
+            out.push((false, format!("{indent}{}", crate::nav::fit(l, w.saturating_sub(indent.len())))));
+        }
+        if body.len() > 6 {
+            out.push((false, format!("{indent}… {} more lines", body.len() - 6)));
+        }
+    }
+    out
+}
+
+/// The diff of pull request SRC (its picked commit, else all) as changes.
+fn load_pr(src: &PrSrc) -> Result<Changes, String> {
+    let text = crate::gh::diff(&src.pr, src.commit.as_deref())?;
+    let mut files = parse(&text);
+    order(&mut files);
+    let base = match &src.commit {
+        Some(c) => format!("{}^", &c[..c.len().min(7)]),
+        None => src.base.clone(),
+    };
+    Ok(Changes { base, files, ..Default::default() })
 }
 
 impl View {
+    /// The changes of pull request PR (DIR: a checkout of its repo, else any dir).
+    pub fn for_pr(pr: &crate::gh::PrRef, dir: &Path) -> View {
+        let mut v = View::new(&format!("pr~{}", pr.key().replace('/', "~")), dir);
+        v.pr_src = Some(PrSrc { pr: pr.clone(), ..Default::default() });
+        v
+    }
+
+    /// PR mode: the pull request's base, commits, threads (a new commit list: the picker keeps
+    /// its pick while it is still there).
+    pub fn set_pr(&mut self, p: &crate::gh::Pr) {
+        let Some(src) = self.pr_src.as_mut() else { return };
+        let threads: Vec<crate::gh::Thread> = p.threads.iter().filter(|t| t.path.is_some()).cloned().collect();
+        let changed = src.threads != threads;
+        src.base = p.base.clone();
+        src.commits = p.commits.clone();
+        src.threads = threads;
+        if src.commit.as_ref().is_some_and(|c| !p.commits.iter().any(|x| &x.oid == c)) {
+            src.commit = None;
+        }
+        let pushed = !src.head.is_empty() && src.head != p.head_oid;
+        src.head = p.head_oid.clone();
+        if changed {
+            self.built = None;
+        }
+        if pushed {
+            self.refresh(true);
+        }
+    }
+
+    /// Tests: the cursor on file I's box.
+    #[cfg(test)]
+    pub fn jump_to_file(&mut self, i: usize) {
+        self.jump_file(i);
+    }
+
+    /// PR mode: show COMMIT's diff (None: all), read now.
+    pub fn pick_commit(&mut self, commit: Option<String>) {
+        if let Some(src) = self.pr_src.as_mut()
+            && src.commit != commit
+        {
+            src.commit = commit;
+            self.loading = None;
+            self.refresh(true);
+        }
+    }
+
     pub fn new(id: &str, dir: &Path) -> View {
         View {
             id: id.to_string(),
@@ -1305,6 +1400,7 @@ impl View {
             outbox: Vec::new(),
             op: None,
             note: None,
+            pr_src: None,
         }
     }
 
@@ -1464,6 +1560,9 @@ impl View {
 
     /// Run git step OP on a thread; its end re-reads git.
     pub fn start_op(&mut self, op: Op) -> Act {
+        if self.pr_src.is_some() {
+            return Act::Toast("a pull request's diff: read only (the merge tab's prompt tells the agents)".into());
+        }
         if self.op.is_some() {
             return Act::Toast("git: 1 step at a time".into());
         }
@@ -1498,7 +1597,7 @@ impl View {
             changed = self.pr != p;
             self.pr = p;
         }
-        let on_branch = !cfg!(test) && self.changes.base != "HEAD" && !self.changes.base.is_empty();
+        let on_branch = !cfg!(test) && self.pr_src.is_none() && self.changes.base != "HEAD" && !self.changes.base.is_empty();
         if on_branch && self.pr_read.is_none() && self.pr_at.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
             self.pr_at = Some(Instant::now());
             let (tx, rx) = mpsc::channel();
@@ -1566,7 +1665,18 @@ impl View {
         if self.loading.is_some() || (!now && self.loaded.is_some_and(|t| t.elapsed() < REFRESH)) {
             return;
         }
+        // PR mode: a read on a new head only (gh calls are counted)
+        if !now && self.pr_src.is_some() && (self.loaded.is_some() || self.error.is_some()) {
+            return;
+        }
         let (tx, rx) = mpsc::channel();
+        if let Some(src) = self.pr_src.clone() {
+            std::thread::spawn(move || {
+                let _ = tx.send(load_pr(&src));
+            });
+            self.loading = Some(rx);
+            return;
+        }
         let dir = self.dir.clone();
         std::thread::spawn(move || {
             let _ = tx.send(load(&dir));
@@ -1767,7 +1877,13 @@ impl View {
         for (ci, c) in self.comments.iter().enumerate().filter(|(_, c)| c.path == f.path) {
             notes.push((c.line, (0..c.text.lines().count().max(1)).map(|k| Row::new(Body::Comment(ci, k), i, Some(c.line))).collect()));
         }
-        let added = |r: &Row| r.comment.is_some() || r.finding.is_some();
+        // PR mode: the GitHub threads on the file's lines
+        for (ti, t) in self.pr_src.iter().flat_map(|s| s.threads.iter().enumerate()).filter(|(_, t)| t.path.as_deref() == Some(f.path.as_str())) {
+            let n = gh_lines(t, usize::MAX).len();
+            let line = t.line.unwrap_or(0);
+            notes.push((line, (0..n).map(|k| Row::new(Body::Gh(ti, k), i, Some(line))).collect()));
+        }
+        let added = |r: &Row| r.comment.is_some() || r.finding.is_some() || matches!(r.body, Body::Gh(..));
         for (line, new) in notes {
             // the last row of the 1st run on that line (a removed line, then the added one)
             let hit = |r: &Row| !r.head && !r.hunk && !added(r) && r.at == Some(line);
@@ -1886,6 +2002,17 @@ impl View {
                 } else {
                     let l = x.body.lines().nth(k - 1).unwrap_or_default();
                     bar(vec![Span::raw("  "), Span::styled(crate::nav::fit(l, inner.saturating_sub(2)), theme::muted())])
+                }
+            }
+            Body::Gh(ti, k) => {
+                let Some(t) = self.pr_src.as_ref().and_then(|s| s.threads.get(ti)) else { return bar(Vec::new()) };
+                let lines = gh_lines(t, inner);
+                let Some((head, text)) = lines.get(k) else { return bar(Vec::new()) };
+                let st = Style::default().fg(theme::pal().warn);
+                if *head {
+                    bar(vec![Span::styled(crate::nav::fit(text, inner), st.add_modifier(Modifier::BOLD))])
+                } else {
+                    bar(vec![Span::styled(crate::nav::fit(text, inner), st)])
                 }
             }
             Body::Comment(ci, k) => {
@@ -2315,7 +2442,7 @@ impl View {
     /// Esc is the view's: it closes a modal, leaves the filter or the message, clears the
     /// filter, the selection or the panel's picks.
     pub fn takes_esc(&self) -> bool {
-        self.typing() || !self.filter.is_empty() || !self.sel.is_empty() || (self.scm.focus && !self.scm.picked.is_empty())
+        self.typing() || !self.filter.is_empty() || !self.sel.is_empty() || (self.scm.focus && !self.scm.picked.is_empty()) || self.scm.picking()
     }
 
     /// The keys of the footer now.
@@ -2324,6 +2451,15 @@ impl View {
             Some(Modal::Comment { .. }) => return "ctrl+⏎: save · esc: cancel · alt+↑↓ / wheel: scroll the lines · 0 text: delete ",
             Some(Modal::Confirm { .. }) => return "y / enter: yes · n / esc: no ",
             None => {}
+        }
+        if self.pr_src.is_some() {
+            return if self.scm.focus {
+                "j k · enter on the commit: pick a commit · →: open the file · e: IDE · alt: diff "
+            } else if self.filtering {
+                "type to filter · enter: 1st hit · esc: clear "
+            } else {
+                "j k: file · space: select · c: comment · r: reviewed · alt: panel · i: prompt "
+            };
         }
         if self.scm.focus && self.scm.msg_focus {
             "commit message · ctrl+⏎: commit the staged files · ctrl+g: draft by model · esc: back "
@@ -2414,7 +2550,7 @@ impl View {
             }
         }
         // inside a box: the code's dark background
-        if self.rows.get(i).is_some_and(|r| matches!(r.body, Body::Why | Body::Note(_) | Body::Hunk(_) | Body::Diff(..) | Body::Side(..) | Body::Finding(..) | Body::Comment(..))) {
+        if self.rows.get(i).is_some_and(|r| matches!(r.body, Body::Why | Body::Note(_) | Body::Hunk(_) | Body::Diff(..) | Body::Side(..) | Body::Finding(..) | Body::Comment(..) | Body::Gh(..))) {
             let bg = code_bg();
             for x in rect.x + 1..rect.right().saturating_sub(1) {
                 if let Some(c) = buf.cell_mut((x, rect.y))
@@ -2861,7 +2997,7 @@ impl View {
             return self.modal_mouse(m);
         }
         let at = ratatui::layout::Position { x: m.column, y: m.row };
-        if self.drag.is_none() && self.scm.rect.contains(at) {
+        if self.drag.is_none() && (self.scm.rect.contains(at) || self.scm.picking()) {
             return self.panel_mouse(m);
         }
         let click = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));

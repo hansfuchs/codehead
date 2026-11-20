@@ -22,19 +22,23 @@ use crate::theme;
 pub enum Tab {
     Quick,
     Threads,
+    /// The owner's pull requests.
+    Merge,
     Search,
     Tokens,
     Agents,
 }
 
-const TABS: [(Tab, &str); 5] = [(Tab::Quick, "quick"), (Tab::Threads, "threads"), (Tab::Search, "search"), (Tab::Tokens, "tokens"), (Tab::Agents, "agents")];
+const TABS: [(Tab, &str); 6] = [(Tab::Quick, "quick"), (Tab::Threads, "threads"), (Tab::Merge, "merge"), (Tab::Search, "search"), (Tab::Tokens, "tokens"), (Tab::Agents, "agents")];
 
 /// A tab of the start screen the menu opens.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Home {
     New,
     Settings,
     Agents,
+    /// The merge tab, a PR open in it (0 thread has it).
+    Merge(Option<crate::gh::PrRef>),
 }
 
 /// What the host does after a key / click.
@@ -51,6 +55,8 @@ pub enum Action {
     Command(usize),
     Remove(String),
     Add(String),
+    /// A PR of the merge tab: its thread's merge tab, else the start screen's.
+    Pr(crate::prlist::Entry),
 }
 
 /// Quick command of the host: label, hotkey hint, id, section (a heading row over each section).
@@ -112,6 +118,8 @@ pub struct Menu {
     tab_rects: Vec<(Rect, Tab)>,
     rows: Vec<(Rect, usize)>,
     frame: Rect,
+    /// Merge tab: the owner's PRs.
+    prs: crate::prlist::PrList,
 }
 
 fn builtins() -> Vec<Item> {
@@ -173,6 +181,7 @@ impl Menu {
             tab_rects: Vec::new(),
             rows: Vec::new(),
             frame: Rect::default(),
+            prs: crate::prlist::PrList::default(),
         }
     }
 
@@ -199,6 +208,10 @@ impl Menu {
     }
 
     fn poll(&mut self) {
+        if self.tab == Tab::Merge {
+            self.prs.ensure();
+            self.prs.poll();
+        }
         if let Some(rx) = &self.loading
             && let Ok(c) = rx.try_recv()
         {
@@ -368,6 +381,10 @@ impl Menu {
             Tab::Quick => self.quick_key(k),
             Tab::Threads => self.threads_key(k),
             Tab::Search => self.search_key(k),
+            Tab::Merge => match self.prs.key(k) {
+                crate::prlist::Pick::Open(e) => Action::Pr(e),
+                _ => Action::None,
+            },
             Tab::Tokens => {
                 match k.code {
                     KeyCode::Up | KeyCode::Char('k') => self.dscroll = self.dscroll.saturating_sub(1),
@@ -510,6 +527,12 @@ impl Menu {
                     self.adding = None;
                     return Action::None;
                 }
+                if self.tab == Tab::Merge {
+                    return match self.prs.mouse(m) {
+                        crate::prlist::Pick::Open(e) => Action::Pr(e),
+                        _ => Action::None,
+                    };
+                }
                 let Some(&(_, i)) = self.rows.iter().find(|(r, _)| r.contains(at)) else { return Action::None };
                 match self.tab {
                     Tab::Quick => {
@@ -527,7 +550,7 @@ impl Menu {
                         self.scursor = i;
                         return self.jump(i);
                     }
-                    Tab::Tokens => {}
+                    Tab::Tokens | Tab::Merge => {}
                     Tab::Agents => {
                         if let Some(c) = self.adding {
                             let name = self.addable().get(i).map(|a| a.name.clone());
@@ -550,6 +573,9 @@ impl Menu {
                 }
             }
             MouseEventKind::ScrollUp if self.tab == Tab::Threads => self.tcursor = self.tcursor.saturating_sub(1),
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp if self.tab == Tab::Merge => {
+                self.prs.mouse(m);
+            }
             MouseEventKind::ScrollDown if self.tab == Tab::Search => self.scursor = (self.scursor + 1).min(self.hits.len().saturating_sub(1)),
             MouseEventKind::ScrollUp if self.tab == Tab::Search => self.scursor = self.scursor.saturating_sub(1),
             MouseEventKind::ScrollDown if self.tab == Tab::Tokens => self.dscroll = self.dscroll.saturating_add(1),
@@ -610,6 +636,10 @@ impl Menu {
             Tab::Threads => {
                 self.draw_threads(f, body);
                 &[("type", "filter"), ("ctrl+r", "repo"), ("↑↓", "move"), ("enter", "open"), ("←→", "tabs"), ("esc tab", "close")]
+            }
+            Tab::Merge => {
+                self.prs.draw(f, body, true);
+                &[("↑↓", "move"), ("enter", "open: its thread, else the merge tab"), ("s", "state"), ("←→", "tabs"), ("esc", "close")]
             }
             Tab::Search => {
                 self.draw_search(f, body);
@@ -893,6 +923,8 @@ mod tests {
         assert_eq!(m.tab, Tab::Quick);
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Threads);
+        m.key(k(KeyCode::Right));
+        assert_eq!(m.tab, Tab::Merge);
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Search);
         m.key(k(KeyCode::Right));

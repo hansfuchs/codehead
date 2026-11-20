@@ -30,6 +30,19 @@ fn edit(f: impl FnOnce(&mut Value)) {
     });
 }
 
+/// The warm-up of HARNESS (engine::warm) at NOW: DUE on the file → marked (`_warm`), true. 1
+/// process wins per try (the lock).
+pub fn claim_warm(harness: &str, now: u64, due: impl FnOnce(&Value) -> bool) -> bool {
+    let mut won = false;
+    edit(|v| {
+        if due(v) {
+            v["_warm"][harness] = json!(now);
+            won = true;
+        }
+    });
+    won
+}
+
 /// A turn of a Claude agent ended: its $ into the sum.
 pub fn add_cost(usd: f64) {
     if usd <= 0.0 {

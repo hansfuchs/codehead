@@ -10,6 +10,7 @@
 //! - `servers`: the MCP servers codehead owns and connects to every harness.
 
 pub mod acp;
+pub mod checkouts;
 pub mod client;
 pub mod edits;
 pub mod guard;
@@ -22,6 +23,7 @@ pub mod roster;
 pub mod servers;
 pub mod store;
 pub mod subagents;
+pub mod warm;
 
 use std::path::PathBuf;
 

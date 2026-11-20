@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! codehead: pick notes, write the task, then work the thread with its agents in this terminal.
 
 mod avatar;
@@ -18,6 +19,8 @@ mod cost;
 mod drafts;
 mod handoff;
 mod harnesstab;
+mod gh;
+mod histsearch;
 mod home;
 mod editor;
 mod files;
@@ -25,6 +28,8 @@ mod fuzzy;
 mod engine;
 mod dropdown;
 mod mention;
+mod merge;
+mod mergetab;
 mod models;
 mod monitors;
 mod nav;
@@ -34,6 +39,7 @@ mod menu;
 mod notes;
 mod paths;
 mod picker;
+mod prlist;
 mod portless;
 mod preview;
 mod rank;
@@ -159,7 +165,7 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          @: agent names. ←→ on a name: + add, or ⇄ replace an agent of the thread: on send, the old
          agent leaves and the new one gets the message with the old one's last messages.
          ctrl+i / ⌘i: the IDE on the thread's worktree (setting editor: auto, code, cursor, zed, idea …).
-         views (row 0): alt/option+←→ previous / next (chat, changes, files), alt+1-3. ctrl+y: yazi. changes: 1 box per file in review
+         views (row 0): alt/option+←→ previous / next (chat, changes, merge, files), alt+1-4. ctrl+y: yazi. changes: 1 box per file in review
          order (schema, logic, config, UI, docs, tests, generated), j k box, n p hunk, space
          reviewed, enter fold, o VS Code at the line, s side by side / unified, i prompt (esc back).
          tool runs (▸): click opens / closes the calls (input + output); ctrl+o: all.

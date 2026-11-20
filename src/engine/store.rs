@@ -54,6 +54,18 @@ pub struct Thread {
     /// Agents stopped on a usage limit: the time (unix ms) the host resumes each.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resume: BTreeMap<String, u64>,
+    /// More checkouts the thread works in (other repos, other worktrees): the agents' edits
+    /// there add them. The 1st checkout: DIR / WORKTREE / BRANCH.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkouts: Vec<Checkout>,
+}
+
+/// A checkout of a thread: its dir (a git toplevel), its branch when added.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkout {
+    pub dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 fn open() -> String {
@@ -69,7 +81,11 @@ pub fn threads_dir() -> PathBuf {
 }
 
 pub fn thread_dir(id: &str) -> PathBuf {
-    threads_dir().join(id)
+    // a pull request's review state (the merge tab's changes): beside the threads, never one
+    match id.strip_prefix("pr~") {
+        Some(k) => data_dir().join("prs").join(k),
+        None => threads_dir().join(id),
+    }
 }
 
 pub fn events_path(id: &str) -> PathBuf {
@@ -99,6 +115,26 @@ impl Thread {
     /// Where the agents work: the worktree, else the dir.
     pub fn work_dir(&self) -> PathBuf {
         PathBuf::from(self.worktree.as_deref().unwrap_or(&self.dir))
+    }
+
+    /// Every checkout of the thread: the work dir first, then the added ones (0 dupes).
+    pub fn all_checkouts(&self) -> Vec<Checkout> {
+        let mut v = vec![Checkout { dir: self.work_dir().display().to_string(), branch: self.branch.clone() }];
+        for c in &self.checkouts {
+            if !v.iter().any(|x| x.dir == c.dir) {
+                v.push(c.clone());
+            }
+        }
+        v
+    }
+
+    /// Add checkout C (a dir the thread has: 0 change). True: added.
+    pub fn add_checkout(&mut self, c: Checkout) -> bool {
+        if self.all_checkouts().iter().any(|x| x.dir == c.dir) {
+            return false;
+        }
+        self.checkouts.push(c);
+        true
     }
 
     pub fn save(&self) -> Result<(), String> {

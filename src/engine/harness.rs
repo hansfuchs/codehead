@@ -4,7 +4,7 @@
 //! `control_response` once the owner picks. Every other harness: ACP (`engine::acp`).
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
 use std::sync::mpsc::Sender;
@@ -52,6 +52,8 @@ pub struct Spec<'a> {
     pub system: &'a str,
     /// `codehead` binary for the MCP server.
     pub exe: &'a Path,
+    /// More dirs the agent may work in (the thread's other checkouts).
+    pub extra: &'a [PathBuf],
 }
 
 pub struct Session {
@@ -226,6 +228,9 @@ pub fn args(s: &Spec, servers: serde_json::Map<String, Value>, allow: &[String])
     }
     if let Some(extra) = crate::config::harness_opt("claude", "args") {
         a.extend(super::harnesses::split(&extra));
+    }
+    for d in s.extra {
+        a.extend(["--add-dir".into(), d.display().to_string()]);
     }
     if let Some(r) = s.resume {
         a.extend(["--resume".into(), r.into()]);

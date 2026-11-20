@@ -56,6 +56,8 @@ pub(super) enum PRow {
     Comment(usize),
     Stash(usize),
     Empty(&'static str),
+    /// PR mode: the commit picker.
+    Pick,
 }
 
 impl PRow {
@@ -94,6 +96,10 @@ pub(super) struct Panel {
     /// The list's screen rows: y, row index, a stuck label.
     lines: Vec<(u16, usize, bool)>,
     buttons: Vec<(Rect, Btn)>,
+    /// PR mode: the commit dropdown open, its cursor (0: every commit, k: the k-th newest);
+    /// its rows (clicks).
+    pick: Option<usize>,
+    pick_rows: Vec<(Rect, usize)>,
 }
 
 impl Panel {
@@ -103,6 +109,11 @@ impl Panel {
             Some(PRow::File(f, _)) if self.focus => Some(*f),
             _ => None,
         }
+    }
+
+    /// PR mode: the commit dropdown is open.
+    pub(super) fn picking(&self) -> bool {
+        self.pick.is_some()
     }
 
     pub fn new() -> Panel {
@@ -124,6 +135,8 @@ impl Panel {
             msg_rect: Rect::default(),
             lines: Vec::new(),
             buttons: Vec::new(),
+            pick: None,
+            pick_rows: Vec::new(),
         }
     }
 }
@@ -158,9 +171,15 @@ impl View {
         let mut order: Vec<usize> = (0..self.changes.files.len()).collect();
         order.sort_by_key(|&i| self.level_of(i) as usize);
         let mut v = Vec::new();
+        let pr = self.pr_src.is_some();
+        if pr {
+            v.push(PRow::Pick);
+        }
         let staged: Vec<usize> = order.iter().copied().filter(|&i| self.changes.staged.contains_key(&self.changes.files[i].path)).collect();
-        v.push(PRow::Section(Sec::Staged, staged.len()));
-        if !p.folded.contains(&Fold::Sec(Sec::Staged)) {
+        if !pr {
+            v.push(PRow::Section(Sec::Staged, staged.len()));
+        }
+        if !pr && !p.folded.contains(&Fold::Sec(Sec::Staged)) {
             v.extend(staged.iter().map(|&i| PRow::File(i, true)));
         }
         let open: Vec<usize> = order.iter().copied().filter(|&i| self.changes.staged.get(&self.changes.files[i].path) != Some(&true)).collect();
@@ -193,6 +212,9 @@ impl View {
                 v.push(PRow::CommentFile(path.to_string(), of.len()));
                 v.extend(of.into_iter().map(PRow::Comment));
             }
+        }
+        if pr {
+            return v;
         }
         v.push(PRow::Section(Sec::Stash, self.stash.len()));
         if !p.folded.contains(&Fold::Sec(Sec::Stash)) {
@@ -265,6 +287,12 @@ impl View {
         if area.height < 6 || area.width < 12 {
             return;
         }
+        if self.pr_src.is_some() {
+            self.scm.msg_rect = Rect::default();
+            self.draw_rows(f, area);
+            self.draw_pick(f, area);
+            return;
+        }
         // the commit message box: 1-5 text rows, a hint row under it
         let inner_w = area.width.saturating_sub(2);
         let rows = (self.scm.msg.rows_for(inner_w) as u16).clamp(1, 5);
@@ -279,6 +307,55 @@ impl View {
         let hint = Rect { y: boxr.bottom(), height: 1, ..area };
         f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(" ctrl+⏎ commit · ctrl+g draft", area.width as usize), theme::muted())), hint);
         let list = Rect { y: hint.bottom() + 1, height: area.bottom().saturating_sub(hint.bottom() + 1), ..area };
+        self.draw_rows(f, list);
+    }
+
+    /// PR mode: the commit picker's label (0: every commit).
+    fn pick_label(&self, k: usize) -> (String, String) {
+        let Some(src) = &self.pr_src else { return (String::new(), String::new()) };
+        if k == 0 {
+            return ("all commits".into(), format!("{} · vs {}", src.commits.len(), if src.base.is_empty() { "base" } else { &src.base }));
+        }
+        match src.commits.iter().rev().nth(k - 1) {
+            Some(c) => (format!("{} {}", c.short, c.headline), crate::gh::stamp(c.date)),
+            None => (String::new(), String::new()),
+        }
+    }
+
+    /// PR mode: the picked commit as the picker's index.
+    fn pick_index(&self) -> usize {
+        let Some(src) = &self.pr_src else { return 0 };
+        src.commit.as_ref().and_then(|c| src.commits.iter().rev().position(|x| &x.oid == c)).map_or(0, |p| p + 1)
+    }
+
+    /// PR mode: pick K of the picker (0: every commit).
+    fn pick(&mut self, k: usize) {
+        let oid = if k == 0 { None } else { self.pr_src.as_ref().and_then(|s| s.commits.iter().rev().nth(k - 1)).map(|c| c.oid.clone()) };
+        self.scm.pick = None;
+        self.pick_commit(oid);
+    }
+
+    /// PR mode: the open commit dropdown under the picker row.
+    fn draw_pick(&mut self, f: &mut Frame, area: Rect) {
+        self.scm.pick_rows.clear();
+        let Some(cur) = self.scm.pick else { return };
+        let n = self.pr_src.as_ref().map_or(0, |s| s.commits.len()) + 1;
+        let rows: Vec<crate::dropdown::Row> = (0..n)
+            .map(|k| {
+                let (text, detail) = self.pick_label(k);
+                crate::dropdown::Row { text, detail, now: k == self.pick_index(), marks: Vec::new() }
+            })
+            .collect();
+        let anchor = Rect { y: area.y, height: 1, ..area };
+        let w = area.width.max(50);
+        let bounds = Rect { width: w, ..f.area() };
+        let Some(r) = crate::dropdown::place(anchor, w, n, bounds, false) else { return };
+        let (_, hits) = crate::dropdown::list(f, r, "commits", "enter: show · esc", &rows, cur, 0, "0 commits");
+        self.scm.pick_rows = hits;
+    }
+
+    /// The panel's list in LIST.
+    fn draw_rows(&mut self, f: &mut Frame, list: Rect) {
         self.scm.rows = self.panel_rows();
         let h = usize::from(list.height);
         if h == 0 {
@@ -410,6 +487,11 @@ impl View {
                 right_fill(&left, &right)
             }
             PRow::Empty(t) => Line::styled(crate::nav::fit(&format!("     {t}"), w), theme::muted().add_modifier(Modifier::ITALIC)),
+            PRow::Pick => {
+                let (text, detail) = self.pick_label(self.pick_index());
+                let left = vec![Span::styled(" ◆ ", theme::accent()), Span::styled(crate::nav::fit(&text, w.saturating_sub(detail.width() + 8)), theme::bold())];
+                right_fill(&left, &[Span::styled(format!("{detail} ▾ "), theme::muted())])
+            }
         }
     }
 
@@ -581,6 +663,20 @@ impl View {
         if self.scm.msg_focus {
             return self.msg_key(k);
         }
+        // PR mode: the commit dropdown's keys while it is open
+        if let Some(cur) = self.scm.pick {
+            let n = self.pr_src.as_ref().map_or(0, |s| s.commits.len()) + 1;
+            match k.code {
+                KeyCode::Up | KeyCode::Char('j') => self.scm.pick = Some(cur.saturating_sub(1)),
+                KeyCode::Down | KeyCode::Char('k') => self.scm.pick = Some((cur + 1).min(n - 1)),
+                KeyCode::Home => self.scm.pick = Some(0),
+                KeyCode::End => self.scm.pick = Some(n - 1),
+                KeyCode::Enter | KeyCode::Right => self.pick(cur),
+                KeyCode::Esc | KeyCode::Left => self.scm.pick = None,
+                _ => {}
+            }
+            return Act::None;
+        }
         self.scm.rows = self.panel_rows();
         let last = self.scm.rows.len().saturating_sub(1);
         let row = self.scm.rows.get(self.scm.at).cloned();
@@ -599,6 +695,7 @@ impl View {
                     }
                 }
             },
+            KeyCode::Enter | KeyCode::Right if row == Some(PRow::Pick) => self.scm.pick = Some(self.pick_index()),
             KeyCode::Right => match row {
                 Some(r) if r.label().is_some() => {
                     let f = r.label().unwrap_or(Fold::Sec(Sec::Staged));
@@ -690,7 +787,17 @@ impl View {
                 self.scm.top = self.scm.top.saturating_sub(3);
                 return Act::None;
             }
-            MouseEventKind::Down(MouseButton::Left) => {}
+            MouseEventKind::Down(MouseButton::Left) => {
+                // PR mode: a click in the open commit dropdown picks, outside it closes it
+                if self.scm.pick.is_some() {
+                    if let Some(&(_, k)) = self.scm.pick_rows.iter().find(|(r, _)| r.contains(at)) {
+                        self.pick(k);
+                    } else {
+                        self.scm.pick = None;
+                    }
+                    return Act::None;
+                }
+            }
             _ => {
                 if self.scm.msg_rect.contains(at) || self.scm.msg_focus {
                     self.scm.msg.mouse(m);
@@ -751,6 +858,10 @@ impl View {
             Some(PRow::Comment(ci)) => {
                 self.scm.at = i;
                 self.jump_comment(ci);
+            }
+            Some(PRow::Pick) => {
+                self.scm.at = i;
+                self.scm.pick = Some(self.pick_index());
             }
             _ => self.scm.at = i,
         }

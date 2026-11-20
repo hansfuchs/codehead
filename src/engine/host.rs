@@ -183,7 +183,8 @@ impl Host {
         let roster = roster::active();
         let system = harness::system_prompt(&a, &t, &roster);
         let dir = t.work_dir();
-        let spec = harness::Spec { agent: &a, thread: &self.id, dir: &dir, resume: t.sessions.get(agent).map(String::as_str), fork: t.fork.iter().any(|a| a == agent), system: &system, exe: &self.exe };
+        let extra: Vec<PathBuf> = t.all_checkouts().into_iter().skip(1).map(|c| PathBuf::from(c.dir)).filter(|d| d.is_dir()).collect();
+        let spec = harness::Spec { agent: &a, thread: &self.id, dir: &dir, resume: t.sessions.get(agent).map(String::as_str), fork: t.fork.iter().any(|a| a == agent), system: &system, exe: &self.exe, extra: &extra };
         let session = harness::spawn(&spec, self.harness_tx.clone())?;
         self.sessions.insert(agent.to_string(), Live { session, busy: false, interrupted: false, mcp });
         Ok(())
@@ -477,6 +478,12 @@ impl Host {
                         });
                     }
                     Kind::Text { .. } | Kind::Thought { .. } | Kind::Tool { .. } => {
+                        // an edit in another repo / worktree: that checkout joins the thread
+                        if let Kind::Tool { name, input, .. } = &kind
+                            && let Ok(t) = self.thread()
+                        {
+                            super::checkouts::note(&t, name, input);
+                        }
                         // a queued message runs as its own turn: it starts with output
                         if let Some(l) = self.sessions.get_mut(&agent)
                             && !l.busy
