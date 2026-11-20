@@ -391,7 +391,8 @@ impl View {
                 buf[(rect.x, y)].set_symbol("▌").set_fg(theme::pal().accent);
             }
             if i == self.scm.at {
-                theme::hover(buf, Rect { x: rect.x + 1, width: rect.width.saturating_sub(1), ..rect });
+                let r = Rect { x: rect.x + 1, width: rect.width.saturating_sub(1), ..rect };
+                if self.scm.focus { theme::cursor_row(buf, r) } else { theme::hover(buf, r) }
                 if self.scm.focus {
                     buf[(rect.x, y)].set_symbol("▌").set_fg(theme::pal().accent);
                 }

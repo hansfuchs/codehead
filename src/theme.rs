@@ -154,6 +154,22 @@ pub fn hover(buf: &mut Buffer, r: Rect) {
     }
 }
 
+/// The cursor row R of a list: on the accent (the text on_accent), as the menu rows. Accent
+/// text in it (filter marks): underlined, else it would vanish.
+pub fn cursor_row(buf: &mut Buffer, r: Rect) {
+    let r = r.intersection(buf.area);
+    for y in r.top()..r.bottom() {
+        for x in r.left()..r.right() {
+            if let Some(c) = buf.cell_mut((x, y)) {
+                if c.fg == pal().accent {
+                    c.modifier.insert(ratatui::style::Modifier::UNDERLINED | ratatui::style::Modifier::BOLD);
+                }
+                c.set_bg(pal().accent).set_fg(pal().on_accent);
+            }
+        }
+    }
+}
+
 pub fn text() -> Style {
     Style::default().fg(pal().text)
 }

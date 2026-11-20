@@ -84,8 +84,11 @@ pub struct Menu {
     loading: Option<Receiver<Vec<Card>>>,
     tcursor: usize,
     toffset: usize,
-    /// Repo filter of the threads tab (chip + dropdown, ctrl+r).
-    repo: crate::repofilter::RepoFilter,
+    /// Repo tabs of the threads tab (←→): the current thread's repo, the others by thread count,
+    /// rows outside of git repos, all.
+    repos: crate::tabgroup::TabGroup,
+    /// The picked repo tab (None: the default, the 1st tab).
+    repo_pick: Option<RepoTab>,
     /// Thread in view (None: start screen).
     thread: Option<String>,
     members: Vec<String>,
@@ -157,7 +160,8 @@ impl Menu {
             loading,
             tcursor: 0,
             toffset: 0,
-            repo: crate::repofilter::RepoFilter::new(),
+            repos: crate::tabgroup::TabGroup::default(),
+            repo_pick: None,
             thread,
             members,
             roster,
@@ -283,7 +287,8 @@ impl Menu {
 
     /// The threads tab's cards (filter + repo applied); the current thread always on top.
     fn visible(&self) -> Vec<usize> {
-        let mut v: Vec<usize> = nav::filter(&self.cards, &self.filter.text()).into_iter().filter(|&i| self.repo.keeps(self.cards[i].repo.as_deref())).collect();
+        let tab = self.repo_tab();
+        let mut v: Vec<usize> = nav::filter(&self.cards, &self.filter.text()).into_iter().filter(|&i| tab.keeps(self.cards[i].repo.as_deref())).collect();
         if let Some(p) = v.iter().position(|&i| self.thread.as_deref() == Some(self.cards[i].id.as_str())) {
             let here = v.remove(p);
             v.insert(0, here);
@@ -291,10 +296,52 @@ impl Menu {
         v
     }
 
-    /// Repo dropdown options: the repos of every card (0 filter applied).
-    fn repo_opts(&self) -> Vec<crate::repofilter::Opt> {
-        let repos: Vec<Option<&std::path::Path>> = self.cards.iter().map(|c| c.repo.as_deref()).collect();
-        crate::repofilter::options(&repos)
+    /// The repo tabs: the current thread's repo, the other repos (most threads first, then A→Z),
+    /// outside of git repos (when a thread is), all.
+    fn repo_tabs(&self) -> Vec<RepoTab> {
+        let here = self.thread.as_deref().and_then(|id| self.cards.iter().find(|c| c.id == id)).and_then(|c| c.repo.clone());
+        let mut counts: Vec<(std::path::PathBuf, usize)> = Vec::new();
+        let mut outside = false;
+        for c in &self.cards {
+            match &c.repo {
+                Some(p) => match counts.iter_mut().find(|(q, _)| q == p) {
+                    Some(e) => e.1 += 1,
+                    None => counts.push((p.clone(), 1)),
+                },
+                None => outside = true,
+            }
+        }
+        let name = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
+        counts.sort_by(|a, b| (Some(&b.0) == here.as_ref()).cmp(&(Some(&a.0) == here.as_ref())).then(b.1.cmp(&a.1)).then_with(|| name(&a.0).cmp(&name(&b.0))));
+        let mut v: Vec<RepoTab> = counts.into_iter().map(|(p, _)| RepoTab::Repo(p)).collect();
+        if outside {
+            v.push(RepoTab::Outside);
+        }
+        v.push(RepoTab::All);
+        v
+    }
+
+    /// The repo tab in use: the pick, else the current thread's repo (0 thread: all).
+    fn repo_tab(&self) -> RepoTab {
+        let tabs = self.repo_tabs();
+        if let Some(p) = self.repo_pick.as_ref().filter(|p| tabs.contains(p)) {
+            return p.clone();
+        }
+        if self.thread.is_some() && let Some(t) = tabs.first() {
+            return t.clone();
+        }
+        RepoTab::All
+    }
+
+    /// ←→ on the repo tabs.
+    fn step_repo(&mut self, d: isize) {
+        let tabs = self.repo_tabs();
+        let cur = self.repo_tab();
+        self.repos.i = tabs.iter().position(|t| *t == cur).unwrap_or(0);
+        self.repos.step(d, tabs.len());
+        self.repo_pick = tabs.get(self.repos.i).cloned();
+        self.tcursor = 0;
+        self.toffset = 0;
     }
 
     /// The agents of the thread (an agent the roster lacks: 0 harness), index = index in `members`.
@@ -356,29 +403,20 @@ impl Menu {
 
     pub fn key(&mut self, k: KeyEvent) -> Action {
         self.poll();
-        // repo dropdown of the threads tab: its keys first (esc closes only it); ctrl+r opens it
-        let ctrl_r = k.code == KeyCode::Char('r') && k.modifiers.contains(ratatui::crossterm::event::KeyModifiers::CONTROL);
-        if self.tab == Tab::Threads && (self.repo.is_open() || ctrl_r) {
-            let opts = self.repo_opts();
-            if !self.repo.is_open() {
-                self.repo.open(&opts);
-            } else if self.repo.key(k, &opts).1 {
-                self.tcursor = 0;
-                self.toffset = 0;
-            }
-            return Action::None;
-        }
+        let ctrl = k.modifiers.contains(ratatui::crossterm::event::KeyModifiers::CONTROL);
+        // a tab with a tab group (threads: repos, merge: states): ←→ move in the group, ctrl+←→
+        // switch the menu tabs; the other tabs: ←→ switch them too
+        let group = matches!(self.tab, Tab::Threads | Tab::Merge);
         match k.code {
-            // tab: closes (tab opens the menu in the thread view); ←/→ only switch the tabs
+            // tab: closes (tab opens the menu in the thread view)
             KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => return Action::Close,
             _ if crate::config::menu_key().matches(&k) => return Action::Close,
-            // ←/→: tabs only (0 run, 0 cursor in the threads filter)
-            KeyCode::Right => {
-                self.switch(1);
+            KeyCode::Right | KeyCode::Left if ctrl || !group => {
+                self.switch(if k.code == KeyCode::Right { 1 } else { -1 });
                 return Action::None;
             }
-            KeyCode::Left => {
-                self.switch(-1);
+            KeyCode::Right | KeyCode::Left if self.tab == Tab::Threads => {
+                self.step_repo(if k.code == KeyCode::Right { 1 } else { -1 });
                 return Action::None;
             }
             _ => {}
@@ -512,17 +550,12 @@ impl Menu {
         let at = Position { x: m.column, y: m.row };
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // repo chip / dropdown of the threads tab: an open dropdown takes every click
-                if self.tab == Tab::Threads {
-                    let opts = self.repo_opts();
-                    let (handled, changed) = self.repo.click(at, &opts);
-                    if changed {
-                        self.tcursor = 0;
-                        self.toffset = 0;
-                    }
-                    if handled {
-                        return Action::None;
-                    }
+                // a repo tab of the threads tab
+                if self.tab == Tab::Threads && self.repos.click(at) {
+                    self.repo_pick = self.repo_tabs().get(self.repos.i).cloned();
+                    self.tcursor = 0;
+                    self.toffset = 0;
+                    return Action::None;
                 }
                 if !self.frame.contains(at) {
                     return Action::Close;
@@ -641,11 +674,11 @@ impl Menu {
             }
             Tab::Threads => {
                 self.draw_threads(f, body);
-                &[("type", "filter"), ("ctrl+r", "repo"), ("↑↓", "move"), ("enter", "open"), ("←→", "tabs"), ("esc tab", "close")]
+                &[("type", "filter"), ("←→", "repo"), ("↑↓", "move"), ("enter", "open"), ("ctrl+←→", "tabs"), ("esc tab", "close")]
             }
             Tab::Merge => {
                 self.prs.draw(f, body, true);
-                &[("↑↓", "move"), ("enter", "open: its thread, else the merge tab"), ("s", "state"), ("←→", "tabs"), ("esc", "close")]
+                &[("←→", "state"), ("↑↓", "move"), ("enter", "open: its thread, else the merge tab"), ("ctrl+←→", "tabs"), ("esc", "close")]
             }
             Tab::Search => {
                 self.draw_search(f, body);
@@ -664,10 +697,6 @@ impl Menu {
                 &[("↑↓", "move"), ("enter", "run · remove (2×)"), ("←→", "tabs"), ("esc tab", "close")]
             }
         };
-        if self.tab == Tab::Threads {
-            let opts = self.repo_opts();
-            self.repo.draw_menu(f, &opts, body);
-        }
         let mut spans = Vec::new();
         for (k, l) in hints {
             spans.push(Span::styled(format!("{k} "), theme::accent()));
@@ -717,16 +746,19 @@ impl Menu {
     }
 
     fn draw_threads(&mut self, f: &mut Frame, body: Rect) {
-        // the repo chip right, the name filter left of it
+        // the name filter, the repo tabs below it
         let fr = Rect { height: 1, ..body };
-        let chip = self.repo.draw_chip(f, fr);
-        let fr = Rect { width: fr.width.saturating_sub(chip + 2), ..fr };
         f.render_widget(Paragraph::new(Span::styled("› ", theme::accent())), Rect { width: 2, ..fr });
         self.filter.render(f, Rect { x: fr.x + 2, width: fr.width.saturating_sub(2), ..fr }, true);
-        let list = Rect { y: body.y + 2, height: body.height.saturating_sub(2), ..body };
+        let tabs = self.repo_tabs();
+        let cur = self.repo_tab();
+        self.repos.i = tabs.iter().position(|t| *t == cur).unwrap_or(0);
+        let labels: Vec<String> = tabs.iter().map(RepoTab::label).collect();
+        self.repos.draw(f, Rect { y: body.y + 1, height: 1, ..body }, "repo", &labels, true);
+        let list = Rect { y: body.y + 3, height: body.height.saturating_sub(3), ..body };
         let vis = self.visible();
         if vis.is_empty() {
-            let msg = if self.loading.is_some() { "reading threads…" } else if self.repo.choice.is_some() { "0 threads in this repo" } else { "0 threads" };
+            let msg = if self.loading.is_some() { "reading threads…" } else if cur != RepoTab::All { "0 threads in this repo" } else { "0 threads" };
             f.render_widget(Paragraph::new(Span::styled(msg, theme::muted())), Rect { height: 1, ..list });
             return;
         }
@@ -901,6 +933,32 @@ impl Menu {
     }
 }
 
+/// A repo tab of the threads tab.
+#[derive(Clone, Debug, PartialEq)]
+enum RepoTab {
+    Repo(std::path::PathBuf),
+    Outside,
+    All,
+}
+
+impl RepoTab {
+    fn keeps(&self, repo: Option<&std::path::Path>) -> bool {
+        match self {
+            RepoTab::Repo(p) => repo == Some(p.as_path()),
+            RepoTab::Outside => repo.is_none(),
+            RepoTab::All => true,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            RepoTab::Repo(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string()),
+            RepoTab::Outside => "outside git".into(),
+            RepoTab::All => "all".into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -929,9 +987,15 @@ mod tests {
         assert_eq!(m.tab, Tab::Quick);
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Threads);
+        // threads, merge: ←→ walk their tab group; ctrl+←→ the menu tabs (every tab)
         m.key(k(KeyCode::Right));
+        assert_eq!(m.tab, Tab::Threads);
+        let ctrl = |c| KeyEvent::new(c, KeyModifiers::CONTROL);
+        m.key(ctrl(KeyCode::Right));
         assert_eq!(m.tab, Tab::Merge);
-        m.key(k(KeyCode::Right));
+        m.key(k(KeyCode::Left));
+        assert_eq!(m.tab, Tab::Merge);
+        m.key(ctrl(KeyCode::Right));
         assert_eq!(m.tab, Tab::Search);
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Tokens);
@@ -1020,43 +1084,41 @@ mod tests {
     }
 
     #[test]
-    fn threads_repo_filter_by_ctrl_r() {
-        use ratatui::crossterm::event::KeyModifiers;
+    fn threads_repo_tabs_start_on_the_current_threads_repo() {
         let repo = |c: &str, r: &str| Card { repo: Some(r.into()), ..card(c, c) };
-        let mut m = Menu::new(Vec::new(), None, Vec::new(), Vec::new(), vec![repo("alpha one", "/x/alpha"), repo("beta one", "/x/beta"), repo("beta two", "/x/beta")]);
+        let cards = vec![repo("t1", "/x/alpha"), repo("b1", "/x/beta"), repo("b2", "/x/beta"), repo("g1", "/x/gamma"), card("o1", "o1")];
+        let mut m = Menu::new(Vec::new(), Some("t1".into()), Vec::new(), Vec::new(), cards);
         m.key(k(KeyCode::Right));
-        assert_eq!(m.visible().len(), 3);
+        assert_eq!(m.tab, Tab::Threads);
         let draw = |m: &mut Menu| {
             let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 30)).unwrap();
             t.draw(|f| m.render(f, f.area(), f.area())).unwrap();
             let b = t.backend().buffer().clone();
-            (0..30).map(|y| (0..90).map(|x| b[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
+            (0..30).map(|y| (0..90).map(|x| b[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>()
         };
-        assert!(draw(&mut m).contains("repo › all ▾"));
-        m.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        // the current thread's repo 1st, then the others by thread count, outside git, all
         let s = draw(&mut m);
-        assert!(s.contains("all repos") && s.contains("beta") && s.contains("2 · /x/beta"), "{s}");
-        // esc: closes the dropdown, the menu stays
-        assert_eq!(m.key(k(KeyCode::Esc)), Action::None);
-        m.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
-        // type: filters the dropdown; enter picks; the filter text stays empty
-        for c in "alp".chars() {
-            m.key(k(KeyCode::Char(c)));
-        }
-        m.key(k(KeyCode::Enter));
-        assert_eq!(m.filter.text(), "");
-        assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "alpha one"));
-        assert_eq!(m.visible().len(), 1);
-        assert!(draw(&mut m).contains("repo › alpha ▾"));
-        // name filter + repo filter: both apply
-        m.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
-        m.key(k(KeyCode::Down));
-        m.key(k(KeyCode::Down));
-        m.key(k(KeyCode::Enter));
-        for c in "two".chars() {
-            m.key(k(KeyCode::Char(c)));
-        }
-        assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "beta two"));
+        let row = s.iter().find(|l| l.contains("repo ")).expect("repo tabs");
+        let at = |t: &str| row.find(t).unwrap_or_else(|| panic!("{t}: {row}"));
+        assert!(at(" alpha ") < at(" beta ") && at(" beta ") < at(" gamma ") && at(" gamma ") < at(" outside git ") && at(" outside git ") < at(" all "), "{row}");
+        assert!(!s.join("\n").contains("ctrl+r"));
+        let ids = |m: &Menu| m.visible().iter().map(|&i| m.cards[i].id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&m), ["t1"], "the current thread's repo by default");
+        // →: beta (2 threads); the name filter applies on top
+        m.key(k(KeyCode::Right));
+        assert_eq!(ids(&m), ["b1", "b2"]);
+        m.key(k(KeyCode::Char('2')));
+        assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "b2"));
+        m.key(k(KeyCode::Backspace));
+        // ←← wraps: all
+        m.key(k(KeyCode::Left));
+        m.key(k(KeyCode::Left));
+        assert_eq!(ids(&m).len(), 5);
+        // a click on a tab picks it
+        draw(&mut m);
+        let r = m.repos.rect_of(1).expect("tab 1 drawn");
+        m.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x, row: r.y, modifiers: KeyModifiers::NONE });
+        assert_eq!(ids(&m), ["b1", "b2"]);
     }
 
     #[test]

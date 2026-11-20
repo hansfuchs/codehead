@@ -159,6 +159,9 @@ struct View {
     /// The thread's checkouts (its work dir 1st), the one the changes view shows.
     checkouts: Vec<PathBuf>,
     checkout: usize,
+    /// The repo tabs on top of the changes view (shift+←→, ctrl+w, a click): 1 per checkout.
+    checkout_tabs: crate::tabgroup::TabGroup,
+    checkout_labels: Vec<String>,
     /// The merge tab: the thread's pull requests.
     merge: crate::merge::Merge,
     merge_sources_at: Option<Instant>,
@@ -290,6 +293,8 @@ impl View {
             mention: Mention::default(),
             checkouts: Vec::new(),
             checkout: 0,
+            checkout_tabs: crate::tabgroup::TabGroup::default(),
+            checkout_labels: Vec::new(),
             merge: crate::merge::Merge::for_thread(id),
             merge_sources_at: None,
             hist: Default::default(),
@@ -1181,6 +1186,16 @@ impl View {
                     self.next_checkout();
                     return false;
                 }
+                // shift+←→: the repo tabs (←→ alone fold the changes)
+                if self.pane == Pane::Changes && k.modifiers.contains(KeyModifiers::SHIFT) && matches!(k.code, KeyCode::Left | KeyCode::Right) && !self.changes.typing() {
+                    self.load_checkouts();
+                    let n = self.checkouts.len();
+                    self.checkout_tabs.i = self.checkout;
+                    if self.checkout_tabs.step(if k.code == KeyCode::Right { 1 } else { -1 }, n) {
+                        self.pick_checkout(self.checkout_tabs.i);
+                    }
+                    return false;
+                }
                 if self.pane == Pane::Files {
                     let act = self.files.key(k);
                     self.files_act(act);
@@ -1428,9 +1443,37 @@ impl View {
     /// The thread's checkouts (more of them: an agent edited in another repo / worktree).
     fn load_checkouts(&mut self) {
         if let Some(t) = store::load(&self.id) {
-            self.checkouts = t.all_checkouts().into_iter().map(|c| PathBuf::from(c.dir)).filter(|d| d.is_dir()).collect();
+            let all: Vec<store::Checkout> = t.all_checkouts().into_iter().filter(|c| Path::new(&c.dir).is_dir()).collect();
+            let name = |c: &store::Checkout| {
+                let d = Path::new(&c.dir);
+                let root = crate::threads::repo_root(d).unwrap_or_else(|| d.to_path_buf());
+                root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| c.dir.clone())
+            };
+            let names: Vec<String> = all.iter().map(name).collect();
+            // 2 checkouts of 1 repo: the branch tells them apart
+            self.checkout_labels = all
+                .iter()
+                .zip(&names)
+                .map(|(c, n)| match &c.branch {
+                    Some(b) if names.iter().filter(|m| *m == n).count() > 1 => format!("{n} · {b}"),
+                    _ => n.clone(),
+                })
+                .collect();
+            self.checkouts = all.into_iter().map(|c| PathBuf::from(c.dir)).collect();
         }
         self.checkout = self.checkout.min(self.checkouts.len().saturating_sub(1));
+    }
+
+    /// The changes view on checkout I.
+    fn pick_checkout(&mut self, i: usize) {
+        if i == self.checkout || i >= self.checkouts.len() {
+            return;
+        }
+        self.checkout = i;
+        let dir = self.checkouts[i].clone();
+        self.changes = crate::changes::View::new(&self.id, &dir);
+        self.changes.refresh(true);
+        self.dirty = true;
     }
 
     /// ctrl+w in the changes view: the thread's next checkout.
@@ -1440,11 +1483,9 @@ impl View {
             self.toast("1 checkout: an agent's edit in another repo / worktree adds 1");
             return;
         }
-        self.checkout = (self.checkout + 1) % self.checkouts.len();
-        let dir = self.checkouts[self.checkout].clone();
-        self.changes = crate::changes::View::new(&self.id, &dir);
-        self.changes.refresh(true);
-        self.toast(format!("changes: {} ({}/{})", tilde(&dir), self.checkout + 1, self.checkouts.len()));
+        let next = (self.checkout + 1) % self.checkouts.len();
+        self.pick_checkout(next);
+        self.toast(format!("changes: {} ({}/{})", tilde(&self.checkouts[next]), next + 1, self.checkouts.len()));
     }
 
     /// Show PR in the merge tab.
@@ -1730,6 +1771,11 @@ impl View {
         // the view bar
         if click && let Some(&(_, p)) = self.bar_rects.iter().find(|(r, _)| r.contains(at)) {
             self.set_pane(p);
+            return;
+        }
+        // a repo tab of the changes view
+        if click && self.pane == Pane::Changes && self.checkout_tabs.click(at) {
+            self.pick_checkout(self.checkout_tabs.i);
             return;
         }
         let in_stream = self.stream_rect.contains(at);
@@ -2234,6 +2280,18 @@ impl View {
             } else {
                 st
             };
+            // the repo tabs on top, a gap below them
+            if self.checkouts.is_empty() {
+                self.load_checkouts();
+            }
+            let st = if st.height > 6 && !self.checkout_labels.is_empty() {
+                self.checkout_tabs.i = self.checkout;
+                let labels = self.checkout_labels.clone();
+                self.checkout_tabs.draw(f, Rect { height: 1, ..st }, "repo", &labels, !self.prompt_focus);
+                Rect { y: st.y + 2, height: st.height - 2, ..st }
+            } else {
+                st
+            };
             self.view_rect = st;
             self.changes.draw(f, st);
             if let Some(n) = self.changes.take_note() {
@@ -2264,18 +2322,7 @@ impl View {
             let label = match p {
                 Pane::Chat if !self.thread.asks.is_empty() => format!(" chat ?{} ", self.thread.asks.len()),
                 Pane::Chat => " chat ".to_string(),
-                Pane::Changes => {
-                    let (done, all) = self.changes.progress();
-                    let n = self.changes.comment_count();
-                    let c = if n > 0 { format!("✎{n} ") } else { String::new() };
-                    let repo = if self.checkouts.len() > 1 {
-                        let name = self.checkouts[self.checkout].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        format!("{name} {}/{} ctrl+w · ", self.checkout + 1, self.checkouts.len())
-                    } else {
-                        String::new()
-                    };
-                    if all == 0 { format!(" changes {repo}{c}") } else { format!(" changes {repo}{done}/{all} {c}") }
-                }
+                Pane::Changes => " changes ".to_string(),
                 Pane::Merge => {
                     let n = self.merge.count();
                     if n == 0 { " merge ".to_string() } else { format!(" merge {n} ") }

@@ -160,7 +160,7 @@ impl MergeTab {
 
     pub fn hints(&self) -> String {
         match &self.detail {
-            None => "↑↓ move · enter: open · s: state · r: read again ".into(),
+            None => "←→ state · ↑↓ move · enter: open · r: read again ".into(),
             Some(_) if self.input_focus => "ctrl+⏎: new thread with this task · esc: back to the pull request ".into(),
             Some(m) => format!("{}· esc: the list ", m.hints()),
         }

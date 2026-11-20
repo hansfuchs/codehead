@@ -2143,7 +2143,7 @@ impl View {
         out
     }
 
-    /// The review comments (for the view bar and the hint row).
+    #[cfg(test)]
     pub fn comment_count(&self) -> usize {
         self.comments.len()
     }
@@ -2560,8 +2560,10 @@ impl View {
                 }
             }
         }
+        // the cursor line: on the accent, as the cursor row of every list
         if i == self.at && !self.scm.focus {
-            theme::hover(f.buffer_mut(), Rect { x: x0, width: 1, ..rect });
+            // inside the box: its borders keep their color (the picked box: the accent)
+            theme::cursor_row(f.buffer_mut(), Rect { x: x0 + 1, width: width.saturating_sub(2), ..rect });
             f.render_widget(Paragraph::new(Span::styled("▌", theme::accent())), Rect { x: x0 + width, width: 1, ..rect });
         }
     }
@@ -3671,8 +3673,10 @@ Binary files a/img.png and b/img.png differ
         let s: Vec<String> = (0..30).map(|y| (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect();
         let y = row_of(&s, "tests/a_test.rs");
         let x0 = s[y].find("tests/").map(|b| s[y][..b].chars().count() as u16).unwrap();
-        assert_eq!(buf[(x0, y as u16)].fg, theme::pal().accent, "a marked char");
-        assert_ne!(buf[(x0 + 4, y as u16)].fg, theme::pal().accent, "`s` of `tests`: 0 mark");
+        // a mark: accent text, on the cursor row underlined (the row is on the accent)
+        let marked = |x: u16| buf[(x, y as u16)].fg == theme::pal().accent || buf[(x, y as u16)].modifier.contains(ratatui::style::Modifier::UNDERLINED);
+        assert!(marked(x0), "a marked char");
+        assert!(!marked(x0 + 4), "`s` of `tests`: 0 mark");
         // enter: the cursor on the 1st hit, the keys back to the list; esc clears the filter
         press(&mut v, KeyCode::Enter);
         assert!(!v.typing() && v.rows[v.at].head && v.changes.files[v.rows[v.at].file].path == "tests/a_test.rs");

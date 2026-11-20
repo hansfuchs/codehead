@@ -1156,7 +1156,7 @@ impl Merge {
         let focus = if focused { t.and_then(|t| t.focus) } else { None };
         let edit = t.and_then(|t| t.edit.as_ref());
         let input_rows = |ta: &TextArea, single: bool| -> u16 { if single { 3 } else { (ta.rows_for(w.saturating_sub(2) as u16) as u16).clamp(3, 14) + 2 } };
-        let hl = |s: Stop, st: Style| if focus == Some(s) { st.bg(theme::pal().hover).add_modifier(Modifier::BOLD) } else { st };
+        let hl = |s: Stop, st: Style| if focus == Some(s) { st.bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD) } else { st };
         let mut rows: Vec<Row> = Vec::new();
         // hero: the title
         match edit {
@@ -1359,7 +1359,9 @@ impl Merge {
             _ => rows.push(Row::stop(Line::styled("  + write a comment", hl(Stop::NewComment, theme::muted())), Stop::NewComment)),
         }
         for (i, th) in p.threads.iter().enumerate() {
-            let line_c = Style::default().fg(theme::pal().line);
+            // the comment box with the focus: an accent border (as a picked file's box)
+            let picked = matches!(focus, Some(Stop::Comment(fi, _)) if fi == i);
+            let line_c = if picked { theme::accent_bold() } else { Style::default().fg(theme::pal().line) };
             let on_line = th.path.as_ref().map(|pa| format!(" · {pa}:{}", th.line.unwrap_or(0))).unwrap_or_default();
             let state = if th.resolved { " · resolved" } else if th.outdated { " · outdated" } else { "" };
             for (k, c) in std::iter::once(&th.root).chain(&th.replies).enumerate() {

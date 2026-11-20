@@ -53,28 +53,22 @@ pub enum Pick {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Filter {
     #[default]
-    All,
     Open,
     Merged,
     Closed,
+    All,
 }
 
 impl Filter {
+    /// The state tabs, in order.
+    const ALL: [Filter; 4] = [Filter::Open, Filter::Merged, Filter::Closed, Filter::All];
+
     fn keeps(self, s: State) -> bool {
         match self {
             Filter::All => true,
             Filter::Open => matches!(s, State::Open | State::Draft),
             Filter::Merged => s == State::Merged,
             Filter::Closed => s == State::Closed,
-        }
-    }
-
-    fn next(self) -> Filter {
-        match self {
-            Filter::All => Filter::Open,
-            Filter::Open => Filter::Merged,
-            Filter::Merged => Filter::Closed,
-            Filter::Closed => Filter::All,
         }
     }
 
@@ -102,6 +96,8 @@ pub struct PrList {
     cached: bool,
     error: Option<String>,
     filter: Filter,
+    /// The state tabs (←→): open, merged, closed, all.
+    tabs: crate::tabgroup::TabGroup,
     /// Index into the PR rows (headers skipped).
     cursor: usize,
     offset: usize,
@@ -266,10 +262,12 @@ impl PrList {
             KeyCode::PageDown => self.cursor = (self.cursor + 10).min(n.saturating_sub(1)),
             KeyCode::Home | KeyCode::Char('g') => self.cursor = 0,
             KeyCode::End | KeyCode::Char('G') => self.cursor = n.saturating_sub(1),
-            KeyCode::Char('s') => {
-                self.filter = self.filter.next();
+            KeyCode::Left | KeyCode::Right => {
+                self.tabs.i = Filter::ALL.iter().position(|f| *f == self.filter).unwrap_or(0);
+                self.tabs.step(if k.code == KeyCode::Right { 1 } else { -1 }, Filter::ALL.len());
+                self.filter = Filter::ALL[self.tabs.i];
                 self.cursor = 0;
-                return Pick::Toast(format!("pull requests: {}", self.filter.label()));
+                self.offset = 0;
             }
             KeyCode::Char('r') => {
                 if self.read.is_some() || self.at.is_some_and(|t| t.elapsed() < MIN_MANUAL) {
@@ -294,6 +292,12 @@ impl PrList {
             MouseEventKind::ScrollDown => self.offset += 3,
             MouseEventKind::ScrollUp => self.offset = self.offset.saturating_sub(3),
             MouseEventKind::Down(MouseButton::Left) => {
+                if self.tabs.click(at) {
+                    self.filter = Filter::ALL[self.tabs.i.min(Filter::ALL.len() - 1)];
+                    self.cursor = 0;
+                    self.offset = 0;
+                    return Pick::None;
+                }
                 if let Some(&(_, k)) = self.rows.iter().find(|(r, _)| r.contains(at)) {
                     if self.cursor == k {
                         return self.key(KeyEvent::from(KeyCode::Enter));
@@ -321,11 +325,15 @@ impl PrList {
             self.at.map(|t| format!("read {}s ago", t.elapsed().as_secs())).unwrap_or_default()
         };
         let head = Line::from(vec![
-            Span::styled(format!("your pull requests · {} · {} ", prs.len(), self.filter.label()), theme::bold()),
-            Span::styled(format!("· {state} · s: state · r: read again · enter: open"), theme::muted()),
+            Span::styled(format!("your pull requests · {} ", prs.len()), theme::bold()),
+            Span::styled(format!("· {state} · r: read again · enter: open"), theme::muted()),
         ]);
         f.render_widget(Paragraph::new(head), Rect { height: 1, ..area });
-        let list = Rect { y: area.y + 2, height: area.height.saturating_sub(2), ..area };
+        // the state tabs on a line of their own
+        self.tabs.i = Filter::ALL.iter().position(|f| *f == self.filter).unwrap_or(0);
+        let labels: Vec<String> = Filter::ALL.iter().map(|f| f.label().to_string()).collect();
+        self.tabs.draw(f, Rect { y: area.y + 1, height: 1, ..area }, "state", &labels, focused);
+        let list = Rect { y: area.y + 3, height: area.height.saturating_sub(3), ..area };
         if rows.is_empty() {
             let msg = if self.read.is_some() { "  reading…" } else { "  0 pull requests" };
             f.render_widget(Paragraph::new(Line::styled(msg, theme::muted())), list);
@@ -394,7 +402,8 @@ mod tests {
 
     #[test]
     fn grouped_by_repo_newest_first() {
-        let l = PrList::with(vec![entry("a/x", 1, 10, State::Open), entry("b/y", 2, 30, State::Merged), entry("a/x", 3, 20, State::Closed), entry("b/y", 4, 5, State::Draft)]);
+        let mut l = PrList::with(vec![entry("a/x", 1, 10, State::Open), entry("b/y", 2, 30, State::Merged), entry("a/x", 3, 20, State::Closed), entry("b/y", 4, 5, State::Draft)]);
+        l.filter = Filter::All;
         let (rows, prs) = l.layout();
         assert_eq!(rows, vec![RowKind::Repo("b/y".into(), 2), RowKind::Pr(1), RowKind::Pr(3), RowKind::Repo("a/x".into(), 2), RowKind::Pr(2), RowKind::Pr(0)]);
         assert_eq!(prs, vec![1, 3, 2, 0]);
@@ -403,8 +412,14 @@ mod tests {
     #[test]
     fn the_state_filter_and_enter() {
         let mut l = PrList::with(vec![entry("a/x", 1, 10, State::Open), entry("a/x", 2, 20, State::Merged), entry("a/x", 3, 30, State::Draft)]);
-        assert!(matches!(l.key(KeyEvent::from(KeyCode::Char('s'))), Pick::Toast(_)));
+        // the 1st tab: open (drafts too); ←→ walk open, merged, closed, all
         assert_eq!(l.layout().1, vec![2, 0], "open: drafts too");
+        l.key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(l.layout().1, vec![1]);
+        l.key(KeyEvent::from(KeyCode::Left));
+        l.key(KeyEvent::from(KeyCode::Left));
+        assert_eq!(l.layout().1.len(), 3, "all");
+        l.key(KeyEvent::from(KeyCode::Right));
         assert!(matches!(l.key(KeyEvent::from(KeyCode::Down)), Pick::None));
         assert_eq!(l.key(KeyEvent::from(KeyCode::Enter)), Pick::Open(l.entries[0].clone()));
     }
