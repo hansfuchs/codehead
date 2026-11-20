@@ -178,6 +178,9 @@ enum Field {
     /// "view drafts (n)" above the title (only with 1+ drafts).
     Drafts,
     Title,
+    /// The repo row of "where" (enter: the repo picker).
+    Repo,
+    /// The branch row of "where" (enter: the where dropdown).
     Where,
     /// Checkboxes below the where row: checkout, stash.
     Opts,
@@ -519,6 +522,10 @@ struct Regions {
     buttons: Vec<(Rect, bool)>,
     notes_label: Rect,
     where_row: Rect,
+    /// The repo row, its chip (anchor of the repo picker), the open picker's area.
+    repo_row: Rect,
+    repo_chip: Rect,
+    repo_pick: Rect,
     /// The where chip (anchor of the where dropdown), the rows of the open dropdown (area, choice).
     where_chip: Rect,
     where_rows: Vec<(Rect, usize)>,
@@ -608,10 +615,11 @@ pub struct App {
     target: Option<Target>,
     /// Choices of the where row: branches (default branch first), new branch, new worktree.
     wheres: Vec<Where>,
-    /// Repos of the where row (r cycles): the start repo, then the home repo's others; the
-    /// dir codehead started in.
+    /// The home repo's repos (the picker shows the ones without a clone), the repo of the where
+    /// row (None: 0 git repo), the open repo picker, the dir codehead started in.
     repos: Vec<crate::home::Repo>,
-    repo_i: usize,
+    repo: Option<crate::home::Repo>,
+    repo_pick: Option<crate::repopick::Picker>,
     start_cwd: PathBuf,
     where_i: usize,
     /// Where dropdown (enter on the where row): open with its cursor, scroll, filter.
@@ -815,14 +823,9 @@ impl App {
         // where: current branch, new branch, new branch + worktree, default branch (main, else master),
         // the other branches (newest commit first)
         let Choices { wheres, checkouts, repo_branch, here_branch, here_dir } = cfg.repo.as_deref().map(|r| where_choices(r, &cfg.cwd)).unwrap_or_default();
-        // repos: the one codehead started in, then the home repo's other repos
-        let mut repos: Vec<crate::home::Repo> = Vec::new();
-        if let Some(r) = &cfg.repo {
-            repos.push(crate::home::Repo { name: r.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), path: r.clone(), url: None });
-        }
-        if !cfg!(test) {
-            repos.extend(crate::home::repos().into_iter().filter(|h| Some(&h.path) != cfg.repo.as_ref()));
-        }
+        // the repo codehead started in; the home repo's repos for the picker
+        let repo = cfg.repo.as_ref().map(|r| crate::home::Repo { name: r.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), path: r.clone(), url: None });
+        let repos = if cfg!(test) { Vec::new() } else { crate::home::repos() };
         let start_cwd = cfg.cwd.clone();
         let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
         let paster = Paster::new(home.join(".cache/codehead/paste").join(format!("new-{}", (crate::engine::now_ms() / 1000))));
@@ -830,7 +833,8 @@ impl App {
         let where_i = if cfg.branch.is_some() { wheres.iter().position(|w| *w == Where::NewWorktree).unwrap_or(0) } else { 0 };
         let mut app = App {
             repos,
-            repo_i: 0,
+            repo,
+            repo_pick: None,
             start_cwd,
             wheres,
             where_i,
@@ -1407,36 +1411,55 @@ impl App {
         }
     }
 
-    /// r on the where row: the next repo (the start repo, then the home repo's others). A repo
-    /// on disk: its branch choices; 0 clone yet: a new branch + worktree after the clone.
-    fn step_repo(&mut self, d: isize) {
-        let n = self.repos.len();
-        if n < 2 {
-            return self.toast("1 repo · more: the home repo's AGENTS.md (setting home)", true);
-        }
+    /// Enter / click on the repo row: the repo picker on the repo (else the dir codehead runs in).
+    fn open_repo_pick(&mut self) {
+        let at = self.repo.as_ref().map(|r| r.path.clone()).filter(|p| p.exists()).unwrap_or_else(|| self.cfg.cwd.clone());
+        self.repo_pick = Some(crate::repopick::Picker::new(&at, self.repos.clone()));
+    }
+
+    /// A pick of the repo picker: E's repo and its branch choices. The start dir (or a dir above
+    /// it in its repo): the dir codehead started in, current branch first; another repo: its dir,
+    /// a new branch + worktree first; a home repo without a clone: a new worktree after the clone.
+    /// 0 git repo: a toast, the repo stays.
+    fn set_repo(&mut self, e: crate::repopick::Entry) {
+        let root = if e.clone.is_some() { Some(e.path.clone()) } else { threads::repo_root(&e.path) };
+        let Some(root) = root else {
+            return self.toast(format!("{}: 0 git repo", tilde(&e.path.display().to_string())), true);
+        };
+        self.repo_pick = None;
         self.target = None;
-        self.repo_i = (self.repo_i as isize + d).rem_euclid(n as isize) as usize;
-        let r = self.repos[self.repo_i].clone();
-        // the start repo: the dir codehead started in; another repo: its root
-        let cwd = if self.repo_i == 0 { self.start_cwd.clone() } else { r.path.clone() };
-        self.cfg.repo = Some(r.path.clone());
+        let start = self.start_cwd.starts_with(&e.path) && threads::repo_root(&self.start_cwd).as_ref() == Some(&root);
+        let cwd = if start { self.start_cwd.clone() } else { e.path.clone() };
+        self.cfg.repo = Some(root.clone());
         self.cfg.cwd = cwd.clone();
-        let c = if r.path.join(".git").exists() {
-            where_choices(&r.path, &cwd)
+        let c = if e.clone.is_some() {
+            Choices { wheres: vec![Where::NewWorktree], here_dir: root.display().to_string(), ..Default::default() }
         } else {
-            Choices { wheres: vec![Where::NewWorktree], here_dir: r.path.display().to_string(), ..Default::default() }
+            where_choices(&root, &cwd)
         };
         self.wheres = c.wheres;
         self.checkouts = c.checkouts;
         self.repo_branch = c.repo_branch;
         self.here_branch = c.here_branch;
         self.here_dir = c.here_dir;
-        self.where_i = if self.repo_i == 0 { 0 } else { self.wheres.iter().position(|w| *w == Where::NewWorktree).unwrap_or(0) };
+        self.where_i = if start { 0 } else { self.wheres.iter().position(|w| *w == Where::NewWorktree).unwrap_or(0) };
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.repo = Some(crate::home::Repo { name, path: root, url: e.clone });
+    }
+
+    /// Keys of the open repo picker.
+    fn repo_pick_key(&mut self, k: KeyEvent) {
+        let Some(p) = self.repo_pick.as_mut() else { return };
+        match p.key(k) {
+            crate::repopick::Act::None => {}
+            crate::repopick::Act::Close => self.repo_pick = None,
+            crate::repopick::Act::Pick(e) => self.set_repo(e),
+        }
     }
 
     /// The where row's repo, when it needs a clone first: (url, path).
     fn clone_first(&self) -> Option<(String, PathBuf)> {
-        let r = self.repos.get(self.repo_i)?;
+        let r = self.repo.as_ref()?;
         (!r.path.join(".git").exists()).then(|| r.url.clone().map(|u| (u, r.path.clone()))).flatten()
     }
 
@@ -1488,6 +1511,7 @@ impl App {
     /// Choice I (of WHERES) from the dropdown. A target from the threads tab gives way to it.
     fn pick_where(&mut self, i: usize) {
         self.where_menu = None;
+        self.repo_pick = None;
         self.target = None;
         self.where_i = i;
     }
@@ -2524,6 +2548,11 @@ impl App {
             self.last_esc = None;
             return self.where_key(k);
         }
+        // repo picker: its keys first (esc: filter off, then closed; 0 double esc)
+        if self.repo_pick.is_some() && self.modal.is_none() {
+            self.last_esc = None;
+            return self.repo_pick_key(k);
+        }
         // repo dropdown of the threads tab: its keys first (esc closes it, 0 double esc); ctrl+r opens it
         if self.screen == Screen::Pick && self.tab == Tab::Threads && self.modal.is_none()
             && (self.trepo.is_open() || (ctrl && k.code == KeyCode::Char('r')))
@@ -2628,7 +2657,7 @@ impl App {
     fn at_start(&self) -> bool {
         let notes = self.screen == Screen::Pick && self.tab == Tab::Notes;
         let pr_open = self.screen == Screen::Pick && self.tab == Tab::Merge && (self.merge_tab.is_detail() || self.merge_tab.typing());
-        self.modal.is_none() && self.drafts_menu.is_none() && self.where_menu.is_none() && !notes && !self.trepo.is_open() && !pr_open
+        self.modal.is_none() && self.drafts_menu.is_none() && self.where_menu.is_none() && self.repo_pick.is_none() && !notes && !self.trepo.is_open() && !pr_open
             && !self.filter_editing && !self.tfilter_editing && !self.afilter_editing
             && !(self.screen == Screen::Pick && self.tab == Tab::Threads && self.tfilter.as_deref().is_some_and(|q| !q.is_empty()))
             && !(self.screen == Screen::Pick && self.tab == Tab::Agents && self.afilter.as_deref().is_some_and(|q| !q.is_empty()))
@@ -2639,6 +2668,7 @@ impl App {
         self.modal = None;
         self.drafts_menu = None;
         self.where_menu = None;
+        self.repo_pick = None;
         self.trepo.close();
         self.filter_editing = false;
         self.tfilter_editing = false;
@@ -2730,6 +2760,7 @@ impl App {
 
     fn switch_tab(&mut self, tab: Tab) {
         self.where_menu = None;
+        self.repo_pick = None;
         // leaving the settings: their last edit applies
         if tab != Tab::Settings && self.screen == Screen::Pick && self.tab == Tab::Settings {
             if let Some(s) = self.settings.as_mut() { s.commit(); }
@@ -3086,7 +3117,8 @@ impl App {
         if !self.drafts.is_empty() {
             v.push(Field::Drafts);
         }
-        v.extend([Field::Prompt, Field::Title]);
+        // the repo row: always (the picker finds a repo also when codehead runs outside of one)
+        v.extend([Field::Prompt, Field::Title, Field::Repo]);
         if !self.wheres.is_empty() {
             v.extend([Field::Where, Field::Opts]);
         }
@@ -3152,11 +3184,18 @@ impl App {
             }
             return;
         }
+        if self.field == Field::Repo {
+            match k.code {
+                KeyCode::Enter | KeyCode::Char(' ') => self.open_repo_pick(),
+                KeyCode::Up => self.go_field(-1),
+                KeyCode::Down => self.go_field(1),
+                _ => {}
+            }
+            return;
+        }
         if self.field == Field::Where {
             match k.code {
                 KeyCode::Enter | KeyCode::Char(' ') => self.open_where(),
-                KeyCode::Char('r') => self.step_repo(1),
-                KeyCode::Char('R') => self.step_repo(-1),
                 KeyCode::Up => self.go_field(-1),
                 KeyCode::Down => self.go_field(1),
                 _ => {}
@@ -3477,6 +3516,14 @@ impl App {
                 }
                 return;
             }
+            // repo picker: a click on a dir moves there (left: current dir, right: into it), a
+            // click outside of it closes it
+            if let Some(p) = self.repo_pick.as_mut() {
+                if down && !p.click(at.x, at.y) && !self.regions.repo_pick.contains(at) {
+                    self.repo_pick = None;
+                }
+                return;
+            }
             if down && self.regions.drafts.contains(at) {
                 self.field = Field::Drafts;
                 return self.open_drafts();
@@ -3498,6 +3545,9 @@ impl App {
                     self.field = Field::Title;
                 } else if self.prompt.area().contains(at) {
                     self.field = Field::Prompt;
+                } else if self.regions.repo_row.contains(at) {
+                    self.field = Field::Repo;
+                    return self.open_repo_pick();
                 } else if self.regions.where_row.contains(at) {
                     self.field = Field::Where;
                     return self.open_where();
@@ -3631,6 +3681,10 @@ impl App {
         if self.screen == Screen::Compose {
             self.draw_drafts(f, area);
             self.draw_where_menu(f, area);
+            let anchor = self.regions.repo_chip;
+            if let Some(p) = self.repo_pick.as_mut() {
+                self.regions.repo_pick = p.draw(f, anchor, body).unwrap_or_default();
+            }
         }
         if self.screen == Screen::Pick && self.tab == Tab::Threads {
             let opts = self.trepo_opts();
@@ -3671,6 +3725,9 @@ impl App {
             if self.where_menu.is_some() {
                 return find_rows(&self.regions.where_rows, at);
             }
+            if let Some(p) = self.repo_pick.as_ref() {
+                return p.left_rows.iter().chain(p.right_rows.iter()).map(|(r, _)| *r).find(|r| r.contains(at));
+            }
             if self.mention_on()
                 && let Some(r) = self.mention.row_at(at).or_else(|| self.command.row_at(at)).or_else(|| self.paths.row_at(at))
             {
@@ -3681,7 +3738,7 @@ impl App {
             }
             return find_rows(&self.regions.opts, at)
                 .or_else(|| find_rows(&self.regions.menu_rows, at))
-                .or_else(|| [self.regions.where_row, self.regions.notes_label].into_iter().find(|r| r.contains(at)));
+                .or_else(|| [self.regions.repo_row, self.regions.where_row, self.regions.notes_label].into_iter().find(|r| r.contains(at)));
         }
         let list = self.regions.list;
         if !list.contains(at) {
@@ -4181,18 +4238,21 @@ impl App {
         let note_rows = n_notes.min(5) as u16 + u16::from(n_notes > 5) + self.carry.len().min(5) as u16;
         // the opts boxes below the where row: 1 row each
         let opts_h = if self.wheres.is_empty() { 0 } else { 2 };
+        // "where": a label, the repo row, the branch row (a git repo only)
+        let branch_h = u16::from(!self.wheres.is_empty());
         // "view drafts (n)": only with 1+ drafts, with a blank row below
         let drafts_h = if self.drafts.is_empty() { 0 } else { 2 };
-        let available = area.height.saturating_sub(drafts_h + title_rows + opts_h + note_rows + 13);
+        let available = area.height.saturating_sub(drafts_h + title_rows + opts_h + note_rows + branch_h + 14);
         let agents_h = if self.agents.is_empty() { 1 } else {
             self.agent_grid(area.width).height.min(2 * (CARD_H as usize + 1)).min(available.max(CARD_H + 1) as usize) as u16
         };
         if drafts_h == 0 && self.field == Field::Drafts {
             self.field = Field::Prompt;
         }
-        // prompt first and largest (the rest of the height), then title, where, agents, notes, a
+        // prompt first and largest (the rest of the height), then title, where (repo, branch,
+        // opts), agents, notes, a
         // blank row below the notes (above the footer)
-        let [r_drafts, l_prompt, i_prompt, _, l_title, i_title, _, info, opts, _, l_agents, r_agents, _, l_notes, notes, _] = Layout::vertical([
+        let [r_drafts, l_prompt, i_prompt, _, l_title, i_title, _, l_where, repo_row, info, opts, _, l_agents, r_agents, _, l_notes, notes, _] = Layout::vertical([
             Constraint::Length(drafts_h),
             Constraint::Length(1),
             Constraint::Min(3),
@@ -4201,6 +4261,8 @@ impl App {
             Constraint::Length(title_rows),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(branch_h),
             Constraint::Length(opts_h),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -4226,32 +4288,42 @@ impl App {
         f.render_widget(Paragraph::new(label(if self.title.is_empty() { "title · optional: the prompt's 1st line" } else { "title" }, self.field == Field::Title)), l_title);
         f.render_widget(Paragraph::new("").style(theme::panel()), i_title);
         self.title.render(f, Rect { x: i_title.x + 1, width: i_title.width.saturating_sub(2), ..i_title }, self.field == Field::Title);
-        // where: the choice (enter: dropdown ▾) + what it does
-        let on = self.field == Field::Where;
-        let mut spans = vec![Span::styled("where ", if on { theme::accent_bold() } else { theme::muted() })];
-        // the repo (r cycles): only with more than 1
-        if self.repos.len() > 1
-            && let Some(r) = self.repos.get(self.repo_i)
-        {
-            spans.push(Span::styled(format!("{} ", r.name), if self.repo_i > 0 { theme::accent_bold() } else { theme::bold() }));
-        }
+        // where: a label, then the repo row and the branch row (each: a chip, enter: its picker
+        // ▾, what it does), then the opts boxes; 1 column in from the label, like the title input
+        let any = matches!(self.field, Field::Repo | Field::Where | Field::Opts);
+        f.render_widget(Paragraph::new(label("where", any)), l_where);
+        let chip = Style::default().fg(theme::pal().text).add_modifier(Modifier::BOLD);
+        // a row: the sub-label, the chip (its area back), the text
+        let row = |f: &mut Frame, r: Rect, name: &str, on: bool, value: String, text: String| -> Rect {
+            let head = format!(" {name:<7}");
+            let x = r.x + head.width() as u16;
+            let value = format!(" {value} ");
+            let area = Rect { x: x.min(r.right().saturating_sub(1)), y: r.y, width: value.width() as u16, height: 1 };
+            let spans = vec![
+                Span::styled(head, if on { theme::accent_bold() } else { theme::muted() }),
+                Span::styled(value, if on { chip.bg(theme::pal().panel) } else { chip }),
+                Span::styled(if on { "▾" } else { " " }, theme::accent()),
+                Span::raw("  "),
+                Span::styled(text, theme::muted()),
+            ];
+            f.render_widget(Paragraph::new(Line::from(spans)), r);
+            area
+        };
+        let (repo_value, repo_text) = match &self.repo {
+            Some(r) if self.clone_first().is_some() => (r.name.clone(), format!("{} · 0 clone yet", tilde(&r.path.display().to_string()))),
+            Some(r) => (r.name.clone(), tilde(&r.path.display().to_string())),
+            None => ("0 git repo".into(), format!("works in {} · enter: pick a repo", tilde(&self.cfg.cwd.display().to_string()))),
+        };
+        self.regions.repo_chip = row(f, repo_row, "repo", self.field == Field::Repo, repo_value, repo_text);
+        self.regions.repo_row = repo_row;
         if !self.wheres.is_empty() {
-            let chip = Style::default().fg(theme::pal().text).add_modifier(Modifier::BOLD);
-            spans.push(Span::raw(" "));
-            let x = info.x + spans.iter().map(|s| s.content.width() as u16).sum::<u16>();
-            let text = format!(" {} ", self.where_chip());
-            self.regions.where_chip = Rect { x: x.min(info.right().saturating_sub(1)), y: info.y, width: text.width() as u16, height: 1 };
-            spans.push(Span::styled(text, if on { chip.bg(theme::pal().panel) } else { chip }));
-            spans.push(Span::styled(if on { "▾" } else { " " }, theme::accent()));
-            spans.push(Span::raw("  "));
+            self.regions.where_chip = row(f, info, "branch", self.field == Field::Where, self.where_chip(), self.where_text());
+            self.regions.where_row = info;
         }
-        spans.push(Span::styled(self.where_text(), theme::muted()));
-        f.render_widget(Paragraph::new(Line::from(spans)), info);
-        self.regions.where_row = info;
-        // opts: ◼ checkout, ◻ stash below it, under the where chip
+        // opts: ◼ checkout, ◻ stash below it, in the column of the sub-labels
         if opts_h > 0 {
             let on = self.field == Field::Opts;
-            let x = opts.x + 6;
+            let x = opts.x;
             for (i, (checked, enabled), label) in [(0, self.checkout_box(), "checkout selected branch"), (1, self.stash_box(), "stash conflicting local changes (git stash)")] {
                 if i as u16 >= opts.height {
                     break;
@@ -4342,7 +4414,9 @@ impl App {
             _ if self.tabs_focus => &[("←→", "tab"), ("↓ / esc", "back"), ("q", "quit")],
             Screen::Compose if self.field == Field::Agents => &[("↑↓←→", "move"), ("space", "pick"), ("enter", "notes"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
             Screen::Compose if self.where_menu.is_some() => &[("↑↓", "move"), ("type", "filter"), ("enter", "pick"), ("esc", "close")],
-            Screen::Compose if self.field == Field::Where => &[("enter", "choices"), ("r", "repo"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
+            Screen::Compose if self.repo_pick.is_some() => &[("↑↓", "dir"), ("←→", "out · in"), ("type", "filter"), ("~", "home"), ("enter", "pick"), ("esc", "close")],
+            Screen::Compose if self.field == Field::Repo => &[("enter", "pick repo"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
+            Screen::Compose if self.field == Field::Where => &[("enter", "choices"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.field == Field::Opts => &[("space", "check / uncheck"), ("↑↓", "box · field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.drafts_menu.is_some() => &[("↑↓", "move"), ("enter", "load"), ("d", "delete"), ("esc", "back")],
             Screen::Compose if self.field == Field::Drafts => &[("enter", "list drafts"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("F1-F5", "tabs")],
@@ -4669,41 +4743,102 @@ mod render_tests {
     }
 
     #[test]
-    fn r_cycles_the_home_repos_and_a_missing_one_gets_cloned_first() {
+    fn repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first() {
         let base = std::env::temp_dir().join(format!("ch-repos-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let mk = |n: &str| {
             let d = base.join(n);
             std::fs::create_dir_all(&d).unwrap();
-            assert!(std::process::Command::new("sh").arg("-c").arg("git init -q -b main && git config user.email t@t && git config user.name t && echo x > a && git add -A && git commit -qm i && git branch feat").current_dir(&d).status().unwrap().success());
+            assert!(std::process::Command::new("sh").arg("-c").arg("git init -q -b main && git config user.email t@t && git config user.name t && echo x > a && git add -A && git commit -qm i && git branch feat && mkdir -p sub/deep").current_dir(&d).status().unwrap().success());
             d
         };
         let (start, other) = (mk("start"), mk("other"));
         let mut a = app();
-        a.cfg.repo = Some(start.clone());
-        a.repos = vec![
-            crate::home::Repo { name: "start".into(), path: start.clone(), url: None },
-            crate::home::Repo { name: "other".into(), path: other.clone(), url: None },
-            crate::home::Repo { name: "gone".into(), path: base.join("gone"), url: Some("git@x:y/gone.git".into()) },
-        ];
+        a.start_cwd = start.clone();
+        a.set_repo(crate::repopick::Entry { name: "start".into(), path: start.clone(), git: true, clone: None });
+        a.repos = vec![crate::home::Repo { name: "gone".into(), path: base.join("gone"), url: Some("git@x:y/gone.git".into()) }];
         a.screen = Screen::Compose;
-        a.field = Field::Where;
         a.title.set_text("fix it");
+        // ↓ from the title: the repo row, then the branch row (0 field skipped)
+        a.field = Field::Title;
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert!(a.field == Field::Repo);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert!(a.field == Field::Where);
+        // r on the branch row: 0 repo switch (the hotkey is gone)
         key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!(a.cfg.repo.as_deref(), Some(start.as_path()));
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        // enter: the picker on start; left: base's dirs (gone: a clone), right: start's dirs
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let out = dump(&mut a, 120, 40);
+        assert_eq!(a.repo_pick.as_ref().and_then(|p| p.current()).map(|e| e.path.clone()), Some(start.clone()), "{out}");
+        assert!(out.lines().any(|l| l.contains("start/") && l.contains("git")), "{out}");
+        assert!(out.lines().any(|l| l.contains("gone/") && l.contains("│ sub/")), "{out}");
+        assert!(out.lines().any(|l| l.contains("gone/") && l.contains("clone")), "{out}");
+        println!("--- repo picker\n{out}");
+        // ↑ (other) + enter: other, a new worktree first
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.repo_pick.is_none());
         assert_eq!(a.cfg.repo.as_deref(), Some(other.as_path()));
         assert_eq!(a.wheres.get(a.where_i), Some(&Where::NewWorktree), "another repo: a new worktree first");
         assert!(a.wheres.contains(&Where::Branch("feat".into())));
         assert!(a.clone_first().is_none());
-        key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+        // a dir in a repo (→ into other, ↓ to sub): its repo
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(a.repo_pick.as_ref().and_then(|p| p.current()).map(|e| e.name.clone()).as_deref(), Some("sub"));
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.cfg.repo.as_deref(), Some(other.as_path()));
+        // the picker on the repo (other, 0 sub), ↑ to gone: cloned first
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.repo_pick.as_ref().and_then(|p| p.current()).map(|e| e.name.clone()).as_deref(), Some("other"));
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(a.wheres, [Where::NewWorktree]);
         assert_eq!(a.clone_first(), Some(("git@x:y/gone.git".to_string(), base.join("gone"))));
         assert!(a.where_text().starts_with("clones git@x:y/gone.git into"), "{}", a.where_text());
-        // back round to the start repo and its dir
-        key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
-        assert_eq!((a.cfg.repo.as_deref(), a.where_i), (Some(start.as_path()), 0));
-        let s = dump(&mut a, 120, 30);
-        assert!(s.contains("where start"), "{s}");
+        // a dir outside of a git repo: a toast, the repo stays
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Left, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.repo_pick.is_some() && a.clone_first().is_some());
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(a.repo_pick.is_none() && a.outcome.is_none());
+        // the start repo again: the start dir, current branch first
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        for _ in 0..2 {
+            key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        }
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!((a.cfg.repo.as_deref(), a.where_i, a.cfg.cwd.clone()), (Some(start.as_path()), 0, start.clone()));
+        // "where" a label; the repo row and the branch row below it, the boxes in their column
+        let s = dump(&mut a, 120, 40);
+        let at = |pat: &str| s.lines().position(|l| l.contains(pat)).unwrap_or_else(|| panic!("{pat}\n{s}"));
+        let col = |pat: &str| s.lines().find_map(|l| l.find(pat).map(|b| l[..b].chars().count())).unwrap();
+        assert!(s.lines().any(|l| l.trim() == "where"), "{s}");
+        assert_eq!((at(" repo "), at(" branch ")), (at("where") + 1, at("where") + 2), "{s}");
+        assert!(s.lines().any(|l| l.contains(" repo ") && l.contains(" start ")), "{s}");
+        assert_eq!(col("repo"), col("branch"), "{s}");
+        assert_eq!(col("checkout selected"), col("branch") + 2, "{s}");
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn outside_of_a_git_repo_the_repo_row_stays_in_the_field_order() {
+        let mut a = app();
+        a.cfg.repo = None;
+        a.repo = None;
+        a.wheres.clear();
+        a.screen = Screen::Compose;
+        a.field = Field::Title;
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert!(a.field == Field::Repo);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert!(a.field == Field::Agents);
+        let s = dump(&mut a, 120, 40);
+        assert!(s.contains("0 git repo") && s.contains("enter: pick a repo"), "{s}");
     }
 
     #[test]
@@ -4781,8 +4916,10 @@ mod render_tests {
         assert_eq!(a.where_chip(), "worktree b");
         pick_up(&mut a, 0);
         assert_eq!(a.where_chip(), "current branch · feature/x");
-        // field order: title → where → opts (2 rows, also with disabled boxes) → agents
+        // field order: title → repo → branch → opts (2 rows, also with disabled boxes) → agents
         a.field = Field::Title;
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert!(a.field == Field::Repo);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Where);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
@@ -4799,14 +4936,14 @@ mod render_tests {
             Agent { name: "nova".into(), harness: "codex".into(), model: Some("gpt-5.5".into()), ..Default::default() },
         ];
         a.picks = vec!["amon".into()];
-        let out = dump(&mut a, 110, 34);
-        assert!(out.contains("where   current branch · feature/x"), "{out}");
+        let out = dump(&mut a, 110, 36);
+        assert!(out.contains("branch  current branch · feature/x"), "{out}");
         assert!(out.contains("◼ checkout selected branch"), "{out}");
         // each box on its own row, below each other
         let lines: Vec<&str> = out.lines().collect();
         let row = |s: &str| lines.iter().position(|l| l.contains(s)).unwrap_or_else(|| panic!("{s}\n{out}"));
         let (co, st) = (row("checkout selected branch"), row("stash conflicting local changes"));
-        assert_eq!((row("where   current"), co), (co - 1, st - 1), "{out}");
+        assert_eq!((row("branch  current"), co), (co - 1, st - 1), "{out}");
         assert_eq!(lines[co].find("checkout"), lines[st].find("stash"), "{out}");
         assert!(out.contains("claude · Opus 5.5") && out.contains("codex · gpt-5.5"), "{out}");
         // 0 blank rows between the harness groups: the codex heading right below the claude card
@@ -4973,7 +5110,8 @@ mod render_tests {
     #[test]
     fn enter_keeps_zero_notes() {
         let mut a = app();
-        // prompt → title → agents → notes field (↓), enter opens the picker
+        // prompt → title → repo → agents → notes field (↓), enter opens the picker
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
@@ -5270,7 +5408,7 @@ mod render_tests {
         assert_eq!(a.agents[a.pick_cursor].name, "lilith");
         a.pick_cursor = 4;
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
-        assert!(a.field == Field::Title);
+        assert!(a.field == Field::Repo);
         a.agents.clear();
         narrow.draw(|f| a.draw(f)).unwrap();
         assert!(a.pick_places.is_empty() && a.regions.menu_rows.is_empty());
@@ -5348,8 +5486,8 @@ mod render_tests {
         a.mouse(moved(tab.x + 1, tab.y));
         t.draw(|f| a.draw(f)).unwrap();
         assert_eq!(bg(&t, tab.x + 1, tab.y), theme::pal().hover);
-        // the where row of the task view
-        let w = a.regions.where_row;
+        // the repo row of the task view
+        let w = a.regions.repo_row;
         a.mouse(moved(w.x + 2, w.y));
         t.draw(|f| a.draw(f)).unwrap();
         assert_eq!(bg(&t, w.x + 2, w.y), theme::pal().hover);
@@ -5795,8 +5933,8 @@ mod render_tests {
         // the agents tab loaded the machine's agents: 1 card again (↓ leaves the cards)
         a.agents.truncate(1);
         a.field = Field::Prompt;
-        // tab: prompt → title → agents → notes → prompt; shift+tab back
-        for f in [Field::Title, Field::Agents, Field::Notes, Field::Prompt] {
+        // tab: prompt → title → repo → agents → notes → prompt; shift+tab back
+        for f in [Field::Title, Field::Repo, Field::Agents, Field::Notes, Field::Prompt] {
             key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
             assert!(a.field == f && a.screen == Screen::Compose);
         }
@@ -5805,7 +5943,7 @@ mod render_tests {
         // ↑↓ walk the fields: ↓ on the last stays, ↑ on the prompt's 1st row: the tabs
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Notes);
-        for f in [Field::Agents, Field::Title, Field::Prompt] {
+        for f in [Field::Agents, Field::Repo, Field::Title, Field::Prompt] {
             key(&mut a, KeyCode::Up, KeyModifiers::NONE);
             assert!(a.field == f);
         }
@@ -6024,7 +6162,8 @@ mod render_tests {
         for c in "Fix deploy".chars() {
             key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
         }
-        // title → agents → notes, enter: the notes picker
+        // title → repo → agents → notes, enter: the notes picker
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);

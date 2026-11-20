@@ -27,7 +27,8 @@ pub mod warm;
 
 use std::path::PathBuf;
 
-/// Tests that set $CODEHEAD_HOME, and tests that need the data dir to stay put while they run.
+/// Tests that need the data dir to stay put while they run. 0 test sets $CODEHEAD_HOME: a set
+/// var moves the data dir of every test of the process (1 process, tests in threads).
 #[cfg(test)]
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

@@ -10,9 +10,12 @@ on:
     branches: [main]
     paths-ignore: ['site/**', 'docs/**', 'notes/**', '**.md']
 
+# a newer push supersedes a running release: only the newest main gets published.
+# `gh release create` with assets publishes a draft only after every upload: a cancel
+# mid-publish leaves at most a draft, never a "latest" without its binaries.
 concurrency:
   group: release
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: write

@@ -389,10 +389,8 @@ mod tests {
 
     #[test]
     fn events_round_trip_and_tail_reads_only_new_lines() {
-        let home = std::env::temp_dir().join(format!("codehead-store-{}", super::super::new_id()));
-        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: test-local env; the tests of this module do not run other env readers.
-        unsafe { std::env::set_var("CODEHEAD_HOME", &home) };
+        // the test process's data dir: 0 $CODEHEAD_HOME (a set var moves every other test's
+        // threads mid-run: a stash written before it, read after it, is gone)
         let t = Thread::new("t", "do it", Path::new("/tmp"), vec!["ada".into()]);
         t.save().unwrap();
         let mut tail = Tail::new(&t.id);
@@ -404,7 +402,7 @@ mod tests {
         let e = tail.read();
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].kind, Kind::TurnStart);
-        assert_eq!(load(&t.id[..10]).unwrap().agents, vec!["ada".to_string()]);
+        assert_eq!(load(&t.id[..14]).unwrap().agents, vec!["ada".to_string()]);
         // 8 writers at once (host, views, CLI): the lock keeps each update
         let writers: Vec<_> = (0..8)
             .map(|w| {
@@ -420,6 +418,6 @@ mod tests {
             w.join().unwrap();
         }
         assert_eq!(load(&t.id).unwrap().agents.len(), 81);
-        let _ = std::fs::remove_dir_all(home);
+        let _ = std::fs::remove_dir_all(thread_dir(&t.id));
     }
 }

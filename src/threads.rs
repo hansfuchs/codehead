@@ -205,6 +205,23 @@ pub fn current_branch(path: &Path) -> String {
     git(path, &["branch", "--show-current"]).1.trim().to_string()
 }
 
+/// DIR on the default branch (main, else master) with an upstream: `git pull --ff-only` first
+/// (30 s max, 0 prompt). None: another branch or 0 upstream (0 pull). Err: git's last line.
+pub fn update_default(dir: &Path) -> Option<Result<String, String>> {
+    let b = current_branch(dir);
+    if b != "main" && b != "master" {
+        return None;
+    }
+    if !git(dir, &["rev-parse", "--abbrev-ref", "@{upstream}"]).0 {
+        return None;
+    }
+    let argv = ["git", "pull", "--ff-only", "--quiet"].map(String::from);
+    let env = [("GIT_TERMINAL_PROMPT".to_string(), "0".to_string())];
+    let (ok, out) = crate::setup::run(&argv, dir, &env, std::time::Duration::from_secs(30));
+    let last = out.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("git pull failed").to_string();
+    Some(if ok { Ok(b) } else { Err(last) })
+}
+
 /// Checkouts (main checkout included) by branch: branch → path.
 pub fn checkouts(repo: &Path) -> std::collections::HashMap<String, String> {
     let (_, out, _) = git(repo, &["worktree", "list", "--porcelain"]);
@@ -526,4 +543,34 @@ pub fn remove(repo: &Path, items: &[Worktree], logs: &Path) -> Vec<Line<'static>
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_start_on_main_pulls_main_first_other_branches_not() {
+        let base = std::env::temp_dir().join(format!("ch-update-main-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let sh = |c: &str| assert!(Command::new("sh").arg("-c").arg(c).current_dir(&base).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "{c}");
+        let cfg = "git config user.email t@t && git config user.name t";
+        sh(&format!("git init -q --bare -b main origin.git && git clone -q origin.git a && cd a && {cfg} && git commit -q --allow-empty -m 1 && git push -q origin main"));
+        sh(&format!("git clone -q origin.git b && cd b && {cfg} && git commit -q --allow-empty -m 2 && git push -q origin main"));
+        let a = base.join("a");
+        let head = |d: &Path| git(d, &["rev-parse", "HEAD"]).1;
+        assert_ne!(head(&a), head(&base.join("b")));
+        assert!(matches!(update_default(&a), Some(Ok(b)) if b == "main"));
+        assert_eq!(head(&a), head(&base.join("b")), "main pulled");
+        // another branch: 0 pull; a branch without upstream: 0 pull
+        sh("cd a && git switch -q -c feat");
+        assert!(update_default(&a).is_none());
+        sh("cd a && git switch -q main && git branch -q --unset-upstream");
+        assert!(update_default(&a).is_none());
+        // diverged: Err with git's line
+        sh("cd a && git branch -q -u origin/main && git commit -q --allow-empty -m local && cd ../b && git commit -q --allow-empty -m 3 && git push -q origin main");
+        assert!(matches!(update_default(&a), Some(Err(e)) if !e.is_empty()));
+        let _ = std::fs::remove_dir_all(base);
+    }
 }

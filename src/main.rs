@@ -47,6 +47,7 @@ mod search;
 mod review;
 mod render;
 mod repofilter;
+mod repopick;
 mod settings;
 mod setup;
 mod skills;
@@ -109,11 +110,15 @@ settings: 4th tab. edit fields and path aliases; ctrl+s saves, ctrl+r discards e
           environment variables override file values. edits stay until saved or reloaded.
 default agent: config agent, else amon, else the first agent.
          preselected for new threads, takes over threads of deleted agents.
-project: git repo of the current directory. the task's where row (←→): the current branch (default,
-         works there), main, the other branches (newest commit first), a new branch (main checkout,
-         git switch -c, 0 worktrees), or a new branch + worktree (-b sets this). below it: checkout
-         the picked branch (else the main checkout works as is), stash local changes that block
-         the checkout (git stash). 0 git repos: the current directory itself (thread works in place)
+project: git repo of the current directory. the task's where rows: repo (enter: a 2-pane picker,
+         left the parent's dirs, right the current dir's, ←→ out / in, type: filter, enter: pick;
+         home repos without a clone: cloned first), then branch (enter: dropdown): the current
+         branch (default, works there), main, the other branches (newest commit first), a new branch
+         (main checkout, git switch -c, 0 worktrees), or a new branch + worktree (-b sets this).
+         below it: checkout the picked branch (else the main checkout works as is), stash local
+         changes that block the checkout (git stash). a start on main / master in an existing
+         checkout: git pull --ff-only first (a failed pull: a toast, the thread starts anyway).
+         0 git repos: the current directory itself (thread works in place)
 prompt:  @: agent names. >: commands, in dropdowns above the prompt box (never over it; a submenu
          beside its parent, 0 room there: above them). max. 10 rows, ▲ ▼ on the right border: more rows.
          mention → files (of the repo / worktree), notes, threads, artifacts (urls in the Claude
@@ -727,6 +732,9 @@ fn start(args: Args) {
                 if let Some(b) = &worktree {
                     println!("git -C {} worktree add <codehead data>/worktrees/{} {}", quote(&repo.display().to_string()), quote(b), quote(b));
                 }
+                if worktree.is_none() && matches!(target, Target::Checkout { .. } | Target::Worktree { .. }) {
+                    println!("git -C {} pull --ff-only    # on main / master with an upstream", quote(&dir.display().to_string()));
+                }
                 println!("thread in {} · agents {} · task:\n{message}", dir.display(), picked.join(", "));
                 return;
             }
@@ -745,6 +753,17 @@ fn start(args: Args) {
                 if let Err(e) = res {
                     tty.leave(&mut out);
                     fail(&e, 1)
+                }
+            }
+            // a thread on main in an existing checkout: main up to date first (ff only); a
+            // failed pull: the thread starts anyway, the view toasts why
+            let mut pull_note = None;
+            if worktree.is_none() && matches!(target, Target::Checkout { .. } | Target::Worktree { .. }) {
+                if label == "main" || label == "master" {
+                    let _ = term.draw(|f| app::draw_status(f, &format!("updating {label} (git pull --ff-only)…"), 0));
+                }
+                if let Some(Err(e)) = threads::update_default(&dir) {
+                    pull_note = Some(format!("{label} not updated: {e}"));
                 }
             }
             let _ = term.draw(|f| app::draw_status(f, &format!("starting {label} · {}…", picked.join(", ")), 0));
@@ -776,7 +795,7 @@ fn start(args: Args) {
             // the task to every picked agent; the host starts with it. 0 host (a failed start):
             // the thread opens with the task as its prompt draft, never lost
             let note = match engine::client::call(&t.id, &serde_json::json!({"op": "prompt", "to": picked, "text": message})) {
-                Ok(_) => None,
+                Ok(_) => pull_note,
                 Err(e) => {
                     view::save_prompt_draft(&t.id, &message);
                     Some(format!("task not sent: {} · the task waits in the prompt · ctrl+enter: send", e.lines().next().unwrap_or_default()))
