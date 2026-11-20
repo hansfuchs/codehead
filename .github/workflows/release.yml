@@ -36,18 +36,17 @@ jobs:
         run: echo "version=$(scripts/version.sh)" >> "$GITHUB_OUTPUT"
 
   binaries:
-    name: binary ${{ matrix.target }}
+    name: binary ${{ matrix.runner }}
     needs: [checks, meta]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
           # oldest Ubuntu runners: the binaries need the oldest glibc
-          - { runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
-          - { runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
-          # 1 Intel macOS runner, arm64 cross-compiled on it
-          - { runner: macos-15-intel, target: x86_64-apple-darwin }
-          - { runner: macos-15-intel, target: aarch64-apple-darwin }
+          - { runner: ubuntu-22.04, targets: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-22.04-arm, targets: aarch64-unknown-linux-gnu }
+          # 1 macOS job (macOS minutes cost the most): arm64 runner, x86_64 cross-compiled on it
+          - { runner: macos-15, targets: aarch64-apple-darwin x86_64-apple-darwin }
     permissions:
       contents: read
       id-token: write
@@ -56,20 +55,20 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: '13.0'
     steps:
       - uses: actions/checkout@v5
-      - run: rustup toolchain install && rustup target add ${{ matrix.target }}
+      - run: rustup toolchain install && rustup target add ${{ matrix.targets }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.runner }}
       - run: scripts/stamp.sh ${{ needs.meta.outputs.version }}
-      - run: cargo build --release --target ${{ matrix.target }}
-      - run: scripts/package.sh ${{ needs.meta.outputs.version }} ${{ matrix.target }}
+      - run: for t in ${{ matrix.targets }}; do cargo build --release --target "$t"; done
+      - run: for t in ${{ matrix.targets }}; do scripts/package.sh ${{ needs.meta.outputs.version }} "$t"; done
       # provenance: the install script runs `gh attestation verify` on it when gh is logged in
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: codehead-*.tar.gz
       - uses: actions/upload-artifact@v4
         with:
-          name: bin-${{ matrix.target }}
+          name: bin-${{ matrix.runner }}
           path: codehead-*.tar.gz*
 
   publish:

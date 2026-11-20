@@ -1,6 +1,6 @@
 name: ci
 
-# Pull requests, and every release before its builds.
+# Pull requests, and every release before its builds. The site: site.yml (only on site changes).
 on:
   pull_request:
   workflow_call:
@@ -16,21 +16,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, macos-15-intel]
+        # macOS: arm64 (faster than Intel: fewer of the costly macOS minutes)
+        runner: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      # lints: the same on every OS, Linux only
       - name: clippy, warnings fail
+        if: runner.os == 'Linux'
         run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
-
-  site:
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: site
-    steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile && bun run build
