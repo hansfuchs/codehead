@@ -1,0 +1,828 @@
+/* codehead.sh landing page (src/pages/index.astro). Mobile first: 1 column, then 2 at 735 px,
+ * the full grid at 1069 px. Style: e2b-like retro precision: 1 display headline (the hero), [ ]
+ * kickers, hairline spec rows, Bayer dither at section edges, solid coral for the 1 action. 0
+ * decoration that says nothing: every element on the page is product. */
+
+.content {
+  max-width: 1152px;
+}
+.content > section {
+  margin-top: 112px;
+}
+.content > section h2 {
+  margin: 0 0 24px;
+  font-size: 22px;
+  line-height: 1.25;
+  letter-spacing: -0.04em;
+}
+.kicker {
+  margin: 0 0 16px;
+  color: var(--coral);
+}
+.small {
+  font-size: 13px;
+}
+kbd {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  background: var(--code-bg);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+/* ---------- header: the crew strip ---------- */
+.bar .crew-cell {
+  min-width: 0;
+  padding-right: 8px;
+}
+crew-strip {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  color: var(--soft);
+}
+crew-strip .strip-faces {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+crew-strip pre {
+  margin: 0;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 8.5px;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+crew-strip pre[data-status='blocked'] {
+  color: #e0aa3c !important;
+}
+crew-strip pre[data-status='done'] {
+  opacity: 0.5;
+}
+crew-strip .strip-line {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.bar .crew-cell {
+  overflow: hidden;
+}
+@media (max-width: 734px) {
+  /* phones: the faces only, the brand gets the room */
+  crew-strip .strip-line {
+    display: none;
+  }
+  .bar .brand {
+    flex: none;
+  }
+}
+
+/* ---------- hero ---------- */
+.hero {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 32px;
+  align-items: center;
+  padding: 16px 0 40px;
+}
+
+.hero-head {
+  /* the stone's frames carry blank rows above and below it: pull them in */
+  margin: -48px 0 -56px;
+  justify-self: center;
+}
+.hero .tag {
+  margin: 0 0 16px;
+  color: var(--coral);
+}
+.hero h1 {
+  max-width: 12ch;
+  margin: 0 0 24px;
+  font-size: clamp(38px, 9.6vw, 68px);
+  line-height: 0.95;
+  letter-spacing: -0.06em;
+  text-transform: uppercase;
+}
+.hero .lead {
+  max-width: 54ch;
+  margin: 0 0 28px;
+  color: var(--soft);
+  font-size: 17px;
+}
+.hero .meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 14px 0 0;
+  color: var(--soft);
+  font-size: 10px;
+}
+.hero .meta span::before {
+  content: '■ ';
+  color: var(--coral);
+}
+@media (min-width: 1069px) {
+  .hero {
+    grid-template-columns: minmax(600px, 1fr) auto;
+    gap: 64px;
+    padding: 80px 0 64px;
+  }
+  .hero-head {
+    order: 2;
+    margin: 0;
+  }
+}
+
+/* install: the command wraps, never scrolls */
+.install-row {
+  display: flex;
+  align-items: stretch;
+  max-width: 640px;
+  border: 1px solid var(--line);
+  background: var(--code-bg);
+}
+.install-row .term {
+  flex: 1;
+  min-width: 0;
+  padding: 16px;
+  overflow: visible;
+  font-size: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.copy-cmd {
+  flex: none;
+  padding: 0 var(--gutter);
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* ---------- the monolith (src/lib/monolith.ts) ---------- */
+ascii-monolith {
+  display: grid;
+  justify-items: center;
+}
+ascii-monolith pre {
+  margin: 0;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  /* phones: about 230 px tall; desktop: about 410 px */
+  font-size: clamp(5.4px, 1.5vw, 10px);
+  line-height: 1.2;
+  letter-spacing: 0;
+  white-space: pre;
+  user-select: none;
+}
+ascii-monolith b {
+  display: inline-block;
+  vertical-align: top;
+  font-weight: 400;
+  background: var(--paper);
+}
+ascii-monolith .s0 { color: color-mix(in oklab, var(--ink) 22%, transparent); }
+ascii-monolith .s1 { color: color-mix(in oklab, var(--ink) 34%, transparent); }
+ascii-monolith .s2 { color: color-mix(in oklab, var(--ink) 48%, transparent); }
+ascii-monolith .s3 { color: color-mix(in oklab, var(--ink) 64%, transparent); }
+ascii-monolith .s4 { color: color-mix(in oklab, var(--ink) 82%, transparent); }
+ascii-monolith .s5 { color: var(--ink); }
+ascii-monolith .s6 { color: var(--coral); }
+ascii-monolith .s7 { color: #e0aa3c; }
+ascii-monolith .s8 { color: color-mix(in oklab, var(--coral) 45%, transparent); }
+ascii-monolith .stack {
+  position: relative;
+}
+ascii-monolith pre.eyes {
+  position: absolute;
+  inset: 0;
+  color: transparent;
+  pointer-events: none;
+}
+ascii-monolith pre.eyes b {
+  background: none;
+}
+/* the keys hint: only while the pointer is on the stone */
+ascii-monolith .monolith-keys {
+  width: 0;
+  min-width: 100%;
+  margin: 10px 0 0;
+  color: var(--soft);
+  font-size: 10px;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+ascii-monolith:hover .monolith-keys {
+  opacity: 1;
+}
+@media (min-width: 1069px) {
+  ascii-monolith pre {
+    font-size: 11.5px;
+  }
+}
+
+/* ---------- demo player: right under the hero ---------- */
+.content > .demo {
+  margin-top: 24px;
+}
+
+/* ---------- manifesto ---------- */
+.manifesto {
+  padding-top: 40px;
+  border-top: 1px solid var(--line);
+}
+.manifesto-body {
+  display: grid;
+  gap: 20px;
+}
+.manifesto-body p {
+  max-width: 60ch;
+  margin: 0;
+  color: var(--soft);
+  font-size: 17px;
+}
+.manifesto-body p:first-child {
+  color: var(--ink);
+}
+@media (min-width: 1069px) {
+  .manifesto-body {
+    grid-template-columns: 1fr 1fr;
+    gap: 48px;
+  }
+}
+
+/* ---------- the 4 moves ---------- */
+.move-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--line);
+}
+.move {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 16px;
+  align-content: start;
+  padding: 24px var(--gutter);
+}
+.move + .move {
+  border-top: 1px solid var(--line);
+}
+.move-n {
+  grid-column: 1 / -1;
+  color: var(--soft);
+}
+.move-key {
+  align-self: start;
+  margin-top: 2px;
+  border-color: var(--coral);
+  color: var(--coral);
+}
+.move h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.move p {
+  grid-column: 1 / -1;
+  margin: 8px 0 0;
+  color: var(--soft);
+}
+@media (min-width: 735px) {
+  .move-list {
+    grid-template-columns: 1fr 1fr;
+  }
+  .move:nth-child(2) {
+    border-top: 0;
+    border-left: 1px solid var(--line);
+  }
+  .move:nth-child(4) {
+    border-left: 1px solid var(--line);
+  }
+}
+@media (min-width: 1069px) {
+  .move-list {
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .move + .move {
+    border-top: 0;
+    border-left: 1px solid var(--line);
+  }
+}
+
+/* ---------- the crew (src/lib/crew.ts) ---------- */
+.crew-head {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 28px;
+}
+.crew-head h2 {
+  margin: 0 !important;
+}
+.crew-head p {
+  max-width: 64ch;
+  margin: 0;
+}
+@media (min-width: 1069px) {
+  .crew-head {
+    grid-template-columns: 1fr 1.4fr;
+    gap: 48px;
+    align-items: start;
+  }
+}
+crew-stage {
+  display: block;
+  border: 1px solid var(--line);
+  background: var(--code-bg);
+}
+.crew-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.crew-card {
+  --agent: var(--ink);
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 20px 8px 16px;
+  border-bottom: 1px solid var(--line-faint);
+  transition: background 0.3s;
+}
+.crew-card:nth-child(odd) {
+  border-right: 1px solid var(--line-faint);
+}
+.crew-card pre {
+  margin: 0;
+  color: var(--agent);
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: clamp(13px, 3.6vw, 20px);
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+.crew-meta {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  text-align: center;
+}
+.crew-name {
+  color: var(--agent);
+  font-family: var(--mono);
+}
+.crew-harness {
+  color: var(--soft);
+  font-size: 12px;
+}
+.crew-status {
+  margin-top: 4px;
+  color: var(--soft);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.crew-card[data-status='-'] .crew-meta {
+  opacity: 0.35;
+}
+.crew-card[data-status='working'] .crew-status,
+.crew-card[data-status='thinking'] .crew-status {
+  color: var(--agent);
+}
+/* waits on you: amber, as in codehead; a blocked agent stands out at once */
+.crew-card[data-status='blocked'] {
+  background: color-mix(in oklab, #e0aa3c 9%, transparent);
+}
+.crew-card[data-status='blocked'] pre,
+.crew-card[data-status='blocked'] .crew-name,
+.crew-card[data-status='blocked'] .crew-status {
+  color: #e0aa3c;
+}
+.crew-card[data-status='done'] pre {
+  opacity: 0.55;
+}
+/* a send: the sender's card lights, the receiver's border flashes */
+.crew-card.sending::after,
+.crew-card.receiving::after {
+  content: '';
+  position: absolute;
+  inset: 4px;
+  border: 1px solid var(--agent);
+  pointer-events: none;
+}
+.crew-card.sending::before {
+  content: 'send →';
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  color: var(--agent);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.crew-card.receiving::after {
+  border-style: dashed;
+}
+@media (min-width: 735px) {
+  .crew-cards {
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .crew-card:nth-child(odd) {
+    border-right: 0;
+  }
+  .crew-card + .crew-card {
+    border-left: 1px solid var(--line-faint);
+  }
+}
+.crew-log {
+  display: grid;
+  gap: 6px;
+  min-height: calc(4 * 1.5em + 3 * 6px + 32px);
+  margin: 0;
+  padding: 16px var(--gutter);
+  list-style: none;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.crew-log li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  color: var(--soft);
+}
+.crew-log li.fresh {
+  color: var(--ink);
+}
+.crew-log .who::after {
+  content: '  ';
+}
+@media (min-width: 735px) {
+  .crew-log li {
+    grid-template-columns: 16ch minmax(0, 1fr);
+  }
+}
+.crew-toml {
+  margin-top: 16px;
+  border: 1px solid var(--line-faint);
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- split sections: the head left (sticky), hairline rows right ---------- */
+.split {
+  display: grid;
+  gap: 8px;
+}
+.split-head p:last-child {
+  max-width: 52ch;
+  margin: -8px 0 24px;
+}
+@media (min-width: 1069px) {
+  .split {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+    gap: 64px;
+    align-items: start;
+  }
+  .split-head {
+    position: sticky;
+    top: calc(var(--bar) + 32px);
+  }
+}
+/* spec rows: a name, then the body with its key */
+.spec {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+.spec li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+.spec-name {
+  font-family: var(--mono);
+  font-size: 16px;
+}
+.spec-body {
+  color: var(--soft);
+  font-size: 15px;
+}
+.spec-body kbd {
+  margin-right: 8px;
+  border-color: var(--coral);
+  color: var(--coral);
+  font-size: 12px;
+}
+@media (min-width: 735px) {
+  .spec li {
+    grid-template-columns: 14ch minmax(0, 1fr);
+    gap: 24px;
+    align-items: baseline;
+  }
+}
+
+/* ---------- quality of life ---------- */
+.qol-grid {
+  display: grid;
+  gap: 32px;
+  margin-bottom: 24px;
+}
+.qol-area {
+  margin: 0 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--coral);
+}
+.qol-col ul {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.qol-col li {
+  display: grid;
+  grid-template-columns: 9ch minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.qol-col kbd {
+  justify-self: start;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+.qol-col li span {
+  color: var(--soft);
+}
+.qol-col code {
+  font-size: 13px;
+}
+@media (min-width: 735px) {
+  .qol-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 40px 32px;
+  }
+}
+@media (min-width: 1069px) {
+  .qol-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .qol-col li {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+}
+
+/* ---------- numbers ---------- */
+.stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: 0 0 32px;
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+}
+.stat-grid > div {
+  padding: 20px var(--gutter) 22px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.stat {
+  color: var(--coral);
+  font-family: var(--mono);
+  font-size: clamp(34px, 8vw, 56px);
+  white-space: nowrap;
+  line-height: 1;
+  letter-spacing: -0.06em;
+}
+.stat-grid dd {
+  margin: 12px 0 0;
+  color: var(--soft);
+  font-size: 14px;
+}
+@media (min-width: 1069px) {
+  .stat-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+.files-row {
+  display: grid;
+  gap: 20px;
+  align-items: center;
+}
+.files-row p {
+  max-width: 52ch;
+  margin: 0;
+}
+.term.files {
+  border: 1px solid var(--line-faint);
+  font-size: 13px;
+  overflow-x: auto;
+}
+@media (min-width: 1069px) {
+  .files-row {
+    grid-template-columns: 1fr 1.2fr;
+    gap: 48px;
+  }
+}
+
+/* ---------- opinions ---------- */
+.opinion-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: op;
+  border-top: 1px solid var(--line);
+}
+.opinion-list li {
+  display: grid;
+  grid-template-columns: 3ch minmax(0, 1fr);
+  gap: 4px 16px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+  counter-increment: op;
+}
+.opinion-list li::before {
+  content: counter(op, decimal-leading-zero);
+  grid-row: span 2;
+  color: var(--coral);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.opinion-list h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.opinion-list p {
+  margin: 0;
+}
+@media (min-width: 735px) {
+  .opinion-list li {
+    grid-template-columns: 3ch minmax(0, 1fr) minmax(0, 1.2fr);
+    align-items: baseline;
+  }
+  .opinion-list li::before {
+    grid-row: auto;
+  }
+}
+
+/* ---------- harnesses ---------- */
+.harnesses > p {
+  margin: -8px 0 20px;
+}
+.harness-list {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line-faint);
+  border-left: 1px solid var(--line-faint);
+}
+.harness-list li {
+  padding: 10px 14px;
+  border-right: 1px solid var(--line-faint);
+  border-bottom: 1px solid var(--line-faint);
+  font-family: var(--mono);
+  font-size: 14px;
+}
+
+/* ---------- nothing to sell ---------- */
+.nothing {
+  padding: 32px var(--gutter);
+  border: 1px solid var(--coral);
+  background: color-mix(in oklab, var(--coral) 5%, transparent);
+}
+.nothing p:last-child {
+  max-width: 64ch;
+  margin: 0;
+  font-size: 17px;
+}
+
+/* ---------- faq ---------- */
+.faq-list {
+  border-top: 1px solid var(--line);
+}
+.faq details {
+  border-bottom: 1px solid var(--line);
+}
+.faq summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 0;
+  font-family: var(--mono);
+  cursor: pointer;
+  list-style: none;
+}
+.faq summary::-webkit-details-marker {
+  display: none;
+}
+.faq summary::after {
+  content: '+';
+  color: var(--coral);
+}
+.faq details[open] summary::after {
+  content: '−';
+}
+.faq details p {
+  max-width: 70ch;
+  margin: 0 0 20px;
+  color: var(--soft);
+}
+
+/* ---------- cta ---------- */
+.cta {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  justify-items: center;
+  margin-bottom: 96px;
+  padding: 64px 0;
+  text-align: center;
+}
+.cta h2 {
+  margin: 0 0 24px !important;
+}
+.cta .install-row {
+  width: 100%;
+  margin: 0 auto 12px;
+  text-align: left;
+}
+.cta .term.setup {
+  width: 100%;
+  max-width: 640px;
+  margin: 0 0 16px;
+  border: 1px solid var(--line-faint);
+  font-size: 13px;
+  text-align: left;
+  white-space: pre-wrap;
+}
+.cta .small {
+  max-width: 56ch;
+  margin: 0 0 28px;
+}
+.cta .actions {
+  justify-content: center;
+}
+.cta-glow {
+  z-index: -1;
+  inset: 0;
+}
+
+/* ---------- demo player on phones: 1 row of tabs that scrolls, a tap opens the clip full screen ---------- */
+@media (max-width: 734px) {
+  .demo-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .demo-tabs button {
+    flex: none;
+  }
+  .demo-screen video {
+    cursor: zoom-in;
+  }
+  .demo-foot p::after {
+    content: ' Tap the clip: full screen.';
+    color: var(--coral);
+  }
+}
+
+/* the demo tabs: the playing clip's tab fills as its progress bar */
+.demo-tabs button {
+  position: relative;
+  overflow: hidden;
+}
+.demo-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--coral);
+  transform: scaleX(0);
+  transform-origin: left;
+  pointer-events: none;
+}
+.demo-tabs button[aria-selected='true'] .demo-progress {
+  background: var(--paper);
+}

@@ -1,12 +1,12 @@
 name: site
 
-# The site builds (Vercel deploys it): only when site/ changes.
+# The site builds (Vercel deploys it): only when site/ or the demo scripts (the clip tabs) change.
 on:
   pull_request:
-    paths: ['site/**']
+    paths: ['site/**', 'scripts/demo/recordings/**']
   push:
     branches: [main]
-    paths: ['site/**']
+    paths: ['site/**', 'scripts/demo/recordings/**']
 
 concurrency:
   group: site-${{ github.event.pull_request.number || github.ref }}

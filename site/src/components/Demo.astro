@@ -1,0 +1,120 @@
+---
+/** Recordings of the real TUI: 1 tab per script in scripts/demo/recordings/*.md (its
+ * frontmatter: label, order, caption), the clip from site/public/demo/<name>.mp4. The clips play
+ * in order: the tab of the playing clip fills as a progress bar, the next one starts at its end. */
+import fs from 'node:fs';
+import path from 'node:path';
+
+interface Props {
+  /** Clip ids to show (default: all), e.g. ['stream', 'team']. */
+  ids?: string[];
+  title?: string;
+}
+const { ids, title = 'the real tui' } = Astro.props;
+
+const dir = path.resolve('../scripts/demo/recordings');
+const clips = (fs.existsSync(dir) ? fs.readdirSync(dir) : [])
+  .filter((f) => f.endsWith('.md') && !f.startsWith('_') && f !== 'README.md')
+  .map((f) => {
+    const fm = fs.readFileSync(path.join(dir, f), 'utf8').match(/^---\n([\s\S]*?)\n---/)?.[1] ?? '';
+    const meta = Object.fromEntries(fm.split('\n').map((l) => [l.slice(0, l.indexOf(':')).trim(), l.slice(l.indexOf(':') + 1).trim()]));
+    return { id: f.slice(0, -3), label: meta.label || f.slice(0, -3), text: meta.caption || '', order: Number(meta.order) || 99 };
+  })
+  .filter((c) => !ids || ids.includes(c.id))
+  .filter((c) => fs.existsSync(path.resolve('public/demo', `${c.id}.mp4`)))
+  .sort((x, y) => x.order - y.order);
+const first = clips[0];
+---
+
+{first && <section class="box demo" aria-labelledby="demo-title">
+  <h2 class="box-title" id="demo-title">{title}</h2>
+  <div class="demo-tabs" role="tablist">
+    {
+      clips.map((c, i) => (
+        <button
+          class="frame label"
+          data-dither
+          type="button"
+          role="tab"
+          aria-selected={i === 0 ? 'true' : 'false'}
+          data-clip={c.id}
+          data-text={c.text}
+        >
+          <span>{c.label}</span>
+          <i class="demo-progress" aria-hidden="true"></i>
+        </button>
+      ))
+    }
+  </div>
+  <div class="demo-screen">
+    <video
+      id="demo-video"
+      src={`/demo/${first.id}.mp4`}
+      poster={`/demo/${first.id}.png`}
+      muted
+      playsinline
+      preload="metadata"
+      aria-label={first.text}></video>
+  </div>
+  <div class="demo-foot">
+    <p class="muted" id="demo-text">{first.text}</p>
+  </div>
+</section>}
+
+<script is:inline>
+  (() => {
+    const video = document.getElementById('demo-video');
+    const text = document.getElementById('demo-text');
+    const tabs = [...document.querySelectorAll('.demo-tabs [data-clip]')];
+    if (!video || !tabs.length) return;
+    const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let at = 0;
+    let raf = 0;
+    // the playing tab fills left to right with the clip's progress
+    const tick = () => {
+      const bar = tabs[at].querySelector('.demo-progress');
+      if (bar && video.duration) bar.style.transform = `scaleX(${Math.min(1, video.currentTime / video.duration)})`;
+      raf = requestAnimationFrame(tick);
+    };
+    const show = (i, play) => {
+      at = (i + tabs.length) % tabs.length;
+      tabs.forEach((t, k) => {
+        t.setAttribute('aria-selected', String(k === at));
+        const bar = t.querySelector('.demo-progress');
+        if (bar) bar.style.transform = 'scaleX(0)';
+      });
+      const b = tabs[at];
+      const id = b.dataset.clip;
+      video.poster = `/demo/${id}.png`;
+      video.src = `/demo/${id}.mp4`;
+      video.setAttribute('aria-label', b.dataset.text);
+      text.textContent = b.dataset.text;
+      if (play) video.play().catch(() => {});
+    };
+    if (still) {
+      video.controls = true;
+      tabs.forEach((b, i) => b.addEventListener('click', () => show(i, false)));
+      return;
+    }
+    // the end of a clip: the next tab
+    video.addEventListener('ended', () => show(at + 1, true));
+    tabs.forEach((b, i) => b.addEventListener('click', () => show(i, true)));
+    // play while in view only
+    new IntersectionObserver(([e]) => {
+      if (e.isIntersecting) {
+        video.play().catch(() => {});
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(tick);
+      } else {
+        video.pause();
+        cancelAnimationFrame(raf);
+      }
+    }, { threshold: 0.25 }).observe(video);
+    // phones: a 120-column terminal needs the whole screen; a tap opens it full screen
+    video.addEventListener('click', () => {
+      if (!matchMedia('(max-width: 734px)').matches) return;
+      if (video.requestFullscreen) video.requestFullscreen().catch(() => {});
+      else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+    });
+  })();
+</script>

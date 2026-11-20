@@ -7,7 +7,7 @@ A task is what you write on the **new** tab before a thread starts: a prompt, a 
 agents and a place to work. Starting it makes a thread and sends the task to every picked
 agent as its first message. The prompt comes first; the title is optional: 0 title, the
 prompt's 1st line names the thread (and its branch). Type, then `ctrl+enter`. `tab` / `shift+tab`
-walk the fields; `alt+1`-`alt+4` switch tabs.
+walk the fields; `F1`-`F4` (`alt+1`-`alt+4`) switch tabs.
 
 ## Prompt
 

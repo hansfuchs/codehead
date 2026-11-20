@@ -3,6 +3,12 @@ title: Thread view
 description: The agents, the stream, your prompt and the cost, in 1 terminal.
 ---
 
+From 160 columns (and in a git checkout), a thread opens side by side: the changes view left at
+full height, the agents, the stream and the prompt right. The prompt has the keys; `esc` with 0
+agents at work gives them to the changes, `i` gives them back. Narrower, the thread shows the
+chat alone: a window that shrinks when your editor opens next to it falls back to the chat by
+itself, and widens back. Once you pick a view (`F1`-`F4`, `alt+1`-`alt+4`), it stays.
+
 The thread view has these parts, top to bottom:
 
 - **Threads** (`tab`): a card per open thread: title, a wave while agents work, `●` unread.
@@ -12,7 +18,7 @@ The thread view has these parts, top to bottom:
   Markdown (tables too) with syntax colors in code blocks. Links open on a click. Scrolled
   up, its last row is a `┄` fold line.
 - **Title row**: the thread title, the scroll position (`↑12 · esc: live`).
-- **Header**: a card per agent (sprite, name, harness and model, effort, and
+- **Header**: a card per agent (avatar, name, harness and model, effort, and
   **working…**, **monitoring…** or **waits on you**) and, on screens 70 columns and wider,
   the tokens box: tokens, cost and context per agent, the last hour as a sparkline, and your
   plan's usage windows.
@@ -89,7 +95,7 @@ an agent color, so a blocked agent stands out at once.
 
 - `esc`: interrupt the running turns after 0.5 s (scrolled up: back to live first).
 - `esc esc`: back to the start screen. The thread keeps running.
-- `F2`: the menu. `n` in its **quick** tab: a new thread. Its **agents** tab shows the agents of the
+- `tab` (`F10` everywhere): the menu. `n` in its **quick** tab: a new thread. Its **agents** tab shows the agents of the
   thread as cards by harness, adds and removes them; **threads**
   switches to another thread.
 - `>` **branch**: a copy of the thread, see [threads](/docs/concepts/threads/#branching).

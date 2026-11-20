@@ -1,170 +1,306 @@
 ---
 import Base from '../layouts/Base.astro';
 import DitherGlow from '../components/DitherGlow.astro';
+import Demo from '../components/Demo.astro';
+import Wordmark from '../components/Wordmark.astro';
+import Install from '../components/Install.astro';
+import '../styles/landing.css';
 
-const harnesses: [string, string][] = [
-  ['Claude Code', 'claude -p'],
-  ['Codex', 'codex-acp'],
-  ['OpenCode', 'opencode acp'],
-  ['Goose', 'goose acp'],
-  ['Cursor', 'cursor-agent acp'],
-  ['Pi', 'pi-acp'],
-  ['Oh My Pi', 'omp acp'],
-  ['Devin', 'devin acp'],
-  ['Grok Build', 'grok agent stdio'],
-  ['Kimi Code', 'kimi acp'],
-  ['Amp', 'amp-acp'],
-  ['Hermes Agent', 'hermes-acp'],
-  ['OpenClaw', 'openclaw acp'],
+/** The 4 moves of a thread: key, title, body. */
+const moves: [string, string, string][] = [
+  ['@', 'Pick the crew.', '1 task, 1 branch or worktree, the 2 or 3 agents it needs. Small enough to hold in your head.'],
+  ['esc', 'Stop it early.', 'Every token and tool call streams in as it happens. Wrong direction at line 12? <kbd>esc</kbd>, 1 sentence, same session.'],
+  ['ctrl+⏎', 'Point at the line.', 'The diff sits left of the chat, sorted: schema and money first, lockfiles last. Select lines, write, send. The agent gets <code>file:line</code> notes.'],
+  ['r', 'Mark it read.', 'A reviewed file folds. It opens again the moment an agent touches it. Done means read.'],
 ];
 
-const features: { title: string; body: string; href: string; busy?: boolean }[] = [
+/** The tools codehead drives: key, tool, what it does there. */
+const tools: [string, string, string][] = [
+  ['! · ctrl+r', 'fzf', 'Shell mode in the thread. Your history and the thread’s commands, best match at the bottom.'],
+  ['ctrl+y', 'yazi', 'Full screen on the worktree, themed to match. A picked file lands in the prompt.'],
+  ['e', 'your editor', 'Opens the file at the line you review: Zed, VS Code, Cursor, JetBrains, Flow Control, $EDITOR.'],
+  ['url', 'portless', 'Every worktree gets its own https://branch.app.localhost. 0 port clashes.'],
+  ['O · M', 'gh', 'Push, open the PR, watch the checks, send a failed CI log to the agent, merge.'],
+  ['s · a · p', 'git', 'Stage selected lines, stage hunks, stash lines with the agent that wrote them.'],
+];
+
+/** Quality of life, by area: key, text. */
+const qol: { area: string; items: [string, string][] }[] = [
   {
-    title: 'write the task',
-    body: 'Prompt first, the title is optional. <code>@</code> picks agents from cards grouped by harness, <code>&gt;</code> mentions files, notes, threads and skills, paths complete as you type. Pasted images and long texts go in as attachments.',
-    href: '/docs/concepts/tasks/',
+    area: 'prompt',
+    items: [
+      ['/', 'A path completes as you type: <code>src/</code>, <code>~/x/</code>, <code>/etc/</code>. Spaces get quoted.'],
+      ['>', 'Commands: files, notes, threads, skills, handoff, branch, reload.'],
+      ['@', 'Agent cards by harness. <kbd>→</kbd> turns add into replace.'],
+      ['tab', 'The menu: threads, agents, tokens. Current thread on top.'],
+      ['enter', 'Markdown lists continue. <kbd>space</kbd> after a marker indents.'],
+      ['ctrl+v', 'Images paste as <code>[Image #1]</code>. Long pastes fold to 1 line.'],
+    ],
   },
   {
-    title: 'named agents',
-    body: 'A name, a harness and model, an effort, a mode, an output style, a voice and a 7×4 sprite. 1 TOML file per agent. Edit 1: its idle sessions restart with the new profile, the conversation kept.',
-    href: '/docs/concepts/agents/',
+    area: 'stream',
+    items: [
+      ['md', 'Markdown first: tables, syntax colors, links, copy buttons on code.'],
+      ['ctrl+o', 'Tool runs fold into 1 row. A click opens them as code and diffs.'],
+      ['1-9', 'Agent questions and permissions answered inline, a few keys each.'],
+      ['ctrl+t', 'Thoughts hidden, folded or open. Your pick.'],
+      ['$', 'Tokens, cost, context per agent. Your plan’s usage windows.'],
+      ['diff', 'Your own edits between turns go to the agents as a diff.'],
+    ],
   },
   {
-    title: 'agents together',
-    body: 'Agents message each other with <code>send</code> and bring each other in. Replace an agent mid-thread: <code>@new (replaces @old)</code> hands over its last messages. A step its harness cannot do goes to an agent that can.',
-    href: '/docs/concepts/messaging/',
+    area: 'review',
+    items: [
+      ['alt+\\', 'Changes left, chat right. A narrow window falls back to the chat.'],
+      ['alt+2', 'Changes grouped by what they do, each group with a why.'],
+      ['V', 'A reviewer agent puts findings under the line. <kbd>y</kbd> takes one.'],
+      ['ctrl+g', 'The commit message, drafted from the staged diff.'],
+      ['F', 'CI failed: the log goes to the agent that wrote the code.'],
+      ['p', 'Stash lines out of the worktree. The agent puts them back.'],
+    ],
   },
   {
-    title: 'a live stream',
-    body: 'Tokens show up as the agent writes them. Markdown with tables and syntax colors, tool runs folded into 1 row, opened as code blocks and diffs with a copy button. Thoughts hidden, folded or open.',
-    href: '/docs/concepts/thread-view/',
-    busy: true,
+    area: 'environment',
+    items: [
+      ['-b', 'A worktree per thread: <code>.env</code> copied, 10 ports, your setup script.'],
+      ['setup', 'Conductor and Amp setup scripts run as they are.'],
+      ['esc esc', 'Close the terminal: a detached host per thread lets agents finish.'],
+      ['>', '<code>handoff</code>: a long thread continues fresh, with a written handoff.'],
+      ['ctl', '<code>codehead ctl</code> scripts any thread. Records are plain JSON.'],
+      ['acp', '13 harnesses, mixed freely in 1 thread.'],
+    ],
   },
-  {
-    title: 'questions in the stream',
-    body: 'Permission requests and agent questions appear below the stream. <code>↑↓</code> and <code>enter</code>, <code>1</code>-<code>9</code>, <code>space</code> for several, or type an <em>other</em> answer. Autopilot, edits, supervised or plan: per agent.',
-    href: '/docs/concepts/thread-view/#questions',
-  },
-  {
-    title: 'tokens and cost',
-    body: 'Tokens, cost and context per agent, the last hour as a sparkline, and the usage windows of your plan, in the header of every thread. <code>codehead --cost</code> opens the full view.',
-    href: '/docs/concepts/thread-view/',
-  },
-  {
-    title: 'threads that keep going',
-    body: '1 detached host process per thread. Close the terminal: the agents finish their turns. Open the thread from any terminal again, or branch it into a copy that goes its own way.',
-    href: '/docs/concepts/threads/',
-  },
-  {
-    title: 'branches and worktrees',
-    body: 'Work on the current branch, switch, start a new branch, or give the thread its own worktree. The threads tab lists them with their unpushed commits.',
-    href: '/docs/concepts/tasks/#where-the-work-runs',
-  },
-  {
-    title: 'plain files',
-    body: 'A thread is a folder: <code>thread.json</code> and an append-only <code>events.jsonl</code>. Read it, grep it, or script the host with <code>codehead ctl</code>.',
-    href: '/docs/concepts/threads/#scripting',
-  },
+];
+
+const harnesses = ['Claude Code', 'Codex', 'OpenCode', 'Goose', 'Cursor', 'Pi', 'Oh My Pi', 'Devin', 'Grok Build', 'Kimi Code', 'Amp', 'Hermes Agent', 'OpenClaw'];
+
+/** The opinions: rule, reason. */
+const opinions: [string, string][] = [
+  ['1 task per thread.', 'Small enough to hold in your head.'],
+  ['A few agents, not 10.', 'Output you can still read is output you can keep.'],
+  ['Review sorted by gravity.', 'Schema and money first, lockfiles last.'],
+  ['Done means read.', 'A file folds only when you mark it.'],
+  ['Terminal only. No phone app.', 'Your agents work. You live your life. Nothing pings you at dinner.'],
+  ['Your machine, your files.', 'No cloud, no account, plain JSON you can grep.'],
+];
+
+const faq: [string, string][] = [
+  ['What is codehead?', 'An opinionated dev+AI OS for the terminal. 1 thread holds 1 task and the few agents it needs. Every token, tool call and diff streams in front of you, the changes view sorts the diff for review, and your terminal tools sit 1 key away.'],
+  ['Which agents does it run?', 'Claude Code over <code>claude -p</code>, and Codex, OpenCode, Goose, Cursor, Amp and 7 more over the Agent Client Protocol. Mix them in 1 thread.'],
+  ['Do I need an API key?', 'No. codehead uses the harness you already logged in to, and its plan or key.'],
+  ['What does it cost?', 'Nothing, and there is nothing to upgrade to. No pricing page, no cloud, no team plan, no account. Apache-2.0.'],
+  ['What happens when I close the terminal?', 'Each thread runs in a detached host. The agents finish their turn. Reopen the thread from anywhere.'],
+  ['Where is my data?', 'On your disk, in plain files: a folder per thread with <code>thread.json</code> and an append-only <code>events.jsonl</code>. 0 telemetry, in the tool and on this site.'],
 ];
 ---
 
 <Base
-  title="codehead · agent work in one terminal"
-  description="Write the task with your notes, pick named agents and a branch, then follow and steer the thread in one terminal. codehead runs the agents itself, on Claude Code, Codex, OpenCode, Goose, Cursor, Pi, Amp and 6 more harnesses."
+  title="codehead · keep your head in the code"
+  description="An opinionated dev+AI OS for the terminal, for engineers who sign their code. Agents write at agent speed, you keep the standard: every line in view, esc to stop, comments on the line, a diff marked read. 1-line install, 0 config, nothing to buy."
 >
   <header class="bar">
-    <a class="cell first frame" href="/" aria-label="codehead"><span class="logo"><span class="mark">ch</span></span></a>
-    <span class="cell grow status label"><span class="dot" aria-hidden="true"></span><span class="truncate">every green commit on main ships</span></span>
+    <a class="cell brand frame" data-dither href="/" aria-label="codehead home"><Wordmark /></a>
+    <span class="cell grow crew-cell" aria-label="a thread in codehead: its agents and what they do"><crew-strip src="/crew.json"></crew-strip></span>
     <a class="cell frame label" data-dither href="/docs/">docs</a>
     <a class="cell frame label" data-dither href="https://github.com/hansfuchs/codehead">github</a>
-    <button class="cell frame label" data-dither type="button" data-theme-toggle aria-label="switch theme">theme</button>
   </header>
 
   <main class="content">
     <section class="hero">
-      <DitherGlow class="hero-glow" peak={0.55} />
-      <p class="tag label">[ codehead · terminal app for agent work ]</p>
-      <h1>Agent work, in one terminal.</h1>
-      <p class="lead">
-        Write the task with your notes. Pick named agents and a branch. Then follow every message, tool run and
-        question of the thread as it streams, and steer it, without leaving the terminal. codehead runs the agents
-        itself, on the harness you already use.
-      </p>
-      <div class="actions">
-        <a class="button frame" data-dither href="/docs/quick-start/">quick start →</a>
-        <a class="button outline frame" data-dither href="/docs/">read the docs</a>
+      <figure class="hero-head">
+        <ascii-monolith src="/monolith.json"></ascii-monolith>
+      </figure>
+      <div class="hero-text">
+        <p class="tag label">codehead · the dev+AI OS for your terminal</p>
+        <h1>Keep your head in the code.</h1>
+        <p class="lead">
+          Agents write at agent speed. You keep the standard: every line in view as it lands, a turn stopped with
+          <kbd>esc</kbd>, a comment on the exact line, a diff marked read before it ships.
+        </p>
+        <Install id="install-cmd" />
+        <p class="meta label"><span>linux · macos</span><span>0 config</span><span>0 telemetry</span><span>apache-2.0</span></p>
       </div>
     </section>
 
-    <section class="box install">
-      <h2 class="box-title">install</h2>
-      <div class="install-row">
-        <pre class="term"><span class="d">$</span> <span id="install-cmd">curl -fsSL https://codehead.sh/install | sh</span></pre>
-        <button class="copy-cmd frame label" data-dither type="button" data-copy="install-cmd">copy</button>
+    <Demo title="the real tui" />
+
+    <section class="manifesto" aria-labelledby="codeheads">
+      <p class="kicker label">[ for codeheads ]</p>
+      <h2 id="codeheads">For the engineer who signs the code.</h2>
+      <div class="manifesto-body">
+        <p>
+          Not for the output leaderboard. Some tools count agents per hour and lines per day. codehead keeps 1 standard:
+          you understand what ships. Agents make you faster. codehead makes sure faster stays good.
+        </p>
+        <p>
+          Fleet tools turn engineers into approval queues: 10 tabs, a 4,000-line PR at 5 pm, a phone app that pings at
+          dinner. That loop is built to keep you hooked. codehead is built to let you go: 1 task, a few agents, done
+          when you read it. Close the laptop. Nothing follows you home.
+        </p>
       </div>
-      <p class="muted note">Linux and macOS · x86_64 and arm64 · needs git and 1 harness, logged in · update with <code>codehead --update</code></p>
     </section>
 
-    <section class="steps" aria-labelledby="how">
-      <h2 class="section-title label" id="how">[ how a thread works ]</h2>
-      <ol>
-        <li class="box">
-          <span class="num">01</span>
-          <h3>write the task</h3>
-          <p>The prompt, notes from your notes folder, context from a Claude Code session or another thread. Pick agents and where the work runs.</p>
-        </li>
-        <li class="box">
-          <span class="num">02</span>
-          <h3>the host runs the agents</h3>
-          <p>A detached process per thread starts 1 session per agent on its harness and gives each the codehead MCP server: <code>send</code>, <code>set_status</code>, <code>list_agents</code>.</p>
-        </li>
-        <li class="box">
-          <span class="num">03</span>
-          <h3>follow and steer</h3>
-          <p>The stream shows every token, tool run and question. Answer, interrupt with <code>esc</code>, message 1 agent with <code>@name</code>, add or replace agents.</p>
-        </li>
+    <section class="moves" aria-labelledby="moves">
+      <p class="kicker label">[ the loop ]</p>
+      <h2 id="moves">4 moves. Every thread.</h2>
+      <ol class="move-list">
+        {
+          moves.map(([k, t, b], i) => (
+            <li class="move">
+              <span class="move-n label">0{i + 1}</span>
+              <kbd class="move-key">{k}</kbd>
+              <h3>{t}</h3>
+              <p set:html={b} />
+            </li>
+          ))
+        }
       </ol>
     </section>
 
-    <section class="grid three" aria-label="features">
-      {
-        features.map((f) => (
-          <a class="box feature frame" data-dither href={f.href} {...(f.busy ? { 'data-life': '', 'aria-busy': 'true' } : {})}>
-            <h2 class="box-title">{f.title}</h2>
-            <p set:html={f.body} />
-            <span class="more label" aria-hidden="true">
-              read more →
-            </span>
-          </a>
-        ))
-      }
+    <section class="crew" aria-labelledby="crew">
+      <p class="kicker label">[ the crew ]</p>
+      <div class="crew-head">
+        <h2 id="crew">Agents with names, not tabs.</h2>
+        <p class="muted">
+          Each agent is a name, a harness, a model and a face: 1 TOML file. Claude Code writes, Codex reviews, OpenCode
+          takes over when Claude’s usage runs out. In 1 thread, in front of you. The faces act out the work: they talk
+          while they work, flash when they wait on you, and form out of braille goo when they join.
+        </p>
+      </div>
+      <crew-stage src="/crew.json"></crew-stage>
+      <pre class="term crew-toml" aria-label="an agent file"><span class="d"># ~/.config/codehead/agents/HAL.toml</span>
+harness = <span class="a">"codex"</span>
+model   = <span class="a">"gpt-5.5"</span>
+mode    = <span class="a">"autopilot"</span>
+voice   = <span class="a">"Reviewer. Name the risk, the file and the line."</span>
+sprite  = &#123; id = <span class="a">"regi:40"</span> &#125;</pre>
     </section>
 
-    <section class="box harnesses">
-      <h2 class="box-title">13 harnesses</h2>
-      <p class="muted">
-        Claude Code runs as <code>claude -p</code> over stream-json. Every other harness runs over the{' '}
-        <a href="https://agentclientprotocol.com">Agent Client Protocol</a>. Mix them on 1 thread: an agent on Codex reviews what an agent on Claude Code wrote.
-      </p>
-      <ul>
+    <section class="os split" aria-labelledby="os">
+      <div class="split-head">
+        <p class="kicker label">[ the os ]</p>
+        <h2 id="os">It drives your setup. It doesn’t replace it.</h2>
+        <p class="muted">
+          1 loop from task to merge, with the terminal tools power users already trust 1 key away. You jump into the
+          code when it matters. Everything else stays in the thread.
+        </p>
+      </div>
+      <ul class="spec">
         {
-          harnesses.map(([name, cmd]) => (
+          tools.map(([k, t, b]) => (
             <li>
-              <span>{name}</span>
-              <code>{cmd}</code>
+              <span class="spec-name">{t}</span>
+              <span class="spec-body"><kbd>{k}</kbd> {b}</span>
             </li>
           ))
         }
       </ul>
-      <a class="button outline frame" data-dither href="/docs/requirements/#a-harness">install commands →</a>
+    </section>
+
+    <section class="qol" aria-labelledby="qol">
+      <p class="kicker label">[ the small things ]</p>
+      <h2 id="qol">Every key earns its place.</h2>
+      <div class="qol-grid">
+        {
+          qol.map((g) => (
+            <div class="qol-col">
+              <p class="label qol-area">{g.area}</p>
+              <ul>
+                {g.items.map(([k, t]) => (
+                  <li>
+                    <kbd>{k}</kbd>
+                    <span set:html={t} />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))
+        }
+      </div>
+      <p class="muted small">Every key, per screen: <a href="/docs/reference/keys/">the key reference</a>.</p>
+    </section>
+
+    <section class="numbers" aria-labelledby="numbers">
+      <p class="kicker label">[ under the hood ]</p>
+      <h2 id="numbers">Fast enough to forget it’s there.</h2>
+      <dl class="stat-grid">
+        <div><dt class="stat">7 ms</dt><dd>from <code>codehead</code> to the 1st frame</dd></div>
+        <div><dt class="stat">&lt;20 ms</dt><dd>per screen change, every screen</dd></div>
+        <div><dt class="stat">0</dt><dd>frames drawn while idle</dd></div>
+        <div><dt class="stat">0</dt><dd>bytes of telemetry. Ever.</dd></div>
+      </dl>
+      <div class="files-row">
+        <p class="muted">
+          Rust, 1 binary. A thread is a folder: <code>thread.json</code> and an append-only <code>events.jsonl</code>. grep
+          it, or script the host with <code>codehead ctl</code>.
+        </p>
+<pre class="term files" aria-label="a thread on disk"><span class="d">$</span> ls ~/.local/share/codehead/threads/refunds
+thread.json  events.jsonl
+<span class="d">$</span> grep -c tool_call events.jsonl
+<span class="a">214</span>
+<span class="d">$</span> codehead ctl send refunds "@EVA run the tests"
+<span class="d">sent</span></pre>
+      </div>
+    </section>
+
+    <section class="opinions split" aria-labelledby="opinions">
+      <div class="split-head">
+        <p class="kicker label">[ opinions ]</p>
+        <h2 id="opinions">Opinions, so you don’t need settings.</h2>
+        <p class="muted">codehead decides the workflow. You spend the saved hours on the code.</p>
+      </div>
+      <ol class="opinion-list">
+        {
+          opinions.map(([r, why]) => (
+            <li>
+              <h3>{r}</h3>
+              <p class="muted">{why}</p>
+            </li>
+          ))
+        }
+      </ol>
+    </section>
+
+    <section class="harnesses" aria-labelledby="harnesses">
+      <p class="kicker label">[ harnesses ]</p>
+      <h2 id="harnesses">Bring the agent you already pay for.</h2>
+      <p class="muted">No API key. codehead uses your harness’s login and plan.</p>
+      <ul class="harness-list">{harnesses.map((h) => <li>{h}</li>)}</ul>
+    </section>
+
+    <section class="nothing" aria-labelledby="nothing">
+      <p class="kicker label">[ nothing to sell ]</p>
+      <h2 id="nothing">There is no pricing page.</h2>
+      <p>
+        No cloud, no team plan, no waitlist, no account, no telemetry. codehead is Apache-2.0 and stays that way. It
+        exists for 1 reason: AI fatigue is real, and the fix is not more AI. It is better work with less noise.
+      </p>
+    </section>
+
+    <section class="faq" aria-labelledby="faq">
+      <p class="kicker label" id="faq">[ faq ]</p>
+      <div class="faq-list">
+        {
+          faq.map(([q, a]) => (
+            <details>
+              <summary>{q}</summary>
+              <p set:html={a} />
+            </details>
+          ))
+        }
+      </div>
     </section>
 
     <section class="cta">
-      <DitherGlow class="cta-glow" peak={0.45} />
-      <h2>Start a thread.</h2>
+      <DitherGlow class="cta-glow" peak={0.4} />
+      <h2>Read what ships.</h2>
+      <Install id="install-cmd-cta" />
+<pre class="term setup" aria-label="what the installer checks"><span class="a">✓</span> codehead   <span class="a">✓</span> git   <span class="a">✓</span> claude <span class="d">(logged in)</span>   <span class="a">✓</span> portless <span class="d">+ local CA</span>
+<span class="d">$</span> codehead</pre>
+      <p class="muted small">Your harness login. Your <code>.env</code> copied into each worktree. Your Conductor or Amp setup script runs as it is.</p>
       <div class="actions">
         <a class="button frame" data-dither href="/docs/quick-start/">quick start →</a>
-        <a class="button outline frame" data-dither href="/docs/reference/keys/">every key</a>
+        <a class="button outline frame" data-dither href="https://github.com/hansfuchs/codehead">github</a>
       </div>
     </section>
   </main>
@@ -174,7 +310,7 @@ const features: { title: string; body: string; href: string; busy?: boolean }[] 
     <a class="frame" data-dither href="/docs/">docs</a>
     <a class="frame" data-dither href="/llms.txt">llms.txt</a>
     <span class="grow"></span>
-    <span>apache-2.0</span>
+    <span>0 telemetry · apache-2.0</span>
   </footer>
 
   <script is:inline>

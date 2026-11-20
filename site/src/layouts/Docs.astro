@@ -1,6 +1,7 @@
 ---
 import Base from './Base.astro';
 import { nav, flat, href } from '../nav';
+import Wordmark from '../components/Wordmark.astro';
 
 interface Props {
   title: string;
@@ -17,11 +18,11 @@ const next = i >= 0 && i < flat.length - 1 ? flat[i + 1] : undefined;
 <Base title={`${title} · codehead`} description={description}>
   <div class="docs">
     <header class="topbar">
-      <a class="logo" href="/"><span class="mark">ch</span><span>codehead</span></a>
+      <a class="logo" href="/" aria-label="codehead home"><Wordmark /></a>
       <button type="button" aria-controls="side" aria-expanded="false" data-menu>menu</button>
     </header>
     <aside class="side" id="side">
-      <a class="logo" href="/"><span class="mark">ch</span><span>codehead</span></a>
+      <a class="logo" href="/" aria-label="codehead home"><Wordmark /></a>
       <nav aria-label="docs">
         {
           nav.map((g) => (
@@ -43,7 +44,6 @@ const next = i >= 0 && i < flat.length - 1 ? flat[i + 1] : undefined;
       <div class="foot">
         <a href="https://github.com/hansfuchs/codehead">github</a>
         <a href="/llms.txt">llms.txt</a>
-        <button type="button" data-theme-toggle>theme</button>
       </div>
     </aside>
     <main class="page">

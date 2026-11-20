@@ -4,15 +4,16 @@ description: Every key, per screen.
 ---
 
 `codehead --help` prints the full list. ⌘ keys need a terminal with the kitty keyboard protocol.
-`F2` and `>` are the defaults of the settings `[keys] menu` and `[keys] command`.
+`F10` and `>` are the defaults of the settings `[keys] menu` and `[keys] command`. In the thread
+view, `tab` opens the menu too (on forms, `tab` walks the fields).
 
 ## Everywhere
 
 | Key | Action |
 | --- | --- |
-| `F2` | menu: quick commands (`n`: new thread), threads, tokens, agents (`←→`: tabs, `esc` / `tab`: close) |
+| `F10` (thread view: `tab`) | menu: quick commands (`n`: new thread), threads, tokens, agents (`←→`: tabs, `esc` / `tab`: close) |
 | `tab` / `shift+tab` | next / previous field (a question: its choices ↔ the prompt) |
-| `alt+1`-`alt+4` | start screen: new, threads, agents, settings tab (macOS: Option as Meta) |
+| `F1`-`F4`, `alt+1`-`alt+4` | start screen: the tabs (macOS: Option as Meta) |
 | `ctrl+←` `ctrl+→`, `alt+←` `alt+→` | word jumps in a text field |
 | `esc` | 1 level back: never applies, never drops edits unasked |
 | `ctrl+z` / `ctrl+shift+z` | undo / redo in any text field (`⌘z` / `⌘⇧z`) |
@@ -57,9 +58,9 @@ description: Every key, per screen.
 | `ctrl+i` | the IDE (setting `editor`) on the thread's worktree (`⌘i`): the window that has it open, else a new one |
 | `pgup` `pgdn`, `shift+↑↓`, wheel | scroll the stream |
 | `tab` / `shift+tab` | thread header under the view bar: the open threads (`←→` pick, `enter` open) |
-| `alt+←` `alt+→` (`⌥←` `⌥→`) | previous / next view of the thread: chat, changes, files (the view bar on the top row); word jumps in the prompt: `ctrl+←→` |
-| `alt+1` `alt+2` `alt+3` | chat / changes / files view |
-| `alt+\` | changes view: the chat on its left on / off (from 200 columns; on by default) |
+| `alt+←` `alt+→` (`⌥←` `⌥→`) | previous / next view of the thread: chat, changes, merge, files (the view bar on the top row); word jumps in the prompt: `ctrl+←→` |
+| `F1`-`F4`, `alt+1`-`alt+4` | chat / changes / merge / files view |
+| `alt+\` | changes view: the chat on its right on / off (from 160 columns; on by default) |
 | `ctrl+y` | yazi (full screen) on the worktree; a picked file goes into the prompt as its path |
 
 ## Changes view

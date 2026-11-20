@@ -1,0 +1,11 @@
+---
+/** The codehead wordmark: 4x8 px letters (examples/lab main.rs `glyph_rows`), in currentColor. */
+interface Props {
+  class?: string;
+}
+const { class: className } = Astro.props;
+---
+
+<svg class:list={['wordmark', className]} viewBox="0 0 39 8" shape-rendering="crispEdges" role="img" aria-label="codehead">
+  <path fill="currentColor" d="M1 3h3v1h-3zM0 4h1v1h-1zM0 5h1v1h-1zM0 6h1v1h-1zM1 7h3v1h-3zM6 3h2v1h-2zM5 4h1v1h-1zM8 4h1v1h-1zM5 5h1v1h-1zM8 5h1v1h-1zM5 6h1v1h-1zM8 6h1v1h-1zM6 7h2v1h-2zM13 0h1v1h-1zM13 1h1v1h-1zM13 2h1v1h-1zM11 3h3v1h-3zM10 4h1v1h-1zM13 4h1v1h-1zM10 5h1v1h-1zM13 5h1v1h-1zM10 6h1v1h-1zM13 6h1v1h-1zM11 7h3v1h-3zM16 3h2v1h-2zM15 4h1v1h-1zM18 4h1v1h-1zM15 5h4v1h-4zM15 6h1v1h-1zM16 7h3v1h-3zM20 0h1v1h-1zM20 1h1v1h-1zM20 2h1v1h-1zM20 3h3v1h-3zM20 4h1v1h-1zM23 4h1v1h-1zM20 5h1v1h-1zM23 5h1v1h-1zM20 6h1v1h-1zM23 6h1v1h-1zM20 7h1v1h-1zM23 7h1v1h-1zM26 3h2v1h-2zM25 4h1v1h-1zM28 4h1v1h-1zM25 5h4v1h-4zM25 6h1v1h-1zM26 7h3v1h-3zM30 3h3v1h-3zM33 4h1v1h-1zM31 5h3v1h-3zM30 6h1v1h-1zM33 6h1v1h-1zM31 7h3v1h-3zM38 0h1v1h-1zM38 1h1v1h-1zM38 2h1v1h-1zM36 3h3v1h-3zM35 4h1v1h-1zM38 4h1v1h-1zM35 5h1v1h-1zM38 5h1v1h-1zM35 6h1v1h-1zM38 6h1v1h-1zM36 7h3v1h-3z" />
+</svg>

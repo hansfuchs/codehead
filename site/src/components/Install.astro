@@ -1,0 +1,12 @@
+---
+/** The install command with a copy button. The command wraps on narrow screens: it never scrolls. */
+interface Props {
+  id: string;
+}
+const { id } = Astro.props;
+---
+
+<div class="install-row">
+  <pre class="term"><span class="d">$</span> <span id={id}>curl -fsSL https://codehead.sh/install | sh</span></pre>
+  <button class="copy-cmd frame label" data-dither type="button" data-copy={id}>copy</button>
+</div>

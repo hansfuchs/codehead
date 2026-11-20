@@ -19,7 +19,7 @@ session of its harness that codehead starts, feeds and listens to.
 - **Thread view**: the agents and the thread's cost on top, the live stream of messages, tool
   runs, thoughts and questions, your prompt.
 - **Questions**: permission requests and agent questions in the stream, answered with a few keys.
-- **Named agents**: a model, a mode, an output style and a sprite each, in 1 TOML file.
+- **Named agents**: a model, a mode, an output style and an avatar each, in 1 TOML file.
 - **Agents together**: agents message each other and bring each other into the thread.
 - **Threads tab**: threads, worktrees and recent Claude Code sessions to continue.
 

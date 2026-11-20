@@ -18,7 +18,7 @@ voice = "Short, dry, exact."
 prompt = """
 Run the tests before you report done.
 """
-sprite = { id = "regi-008", rows = ["╭─────╮", "│⢀⢀⢐⢀⢀│", "│  ⢐  │", "╰─────╯"] }
+sprite = { id = "regi:31 eyes=3 speed=0.5", rows = ["⢀⣠⠖⠛⠳⣄⡀", "⡞⠉⠠ ⠠⢀⣹", "⠹⡔⠠⠈⠠⢀⡇", " ⠈⠳⢤⠔⠋ "] }
 skills = ["review"]       # optional: the skills it loads
 command = "npx pi-acp"    # optional, ACP harnesses: another command
 ```
@@ -42,16 +42,22 @@ publishing, dropped databases and the like.
 Questions show up in the [thread view](/docs/concepts/thread-view/). codehead's own tools
 (`send`, `set_status`, `list_agents`) never ask.
 
-## Sprites
+## Avatars
 
-Each agent gets a 7×4 glyph portrait, shown in the thread view and on the agents tab:
+Each agent gets an animated 7×4 braille avatar, shown in the thread view, on the agents tab
+and in the menu. It acts out the agent's status: it talks and blinks with its eyes while it
+works, looks around while it monitors, flashes when it waits on you.
 
-<pre class="sprite">╭─────╮
-│⢀⢀⢐⢀⢀│
-│  ⢐  │
-╰─────╯</pre>
+2 categories:
 
-The agent form picks a sprite set, then a sprite, or you draw your own in `$EDITOR`.
+- **regi** (the default): a 1-dot braille frame or a wireframe solid that floats, with eye
+  dots in 1 of 12 patterns
+- **geo**: ray-marched solids, each with its own motion
+
+On the agent form, `enter` on the avatar row opens the picker: `tab` switches the category,
+`←→↑↓` picks, `s` previews a status, `f` sets the float speed, `e` the eye pattern (regi),
+`enter` takes it. When an agent appears in a thread, it spawns: it forms out of braille goo in
+its color.
 
 ## Output styles
 

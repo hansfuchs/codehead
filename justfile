@@ -29,3 +29,8 @@ site-build:
 # Agent sprite pools (examples/sprites.rs): --force regenerates pcb + chip, --sheet prints them.
 sprites *args:
     cargo run --quiet --example sprites -- {{args}}
+
+# Demo videos of the real TUI (scripts/demo): fake harnesses, scripted keys → site/public/demo/.
+demo *flows:
+    cargo build --release --locked
+    ~/.cache/codehead-demo/venv/bin/python scripts/demo/demo.py {{flows}}

@@ -1,12 +1,12 @@
 # codehead
 
 <p>
-  <a href="https://github.com/hansfuchs/codehead/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/hansfuchs/codehead?color=cc5c10"></a>
+  <a href="https://github.com/hansfuchs/codehead/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/hansfuchs/codehead?color=ff7565"></a>
   <img alt="Linux and macOS" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-150700">
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-e3d2be"></a>
 </p>
 
-**Agent work, in one terminal.**
+**Keep your head in the code.**
 
 Write the task with your notes, pick named agents and a branch, then follow every message,
 tool run and question of the thread, and steer it. codehead runs the agents itself, on the
