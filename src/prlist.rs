@@ -102,6 +102,9 @@ pub struct PrList {
     cursor: usize,
     offset: usize,
     rows: Vec<(Rect, usize)>,
+    /// Data version: up with each read that brings new PRs (the list dissolves in).
+    version: u64,
+    fx: crate::dissolve::Dissolve,
 }
 
 fn dir() -> PathBuf {
@@ -137,6 +140,21 @@ pub fn remember(thread: &str, prs: &[PrRef]) {
         let _ = std::fs::create_dir_all(dir());
         crate::engine::write_atomic(&p, v.to_string().as_bytes())
     });
+}
+
+/// The PRs the merge tab of THREAD found last (`remember`).
+pub fn remembered(thread: &str) -> Vec<PrRef> {
+    let v: Value = std::fs::read(dir().join("threads.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    v[thread]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|k| {
+            let (repo, n) = k.rsplit_once('/')?;
+            Some(PrRef::new(repo, n.parse().ok()?))
+        })
+        .collect()
 }
 
 /// PR → its thread: the remembered lists, then the threads' checkouts on the PR's branch.
@@ -214,12 +232,20 @@ impl PrList {
     }
 
     /// A finished read applies. True: a redraw is due.
+    /// A read is on its way.
+    pub fn reading(&self) -> bool {
+        self.read.is_some()
+    }
+
     pub fn poll(&mut self) -> bool {
         let Some(rx) = &self.read else { return false };
         let Ok(r) = rx.try_recv() else { return false };
         self.read = None;
         match r {
             Ok(e) => {
+                if e != self.entries {
+                    self.version += 1;
+                }
                 self.entries = e;
                 self.error = None;
             }
@@ -310,7 +336,14 @@ impl PrList {
         Pick::None
     }
 
+    /// The list in AREA: the cache at once, a read's new PRs dissolve in.
     pub fn draw(&mut self, f: &mut Frame, area: Rect, focused: bool) {
+        self.draw_now(f, area, focused);
+        let list = Rect { y: area.y + 3, height: area.height.saturating_sub(3), ..area };
+        self.fx.apply(f, list, self.version);
+    }
+
+    fn draw_now(&mut self, f: &mut Frame, area: Rect, focused: bool) {
         self.rows.clear();
         if area.height < 2 {
             return;

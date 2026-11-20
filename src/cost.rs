@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::buffer::{Buffer, Cell};
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -348,61 +348,11 @@ struct Morph {
 }
 
 impl Morph {
-    /// The box now: equal cells as they are; bar cells by a 4x4 Bayer order, text cells by a
-    /// left-to-right decode (old, noise in the accent, new).
+    /// The box now: the changed cells on their way from FROM to TO (`dissolve::mix`).
     fn shown(&self) -> Buffer {
         let p = (self.start.elapsed().as_secs_f32() / MORPH_TIME.as_secs_f32()).min(1.0);
-        if p >= 1.0 {
-            return self.to.clone();
-        }
-        let mut out = self.to.clone();
-        let a = self.to.area;
-        let blank = Cell::default();
-        let frame = (p * 1000.0 / 33.0) as u64;
-        for y in 0..a.height {
-            for x in 0..a.width {
-                let new = &self.to[(x, y)];
-                let old = self.from.cell((x, y)).unwrap_or(&blank);
-                if old == new {
-                    continue;
-                }
-                let cell = if is_bar(old) || is_bar(new) {
-                    if p > BAYER[(y % 4) as usize][(x % 4) as usize] { new.clone() } else { old.clone() }
-                } else {
-                    let at = x as f32 / a.width.max(1) as f32;
-                    let cyc = p * (1.0 + BAND);
-                    if cyc > at + BAND {
-                        new.clone()
-                    } else if cyc > at {
-                        let n = crate::avatar::regi::hash(frame * 131 + u64::from(y) * 977 + u64::from(x));
-                        let mut c = new.clone();
-                        c.set_char(NOISE[(n * NOISE.len() as f32) as usize % NOISE.len()]).set_style(theme::accent());
-                        c
-                    } else {
-                        old.clone()
-                    }
-                };
-                out[(x, y)] = cell;
-            }
-        }
-        out
+        crate::dissolve::mix(&self.from, &self.to, p)
     }
-}
-
-const BAND: f32 = 0.15;
-const NOISE: [char; 10] = ['░', '▒', '▓', '/', '\\', '|', '-', '+', '*', '#'];
-/// 4x4 Bayer thresholds, 0..1.
-const BAYER: [[f32; 4]; 4] = [
-    [0.5 / 16.0, 8.5 / 16.0, 2.5 / 16.0, 10.5 / 16.0],
-    [12.5 / 16.0, 4.5 / 16.0, 14.5 / 16.0, 6.5 / 16.0],
-    [3.5 / 16.0, 11.5 / 16.0, 1.5 / 16.0, 9.5 / 16.0],
-    [15.5 / 16.0, 7.5 / 16.0, 13.5 / 16.0, 5.5 / 16.0],
-];
-
-/// A cell of a window bar or a sparkline: it dithers, it does not decode.
-fn is_bar(c: &Cell) -> bool {
-    let sym = c.symbol();
-    (sym == " " && c.bg != ratatui::style::Color::Reset) || sym.chars().next().is_some_and(|ch| SPARK.contains(&ch) || "░▒▓█".contains(ch))
 }
 
 /// BOX (at 0, 0) into the frame at AREA.

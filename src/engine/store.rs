@@ -184,6 +184,13 @@ pub fn update(id: &str, f: impl FnOnce(&mut Thread)) -> Result<Thread, String> {
 }
 
 /// Every thread, newest activity first.
+/// The thread updated last, by its thread.json's time (1 parse, not 1 per thread).
+pub fn latest() -> Option<Thread> {
+    let rd = std::fs::read_dir(threads_dir()).ok()?;
+    let newest = rd.flatten().map(|e| e.path().join("thread.json")).filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p))).max_by_key(|(t, _)| *t)?;
+    serde_json::from_slice(&std::fs::read(newest.1).ok()?).ok()
+}
+
 pub fn all() -> Vec<Thread> {
     let Ok(rd) = std::fs::read_dir(threads_dir()) else { return Vec::new() };
     let mut v: Vec<Thread> = rd
@@ -368,6 +375,40 @@ impl Tail {
         Tail { path: events_path(id), offset: 0, partial: Vec::new() }
     }
 
+    /// A tail from the last BYTES of the log (its 1st whole line on): the start of the 1st line it
+    /// reads, the events before it are `head`'s.
+    pub fn from_end(id: &str, bytes: u64) -> (Tail, u64) {
+        let path = events_path(id);
+        let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if len <= bytes {
+            return (Tail { path, offset: 0, partial: Vec::new() }, 0);
+        }
+        let from = len - bytes;
+        // the line cut at FROM: its rest skipped
+        let mut start = from;
+        if let Ok(mut f) = std::fs::File::open(&path)
+            && f.seek(SeekFrom::Start(from - 1)).is_ok()
+        {
+            let mut cut = Vec::new();
+            if std::io::BufRead::read_until(&mut std::io::BufReader::new(f), b'\n', &mut cut).is_ok() {
+                start = from - 1 + cut.len() as u64;
+            }
+        }
+        (Tail { path, offset: start, partial: Vec::new() }, start)
+    }
+}
+
+/// The events of thread ID's log before byte END (the part a `Tail::from_end` skipped).
+pub fn head(id: &str, end: u64) -> Vec<Event> {
+    let Ok(mut f) = std::fs::File::open(events_path(id)) else { return Vec::new() };
+    let mut buf = vec![0u8; end as usize];
+    if f.read_exact(&mut buf).is_err() {
+        return Vec::new();
+    }
+    buf.split(|&b| b == b'\n').filter(|l| !l.is_empty()).filter_map(|l| serde_json::from_slice(l).ok()).collect()
+}
+
+impl Tail {
     /// Events written since the last read.
     pub fn read(&mut self) -> Vec<Event> {
         let Ok(mut f) = std::fs::File::open(&self.path) else { return Vec::new() };
@@ -390,6 +431,26 @@ impl Tail {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tail_from_the_end_starts_at_a_whole_line_and_the_head_holds_the_rest() {
+        let t = Thread::new("t", "do it", Path::new("/tmp"), vec!["ada".into()]);
+        t.save().unwrap();
+        for i in 0..20 {
+            append(&t.id, &Event { ts: i, agent: Some("ada".into()), kind: Kind::Text { text: format!("line {i} {}", "x".repeat(40)) } }).unwrap();
+        }
+        let len = std::fs::metadata(events_path(&t.id)).unwrap().len();
+        let (mut tail, end) = Tail::from_end(&t.id, len / 3);
+        assert!(end > 0 && end < len);
+        let (head, rest) = (head(&t.id, end), tail.read());
+        assert!(!head.is_empty() && !rest.is_empty());
+        let ts: Vec<u64> = head.iter().chain(&rest).map(|e| e.ts).collect();
+        assert_eq!(ts, (0..20).collect::<Vec<_>>(), "every event once, in order");
+        // a short log: the whole of it from the tail, 0 head
+        let (_, end) = Tail::from_end(&t.id, len + 10);
+        assert_eq!(end, 0);
+        let _ = std::fs::remove_dir_all(thread_dir(&t.id));
+    }
 
     #[test]
     fn events_round_trip_and_tail_reads_only_new_lines() {

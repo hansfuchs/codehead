@@ -14,7 +14,7 @@ use crate::theme;
 const TAIL: u64 = 512 * 1024;
 const BIG: u64 = 4 * 1024 * 1024;
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     pub id: String,
     pub path: PathBuf,

@@ -159,6 +159,15 @@ pub struct View {
     texts: HashMap<(PathBuf, u64), String>,
     scroll: usize,
     loaded: Option<Instant>,
+    /// The list's read (the thread log, the home repo's notes): off the UI thread.
+    reads: crate::background::Reads<(), Vec<Entry>>,
+    /// Preview renders (markdown, code highlight): off the UI thread.
+    renders: crate::background::Reads<(PathBuf, u16, u64), Vec<Line<'static>>>,
+    /// Data versions (a list read in, a preview in): their areas dissolve to the new rows.
+    list_version: u64,
+    preview_version: u64,
+    list_fx: crate::dissolve::Dissolve,
+    preview_fx: crate::dissolve::Dissolve,
     /// Files messages named (clicked links): they stay in the list.
     named: Vec<PathBuf>,
     /// Fuzzy filter (f): name and content; typing while focused.
@@ -184,6 +193,12 @@ impl View {
             texts: HashMap::new(),
             scroll: 0,
             loaded: None,
+            reads: crate::background::Reads::default(),
+            renders: crate::background::Reads::default(),
+            list_version: 0,
+            preview_version: 0,
+            list_fx: Default::default(),
+            preview_fx: Default::default(),
             named: Vec::new(),
             filter,
             filtering: false,
@@ -257,22 +272,61 @@ impl View {
         if !now && self.loaded.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) {
             return;
         }
-        let mut files = load(&self.id, &self.dir);
+        self.loaded = Some(Instant::now());
+        // tests: at once
+        if cfg!(test) {
+            let files = load(&self.id, &self.dir);
+            let _ = self.apply(files);
+            return;
+        }
+        if !self.reads.waiting(&()) {
+            let (id, dir) = (self.id.clone(), self.dir.clone());
+            self.reads.request((), move || load(&id, &dir));
+        }
+    }
+
+    /// A finished read of the list: in. True: the list changed.
+    pub fn poll(&mut self) -> bool {
+        let reads = self.reads.poll();
+        let mut changed = false;
+        for (_, files) in reads {
+            changed |= self.apply(files);
+        }
+        if changed {
+            self.list_version += 1;
+        }
+        let renders = self.renders.poll();
+        if !renders.is_empty() {
+            if self.cache.len() > 64 {
+                self.cache.clear();
+            }
+            self.cache.extend(renders);
+            self.preview_version += 1;
+            changed = true;
+        }
+        changed
+    }
+
+    /// FILES (a read of the list) + the named files: the list; the cursor stays on its file.
+    /// True: the list changed.
+    fn apply(&mut self, mut files: Vec<Entry>) -> bool {
         // named files (clicked links) stay
         for p in self.named.iter().rev() {
             if !files.iter().any(|e| e.path == *p) {
                 files.insert(0, Entry { path: p.clone(), source: Source::Named, at: mtime(p) });
             }
         }
-        self.loaded = Some(Instant::now());
         if files != self.files || self.visible.len() != self.files.len() || !self.filter.text().trim().is_empty() {
             let cur = self.cur().map(|e| e.path.clone());
+            let changed = files != self.files;
             self.files = files;
             self.rebuild();
             if let Some(p) = cur {
                 self.at = self.visible.iter().position(|(i, _)| self.files[*i].path == p).unwrap_or(self.at);
             }
+            return changed;
         }
+        false
     }
 
     /// Pick PATH (a file a message named): in the list, else added.
@@ -282,6 +336,10 @@ impl View {
         }
         self.filter.set_text("");
         self.filtering = false;
+        // the named file at once; the rest of the list from the read
+        if !self.files.iter().any(|e| e.path == path) {
+            self.files.insert(0, Entry { path: path.to_path_buf(), source: Source::Named, at: mtime(path) });
+        }
         self.refresh(true);
         self.rebuild();
         self.at = self.visible.iter().position(|(i, _)| self.files[*i].path == path).unwrap_or(0);
@@ -304,24 +362,23 @@ impl View {
         }
     }
 
-    fn preview_lines(&mut self, p: &Path, width: u16) -> Vec<Line<'static>> {
+    /// The preview of P at WIDTH: from the cache, else None and a render off the UI thread
+    /// (tests: at once).
+    fn preview_lines(&mut self, p: &Path, width: u16) -> Option<Vec<Line<'static>>> {
         let key = (p.to_path_buf(), width, mtime(p));
         if let Some(l) = self.cache.get(&key) {
-            return l.clone();
+            return Some(l.clone());
         }
-        let text = std::fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_else(|e| format!("{e}"));
-        let w = usize::from(width);
-        let lines: Vec<Line<'static>> = if p.extension().is_some_and(|x| x == "md") {
-            crate::render::markdown(&text, w, &[]).into_iter().map(|r| r.line).collect()
-        } else {
-            let lang = p.extension().map(|x| x.to_string_lossy().into_owned()).unwrap_or_else(|| "text".into());
-            crate::render::code_rows(&text, &lang, w, &[], true, None).into_iter().skip(1).map(|r| r.line).collect()
-        };
-        if self.cache.len() > 64 {
-            self.cache.clear();
+        if cfg!(test) {
+            let lines = render_preview(p, width);
+            self.cache.insert(key, lines.clone());
+            return Some(lines);
         }
-        self.cache.insert(key, lines.clone());
-        lines
+        if !self.renders.waiting(&key) {
+            let path = p.to_path_buf();
+            self.renders.request(key, move || render_preview(&path, width));
+        }
+        None
     }
 
     /// The list rows: per section a heading, its files, a blank row between sections; a filter:
@@ -347,6 +404,7 @@ impl View {
     }
 
     pub fn draw(&mut self, f: &mut Frame, area: Rect) {
+        self.poll();
         self.refresh(false);
         if self.files.is_empty() {
             f.render_widget(Paragraph::new(Line::styled("  0 files yet: the files the agents write, and the home repo's notes of this thread · ctrl+y: yazi", theme::muted())), area);
@@ -423,13 +481,18 @@ impl View {
                 }
             }
         }
+        self.list_fx.apply(f, list, self.list_version);
         let Some(p) = self.cur().map(|e| e.path.clone()) else { return };
-        let lines = self.preview_lines(&p, preview.width.saturating_sub(1));
+        let Some(lines) = self.preview_lines(&p, preview.width.saturating_sub(1)) else {
+            f.render_widget(Paragraph::new(Line::styled(format!(" {} · reading…", self.shown(&p)), theme::muted())), Rect { height: 1, ..preview });
+            return;
+        };
         self.scroll = self.scroll.min(lines.len().saturating_sub(1));
         let head = Line::from(vec![Span::styled(format!(" {} ", self.shown(&p)), theme::accent_bold()), Span::styled(format!("{} lines · o: IDE · y: yazi · c: copy path · f: filter", lines.len()), theme::muted())]);
         f.render_widget(Paragraph::new(head), Rect { height: 1, ..preview });
         let body: Vec<Line> = lines.into_iter().skip(self.scroll).take(usize::from(preview.height.saturating_sub(2))).collect();
         f.render_widget(Paragraph::new(body), Rect { x: preview.x + 1, y: preview.y + 2, height: preview.height.saturating_sub(2), width: preview.width.saturating_sub(1) });
+        self.preview_fx.apply(f, preview, self.preview_version);
     }
 
     fn step(&mut self, d: isize) {
@@ -575,6 +638,18 @@ pub fn yazi_cmd(target: &Path) -> (Vec<String>, Vec<(String, String)>, PathBuf) 
     let _ = std::fs::remove_file(&chooser);
     let argv = vec!["yazi".to_string(), target.display().to_string(), format!("--chooser-file={}", chooser.display())];
     (argv, vec![("YAZI_CONFIG_HOME".into(), yazi_config().display().to_string())], chooser)
+}
+
+/// The preview rows of P at WIDTH: markdown, else highlighted code.
+fn render_preview(p: &Path, width: u16) -> Vec<Line<'static>> {
+    let text = std::fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_else(|e| format!("{e}"));
+    let w = usize::from(width);
+    if p.extension().is_some_and(|x| x == "md") {
+        crate::render::markdown(&text, w, &[]).into_iter().map(|r| r.line).collect()
+    } else {
+        let lang = p.extension().map(|x| x.to_string_lossy().into_owned()).unwrap_or_else(|| "text".into());
+        crate::render::code_rows(&text, &lang, w, &[], true, None).into_iter().skip(1).map(|r| r.line).collect()
+    }
 }
 
 #[cfg(test)]

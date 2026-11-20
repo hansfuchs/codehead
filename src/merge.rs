@@ -129,6 +129,25 @@ struct Tab {
     /// An edit on its way.
     busy: Option<String>,
     changes: Option<crate::changes::View>,
+    /// The disk cache of the PR was read (once per tab).
+    cached: bool,
+}
+
+/// The disk cache of PR's last read: `prs/pr/<owner>/<name>/<number>.json` in the data dir.
+fn cache_path(pr: &PrRef) -> PathBuf {
+    crate::engine::data_dir().join("prs").join("pr").join(format!("{}.json", pr.key()))
+}
+
+fn cache_read(pr: &PrRef) -> Option<Pr> {
+    serde_json::from_slice(&std::fs::read(cache_path(pr)).ok()?).ok()
+}
+
+fn cache_write(p: &Pr) {
+    let path = cache_path(&p.pr);
+    if let (Some(dir), Ok(b)) = (path.parent(), serde_json::to_vec(p)) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = crate::engine::write_atomic(&path, &b);
+    }
 }
 
 enum Res {
@@ -157,6 +176,9 @@ pub struct Merge {
     tx: Sender<Res>,
     rx: Receiver<Res>,
     sources: Option<Sources>,
+    /// Data version: up with each read that brings new data (its area dissolves in).
+    version: u64,
+    fx: crate::dissolve::Dissolve,
     assoc_at: Option<Instant>,
     assoc_busy: bool,
     assoc_error: Option<String>,
@@ -231,8 +253,10 @@ pub fn open_url(url: &str) {
 
 impl Merge {
     /// The merge tab of a thread: its PRs come from SOURCES (read in the background).
+    /// The merge tab of thread ID: its PRs of the last read at once (a read follows).
     pub fn for_thread(id: &str) -> Merge {
-        let mut m = Merge::new(true, Vec::new());
+        let prs = if cfg!(test) { Vec::new() } else { crate::prlist::remembered(id) };
+        let mut m = Merge::new(true, prs);
         m.thread_id = id.to_string();
         m
     }
@@ -253,6 +277,8 @@ impl Merge {
             tx,
             rx,
             sources: None,
+            version: 0,
+            fx: Default::default(),
             assoc_at: None,
             assoc_busy: false,
             assoc_error: None,
@@ -353,6 +379,11 @@ impl Merge {
         t.read_at = Some(Instant::now());
         self.spawn(move || {
             let r = gh::fetch(&pr);
+            if let Ok(p) = &r
+                && !cfg!(test)
+            {
+                cache_write(p);
+            }
             Res::Pr(pr, Box::new(r))
         });
     }
@@ -381,6 +412,9 @@ impl Merge {
                             if let Some(c) = t.changes.as_mut() {
                                 c.set_pr(&p);
                             }
+                            if t.pr.as_ref() != Some(&p) {
+                                self.version += 1;
+                            }
                             t.pr = Some(p);
                             t.error = None;
                         }
@@ -392,6 +426,9 @@ impl Merge {
                     match r {
                         Ok(list) => {
                             crate::prlist::remember(&self.thread_id, &list);
+                            if list != self.prs {
+                                self.version += 1;
+                            }
                             let keep = self.current().cloned();
                             self.prs = list;
                             self.cur = keep.and_then(|k| self.prs.iter().position(|p| *p == k)).unwrap_or(0);
@@ -1003,7 +1040,24 @@ impl Merge {
         v
     }
 
+    /// The merge tab in AREA: the cached PR at once, a read's new data dissolves in.
     pub fn draw(&mut self, f: &mut Frame, area: Rect, focused: bool) {
+        if let Some(pr) = self.current().cloned()
+            && !cfg!(test)
+        {
+            let t = self.tabs.entry(pr.clone()).or_default();
+            if !t.cached {
+                t.cached = true;
+                if t.pr.is_none() {
+                    t.pr = cache_read(&pr);
+                }
+            }
+        }
+        self.draw_now(f, area, focused);
+        self.fx.apply(f, area, self.version);
+    }
+
+    fn draw_now(&mut self, f: &mut Frame, area: Rect, focused: bool) {
         self.area = area;
         self.hits.clear();
         self.tab_hits.clear();

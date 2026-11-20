@@ -102,6 +102,9 @@ enum Msg {
     Shell(String, String, i32, PathBuf),
     /// Shell mode's dir: the thread's checkout with the most line changes.
     ShellCwd(PathBuf),
+    /// The log's events before the tail the view opened with (a big log: read in the
+    /// background).
+    Head(Vec<store::Event>),
 }
 
 struct View {
@@ -109,6 +112,8 @@ struct View {
     title: String,
     cwd: PathBuf,
     tail: store::Tail,
+    /// The log opened at its tail (a big log): the events read since, until the head is in.
+    early: Option<Vec<store::Event>>,
     thread: stream::Thread,
     roster: Vec<crate::agents::Agent>,
     members: Vec<String>,
@@ -165,6 +170,8 @@ struct View {
     /// The merge tab: the thread's pull requests.
     merge: crate::merge::Merge,
     merge_sources_at: Option<Instant>,
+    /// The merge tab's sources read (git remotes, the log's PR links): off the UI thread.
+    merge_reads: crate::background::Reads<(), (Vec<(String, PathBuf)>, crate::merge::Sources)>,
     /// ctrl+r in shell mode: the history search.
     hist: crate::histsearch::HistSearch,
     command: crate::command::Command,
@@ -249,6 +256,14 @@ struct View {
 
 impl View {
     fn new(id: &str, cwd: &Path, title: &str, tx: Sender<Msg>) -> View {
+        // a big log: the 1st frame from its last 256 KiB, the rest parsed in the background
+        let (tail, head_end) = if cfg!(test) { (store::Tail::new(id), 0) } else { store::Tail::from_end(id, 256 << 10) };
+        if head_end > 0 {
+            let (id, tx) = (id.to_string(), tx.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(Msg::Head(store::head(&id, head_end)));
+            });
+        }
         let roster = crate::agents::load();
         let mut input = TextArea::new(false, "message the thread · @name for someone else");
         input.style = Some(theme::text());
@@ -259,7 +274,8 @@ impl View {
             id: id.to_string(),
             title: title.lines().next().unwrap_or_default().to_string(),
             cwd: cwd.to_path_buf(),
-            tail: store::Tail::new(id),
+            tail,
+            early: (head_end > 0).then(Vec::new),
             thread: stream::Thread::default(),
             roster: Vec::new(),
             members: Vec::new(),
@@ -297,6 +313,7 @@ impl View {
             checkout_labels: Vec::new(),
             merge: crate::merge::Merge::for_thread(id),
             merge_sources_at: None,
+            merge_reads: crate::background::Reads::default(),
             hist: Default::default(),
             command,
             paths: crate::paths::Paths::new(cwd),
@@ -562,6 +579,9 @@ impl View {
         if evs.is_empty() {
             return false;
         }
+        if let Some(early) = self.early.as_mut() {
+            early.extend(evs.iter().cloned());
+        }
         let asks = self.thread.asks.first().map(|a| a.id.clone());
         for e in &evs {
             self.thread.push(e);
@@ -594,6 +614,22 @@ impl View {
         self.history = self.thread.sent();
         self.dirty = true;
         true
+    }
+
+    /// The log's head is in: the stream again from the 1st event (head, then the tail so far).
+    fn take_head(&mut self, head: Vec<store::Event>) {
+        let Some(early) = self.early.take() else { return };
+        let mut t = stream::Thread::default();
+        for e in head.iter().chain(&early) {
+            t.push(e);
+        }
+        let asks = self.thread.asks.first().map(|a| a.id.clone());
+        self.thread = t;
+        if self.thread.asks.first().map(|a| a.id.clone()) != asks {
+            self.ask.sync(self.thread.asks.first());
+        }
+        self.history = self.thread.sent();
+        self.dirty = true;
     }
 
     fn toast(&mut self, m: impl Into<String>) {
@@ -1429,15 +1465,40 @@ impl View {
             return;
         }
         self.merge_sources_at = Some(Instant::now());
-        let Some(t) = store::load(&self.id) else { return };
-        let checkouts: Vec<(PathBuf, Option<String>)> = t.all_checkouts().into_iter().map(|c| (PathBuf::from(c.dir), c.branch)).collect();
-        for (dir, _) in &checkouts {
-            if let Some(repo) = crate::gh::repo_of_dir(dir) {
-                self.merge.set_dir(&repo, dir.clone());
-            }
+        let id = self.id.clone();
+        let read = move || {
+            let Some(t) = store::load(&id) else { return (Vec::new(), crate::merge::Sources::default()) };
+            let checkouts: Vec<(PathBuf, Option<String>)> = t.all_checkouts().into_iter().map(|c| (PathBuf::from(c.dir), c.branch)).collect();
+            let dirs = checkouts.iter().filter_map(|(dir, _)| crate::gh::repo_of_dir(dir).map(|r| (r, dir.clone()))).collect();
+            let log = std::fs::read_to_string(store::events_path(&id)).unwrap_or_default();
+            (dirs, crate::merge::Sources { checkouts, links: crate::gh::pr_urls(&log) })
+        };
+        // tests: at once
+        if cfg!(test) {
+            let r = read();
+            self.apply_merge_sources(r);
+            return;
         }
-        let log = std::fs::read_to_string(store::events_path(&self.id)).unwrap_or_default();
-        self.merge.set_sources(crate::merge::Sources { checkouts, links: crate::gh::pr_urls(&log) });
+        if !self.merge_reads.waiting(&()) {
+            self.merge_reads.request((), read);
+        }
+    }
+
+    fn apply_merge_sources(&mut self, (dirs, sources): (Vec<(String, PathBuf)>, crate::merge::Sources)) {
+        for (repo, dir) in dirs {
+            self.merge.set_dir(&repo, dir);
+        }
+        self.merge.set_sources(sources);
+    }
+
+    /// A finished sources read: in the merge tab. True: 1 came.
+    fn poll_merge_sources(&mut self) -> bool {
+        let reads = self.merge_reads.poll();
+        let any = !reads.is_empty();
+        for (_, r) in reads {
+            self.apply_merge_sources(r);
+        }
+        any
     }
 
     /// The thread's checkouts (more of them: an agent edited in another repo / worktree).
@@ -2720,6 +2781,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
     let _sub = subscribe(id, tx.clone());
     crate::engine::trace("view new …");
+    let opened = Instant::now();
     let mut v = View::new(id, cwd, title, tx);
     crate::engine::trace("view new");
     // the menu's merge tab picked a PR of this thread: its merge tab on it
@@ -2744,6 +2806,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     }
     v.save_prompt();
     crate::nav::mark_seen_now(id);
+    let mut opening = Some(opened);
     let mut roster_at = Instant::now();
     let mut drawn = Instant::now() - Duration::from_secs(1);
     let mut dirty = true;
@@ -2754,15 +2817,25 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     loop {
         // a frame on change; animations (wave, spinners, toast) at 150 ms; else 1 per second
         // (clock, cost box, sending timer)
-        let every = if v.spawning() { Duration::from_millis(33) } else if v.animating() { Duration::from_millis(150) } else { Duration::from_secs(1) };
+        let every = if v.spawning() || crate::dissolve::active() || v.menu.as_ref().is_some_and(|m| m.waiting()) { Duration::from_millis(33) } else if v.animating() { Duration::from_millis(150) } else { Duration::from_secs(1) };
         if dirty || drawn.elapsed() >= every {
+            let (pane, menu) = (v.pane, v.menu.is_some());
+            let _w = crate::engine::watch(move || format!("view: draw {pane:?}{}", if menu { " + menu" } else { "" }));
             term.draw(|f| v.draw(f)).map_err(|e| e.to_string())?;
-            crate::engine::trace("view draw");
             drawn = Instant::now();
             dirty = false;
+            crate::engine::first_frame();
+            if let Some(at) = opening.take() {
+                let took = at.elapsed();
+                if took > crate::engine::BUDGET {
+                    crate::engine::trace(&format!("SLOW {} view open → 1st frame", took.as_millis()));
+                }
+            }
         }
         crate::all_keys(v.all_keys());
         for (ev, at) in crate::read_ready(Duration::from_millis(50))? {
+            let tag = if crate::engine::trace_on() { format!("view {:?}{}: {ev:?}", v.pane, if v.menu.is_some() { " + menu" } else { "" }) } else { String::new() };
+            let _w = crate::engine::watch(move || tag);
             crate::textarea::stamp(Some(at));
             dirty = true;
             let done = match ev {
@@ -2807,8 +2880,12 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
             crate::nav::mark_seen_now(id);
             return Ok(std::mem::replace(&mut v.exit, Exit::Back));
         }
+        let pane = v.pane;
+        let _w = crate::engine::watch(move || format!("view: tick {pane:?}"));
         dirty |= v.hist.poll();
         dirty |= v.merge.poll(v.pane == Pane::Merge);
+        dirty |= v.files.poll();
+        dirty |= v.poll_merge_sources();
         while let Ok(m) = rx.try_recv() {
             dirty = true;
             match m {
@@ -2843,6 +2920,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
                     v.shell_done(cmd, out, code, &dir);
                     wake = true;
                 }
+                Msg::Head(head) => v.take_head(head),
                 Msg::ShellCwd(dir) => {
                     v.shell_cwd = dir;
                     v.dirty = true;

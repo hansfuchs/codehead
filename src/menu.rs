@@ -82,6 +82,9 @@ pub struct Menu {
     filter: TextArea,
     cards: Vec<Card>,
     loading: Option<Receiver<Vec<Card>>>,
+    /// Data version of the cards: up with each read that brings new cards (they dissolve in).
+    cards_version: u64,
+    cards_fx: crate::dissolve::Dissolve,
     tcursor: usize,
     toffset: usize,
     /// Repo tabs of the threads tab (←→): the current thread's repo, the others by thread count,
@@ -141,10 +144,14 @@ impl Menu {
         let loading = (cards.is_empty() && !cfg!(test)).then(|| {
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
-                let _ = tx.send(nav::load());
+                let cards = nav::load();
+                crate::background::save("cards", &cards);
+                let _ = tx.send(cards);
             });
             rx
         });
+        // the cards of the last read at once; the read's new cards dissolve in
+        let cards = if cards.is_empty() && !cfg!(test) { crate::background::snapshot("cards").unwrap_or_default() } else { cards };
         let mut all = builtins();
         all.extend(items);
         let mut filter = TextArea::new(true, "filter threads");
@@ -158,6 +165,8 @@ impl Menu {
             filter,
             cards,
             loading,
+            cards_version: 0,
+            cards_fx: Default::default(),
             tcursor: 0,
             toffset: 0,
             repos: crate::tabgroup::TabGroup::default(),
@@ -211,6 +220,11 @@ impl Menu {
         }
     }
 
+    /// A background read on its way (threads, messages, tokens, PRs): the host draws often.
+    pub fn waiting(&self) -> bool {
+        self.loading.is_some() || self.msgs_rx.is_some() || self.detail_rx.is_some() || (self.tab == Tab::Merge && self.prs.reading())
+    }
+
     fn poll(&mut self) {
         if self.tab == Tab::Merge {
             self.prs.ensure();
@@ -219,6 +233,9 @@ impl Menu {
         if let Some(rx) = &self.loading
             && let Ok(c) = rx.try_recv()
         {
+            if c != self.cards {
+                self.cards_version += 1;
+            }
             self.cards = c;
             self.loading = None;
         }
@@ -758,7 +775,7 @@ impl Menu {
         let list = Rect { y: body.y + 3, height: body.height.saturating_sub(3), ..body };
         let vis = self.visible();
         if vis.is_empty() {
-            let msg = if self.loading.is_some() { "reading threads…" } else if cur != RepoTab::All { "0 threads in this repo" } else { "0 threads" };
+            let msg = if self.loading.is_some() && self.cards.is_empty() { "reading threads…" } else if cur != RepoTab::All { "0 threads in this repo" } else { "0 threads" };
             f.render_widget(Paragraph::new(Span::styled(msg, theme::muted())), Rect { height: 1, ..list });
             return;
         }
@@ -778,6 +795,7 @@ impl Menu {
             nav::draw_card(f.buffer_mut(), r, c, slot == self.tcursor, self.thread.as_deref() == Some(c.id.as_str()), true, tick);
             self.rows.push((r, i));
         }
+        self.cards_fx.apply(f, list, self.cards_version);
         let more = vis.len().saturating_sub(self.toffset + fits);
         if self.toffset > 0 || more > 0 {
             let text = format!("{}↑ · {more}↓", self.toffset);

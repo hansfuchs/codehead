@@ -158,18 +158,24 @@ struct Choices {
 /// Choices of REPO (CWD: the dir codehead runs in): current branch, new branch, new branch +
 /// worktree, default branch (main, else master), the other branches (newest commit first).
 fn where_choices(repo: &Path, cwd: &Path) -> Choices {
-    // 5 git runs at once (~20 ms each in a big repo): the start screen waits for them
-    let (bs, here_branch, mut here_dir, checkouts, repo_branch) = std::thread::scope(|s| {
-        let bs = s.spawn(|| threads::branches(repo));
-        let here = s.spawn(|| threads::current_branch(cwd));
-        let top = s.spawn(|| threads::git(cwd, &["rev-parse", "--show-toplevel"]).1.trim().to_string());
+    // 2 git runs at once (~15 ms each): off the UI thread (`quick_choices` until then)
+    let (bs, checkouts) = std::thread::scope(|s| {
         let checkouts = s.spawn(|| threads::checkouts(repo));
-        let repo_branch = threads::current_branch(repo);
-        (bs.join().unwrap_or_default(), here.join().unwrap_or_default(), top.join().unwrap_or_default(), checkouts.join().unwrap_or_default(), repo_branch)
+        (threads::branches(repo), checkouts.join().unwrap_or_default())
     });
-    if here_dir.is_empty() {
-        here_dir = repo.display().to_string();
-    }
+    choices_of(repo, cwd, bs, checkouts)
+}
+
+/// The where choices by the file system only (0 git runs): current branch, new branch, new
+/// branch + worktree. The branches come with `where_choices`.
+fn quick_choices(repo: &Path, cwd: &Path) -> Choices {
+    choices_of(repo, cwd, Vec::new(), HashMap::new())
+}
+
+fn choices_of(repo: &Path, cwd: &Path, bs: Vec<String>, checkouts: HashMap<String, String>) -> Choices {
+    let here_branch = threads::current_branch(cwd);
+    let repo_branch = threads::current_branch(repo);
+    let here_dir = threads::toplevel(cwd).unwrap_or_else(|| repo.to_path_buf()).display().to_string();
     let default = ["main", "master"].into_iter().find(|d| bs.iter().any(|b| b == d)).map(String::from);
     let mut wheres = vec![Where::Current, Where::NewBranch, Where::NewWorktree];
     if let Some(d) = default.as_ref().filter(|d| **d != here_branch) {
@@ -626,6 +632,11 @@ pub struct App {
     repos: Vec<crate::home::Repo>,
     repo: Option<crate::home::Repo>,
     repo_pick: Option<crate::repopick::Picker>,
+    /// The where row's branches per repo: off the UI thread (git runs).
+    where_reads: background::Reads<PathBuf, Choices>,
+    /// Data version of the threads tab: up with each read that brings new rows (they dissolve in).
+    threads_version: u64,
+    threads_fx: crate::dissolve::Dissolve,
     start_cwd: PathBuf,
     where_i: usize,
     /// Where dropdown (enter on the where row): open with its cursor, scroll, filter.
@@ -831,7 +842,7 @@ impl App {
         }
         // where: current branch, new branch, new branch + worktree, default branch (main, else master),
         // the other branches (newest commit first)
-        let Choices { wheres, checkouts, repo_branch, here_branch, here_dir } = cfg.repo.as_deref().map(|r| where_choices(r, &cfg.cwd)).unwrap_or_default();
+        let Choices { wheres, checkouts, repo_branch, here_branch, here_dir } = cfg.repo.as_deref().map(|r| if cfg!(test) { where_choices(r, &cfg.cwd) } else { quick_choices(r, &cfg.cwd) }).unwrap_or_default();
         // the repo codehead started in; the home repo's repos for the picker
         let repo = cfg.repo.as_ref().map(|r| crate::home::Repo { name: r.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), path: r.clone(), url: None });
         let repos = if cfg!(test) { Vec::new() } else { crate::home::repos() };
@@ -844,6 +855,9 @@ impl App {
             repos,
             repo,
             repo_pick: None,
+            where_reads: background::Reads::default(),
+            threads_version: 0,
+            threads_fx: Default::default(),
             start_cwd,
             wheres,
             where_i,
@@ -956,6 +970,10 @@ impl App {
         app.refresh_agents();
         if !cfg!(test) {
             app.reload_notes();
+            if let Some(r) = app.cfg.repo.clone() {
+                let cwd = app.cfg.cwd.clone();
+                app.where_reads.request(r.clone(), move || where_choices(&r, &cwd));
+            }
         }
         app
     }
@@ -1189,6 +1207,20 @@ impl App {
     /// Background reads in. True: something on screen may change (a redraw is due).
     pub fn tick(&mut self) -> bool {
         let mut dirty = self.previews.poll();
+        // the where row's branches: the pick stays on its choice
+        for (repo, c) in self.where_reads.poll() {
+            if self.cfg.repo.as_ref() != Some(&repo) || self.repo.as_ref().is_some_and(|r| r.url.is_some()) {
+                continue;
+            }
+            let picked = self.wheres.get(self.where_i).cloned();
+            self.wheres = c.wheres;
+            self.checkouts = c.checkouts;
+            self.repo_branch = c.repo_branch;
+            self.here_branch = c.here_branch;
+            self.here_dir = c.here_dir;
+            self.where_i = picked.and_then(|p| self.wheres.iter().position(|w| *w == p)).unwrap_or(0);
+            dirty = true;
+        }
         // the new-thread view opens: the plan windows start now, the task can take its time
         if self.screen == Screen::Pick && self.tab == Tab::Merge {
             dirty |= self.merge_tab.poll();
@@ -1219,12 +1251,20 @@ impl App {
         let keep = self.current_wt().map(|w| w.key()).or_else(|| self.current_session().map(|s| s.key()));
         let mut changed = false;
         for (_, rows) in self.thread_reads.poll() {
+            if self.worktrees.as_ref() == Some(&rows) {
+                continue;
+            }
+            self.threads_version += 1;
             self.worktrees = Some(rows);
             changed = true;
             let keys: HashSet<String> = self.worktrees.iter().flatten().map(|w| w.key()).collect();
             self.tsel.retain(|k| keys.contains(k));
         }
         for (_, rows) in self.session_reads.poll() {
+            if self.sessions == rows {
+                continue;
+            }
+            self.threads_version += 1;
             self.sessions = rows;
             changed = true;
         }
@@ -1446,8 +1486,13 @@ impl App {
         self.cfg.cwd = cwd.clone();
         let c = if e.clone.is_some() {
             Choices { wheres: vec![Where::NewWorktree], here_dir: root.display().to_string(), ..Default::default() }
-        } else {
+        } else if cfg!(test) {
             where_choices(&root, &cwd)
+        } else {
+            // the branches: from the background read (`tick`)
+            let (r, d) = (root.clone(), cwd.clone());
+            self.where_reads.request(root.clone(), move || where_choices(&r, &d));
+            quick_choices(&root, &cwd)
         };
         self.wheres = c.wheres;
         self.checkouts = c.checkouts;
@@ -3928,7 +3973,10 @@ impl App {
         f.render_widget(p, inner);
         match self.tab {
             Tab::Notes => self.draw_notes(f, list),
-            Tab::Threads => self.draw_threads(f, list),
+            Tab::Threads => {
+                self.draw_threads(f, list);
+                self.threads_fx.apply(f, list, self.threads_version);
+            }
             Tab::Agents | Tab::New => self.draw_agents(f, list),
             Tab::Settings | Tab::Merge => {}
         }

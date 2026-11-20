@@ -107,11 +107,7 @@ impl Paths {
 
     /// CWD: the dir of the task / thread.
     pub fn new(cwd: &Path) -> Paths {
-        let (ok, top, _) = crate::threads::git(cwd, &["rev-parse", "--show-toplevel"]);
-        let mut roots = Vec::new();
-        if ok && !top.trim().is_empty() {
-            roots.push(PathBuf::from(top.trim()));
-        }
+        let mut roots: Vec<PathBuf> = crate::threads::toplevel(cwd).into_iter().collect();
         if !roots.iter().any(|r| r == cwd) {
             roots.push(cwd.to_path_buf());
         }

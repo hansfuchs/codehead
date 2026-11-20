@@ -54,6 +54,7 @@ mod skills;
 mod sprites;
 mod stream;
 mod subagents;
+mod dissolve;
 mod styles;
 mod tabgroup;
 mod textarea;
@@ -507,7 +508,7 @@ fn start(args: Args) {
         fail(&e, 2);
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let repo = threads::repo_of(&cwd);
+    let repo = threads::repo_root(&cwd);
     if engine::harnesses::installed().is_empty() {
         let list: Vec<String> = engine::harnesses::ALL.iter().map(|h| format!("  {} ({}): {}", h.label, h.bin, h.install)).collect();
         fail(&format!("0 harnesses on PATH: codehead's agents run on one of these:\n{}", list.join("\n")), 1);
@@ -539,16 +540,6 @@ fn start(args: Args) {
         logs: engine::logs_dir(),
         drafts: drafts::dir(),
     };
-    engine::trace("app new …");
-    let mut app = App::new(cfg, &args.title);
-    // -b names a branch of the start dir's repo: the setting `repo` stays off then
-    if args.branch.is_none()
-        && let Some(r) = config::default_repo()
-    {
-        app.use_default_repo(&r);
-    }
-    engine::trace("app new");
-
     restore_on_panic();
     catch_signals();
     // agents stopped on a usage limit whose host is gone (a reboot, a kill): their host again,
@@ -576,18 +567,32 @@ fn start(args: Args) {
 
     // plain `codehead` (0 options, 0 title): the thread updated last; esc esc: the start screen
     let plain = args.view.is_none() && args.title.is_empty() && args.agent.is_none() && args.branch.is_none() && !args.copy && !args.dry;
-    let latest = plain.then(|| engine::store::all().into_iter().next().map(|t| t.id)).flatten();
+    let latest = plain.then(engine::store::latest).flatten().map(|t| t.id);
+    // the thread view first: the start screen (App) is built when it ends
+    let mut back: Option<Option<menu::Home>> = None;
     if let Some(id) = args.view.as_ref().or(latest.as_ref()) {
-        engine::trace("latest");
-        let t = threads::all_threads_lite().into_iter().find(|t| t.id.starts_with(id));
-        engine::trace("all_threads");
+        // 1 thread.json (an id prefix: the newest match), 0 scan of every thread's host and log
+        let t = engine::store::load(id).or_else(|| engine::store::all().into_iter().find(|t| t.id.starts_with(id.as_str())));
         let Some(t) = t else { tty.leave(&mut out); fail(&format!("no thread {id}"), 2) };
-        let dir = [t.worktree.clone(), t.dir.clone()].into_iter().flatten().map(PathBuf::from).find(|p| p.is_dir()).unwrap_or_else(|| cwd.clone());
+        let dir = [t.worktree.clone(), Some(t.dir.clone())].into_iter().flatten().map(PathBuf::from).find(|p| p.is_dir()).unwrap_or_else(|| cwd.clone());
         // --view opens a done thread again; the auto-open leaves its state as it is
         if args.view.is_some() {
             wake(&t.id);
         }
-        let tab = open_view(&mut term, &mut tty, &mut out, &t.id, &dir, &t.title, &cwd, None);
+        back = Some(open_view(&mut term, &mut tty, &mut out, &t.id, &dir, &t.title, &cwd, None));
+    }
+    // a thread view ended: until the start screen's next frame
+    let mut transition: Option<Instant> = back.is_some().then(Instant::now);
+    engine::trace("app new …");
+    let mut app = App::new(cfg, &args.title);
+    // -b names a branch of the start dir's repo: the setting `repo` stays off then
+    if args.branch.is_none()
+        && let Some(r) = config::default_repo()
+    {
+        app.use_default_repo(&r);
+    }
+    engine::trace("app new");
+    if let Some(tab) = back {
         app.return_from_thread();
         if let Some(tab) = tab { app.go_home(tab); }
     }
@@ -597,10 +602,19 @@ fn start(args: Args) {
     let mut drawn = Instant::now();
     'screens: loop {
     loop {
-        if dirty || drawn.elapsed() >= Duration::from_secs(1) {
+        // a dissolve under way: 30 frames per second
+        if dirty || drawn.elapsed() >= Duration::from_secs(1) || (dissolve::active() && drawn.elapsed() >= Duration::from_millis(33)) {
+            let _w = engine::watch(|| "start: draw".to_string());
             let _ = term.draw(|f| app.draw(f));
             dirty = false;
             drawn = Instant::now();
+            engine::first_frame();
+            if let Some(at) = transition.take() {
+                let took = at.elapsed();
+                if took > engine::BUDGET {
+                    engine::trace(&format!("SLOW {} back to the start screen", took.as_millis()));
+                }
+            }
         }
         if app.outcome.is_some() {
             break;
@@ -629,7 +643,7 @@ fn start(args: Args) {
             continue;
         }
         // every waiting event before the next draw: a burst (OS text substitution) stays 1 burst
-        let mut wait = Duration::from_millis(80);
+        let mut wait = Duration::from_millis(if dissolve::active() { 33 } else { 80 });
         let mut failed = false;
         'events: loop {
             let batch = match read_ready(wait) {
@@ -643,6 +657,8 @@ fn start(args: Args) {
             dirty = true;
             for (ev, at) in batch {
                 textarea::stamp(Some(at));
+                let tag = if engine::trace_on() { format!("start: {ev:?}") } else { String::new() };
+                let _w = engine::watch(move || tag);
                 match ev {
                     Event::Key(k) if k.kind != KeyEventKind::Release => app.key(k),
                     Event::Mouse(m) => app.mouse(m),
@@ -660,6 +676,7 @@ fn start(args: Args) {
         if failed {
             break;
         }
+        let _w = engine::watch(|| "start: tick".to_string());
         dirty |= app.tick();
     }
 
@@ -822,6 +839,7 @@ fn start(args: Args) {
             open_view(&mut term, &mut tty, &mut out, &t.id, &dir, &t.title, &cwd, None)
         }
     };
+    transition = Some(Instant::now());
     app.return_from_thread();
     if let Some(tab) = home_tab { app.go_home(tab); }
     dirty = true;

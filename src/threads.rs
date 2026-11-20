@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 
 use crate::theme;
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Thread {
     pub id: String,
     pub title: String,
@@ -94,7 +94,7 @@ fn shortstat(dir: &Path) -> Option<(usize, usize, usize)> {
     Some((num("file") + untracked, num("insertion"), num("deletion")))
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Worktree {
     pub path: String,
     pub branch: String,
@@ -200,9 +200,26 @@ pub fn branches(repo: &Path) -> Vec<String> {
     out.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
 }
 
-/// Branch checked out at PATH ("" when detached).
+/// Branch checked out at PATH ("" when detached), by the file system only (a git run: ~13 ms):
+/// the HEAD of its checkout (a linked worktree: the HEAD in its git dir).
 pub fn current_branch(path: &Path) -> String {
-    git(path, &["branch", "--show-current"]).1.trim().to_string()
+    let Some(top) = toplevel(path) else { return String::new() };
+    let g = top.join(".git");
+    let head = if g.is_dir() {
+        g.join("HEAD")
+    } else {
+        let Ok(text) = std::fs::read_to_string(&g) else { return String::new() };
+        let Some(dir) = text.trim().strip_prefix("gitdir:").map(str::trim) else { return String::new() };
+        let dir = PathBuf::from(dir);
+        (if dir.is_relative() { top.join(dir) } else { dir }).join("HEAD")
+    };
+    std::fs::read_to_string(head).ok().and_then(|h| h.trim().strip_prefix("ref: refs/heads/").map(String::from)).unwrap_or_default()
+}
+
+/// Top dir of the checkout (main or linked worktree) that holds PATH, by the file system only:
+/// the nearest dir with a `.git` dir or file.
+pub fn toplevel(path: &Path) -> Option<PathBuf> {
+    path.ancestors().filter(|d| !d.as_os_str().is_empty()).find(|d| d.join(".git").exists()).map(Path::to_path_buf)
 }
 
 /// DIR on the default branch (main, else master) with an upstream: `git pull --ff-only` first

@@ -1166,6 +1166,9 @@ pub fn batch(comments: &[Comment]) -> Option<String> {
 }
 
 pub struct View {
+    /// Data version: up with each read that brings new diffs (they dissolve in).
+    version: u64,
+    fx: crate::dissolve::Dissolve,
     /// An alt press with 0 key after it yet: its release toggles the focus.
     alt_tap: bool,
     id: String,
@@ -1347,6 +1350,8 @@ impl View {
 
     pub fn new(id: &str, dir: &Path) -> View {
         View {
+            version: 0,
+            fx: Default::default(),
             id: id.to_string(),
             dir: dir.to_path_buf(),
             changes: Changes::default(),
@@ -2568,7 +2573,13 @@ impl View {
         }
     }
 
+    /// The view in AREA: a read's new diffs dissolve in.
     pub fn draw(&mut self, f: &mut Frame, area: Rect) {
+        self.draw_now(f, area);
+        self.fx.apply(f, area, self.version);
+    }
+
+    fn draw_now(&mut self, f: &mut Frame, area: Rect) {
         let full = area;
         if self.poll_review() {
             self.built = None;
@@ -2584,6 +2595,7 @@ impl View {
         }
         if self.poll() {
             self.built = None;
+            self.version += 1;
         }
         self.sync_stash(false);
         self.refresh(false);

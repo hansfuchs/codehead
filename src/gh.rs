@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 
 /// A pull request: repo (`owner/name`), number.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct PrRef {
     pub repo: String,
     pub number: u64,
@@ -70,7 +70,7 @@ pub fn repo_of_dir(dir: &Path) -> Option<String> {
     git(&["remote", "-v"])?.lines().find_map(|l| l.split_whitespace().nth(1).and_then(repo_of_remote))
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     #[default]
     Open,
@@ -111,7 +111,7 @@ pub struct Item {
     pub head: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Label {
     pub name: String,
     /// `rrggbb`.
@@ -119,7 +119,7 @@ pub struct Label {
 }
 
 /// Where a comment lives (the API to edit, delete, reply).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     /// On the conversation (REST: issues/comments).
     #[default]
@@ -130,7 +130,7 @@ pub enum Kind {
     Line,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Comment {
     pub kind: Kind,
     pub id: u64,
@@ -146,7 +146,7 @@ pub struct Comment {
 
 /// A comment of the conversation with its replies (a review thread: the 1st comment and the
 /// rest), PATH / LINE for a thread on the diff.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Thread {
     pub root: Comment,
     pub replies: Vec<Comment>,
@@ -156,7 +156,7 @@ pub struct Thread {
     pub outdated: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     Fail,
     Pending,
@@ -164,7 +164,7 @@ pub enum Verdict {
     Skip,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Check {
     pub name: String,
     /// The workflow (Actions) or the app.
@@ -177,7 +177,7 @@ pub struct Check {
     pub description: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Commit {
     pub oid: String,
     pub short: String,
@@ -186,7 +186,7 @@ pub struct Commit {
 }
 
 /// Everything the merge tab shows of 1 PR.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pr {
     pub pr: PrRef,
     pub title: String,

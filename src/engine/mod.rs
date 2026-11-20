@@ -144,18 +144,80 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
     std::fs::rename(&tmp, path)
 }
 
+/// The UI's budget per step (a key, a draw, a tick, a screen change): longer = a hang.
+pub const BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
+
+pub fn trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CODEHEAD_TRACE").is_some_and(|v| !v.is_empty()))
+}
+
+/// The 1st frame is on screen: longer than BUDGET after the start → `SLOW … boot`.
+pub fn first_frame() {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let took = start_instant().elapsed();
+    if took > BUDGET {
+        trace(&format!("SLOW {} cpu {} boot (1st frame)", took.as_millis(), thread_cpu().as_millis()));
+    }
+}
+
+fn start_instant() -> std::time::Instant {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *START.get_or_init(std::time::Instant::now)
+}
+
+/// A UI step under watch: at its end, longer than BUDGET → `SLOW <ms> <label>` in the trace
+/// ($CODEHEAD_TRACE=1). LABEL runs only then.
+pub struct Watch<F: FnOnce() -> String> {
+    at: std::time::Instant,
+    cpu: std::time::Duration,
+    label: Option<F>,
+}
+
+pub fn watch<F: FnOnce() -> String>(label: F) -> Watch<F> {
+    let on = trace_on();
+    Watch { at: std::time::Instant::now(), cpu: if on { thread_cpu() } else { std::time::Duration::ZERO }, label: on.then_some(label) }
+}
+
+/// CPU time of the calling thread: a step's own work (its wall time also holds waits and a
+/// busy machine).
+pub fn thread_cpu() -> std::time::Duration {
+    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: T is a valid timespec; the clock id is a constant.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+    std::time::Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+}
+
+/// $CODEHEAD_TRACE=all: every watched step in the trace, not only the slow ones.
+fn trace_all() -> bool {
+    static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALL.get_or_init(|| std::env::var("CODEHEAD_TRACE").is_ok_and(|v| v == "all"))
+}
+
+impl<F: FnOnce() -> String> Drop for Watch<F> {
+    fn drop(&mut self) {
+        let took = self.at.elapsed();
+        if (took > BUDGET || trace_all())
+            && let Some(l) = self.label.take()
+        {
+            let tag = if took > BUDGET { "SLOW" } else { "ok" };
+            trace(&format!("{tag} {} cpu {} {}", took.as_millis(), (thread_cpu().saturating_sub(self.cpu)).as_millis(), l()));
+        }
+    }
+}
+
 /// $CODEHEAD_TRACE=1: `<ms since start> <label>` lines in logs/trace.log (boot and redraw timing).
 pub fn trace(label: &str) {
-    use std::sync::OnceLock;
-    static START: OnceLock<std::time::Instant> = OnceLock::new();
-    static ON: OnceLock<bool> = OnceLock::new();
-    let start = START.get_or_init(std::time::Instant::now);
-    if !*ON.get_or_init(|| std::env::var_os("CODEHEAD_TRACE").is_some_and(|v| !v.is_empty())) {
+    let start = start_instant();
+    if !trace_on() {
         return;
     }
     use std::io::Write;
     let _ = std::fs::create_dir_all(logs_dir());
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(logs_dir().join("trace.log")) {
-        let _ = writeln!(f, "{:>6} {label}", start.elapsed().as_millis());
+        let _ = writeln!(f, "{:>6} {:>4} {label}", start.elapsed().as_millis(), thread_cpu().as_millis());
     }
 }
