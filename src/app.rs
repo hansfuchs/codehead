@@ -73,7 +73,8 @@ pub enum Outcome {
     Copy(Vec<PathBuf>),
     /// AGENTS: first starts the thread, the others join it.
     /// CLONE: a home repo to clone first (url, path).
-    New { message: String, target: Target, agents: Vec<String>, clone: Option<(String, PathBuf)> },
+    /// FLOW: the slug of the flow the thread follows.
+    New { message: String, target: Target, agents: Vec<String>, clone: Option<(String, PathBuf)>, flow: Option<String> },
     Resume(Box<Worktree>),
 }
 
@@ -93,6 +94,8 @@ enum Tab {
     /// The owner's pull requests (mergetab.rs).
     Merge,
     Agents,
+    /// Flows and their steps (flows.rs).
+    Flows,
     Settings,
 }
 
@@ -102,7 +105,8 @@ impl Tab {
             Tab::New | Tab::Notes => Tab::Threads,
             Tab::Threads => Tab::Merge,
             Tab::Merge => Tab::Agents,
-            Tab::Agents => Tab::Settings,
+            Tab::Agents => Tab::Flows,
+            Tab::Flows => Tab::Settings,
             Tab::Settings => Tab::New,
         }
     }
@@ -112,13 +116,14 @@ impl Tab {
             Tab::Threads => Tab::New,
             Tab::Merge => Tab::Threads,
             Tab::Agents => Tab::Merge,
-            Tab::Settings => Tab::Agents,
+            Tab::Flows => Tab::Agents,
+            Tab::Settings => Tab::Flows,
         }
     }
 }
 
-/// The main tabs in order (F1-F5, alt+1-5).
-const MAIN_TABS: [Tab; 5] = [Tab::New, Tab::Threads, Tab::Merge, Tab::Agents, Tab::Settings];
+/// The main tabs in order (F1-F6, alt+1-6).
+const MAIN_TABS: [Tab; 6] = [Tab::New, Tab::Threads, Tab::Merge, Tab::Agents, Tab::Flows, Tab::Settings];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -187,7 +192,7 @@ fn choices_of(repo: &Path, cwd: &Path, bs: Vec<String>, checkouts: HashMap<Strin
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Field {
-    /// "view drafts (n)" above the title (only with 1+ drafts).
+    /// The drafts row above the prompt: "view drafts (n)" (only with 1+ drafts), "save as draft".
     Drafts,
     Title,
     /// The repo row of "where" (enter: the repo picker).
@@ -196,6 +201,8 @@ enum Field {
     Where,
     /// Checkboxes below the where row: checkout, stash.
     Opts,
+    /// The flow of the new thread (←→: the flows).
+    Flow,
     Agents,
     Notes,
     Prompt,
@@ -239,7 +246,7 @@ enum ConfirmAction {
     Agent(Agent),
     /// Esc on an agent form with edits: yes drops them, no: back to the form.
     DiscardAgent(Box<AgentForm>),
-    /// ctrl+r on the task: where row, notes, context back to the start.
+    /// The menu command "reset" of the task: where row, notes, context back to the start.
     ResetTask,
 }
 
@@ -538,6 +545,8 @@ struct Regions {
     repo_row: Rect,
     repo_chip: Rect,
     repo_pick: Rect,
+    /// The flow chip of the task.
+    flow_row: Rect,
     /// The where chip (anchor of the where dropdown), the rows of the open dropdown (area, choice).
     where_chip: Rect,
     where_rows: Vec<(Rect, usize)>,
@@ -548,6 +557,8 @@ struct Regions {
     opts: Vec<(Rect, usize)>,
     /// "view drafts (n)" field, and the rows of its open dropdown (area, draft).
     drafts: Rect,
+    /// "save as draft" button, right of "view drafts (n)".
+    save_draft: Rect,
     draft_rows: Vec<(Rect, usize)>,
 }
 
@@ -557,6 +568,9 @@ pub struct App {
     pub cfg: Config,
     /// The merge tab: the owner's pull requests, 1 open.
     merge_tab: crate::mergetab::MergeTab,
+    /// The flows tab.
+    flows_tab: crate::flows::FlowsTab,
+    flows_area: Rect,
     merge_area: Rect,
     /// The new-thread view was open at the last tick (its windows warmed up: engine::warm).
     warmed: bool,
@@ -570,6 +584,8 @@ pub struct App {
     filter_editing: bool,
     /// Last mouse position: the clickable item under it gets the hover bg.
     hover: Option<Position>,
+    /// The last drawn frame: ctrl+click reads the URL under the mouse from it.
+    last_frame: ratatui::buffer::Buffer,
     /// Input of the notes filter (undo / redo, cursor); FILTER holds its text.
     filter_ta: TextArea,
     tab: Tab,
@@ -582,7 +598,7 @@ pub struct App {
     /// Threads tab filter (fuzzy, thread names). Some = row shows text.
     tfilter: Option<String>,
     tfilter_editing: bool,
-    /// Repo filter of the threads tab (chip + dropdown, ctrl+r).
+    /// Repo filter of the threads tab (chip + dropdown; ←→ step it).
     trepo: crate::repofilter::RepoFilter,
     /// Input of the threads filter; TFILTER holds its text.
     tfilter_ta: TextArea,
@@ -657,6 +673,9 @@ pub struct App {
     checkout: bool,
     stash: bool,
     opt_i: usize,
+    /// The flow row: 0 = 0 flow, I = the I-th flow of FLOW_LIB.
+    flow_i: usize,
+    flow_lib: crate::engine::flows::Library,
     /// Prompt pastes: images, long texts (files, listed in the message).
     paster: Paster,
     files: Vec<(String, PathBuf)>,
@@ -665,6 +684,8 @@ pub struct App {
     command: Command,
     /// Path dropdown of the prompt: the entries of the directory a typed path names.
     paths: crate::paths::Paths,
+    /// `#` of the prompt: the shortcuts.
+    shortcuts: crate::shortcuts::Pick,
     /// This task's draft file (id), and its content at the last write.
     draft_id: String,
     draft_saved: String,
@@ -673,6 +694,8 @@ pub struct App {
     /// The other drafts (oldest first), and the open drafts dropdown: cursor, 1st row in view.
     drafts: Vec<Draft>,
     drafts_menu: Option<(usize, usize)>,
+    /// Button of the drafts row under the cursor: 0 "view drafts (n)", 1 "save as draft".
+    draft_btn: usize,
     /// Agent cards per row (last draw), for ↑↓.
     /// Global effort (~/.claude/settings.json effortLevel), for the cards.
     effort: String,
@@ -684,6 +707,8 @@ pub struct App {
     toast: Option<(String, Instant, bool)>,
     regions: Regions,
     pub outcome: Option<Outcome>,
+    /// The notifications dropdown (ctrl+n).
+    notes_panel: Option<crate::notify::Panel>,
     pub suspend: Option<Suspend>,
     /// Time of the last plain esc, and whether it came on the start screen (a main tab, 0 local
     /// controls). A 2nd esc within DOUBLE_ESC: start screen → quit, else → close local controls.
@@ -873,16 +898,20 @@ impl App {
             checkout: true,
             stash: false,
             opt_i: 0,
+            flow_i: 0,
+            flow_lib: crate::engine::flows::Library::default(),
             paster,
             files: Vec::new(),
             mention: Mention::default(),
             command: Command::new(&cfg.cwd),
             paths: crate::paths::Paths::new(&cfg.cwd),
+            shortcuts: crate::shortcuts::Pick::default(),
             draft_id: drafts::new_id(),
             draft_saved: String::new(),
             draft_kept: false,
             drafts: Vec::new(),
             drafts_menu: None,
+            draft_btn: 0,
             effort: agents::effort_name(),
             notes,
             collapsed: HashSet::new(),
@@ -894,8 +923,11 @@ impl App {
             filter_editing: false,
             filter_ta: TextArea::new(true, ""),
             hover: None,
+            last_frame: ratatui::buffer::Buffer::default(),
             warmed: false,
             merge_tab: Default::default(),
+            flows_tab: crate::flows::FlowsTab::new(Some(cfg.cwd.clone())),
+            flows_area: Rect::default(),
             merge_area: Rect::default(),
             tab: if cfg.copy_mode { Tab::Notes } else { Tab::New },
             settings: None,
@@ -953,6 +985,7 @@ impl App {
             toast: None,
             regions: Regions::default(),
             outcome: None,
+            notes_panel: None,
             suspend: None,
             last_esc: None,
             settings_typed: false,
@@ -1502,6 +1535,8 @@ impl App {
         self.where_i = if start { 0 } else { self.wheres.iter().position(|w| *w == Where::NewWorktree).unwrap_or(0) };
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.repo = Some(crate::home::Repo { name, path: root, url: e.clone });
+        self.flow_i = 0;
+        self.load_task_flows();
     }
 
     /// The setting `repo` (DIR): the where row starts on DIR's repo, as if picked. DIR in the
@@ -1690,7 +1725,8 @@ impl App {
     /// prompt. 0 title: the prompt comes first (its 1st line: the title), 0 line twice.
     pub fn message(&self) -> String {
         let derived = self.title.text().trim().is_empty();
-        let text = self.prompt.text();
+        // `#name` of a shortcut: its text
+        let text = crate::shortcuts::expand(&self.prompt.text());
         let prompt = crate::textarea::without_empty_items(&text);
         let mut parts = Vec::new();
         if derived {
@@ -1728,7 +1764,11 @@ impl App {
             }
             Ok(target) => {
                 let agents = self.agents.iter().filter(|a| self.picks.contains(&a.name)).map(|a| a.name.clone()).collect();
-                self.outcome = Some(Outcome::New { message: self.message(), target, agents, clone: self.clone_first() })
+                let flow = self.flow_slug();
+                if let Some(f) = &flow {
+                    flow_default_set(&self.flow_key(), f);
+                }
+                self.outcome = Some(Outcome::New { message: self.message(), target, agents, clone: self.clone_first(), flow })
             }
             Err(e) => {
                 self.field = Field::Title;
@@ -1824,6 +1864,21 @@ impl App {
         self.draft_kept = false;
         self.draft_saved = self.draft().content();
         self.field = Field::Prompt;
+    }
+
+    /// "n" of the menu: the form empty, also in a draft. The task on screen stays a draft (its
+    /// file: written by backup), listed in "view drafts (n)".
+    fn new_task(&mut self) {
+        self.backup();
+        // a new id first: clear_task drops the draft of the id on screen
+        self.draft_id = drafts::new_id();
+        self.clear_task();
+        self.drafts = drafts::load(&self.cfg.drafts, &self.draft_id);
+    }
+
+    /// The button of the drafts row under the cursor: "view drafts" only with 1+ drafts.
+    fn draft_btn(&self) -> usize {
+        if self.drafts.is_empty() { 1 } else { self.draft_btn.min(1) }
     }
 
     fn open_drafts(&mut self) {
@@ -2167,12 +2222,13 @@ impl App {
                     c("menu", "edit the prompt in $EDITOR", Act::EditPrompt),
                     c("ctrl+o", "pick notes (also enter on notes)", Act::OpenNotes),
                     c("ctrl+s", "save the task as a draft for later, start over", Act::SaveDraft),
-                    c("ctrl+r", "reset: where from the where row, 0 notes, 0 Claude Code context (asks first)", Act::Reset),
+                    c("menu", "reset: where from the where row, 0 notes, 0 Claude Code context (asks first)", Act::Reset),
                     c("esc esc", "quit", Act::Quit),
                 ],
                 vec![
                     ("↑↓", "field (↑ on the prompt's 1st row leaves it)"),
-                    ("tab / shift+tab", "next / previous tab"),
+                    ("tab / shift+tab", "next / previous field"),
+                    ("F1-F6 · alt+1-6", "main tabs"),
                     ("enter", "title: next field · notes: pick · prompt: new line"),
                     ("x on notes", "drop notes + Claude Code context"),
                     ("enter", "where: dropdown · current branch · new branch · new worktree · recent branches · type: filter"),
@@ -2217,7 +2273,7 @@ impl App {
             (Screen::Pick, Tab::Threads) => (
                 vec![
                     c("f", "filter thread names (fuzzy)", Act::ThreadFilter),
-                    c("ctrl+r", "filter by repo (dropdown)", Act::RepoFilter),
+                    c("←→", "filter by repo (dropdown; ←→: the previous / next repo at once)", Act::RepoFilter),
                     c("d", "delete thread + worktree (+ branch, if pushed)", Act::DeleteThreads),
                     c("r", "reload", Act::Reload),
                     c("q", "quit", Act::Quit),
@@ -2227,10 +2283,10 @@ impl App {
                     ("space", "select thread / worktree"),
                     ("enter", "open thread (new task if none)"),
                     ("f", "filter: enter / esc back to the list"),
-                    ("ctrl+r", "repo filter: ↑↓ move, type: filter, enter: pick, esc: close"),
+                    ("←→", "previous / next repo (menu: the repo dropdown, type: filter)"),
                     ("enter on claude", "new thread, last response as context"),
                     ("c", "thread / claude session: last response in / out of the task context"),
-                    ("tab / shift+tab", "switch tab"),
+                    ("F1-F6 · alt+1-6", "switch tab"),
                     ("pgup pgdn", "scroll preview"),
                     ("esc", "clear filter"),
                 ],
@@ -2248,7 +2304,7 @@ impl App {
                     ("↑↓←→", "move in the card grid · ↑ on top row: tabs"),
                     ("enter", "edit agent"),
                     ("f", "filter: enter / esc back to the cards"),
-                    ("tab / shift+tab", "switch tab"),
+                    ("F1-F6 · alt+1-6", "switch tab"),
                     ("pgup pgdn", "scroll preview"),
                     ("esc", "close local controls"),
                 ],
@@ -2261,13 +2317,29 @@ impl App {
                     ("ctrl+enter / ctrl+click", "open on GitHub"),
                     ("←→", "state tabs: open, merged, closed, all"),
                     ("[ ] · < >", "previous / next PR · overview / changes"),
+                    ("↑ on top · ←→", "PR / views row: switch PR / overview, changes (the diff too)"),
+                    ("i · tab", "the prompt; tab / esc: back"),
                     ("i", "prompt: a new thread with this task"),
                     ("esc", "back to the list"),
                 ],
             ),
+            (Screen::Pick, Tab::Flows) => (
+                vec![c("r", "read the flow and step files again", Act::Reload), c("q", "quit", Act::Quit)],
+                vec![
+                    ("←→", "flows / steps"),
+                    ("enter", "flow: its rail · step: edit"),
+                    ("n D R", "new · duplicate · rename"),
+                    ("d d · r", "delete · reset an edited built-in"),
+                    ("m", "flow: user ↔ repo (.codehead/flows)"),
+                    ("rail: a enter J K", "add · edit · move a step"),
+                    ("rail: g o L + -", "gate · gate outcome · loop · loop max"),
+                    ("rail: @ s", "role · save a one-off as a shared step"),
+                    ("editor: ctrl+g ctrl+f", "gate · fork a shared step into a one-off"),
+                ],
+            ),
             (Screen::Pick, Tab::Settings) => (
-                vec![c("ctrl+n", "add path alias", Act::AddAlias), c("ctrl+r", "reload file", Act::Reload), c("q", "quit", Act::Quit)],
-                vec![("↑↓", "field / alias box"), ("enter", "alias box: edit / done"), ("d", "delete the highlighted alias"), ("tab / shift+tab", "switch tab"), ("esc", "close path suggestions"), ("auto", "changes apply on leaving a field")],
+                vec![c("ctrl+a", "add path alias", Act::AddAlias), c("ctrl+r", "reload file", Act::Reload), c("q", "quit", Act::Quit)],
+                vec![("↑↓", "field / alias box"), ("enter", "alias box: edit / done"), ("d", "delete the highlighted alias"), ("F1-F6 · alt+1-6", "switch tab"), ("esc", "close path suggestions"), ("auto", "changes apply on leaving a field")],
             ),
         }
     }
@@ -2287,17 +2359,33 @@ impl App {
         use crate::menu::Home;
         self.modal = None;
         self.drafts_menu = None;
+        if h == Home::New {
+            self.new_task();
+        }
         self.switch_tab(match h {
             Home::New => Tab::New,
             Home::Settings => Tab::Settings,
             Home::Agents => Tab::Agents,
             Home::Merge(_) => Tab::Merge,
+            Home::Flows(_) => Tab::Flows,
         });
         if h != Home::Settings {
             self.tabs_focus = false;
         }
         if let Home::Merge(Some(pr)) = &h {
             self.merge_tab.open(pr);
+        }
+        if let Home::Flows(Some(slug)) = &h {
+            self.flows_tab.open(slug);
+        }
+    }
+
+    /// What the flows tab asked for.
+    fn flows_out(&mut self, o: crate::flows::Out) {
+        match o {
+            crate::flows::Out::None => {}
+            crate::flows::Out::Toast(t) => self.toast(t, false),
+            crate::flows::Out::Up => self.tabs_focus = true,
         }
     }
 
@@ -2355,7 +2443,7 @@ impl App {
 
     fn run(&mut self, act: Act) {
         match act {
-            Act::AddAlias => self.settings_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+            Act::AddAlias => self.settings_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)),
             Act::AgentFilter => {
                 self.switch_tab(Tab::Agents);
                 self.tabs_focus = false;
@@ -2448,6 +2536,7 @@ impl App {
                     Tab::Agents => self.load_agents(),
                     Tab::Notes | Tab::New => self.reload_notes(),
                     Tab::Settings => { self.settings_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)); return; }
+                    Tab::Flows => self.flows_tab.enter(),
                 }
                 self.toast("reloaded", false);
             }
@@ -2596,6 +2685,16 @@ impl App {
 
     fn key_inner(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        // notifications (ctrl+n): over everything, the menu too
+        if let Some(p) = self.notes_panel.as_mut() {
+            let pick = p.key(k);
+            return self.notes_pick(pick);
+        }
+        if crate::notify::is_key(&k) {
+            self.menu = None;
+            self.notes_panel = Some(crate::notify::Panel::open(None));
+            return;
+        }
         // F2 menu: over everything, its keys first (1 esc closes it)
         if let Some(m) = self.menu.as_mut() {
             self.last_esc = None;
@@ -2621,10 +2720,8 @@ impl App {
             self.last_esc = None;
             return self.repo_pick_key(k);
         }
-        // repo dropdown of the threads tab: its keys first (esc closes it, 0 double esc); ctrl+r opens it
-        if self.screen == Screen::Pick && self.tab == Tab::Threads && self.modal.is_none()
-            && (self.trepo.is_open() || (ctrl && k.code == KeyCode::Char('r')))
-        {
+        // repo dropdown of the threads tab: its keys first (esc closes it, 0 double esc)
+        if self.screen == Screen::Pick && self.tab == Tab::Threads && self.modal.is_none() && self.trepo.is_open() {
             self.last_esc = None;
             return self.trepo_key(k);
         }
@@ -2636,7 +2733,7 @@ impl App {
             harnesses.sort();
             harnesses.dedup();
             self.command.harnesses = harnesses;
-            if self.mention.key(k, &mut self.prompt, &self.agents) || self.command.key(k, &mut self.prompt) || self.paths.key(k, &mut self.prompt) {
+            if self.mention.key(k, &mut self.prompt, &self.agents) || self.command.key(k, &mut self.prompt) || self.shortcuts.key(k, &mut self.prompt) || self.paths.key(k, &mut self.prompt) {
                 self.last_esc = None;
                 return;
             }
@@ -2676,8 +2773,8 @@ impl App {
         }
         // F1-F4 (alt+1..4 too): the main tabs from every field (ctrl / alt+←→: word jumps); tab: the next field
         let main_tab = match k.code {
-            KeyCode::F(n @ 1..=5) => Some(usize::from(n - 1)),
-            KeyCode::Char(c @ '1'..='5') if k.modifiers.contains(KeyModifiers::ALT) && !ctrl => Some(usize::from(c as u8 - b'1')),
+            KeyCode::F(n @ 1..=6) => Some(usize::from(n - 1)),
+            KeyCode::Char(c @ '1'..='6') if k.modifiers.contains(KeyModifiers::ALT) && !ctrl => Some(usize::from(c as u8 - b'1')),
             _ => None,
         };
         if !self.cfg.copy_mode
@@ -2699,6 +2796,11 @@ impl App {
                     self.settings_key(k);
                     return;
                 }
+                if self.tab == Tab::Flows && !self.tabs_focus {
+                    let o = self.flows_tab.key(k);
+                    self.flows_out(o);
+                    return;
+                }
                 if self.tab != Tab::Merge && self.preview_key(k) {
                     return;
                 }
@@ -2714,6 +2816,7 @@ impl App {
                         }
                         Tab::Agents | Tab::New => self.agents_key(k),
                         Tab::Settings => self.settings_key(k),
+                        Tab::Flows => {}
                     }
                 }
             }
@@ -2724,7 +2827,7 @@ impl App {
     /// for an Esc to close (modal, filter input, thread filter, the notes list of the task).
     fn at_start(&self) -> bool {
         let notes = self.screen == Screen::Pick && self.tab == Tab::Notes;
-        let pr_open = self.screen == Screen::Pick && self.tab == Tab::Merge && (self.merge_tab.is_detail() || self.merge_tab.typing());
+        let pr_open = self.screen == Screen::Pick && ((self.tab == Tab::Merge && (self.merge_tab.is_detail() || self.merge_tab.typing())) || (self.tab == Tab::Flows && self.flows_tab.typing()));
         self.modal.is_none() && self.drafts_menu.is_none() && self.where_menu.is_none() && self.repo_pick.is_none() && !notes && !self.trepo.is_open() && !pr_open
             && !self.filter_editing && !self.tfilter_editing && !self.afilter_editing
             && !(self.screen == Screen::Pick && self.tab == Tab::Threads && self.tfilter.as_deref().is_some_and(|q| !q.is_empty()))
@@ -2811,7 +2914,7 @@ impl App {
     fn paste_prompt(&mut self, p: Pasted) {
         self.field = Field::Prompt;
         match p {
-            Pasted::Text(t) => self.prompt.insert(&t),
+            Pasted::Text(t) => self.prompt.paste(&t),
             Pasted::File { path, marker } => {
                 self.prompt.insert(&marker.to_string());
                 self.toast(format!("{marker}: {}", tilde(&path.display().to_string())), false);
@@ -2836,6 +2939,7 @@ impl App {
         }
         if tab == Tab::New {
             self.screen = Screen::Compose;
+            self.load_task_flows();
             return;
         }
         self.screen = Screen::Pick;
@@ -2848,6 +2952,9 @@ impl App {
         }
         if tab == Tab::Merge {
             self.merge_tab.ensure();
+        }
+        if tab == Tab::Flows {
+            self.flows_tab.enter();
         }
         if tab == Tab::Settings {
             self.settings_typed = false;
@@ -2917,9 +3024,10 @@ impl App {
 
     fn tabs_key(&mut self, k: KeyEvent) {
         match k.code {
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.switch_tab(self.cur_tab().next()),
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => self.switch_tab(self.cur_tab().prev()),
-            KeyCode::Down | KeyCode::Enter | KeyCode::Char('j') | KeyCode::Esc => {
+            KeyCode::Right | KeyCode::Char('l') => self.switch_tab(self.cur_tab().next()),
+            KeyCode::Left | KeyCode::Char('h') => self.switch_tab(self.cur_tab().prev()),
+            // tab: the next field, the tab's content (as ↓)
+            KeyCode::Down | KeyCode::Enter | KeyCode::Char('j') | KeyCode::Esc | KeyCode::Tab => {
                 self.tabs_focus = false;
                 if self.screen == Screen::Compose {
                     self.field = self.fields()[0];
@@ -3055,7 +3163,7 @@ impl App {
         }
     }
 
-    /// Keys of the repo dropdown (ctrl+r: open / close).
+    /// Keys of the open repo dropdown.
     fn trepo_key(&mut self, k: KeyEvent) {
         let opts = self.trepo_opts();
         self.tabs_focus = false;
@@ -3112,6 +3220,14 @@ impl App {
                 }
             }
             KeyCode::Enter => self.open_thread(),
+            // ←→: the previous / next repo (as the menu's threads tab)
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+                let opts = self.trepo_opts();
+                if self.trepo.step(if matches!(k.code, KeyCode::Right | KeyCode::Char('l')) { 1 } else { -1 }, &opts) {
+                    self.tcursor = 0;
+                    self.pscroll = 0;
+                }
+            }
             KeyCode::Char('c') => self.toggle_context(),
             // a list: 0 fields to tab to (main tabs: alt+1-4)
             KeyCode::Tab | KeyCode::BackTab => {}
@@ -3178,19 +3294,52 @@ impl App {
         }
     }
 
-    /// The task's fields top to bottom: drafts (1+ drafts), prompt, title, where + its boxes (a
+    /// The repo (else the dir) the flow default belongs to.
+    fn flow_key(&self) -> String {
+        self.repo.as_ref().map(|r| r.path.display().to_string()).unwrap_or_else(|| self.cfg.cwd.display().to_string())
+    }
+
+    /// The flows of the task's repo read again; the row on the repo's last flow.
+    pub fn load_task_flows(&mut self) {
+        let dir = self.repo.as_ref().map(|r| r.path.clone()).unwrap_or_else(|| self.cfg.cwd.clone());
+        let keep = self.flow_slug();
+        self.flow_lib = crate::engine::flows::Library::load(Some(&dir));
+        let want = keep.or_else(|| flow_default_get(&self.flow_key()));
+        self.flow_i = want.and_then(|w| self.flow_lib.flows.iter().position(|f| f.slug == w)).map_or(0, |i| i + 1);
+    }
+
+    fn flow_slug(&self) -> Option<String> {
+        self.flow_i.checked_sub(1).and_then(|i| self.flow_lib.flows.get(i)).map(|f| f.slug.clone())
+    }
+
+    /// The flow row: ←→ step, a letter: the next flow with it.
+    fn flow_key_press(&mut self, k: KeyEvent) {
+        let n = self.flow_lib.flows.len() + 1;
+        match k.code {
+            KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter => self.flow_i = (self.flow_i + 1) % n,
+            KeyCode::Left => self.flow_i = (self.flow_i + n - 1) % n,
+            KeyCode::Char('0') | KeyCode::Backspace => self.flow_i = 0,
+            KeyCode::Char(c) if c.is_alphanumeric() => {
+                let c = c.to_ascii_lowercase();
+                let hits: Vec<usize> = (0..self.flow_lib.flows.len()).filter(|&i| self.flow_lib.flows[i].name.to_lowercase().starts_with(c)).map(|i| i + 1).collect();
+                if let Some(&next) = hits.iter().find(|&&i| i > self.flow_i).or(hits.first()) {
+                    self.flow_i = next;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The task's fields top to bottom: drafts row, prompt, title, where + its boxes (a
     /// git repo), agents, notes.
     fn fields(&self) -> Vec<Field> {
-        let mut v = Vec::new();
-        if !self.drafts.is_empty() {
-            v.push(Field::Drafts);
-        }
+        let mut v = vec![Field::Drafts];
         // the repo row: always (the picker finds a repo also when codehead runs outside of one)
         v.extend([Field::Prompt, Field::Title, Field::Repo]);
         if !self.wheres.is_empty() {
             v.extend([Field::Where, Field::Opts]);
         }
-        v.extend([Field::Agents, Field::Notes]);
+        v.extend([Field::Flow, Field::Agents, Field::Notes]);
         v
     }
 
@@ -3230,7 +3379,6 @@ impl App {
             KeyCode::Enter if ctrl || alt || k.modifiers.contains(KeyModifiers::SUPER) => return self.start(),
             KeyCode::Char('o') if ctrl => return self.run(Act::OpenNotes),
             KeyCode::Char('s') if ctrl => return self.run(Act::SaveDraft),
-            KeyCode::Char('r') if ctrl => return self.run(Act::Reset),
             // ctrl+v / ⌘v in the prompt, like Claude Code: the clipboard image, else its text
             KeyCode::Char('v' | 'V') if self.field == Field::Prompt && (ctrl || k.modifiers.contains(KeyModifiers::SUPER)) => {
                 let p = self.paster.clipboard();
@@ -3245,7 +3393,10 @@ impl App {
         }
         if self.field == Field::Drafts {
             match k.code {
-                KeyCode::Enter | KeyCode::Char(' ') => self.open_drafts(),
+                KeyCode::Enter | KeyCode::Char(' ') if self.draft_btn() == 0 => self.open_drafts(),
+                KeyCode::Enter | KeyCode::Char(' ') => self.save_draft(),
+                KeyCode::Left | KeyCode::Char('h') if !self.drafts.is_empty() => self.draft_btn = 0,
+                KeyCode::Right | KeyCode::Char('l') => self.draft_btn = 1,
                 KeyCode::Down => self.go_field(1),
                 KeyCode::Up => self.go_field(-1),
                 _ => {}
@@ -3267,6 +3418,14 @@ impl App {
                 KeyCode::Up => self.go_field(-1),
                 KeyCode::Down => self.go_field(1),
                 _ => {}
+            }
+            return;
+        }
+        if self.field == Field::Flow {
+            match k.code {
+                KeyCode::Up => self.go_field(-1),
+                KeyCode::Down => self.go_field(1),
+                _ => self.flow_key_press(k),
             }
             return;
         }
@@ -3449,6 +3608,10 @@ impl App {
             if let Some(settings) = &mut self.settings { settings.paste(text); }
             return;
         }
+        if self.screen == Screen::Pick && self.tab == Tab::Flows {
+            self.flows_tab.paste(text);
+            return;
+        }
         match self.screen {
             Screen::Compose if self.field == Field::Title => self.title.insert(text),
             // like the thread view: a paste on any other field goes to the prompt
@@ -3474,6 +3637,13 @@ impl App {
 
     // ---------- mouse ----------
     pub fn mouse(&mut self, m: MouseEvent) {
+        if let Some(p) = self.notes_panel.as_mut() {
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                let pick = p.click(ratatui::layout::Position { x: m.column, y: m.row });
+                self.notes_pick(pick);
+            }
+            return;
+        }
         self.mouse_inner(m);
         if !matches!(m.kind, MouseEventKind::Moved) {
             self.backup();
@@ -3483,9 +3653,22 @@ impl App {
     fn mouse_inner(&mut self, m: MouseEvent) {
         let at = Position { x: m.column, y: m.row };
         self.hover = Some(at);
+        // ctrl+click on a URL anywhere on screen: the browser
+        if matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
+            && m.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+            && let Some(url) = crate::urls::at(&self.last_frame, at)
+        {
+            crate::merge::open_url(&url);
+            self.toast(format!("open {url}"), false);
+            return;
+        }
         if let Some(menu) = self.menu.as_mut() {
             let a = menu.mouse(m);
             return self.menu_action(a);
+        }
+        if self.modal.is_none() && self.screen == Screen::Pick && self.tab == Tab::Flows && self.flows_area.contains(at) {
+            let o = self.flows_tab.mouse(m);
+            return self.flows_out(o);
         }
         if self.modal.is_none() && self.screen == Screen::Pick && self.tab == Tab::Merge && self.merge_area.contains(at) {
             let o = self.merge_tab.mouse(m);
@@ -3594,13 +3777,19 @@ impl App {
             }
             if down && self.regions.drafts.contains(at) {
                 self.field = Field::Drafts;
+                self.draft_btn = 0;
                 return self.open_drafts();
+            }
+            if down && self.regions.save_draft.contains(at) {
+                self.field = Field::Drafts;
+                self.draft_btn = 1;
+                return self.save_draft();
             }
             if self.mention_on() {
                 if down && self.mention.mouse(m, &mut self.prompt, &self.agents) {
                     return;
                 }
-                if self.command.mouse(m, &mut self.prompt) || self.paths.mouse(m, &mut self.prompt) {
+                if self.command.mouse(m, &mut self.prompt) || self.shortcuts.mouse(m, &mut self.prompt) || self.paths.mouse(m, &mut self.prompt) {
                     return;
                 }
             }
@@ -3619,6 +3808,9 @@ impl App {
                 } else if self.regions.where_row.contains(at) {
                     self.field = Field::Where;
                     return self.open_where();
+                } else if self.regions.flow_row.contains(at) {
+                    self.field = Field::Flow;
+                    return self.flow_key_press(KeyEvent::from(KeyCode::Right));
                 } else if self.regions.notes_label.contains(at) {
                     self.field = Field::Notes;
                     return self.open_notes();
@@ -3744,7 +3936,12 @@ impl App {
             self.mention.render(f, &self.prompt, &self.agents, area);
             let avoid = self.prompt.area();
             self.command.render(f, &self.prompt, area, avoid);
+            self.shortcuts.render(f, &self.prompt, area, avoid);
             self.paths.render(f, &self.prompt, area, avoid);
+            let open = self.shortcuts.is_open(&self.prompt);
+            crate::shortcuts::render_popup(f, &self.prompt, self.hover, self.field == Field::Prompt, area, open);
+        } else {
+            self.shortcuts.hide();
         }
         if self.screen == Screen::Compose {
             self.draw_drafts(f, area);
@@ -3760,10 +3957,28 @@ impl App {
         }
         self.draw_modal(f, area);
         if let Some(m) = self.menu.as_mut() {
-            m.render(f, area, area);
+            m.render(f, area);
         }
+        if let Some(p) = self.notes_panel.as_mut() {
+            p.draw(f, area);
+        }
+        self.last_frame.clone_from(f.buffer_mut());
         if let Some(r) = self.hover_rect() {
             theme::hover(f.buffer_mut(), r);
+        }
+    }
+
+    /// A key / click of the notifications dropdown: a jump opens the thread at the note's event.
+    fn notes_pick(&mut self, p: crate::notify::Pick) {
+        use crate::notify::Pick;
+        match p {
+            Pick::Stay => {}
+            Pick::Close => self.notes_panel = None,
+            Pick::Jump(n) => {
+                self.notes_panel = None;
+                crate::search::jump_to(&n.thread, n.ts);
+                self.outcome = Some(Outcome::Resume(Box::new(worktree_of(&n.card()))));
+            }
         }
     }
 
@@ -3797,12 +4012,12 @@ impl App {
                 return p.left_rows.iter().chain(p.right_rows.iter()).map(|(r, _)| *r).find(|r| r.contains(at));
             }
             if self.mention_on()
-                && let Some(r) = self.mention.row_at(at).or_else(|| self.command.row_at(at)).or_else(|| self.paths.row_at(at))
+                && let Some(r) = self.mention.row_at(at).or_else(|| self.command.row_at(at)).or_else(|| self.shortcuts.row_at(at)).or_else(|| self.paths.row_at(at))
             {
                 return Some(r);
             }
-            if self.regions.drafts.contains(at) {
-                return Some(self.regions.drafts);
+            if let Some(r) = [self.regions.drafts, self.regions.save_draft].into_iter().find(|r| r.contains(at)) {
+                return Some(r);
             }
             return find_rows(&self.regions.opts, at)
                 .or_else(|| find_rows(&self.regions.menu_rows, at))
@@ -3833,7 +4048,7 @@ impl App {
         if self.screen == Screen::Pick && self.tab == Tab::Notes {
             spans.push(Span::styled(" new › notes ", theme::pill()));
         } else {
-            for (tab, label) in [(Tab::New, "new"), (Tab::Threads, "threads"), (Tab::Merge, "merge"), (Tab::Agents, "agents"), (Tab::Settings, "settings")] {
+            for (tab, label) in [(Tab::New, "new"), (Tab::Threads, "threads"), (Tab::Merge, "merge"), (Tab::Agents, "agents"), (Tab::Flows, "flows"), (Tab::Settings, "settings")] {
                 let active = self.cur_tab() == tab;
                 let focused = active && self.tabs_focus;
                 let (bg, fg) = match (active, focused) {
@@ -3854,11 +4069,8 @@ impl App {
             }
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
-        let place = match &self.cfg.repo {
-            Some(r) => r.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-            None => self.cfg.cwd.display().to_string(),
-        };
-        let right = Line::from(vec![Span::styled(self.cfg.agent.clone(), theme::accent()), Span::styled(format!(" · {place} "), theme::muted())]).right_aligned();
+        // notifications: kind + agent count (ctrl+n lists them)
+        let right = Line::from(crate::notify::badge(&crate::notify::unseen(None))).right_aligned();
         let right_area = Rect { x: x.min(area.right()), width: area.right().saturating_sub(x), ..area };
         f.render_widget(Paragraph::new(right), right_area);
     }
@@ -3882,6 +4094,13 @@ impl App {
         if self.tab == Tab::Merge {
             self.merge_area = area;
             self.merge_tab.draw(f, area);
+            return;
+        }
+        self.flows_area = Rect::default();
+        if self.tab == Tab::Flows {
+            self.flows_area = area;
+            let active = !self.tabs_focus;
+            self.flows_tab.draw(f, area, active);
             return;
         }
         if self.tab == Tab::Settings {
@@ -3978,7 +4197,7 @@ impl App {
                 self.threads_fx.apply(f, list, self.threads_version);
             }
             Tab::Agents | Tab::New => self.draw_agents(f, list),
-            Tab::Settings | Tab::Merge => {}
+            Tab::Settings | Tab::Merge | Tab::Flows => {}
         }
     }
 
@@ -4311,9 +4530,9 @@ impl App {
         let opts_h = if self.wheres.is_empty() { 0 } else { 2 };
         // "where": a label, the repo row, the branch row (a git repo only)
         let branch_h = u16::from(!self.wheres.is_empty());
-        // "view drafts (n)": only with 1+ drafts, with a blank row below
-        let drafts_h = if self.drafts.is_empty() { 0 } else { 2 };
-        let available = area.height.saturating_sub(drafts_h + title_rows + opts_h + note_rows + branch_h + 14);
+        // the drafts row: "view drafts (n)" (1+ drafts), "save as draft"; a blank row below
+        let drafts_h = 2;
+        let available = area.height.saturating_sub(drafts_h + title_rows + opts_h + note_rows + branch_h + 15);
         let agents_h = if self.agents.is_empty() { 1 } else {
             let g = self.agent_grid(area.width);
             let view = g.height.min(2 * (CARD_H as usize + 1)).min(available.max(CARD_H + 1) as usize);
@@ -4326,13 +4545,10 @@ impl App {
                 None => view as u16,
             }
         };
-        if drafts_h == 0 && self.field == Field::Drafts {
-            self.field = Field::Prompt;
-        }
         // prompt first and largest (the rest of the height), then title, where (repo, branch,
         // opts), agents, notes, a
         // blank row below the notes (above the footer)
-        let [r_drafts, l_prompt, i_prompt, _, l_title, i_title, _, l_where, repo_row, info, opts, _, l_agents, r_agents, _, l_notes, notes, _] = Layout::vertical([
+        let [r_drafts, l_prompt, i_prompt, _, l_title, i_title, _, l_where, repo_row, info, opts, flow_row, _, l_agents, r_agents, _, l_notes, notes, _] = Layout::vertical([
             Constraint::Length(drafts_h),
             Constraint::Length(1),
             Constraint::Min(3),
@@ -4346,6 +4562,7 @@ impl App {
             Constraint::Length(opts_h),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Length(agents_h),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -4353,16 +4570,28 @@ impl App {
             Constraint::Length(1),
         ])
         .areas(area);
-        if drafts_h > 0 {
+        {
             let on = self.field == Field::Drafts;
-            let text = format!(" view drafts ({}) ", self.drafts.len());
-            let r = Rect { width: (text.width() as u16).min(r_drafts.width), height: 1, ..r_drafts };
-            let st = if on { theme::pill().add_modifier(Modifier::BOLD) } else { theme::panel().fg(theme::pal().accent) };
-            f.render_widget(Paragraph::new(text).style(st), r);
-            self.regions.drafts = r;
+            let btn = self.draft_btn();
+            let st = |cur: bool| if cur { theme::pill().add_modifier(Modifier::BOLD) } else { theme::panel().fg(theme::pal().accent) };
+            let mut x = r_drafts.x;
+            self.regions.drafts = Rect::default();
+            if !self.drafts.is_empty() {
+                let text = format!(" view drafts ({}) ", self.drafts.len());
+                let r = Rect { x, width: (text.width() as u16).min(r_drafts.width), height: 1, ..r_drafts };
+                f.render_widget(Paragraph::new(text).style(st(on && btn == 0)), r);
+                self.regions.drafts = r;
+                x = r.right() + 2;
+            }
+            let text = " save as draft ";
+            let r = Rect { x, width: (text.width() as u16).min(r_drafts.right().saturating_sub(x)), height: 1, ..r_drafts };
+            f.render_widget(Paragraph::new(text).style(st(on && btn == 1)), r);
+            self.regions.save_draft = r;
             if on && self.drafts_menu.is_none() {
-                let hint = Rect { x: r.right() + 2, width: r_drafts.width.saturating_sub(r.width + 2), height: 1, ..r_drafts };
-                f.render_widget(Paragraph::new(Line::styled("enter: list of unsent tasks", theme::muted())), hint);
+                let hint = if btn == 0 { "enter: list of unsent tasks" } else { "enter: keep the task for later, start over" };
+                let hx = r.right() + 2;
+                let h = Rect { x: hx, width: r_drafts.right().saturating_sub(hx), height: 1, ..r_drafts };
+                f.render_widget(Paragraph::new(Line::styled(hint, theme::muted())), h);
             }
         }
         f.render_widget(Paragraph::new(label(if self.title.is_empty() { "title · optional: the prompt's 1st line" } else { "title" }, self.field == Field::Title)), l_title);
@@ -4399,6 +4628,21 @@ impl App {
         if !self.wheres.is_empty() {
             self.regions.where_chip = row(f, info, "branch", self.field == Field::Where, self.where_chip(), self.where_text());
             self.regions.where_row = info;
+        }
+        // flow: the chip, its steps and gates
+        {
+            let on = self.field == Field::Flow;
+            let (value, text) = match self.flow_i.checked_sub(1).and_then(|i| self.flow_lib.flows.get(i)) {
+                Some(fl) => {
+                    let nodes = crate::engine::flows::resolve(fl, &self.flow_lib);
+                    let gates = nodes.iter().filter(|n| n.gate).count();
+                    let loops = nodes.iter().filter(|n| n.loops.is_some()).count();
+                    (format!("◆ {}", fl.name), format!("{} steps · {gates} gates · {loops} loops · {}", nodes.len(), fl.description))
+                }
+                None => ("0 flow".to_string(), "free-form: the agents follow the task only".to_string()),
+            };
+            let text = if on { format!("←→ flows · a letter: jump · {text}") } else { text };
+            self.regions.flow_row = row(f, flow_row, "flow", on, value, text);
         }
         // opts: ◼ checkout, ◻ stash below it, in the column of the sub-labels
         if opts_h > 0 {
@@ -4497,20 +4741,22 @@ impl App {
             Screen::Compose if self.repo_pick.is_some() => &[("↑↓", "dir"), ("←→", "out · in"), ("type", "filter"), ("~", "home"), ("enter", "pick"), ("esc", "close")],
             Screen::Compose if self.field == Field::Repo => &[("enter", "pick repo"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.field == Field::Where => &[("enter", "choices"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
+            Screen::Compose if self.field == Field::Flow => &[("←→", "flow"), ("a-z", "jump"), ("0", "0 flow"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.field == Field::Opts => &[("space", "check / uncheck"), ("↑↓", "box · field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.drafts_menu.is_some() => &[("↑↓", "move"), ("enter", "load"), ("d", "delete"), ("esc", "back")],
-            Screen::Compose if self.field == Field::Drafts => &[("enter", "list drafts"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("F1-F5", "tabs")],
+            Screen::Compose if self.field == Field::Drafts => &[("←→", "button"), ("enter", "press"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("F1-F6", "tabs")],
             Screen::Compose if self.field == Field::Prompt => &[("@", "agents"), (cmd.as_str(), "commands"), ("dir/", "paths"), ("ctrl+v", "image"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("esc esc", "quit")],
             Screen::Compose if self.field == Field::Notes => &[("enter", "pick notes"), ("x", "drop"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
-            Screen::Compose => &[("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("tab", "next field"), ("F1-F5", "tabs"), ("esc esc", "quit")],
+            Screen::Compose => &[("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("tab", "next field"), ("F1-F6", "tabs"), ("esc esc", "quit")],
             Screen::Pick if self.tfilter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to list")],
             Screen::Pick if self.filter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter", "done"), ("esc", "clear")],
             Screen::Pick if self.tab == Tab::Notes && self.cfg.copy_mode => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "copy"), ("esc", "quit")],
             Screen::Pick if self.tab == Tab::Notes => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "confirm"), ("esc", "new"), ("tab", "back")],
-            Screen::Pick if self.tab == Tab::Threads => &[("↑↓", "move"), ("f", "filter"), ("space", "select"), ("c", "context"), ("enter", "open"), ("F1-F5", "tabs")],
+            Screen::Pick if self.tab == Tab::Threads => &[("↑↓", "move"), ("f", "filter"), ("space", "select"), ("c", "context"), ("enter", "open"), ("F1-F6", "tabs")],
             Screen::Pick if self.tab == Tab::Settings => self.settings.as_ref().map_or(&[], |s| s.help()),
+            Screen::Pick if self.tab == Tab::Flows => self.flows_tab.help(),
             Screen::Pick if self.afilter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to cards")],
-            Screen::Pick => &[("↑↓←→", "move"), ("f", "filter"), ("enter", "edit"), ("F1-F5", "tabs")],
+            Screen::Pick => &[("↑↓←→", "move"), ("f", "filter"), ("enter", "edit"), ("F1-F6", "tabs")],
         };
         for (k, l) in hints {
             spans.extend(hint(k, l));
@@ -4759,6 +5005,23 @@ pub fn draw_status(f: &mut Frame, text: &str, tick: usize) {
     f.render_widget(Paragraph::new(line), Rect { height: 1, ..area });
 }
 
+/// The flow a new task of repo KEY starts with: the last one picked there.
+fn flow_defaults_path() -> PathBuf {
+    crate::engine::data_dir().join("flow-defaults.json")
+}
+
+fn flow_default_get(key: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(flow_defaults_path()).ok()?).ok()?;
+    v[key].as_str().map(String::from)
+}
+
+fn flow_default_set(key: &str, slug: &str) {
+    let p = flow_defaults_path();
+    let mut v: serde_json::Value = std::fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| serde_json::json!({}));
+    v[key] = serde_json::Value::String(slug.to_string());
+    let _ = crate::engine::write_atomic(&p, v.to_string().as_bytes());
+}
+
 #[cfg(test)]
 mod render_tests {
     use super::*;
@@ -4949,6 +5212,8 @@ mod render_tests {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Repo);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert!(a.field == Field::Flow);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Agents);
         let s = dump(&mut a, 120, 40);
         assert!(s.contains("0 git repo") && s.contains("enter: pick a repo"), "{s}");
@@ -5040,7 +5305,10 @@ mod render_tests {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Opts && a.opt_i == 1);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert!(a.field == Field::Flow);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Agents);
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
         assert!(a.field == Field::Opts && a.opt_i == 1);
         a.screen = Screen::Compose;
@@ -5049,7 +5317,7 @@ mod render_tests {
             Agent { name: "nova".into(), harness: "codex".into(), model: Some("gpt-5.5".into()), ..Default::default() },
         ];
         a.picks = vec!["amon".into()];
-        let out = dump(&mut a, 110, 36);
+        let out = dump(&mut a, 110, 38);
         assert!(out.contains("branch  current branch · feature/x"), "{out}");
         assert!(out.contains("◼ checkout selected branch"), "{out}");
         // each box on its own row, below each other
@@ -5192,7 +5460,7 @@ mod render_tests {
         key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
         assert_eq!(a.prompt.text(), "- a\n  - foo");
         let out = dump(&mut a, 100, 20);
-        assert!(out.contains("  - foo"), "{out}");
+        assert!(out.contains("  • foo"), "{out}");
     }
 
     fn key(app: &mut App, code: KeyCode, m: KeyModifiers) {
@@ -5223,11 +5491,10 @@ mod render_tests {
     #[test]
     fn enter_keeps_zero_notes() {
         let mut a = app();
-        // prompt → title → repo → agents → notes field (↓), enter opens the picker
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        // prompt → title → repo → flow → agents → notes field (↓), enter opens the picker
+        for _ in 0..5 {
+            key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        }
         assert!(a.field == Field::Notes);
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert!(a.screen == Screen::Pick && a.tab == Tab::Notes);
@@ -5369,6 +5636,37 @@ mod render_tests {
     }
 
     #[test]
+    fn save_as_draft_button_and_menu_new_starts_empty() {
+        let mut a = app();
+        let dir = a.cfg.drafts.clone();
+        // 0 drafts: the save button only
+        let s = dump(&mut a, 120, 40);
+        assert!(s.contains("save as draft") && !s.contains("view drafts"), "{s}");
+        type_text(&mut a, "first idea");
+        a.field = Field::Drafts;
+        // ← with 0 drafts: stays on save; enter: kept, the form empty
+        key(&mut a, KeyCode::Left, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.prompt.text().is_empty());
+        assert_eq!(drafts::load(&dir, &a.draft_id).iter().map(|d| (d.prompt.as_str(), d.kept)).collect::<Vec<_>>(), [("first idea", true)]);
+        assert!(dump(&mut a, 120, 40).contains("view drafts (1)"));
+        // a loaded draft, then menu "n": the form empty, the draft kept in the list
+        a.field = Field::Drafts;
+        key(&mut a, KeyCode::Left, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.prompt.text(), "first idea");
+        type_text(&mut a, " more");
+        a.go_home(crate::menu::Home::New);
+        assert!(a.prompt.text().is_empty() && a.title.text().is_empty());
+        assert_eq!(a.drafts.iter().map(|d| d.prompt.as_str()).collect::<Vec<_>>(), ["first idea more"]);
+        // an empty form: "n" again, 0 new draft
+        a.go_home(crate::menu::Home::New);
+        assert_eq!(drafts::load(&dir, "").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn drafts_backup_list_load_delete() {
         let mut a = app();
         let dir = a.cfg.drafts.clone();
@@ -5460,12 +5758,7 @@ mod render_tests {
     fn up_from_the_task_top_reaches_the_tabs() {
         let mut a = app();
         assert!(a.screen == Screen::Compose && a.field == Field::Prompt && a.drafts.is_empty());
-        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
-        assert!(a.tabs_focus);
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        assert!(!a.tabs_focus && a.field == Field::Prompt);
-        // with drafts: prompt → drafts row → tabs
-        a.drafts = vec![Default::default()];
+        // prompt → drafts row ("save as draft") → tabs
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
         assert!(a.field == Field::Drafts && !a.tabs_focus);
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
@@ -5521,7 +5814,7 @@ mod render_tests {
         assert_eq!(a.agents[a.pick_cursor].name, "lilith");
         a.pick_cursor = 4;
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
-        assert!(a.field == Field::Repo);
+        assert!(a.field == Field::Flow);
         a.agents.clear();
         narrow.draw(|f| a.draw(f)).unwrap();
         assert!(a.pick_places.is_empty() && a.regions.menu_rows.is_empty());
@@ -5874,7 +6167,7 @@ mod render_tests {
         std::fs::write(&a.settings_path, &config).unwrap();
 
         a.switch_tab(Tab::Agents);
-        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings && a.tabs_focus);
         let screen = dump(&mut a, 100, 36);
         assert!(!screen.contains("deploy.md"), "{screen}");
@@ -5882,7 +6175,7 @@ mod render_tests {
         assert!(a.screen == Screen::Compose);
         assert_eq!(std::fs::read_to_string(&a.settings_path).unwrap(), config);
 
-        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings && a.tabs_focus);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(!a.tabs_focus);
@@ -5894,7 +6187,7 @@ mod render_tests {
 
         // Re-entry must remove focus even after the path field was active.
         a.switch_tab(Tab::Agents);
-        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings && a.tabs_focus);
         let screen = dump(&mut a, 100, 36);
         assert!(!screen.contains("deploy.md"), "{screen}");
@@ -5908,7 +6201,7 @@ mod render_tests {
         let mut a = app();
         a.switch_tab(Tab::Settings);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        key(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
         a.paste("local");
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         a.paste(&format!("{}/infra/", a.cfg.cwd.display()));
@@ -5932,7 +6225,7 @@ mod render_tests {
         let s = crate::engine::servers::Server { name: "docs-x".into(), kind: "stdio".into(), command: Some("npx".into()), args: vec!["-y".into(), "docs".into()], auto_allow: true, ..Default::default() };
         crate::engine::servers::save(&[s]).unwrap();
         let mut a = app();
-        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         // ↑ from the 1st field: the sub-tab bar; → →: mcp servers
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
@@ -5967,14 +6260,14 @@ mod render_tests {
         let mut a = app();
         a.title.set_text("task title");
         a.prompt.set_text("task prompt");
-        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        key(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
         a.paste("project:platform");
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         a.paste("~/notes/platform/");
-        let screen = dump(&mut a, 60, 18);
+        let screen = dump(&mut a, 70, 18);
         assert!(screen.lines().next().unwrap().contains("settings") && screen.contains("mcp servers"), "{screen}");
         assert!(screen.contains("not applied"), "{screen}");
         assert!(screen.contains("~/notes/platform/"), "{screen}");
@@ -5983,7 +6276,7 @@ mod render_tests {
         assert!(a.screen == Screen::Compose);
         assert_eq!(a.title.text(), "task title");
         assert_eq!(a.prompt.text(), "task prompt");
-        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
         let screen = dump(&mut a, 100, 24);
         assert!(screen.contains("~/notes/platform/"), "{screen}");
         key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
@@ -5994,7 +6287,7 @@ mod render_tests {
     fn settings_esc_undoes_the_field_edit_and_never_applies() {
         let mut a = app();
         let before = std::fs::read_to_string(&a.settings_path).unwrap_or_default();
-        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.tab == Tab::Settings && !a.tabs_focus);
         // a plain field: typed, esc → the text at entry, 0 write
@@ -6006,7 +6299,7 @@ mod render_tests {
         assert_eq!(a.settings.as_ref().unwrap().form.fields[0].text(), start);
         assert_eq!(std::fs::read_to_string(&a.settings_path).unwrap_or_default(), before);
         // an alias: unlocked, typed, esc → 0 alias, locked, 0 write
-        key(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
         a.paste("project:x");
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         let s = a.settings.as_ref().unwrap();
@@ -6035,7 +6328,7 @@ mod render_tests {
         alt(&mut a, '1');
         assert!(a.screen == Screen::Compose && a.field == Field::Prompt);
         // alt+2..4: threads, agents, settings
-        for (t, d) in [(Tab::Threads, '2'), (Tab::Merge, '3'), (Tab::Agents, '4'), (Tab::Settings, '5')] {
+        for (t, d) in [(Tab::Threads, '2'), (Tab::Merge, '3'), (Tab::Agents, '4'), (Tab::Flows, '5'), (Tab::Settings, '6')] {
             alt(&mut a, d);
             assert!(a.screen == Screen::Pick && a.tab == t);
         }
@@ -6046,8 +6339,8 @@ mod render_tests {
         // the agents tab loaded the machine's agents: 1 card again (↓ leaves the cards)
         a.agents.truncate(1);
         a.field = Field::Prompt;
-        // tab: prompt → title → repo → agents → notes → prompt; shift+tab back
-        for f in [Field::Title, Field::Repo, Field::Agents, Field::Notes, Field::Prompt] {
+        // tab: prompt → title → repo → flow → agents → notes → prompt; shift+tab back
+        for f in [Field::Title, Field::Repo, Field::Flow, Field::Agents, Field::Notes, Field::Prompt] {
             key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
             assert!(a.field == f && a.screen == Screen::Compose);
         }
@@ -6056,12 +6349,13 @@ mod render_tests {
         // ↑↓ walk the fields: ↓ on the last stays, ↑ on the prompt's 1st row: the tabs
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Notes);
-        for f in [Field::Agents, Field::Repo, Field::Title, Field::Prompt] {
+        for f in [Field::Agents, Field::Flow, Field::Repo, Field::Title, Field::Prompt, Field::Drafts] {
             key(&mut a, KeyCode::Up, KeyModifiers::NONE);
             assert!(a.field == f);
         }
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
         assert!(a.tabs_focus);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         // alt+digit in the prompt: tabs; ctrl / alt+←→: word jumps
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         type_text(&mut a, "one two");
@@ -6139,14 +6433,17 @@ mod render_tests {
     }
 
     #[test]
-    fn ctrl_r_reset_asks_first() {
+    fn reset_asks_first() {
         let mut a = app();
         a.selected = vec!["ideas.md".into()];
+        // ctrl+r: 0 reset (ctrl+r reads again on every screen); the menu command asks first
         key(&mut a, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(a.modal.is_none());
+        a.run(Act::Reset);
         assert!(matches!(a.modal, Some(Modal::Confirm { .. })));
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(a.selected, vec!["ideas.md".to_string()]);
-        key(&mut a, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        a.run(Act::Reset);
         key(&mut a, KeyCode::Char('y'), KeyModifiers::NONE);
         assert!(a.selected.is_empty() && a.modal.is_none());
     }
@@ -6212,14 +6509,14 @@ mod render_tests {
         assert_eq!(a.n_threads(), 5);
         let s = dump(&mut a, 120, 30);
         assert!(s.contains("repo › all ▾"), "{s}");
-        key(&mut a, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        a.run(Act::RepoFilter);
         let s = dump(&mut a, 120, 30);
         assert!(s.contains("all repos") && s.contains("2 · /x/beta") && s.contains("outside git repos"), "{s}");
         // esc: closes the dropdown only (0 tab change, 0 quit)
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!a.trepo.is_open() && a.tab == Tab::Threads && a.outcome.is_none());
-        // ctrl+r, type "alp", enter: alpha rows only (thread + claude session)
-        key(&mut a, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        // the menu command, type "alp", enter: alpha rows only (thread + claude session)
+        a.run(Act::RepoFilter);
         for c in "alp".chars() {
             key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
         }
@@ -6269,21 +6566,42 @@ mod render_tests {
     }
 
     #[test]
+    fn the_flows_tab_draws_the_rail_with_its_arcs() {
+        let mut a = app();
+        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
+        assert!(a.tab == Tab::Flows);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let screen = dump(&mut a, 130, 30);
+        println!("--- flows\n{screen}");
+        assert!(screen.contains(" flows ") && screen.contains("new feature") && screen.contains("plan approval"), "{screen}");
+        assert!(screen.contains("◀") && screen.contains("changes") && screen.contains("↺"), "{screen}");
+        key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
+        for c in "rev".chars() {
+            key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        let screen = dump(&mut a, 130, 30);
+        println!("--- picker\n{screen}");
+        assert!(screen.contains("one-off: rev") && screen.contains("peer-review"), "{screen}");
+    }
+
+    #[test]
     fn screens() {
         let mut a = app();
         a.field = Field::Title;
         for c in "Fix deploy".chars() {
             key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
         }
-        // title → repo → agents → notes, enter: the notes picker
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        // title → repo → flow → agents → notes, enter: the notes picker
+        for _ in 0..4 {
+            key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        }
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         println!("--- notes picker\n{}", dump(&mut a, 130, 16));
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
-        key(&mut a, KeyCode::F(10), KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('p'), KeyModifiers::CONTROL);
         println!("--- menu\n{}", dump(&mut a, 100, 22));
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -6316,3 +6634,4 @@ mod render_tests {
         let _ = std::fs::remove_dir_all(&a.cfg.notes);
     }
 }
+

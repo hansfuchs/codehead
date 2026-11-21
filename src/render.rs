@@ -470,7 +470,9 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
                     if i > 0 {
                         b.pieces.push(Piece { text: " ".into(), style: st, ..Default::default() });
                     }
-                    let url = link.clone().or_else(|| (part.starts_with("https://") || part.starts_with("http://")).then(|| part.trim_end_matches(['.', ',', ')', ';']).to_string()));
+                    // `(https://…)`, `<https://…>`, `"https://…"`: the URL without the marks around it
+                    let bare = part.find("https://").or_else(|| part.find("http://")).map(|i| part[i..].trim_end_matches(['.', ',', ')', ';', ':', '>', '"', '\'', ']']).to_string());
+                    let url = link.clone().or(bare);
                     let st = if url.is_some() && link.is_none() { st.fg(theme::pal().accent).add_modifier(Modifier::UNDERLINED) } else { st };
                     b.pieces.push(Piece { text: part.to_string(), style: st, link: url, ..Default::default() });
                 }

@@ -154,6 +154,37 @@ fn list_item(line: &[char]) -> Option<(usize, usize, String)> {
     None
 }
 
+/// LINE opens or closes a ``` fence.
+fn is_fence(line: &[char]) -> bool {
+    let t: Vec<&char> = line.iter().skip_while(|c| **c == ' ').collect();
+    t.len() >= 3 && t[..3].iter().all(|c| **c == '`')
+}
+
+/// Per line: syntax colors of the fenced code (None: prose or a fence line), and fence lines.
+fn fence_colors(lines: &[Vec<char>]) -> (Vec<Option<Vec<ratatui::style::Color>>>, Vec<bool>) {
+    let mut colors = vec![None; lines.len()];
+    let fence: Vec<bool> = lines.iter().map(|l| is_fence(l)).collect();
+    let mut i = 0;
+    while i < lines.len() {
+        if !fence[i] {
+            i += 1;
+            continue;
+        }
+        let tag: String = lines[i].iter().skip_while(|c| **c == ' ' || **c == '`').collect::<String>().trim().to_string();
+        let end = (i + 1..lines.len()).find(|j| fence[*j]).unwrap_or(lines.len());
+        if end > i + 1 {
+            let body: String = lines[i + 1..end].iter().map(|l| l.iter().collect::<String>()).collect::<Vec<_>>().join("\n");
+            let lang = if tag.is_empty() { crate::code::language(&body, &[]) } else { tag.as_str() };
+            let hl = crate::code::highlight(&body, lang);
+            for (k, row) in (i + 1..end).enumerate() {
+                colors[row] = hl.get(k).map(|l| l.iter().map(|(c, _)| *c).collect());
+            }
+        }
+        i = end + 1;
+    }
+    (colors, fence)
+}
+
 /// TEXT without its trailing empty Markdown list items (a marker an Enter left, e.g. `7.`), only
 /// after other lines, trimmed at the end. A sent message: 0 stray marker the view hides.
 pub fn without_empty_items(text: &str) -> &str {
@@ -283,6 +314,11 @@ impl TextArea {
         self.want_x = None;
     }
 
+    /// A 1-line input.
+    pub fn is_single(&self) -> bool {
+        self.single
+    }
+
     pub fn is_empty(&self) -> bool {
         self.lines.len() == 1 && self.lines[0].is_empty()
     }
@@ -397,6 +433,48 @@ impl TextArea {
             return None;
         }
         Some((Pos { row: self.cur.row, col: at }, line[c..self.cur.col].iter().collect()))
+    }
+
+    /// The text from FROM to the cursor (same row, 0 selection). None: another row, after it.
+    pub fn since(&self, from: Pos) -> Option<String> {
+        if self.range().is_some() || from.row != self.cur.row || from.col > self.cur.col {
+            return None;
+        }
+        Some(self.lines[self.cur.row][from.col..self.cur.col].iter().collect())
+    }
+
+    /// `#query` right before the cursor: the `#` position + the query (a shortcut name). For
+    /// the shortcut dropdown.
+    pub fn shortcut(&self) -> Option<(Pos, String)> {
+        self.trigger('#', |c| is_word(c) || c == '-')
+    }
+
+    /// The `#name` token at screen cell AT (None: at the cursor): its `#` position + the name.
+    /// For the shortcut popup.
+    pub fn shortcut_at(&self, at: Option<Position>) -> Option<(Pos, String)> {
+        let p = match at {
+            Some(a) => {
+                if !self.area.contains(a) {
+                    return None;
+                }
+                let y = usize::from(a.y - self.area.y);
+                self.pos_at(self.scroll + y, usize::from(a.x - self.area.x))
+            }
+            None => self.cur,
+        };
+        let line = self.lines.get(p.row)?;
+        let name = |c: char| is_word(c) || c == '-';
+        // back to the `#` (the cursor right after the name counts too)
+        let mut c = p.col.min(line.len());
+        while c > 0 && line[c - 1] != '#' && name(line[c - 1]) {
+            c -= 1;
+        }
+        let hash = if line.get(c) == Some(&'#') { c } else if c > 0 && line[c - 1] == '#' { c - 1 } else { return None };
+        if hash > 0 && !(line[hash - 1].is_whitespace() || matches!(line[hash - 1], '(' | '[' | '"' | '\'')) {
+            return None;
+        }
+        let word: String = line[hash + 1..].iter().take_while(|c| name(**c)).collect();
+        (!word.is_empty() && p.col <= hash + 1 + word.chars().count()).then_some((Pos { row: p.row, col: hash }, word))
     }
 
     /// Replace FROM..cursor (same row) with TEXT (1 undo step).
@@ -537,6 +615,24 @@ impl TextArea {
         self.insert_raw(text);
         self.follow = true;
         self.want_x = None;
+    }
+
+    /// Row ROW is inside a ``` fence (its own fence lines excluded).
+    fn in_fence(&self, row: usize) -> bool {
+        self.lines[..row].iter().filter(|l| is_fence(l)).count() % 2 == 1
+    }
+
+    /// A paste: code outside a fence goes in as a fenced block with its language tag (0 match: 0 tag).
+    pub fn paste(&mut self, text: &str) {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        if self.single || self.in_fence(self.cur.row) || !crate::code::looks_code(&text) {
+            return self.insert(&text);
+        }
+        let row = &self.lines[self.cur.row];
+        let before = if self.cur.col > 0 { "\n" } else { "" };
+        let after = if self.cur.col < row.len() { "\n" } else { "" };
+        let tag = crate::code::guess(&text).unwrap_or("");
+        self.insert(&format!("{before}```{tag}\n{}\n```{after}", text.trim_end_matches('\n')));
     }
 
     /// Delete from the cursor to the start (END: the end) of its visual row. A selection: the selection.
@@ -1112,9 +1208,16 @@ impl TextArea {
             let sel = self.range();
             let sel_style = Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent);
             let mut lines = Vec::new();
+            let (code, fence) = if self.single { (Vec::new(), Vec::new()) } else { fence_colors(&self.lines) };
             for s in self.vis.iter().skip(self.scroll).take(h) {
                 let line = &self.lines[s.row];
                 let colors = mention_colors(line, &self.marks);
+                let code_row = code.get(s.row).and_then(|c| c.as_ref());
+                let fence_row = fence.get(s.row).copied().unwrap_or(false);
+                // `- ` / `* ` / `+ ` items outside code show as `•` (the text keeps the marker)
+                let bullet = (code_row.is_none() && !fence_row && !self.single)
+                    .then(|| list_item(line).filter(|(_, w, _)| *w <= 6 && matches!(line.get(line.iter().take_while(|c| **c == ' ').count()), Some('-' | '*' | '+'))).map(|(indent, _, _)| indent))
+                    .flatten();
                 let mut spans: Vec<Span> = Vec::new();
                 let (mut buf, mut buf_style) = (String::new(), base);
                 for (col, &ch) in line.iter().enumerate().take(s.end).skip(s.start) {
@@ -1123,6 +1226,10 @@ impl TextArea {
                         sel_style
                     } else if let Some(c) = colors[col] {
                         base.fg(c).add_modifier(Modifier::BOLD)
+                    } else if let Some(c) = code_row.and_then(|r| r.get(col)) {
+                        base.fg(*c)
+                    } else if fence_row {
+                        base.fg(theme::pal().muted)
                     } else {
                         base
                     };
@@ -1130,7 +1237,7 @@ impl TextArea {
                         spans.push(Span::styled(std::mem::take(&mut buf), buf_style));
                     }
                     buf_style = st;
-                    buf.push(ch);
+                    buf.push(if bullet == Some(col) { '•' } else { ch });
                 }
                 // a selected line break shows as 1 selected cell
                 let nl_selected = s.last && sel.is_some_and(|(a, b)| Pos { row: s.row, col: s.end } >= a && Pos { row: s.row, col: s.end } < b);
@@ -1622,6 +1729,26 @@ mod tests {
         assert_eq!(t.text(), "older prompt");
         press(&mut t, KeyCode::Char('z'), KeyModifiers::CONTROL);
         assert_eq!(t.text(), "draft");
+    }
+
+    #[test]
+    fn code_paste_gets_a_fence_with_its_tag_once() {
+        let mut t = ta("see ");
+        t.line_edge(true, false);
+        t.paste("fn main() {\n    let v: Vec<u8> = vec![];\n}");
+        assert_eq!(t.text(), "see \n```rs\nfn main() {\n    let v: Vec<u8> = vec![];\n}\n```");
+        // inside the fence: as is
+        let mut u = TextArea::new(false, "");
+        u.insert("```\n");
+        u.paste("fn a() {\n}");
+        assert_eq!(u.text(), "```\nfn a() {\n}");
+        // prose: as is; unknown code: 0 tag
+        let mut p = TextArea::new(false, "");
+        p.paste("hello there\nhow are you");
+        assert_eq!(p.text(), "hello there\nhow are you");
+        let mut q = TextArea::new(false, "");
+        q.paste(";;;\n{}");
+        assert_eq!(q.text(), "```\n;;;\n{}\n```");
     }
 
     #[test]

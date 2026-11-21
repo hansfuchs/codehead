@@ -44,6 +44,8 @@ pub struct Mention {
     replace: Option<usize>,
     /// The last pick: name + the agent it replaces (None: add).
     pub picked: Option<(String, Option<String>)>,
+    /// ↑↓: the current agent's `@name` in the text (the typed query: the filter).
+    preview: crate::dropdown::Preview,
 }
 
 /// Text after `@new` for a replace pick: ` (replaces @old)`.
@@ -113,6 +115,11 @@ impl Mention {
         if self.closed == Some(at) {
             return None;
         }
+        // a live preview in the text: the query typed before it filters
+        let q = match self.preview.typed(ta) {
+            Some((p, t)) if p == at => t.chars().skip(1).collect(),
+            _ => q,
+        };
         let m = order(&visible(agents, &q));
         (!m.is_empty()).then_some((at, m))
     }
@@ -155,14 +162,27 @@ impl Mention {
             return true;
         }
         match k.code {
-            KeyCode::Up if plain => self.cursor = (self.cursor + n - 1) % n,
-            KeyCode::Down if plain => self.cursor = (self.cursor + 1) % n,
+            KeyCode::Up | KeyCode::Down if plain => {
+                self.cursor = if k.code == KeyCode::Up { (self.cursor + n - 1) % n } else { (self.cursor + 1) % n };
+                // the agent's `@name` in the text at once
+                let typed = match self.preview.typed(ta) {
+                    Some((_, t)) => t,
+                    None => ta.mention().map(|(_, q)| format!("@{q}")).unwrap_or_default(),
+                };
+                let name = agents[m[self.cursor]].name.clone();
+                self.preview.show(ta, at, &typed, &format!("@{name}"));
+            }
             KeyCode::Right if k.modifiers.is_empty() && !targets.is_empty() => self.replace = Some(0),
             KeyCode::Left if k.modifiers.is_empty() && !targets.is_empty() => {}
             KeyCode::Tab | KeyCode::Enter if k.modifiers.is_empty() => self.pick(ta, at, &name, None),
             KeyCode::Esc if k.modifiers.is_empty() => {
                 self.closed = Some(at);
                 self.cursor = 0;
+            }
+            // a name char after a preview: the typed query again, the char after it
+            KeyCode::Char(c) if plain && (c.is_alphanumeric() || matches!(c, '-' | '_' | '.')) && self.preview.revert(ta) => {
+                self.cursor = 0;
+                return false;
             }
             _ => {
                 // typing goes on: the 1st match is current again

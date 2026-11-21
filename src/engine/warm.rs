@@ -5,6 +5,11 @@
 //! "Not running": `limits.json` has 0 report of the window, or its reset time is past. 1 try per
 //! harness per [`GAP`] (every codehead process: the mark sits in `limits.json`). The reply's
 //! limit reports go into `limits.json`: the next check sees the new window.
+//!
+//! The watch ([`watch`]): every codehead process (the screen, each host) checks `limits.json`
+//! every [`TICK`]. A window whose reset time passed [`DELAY`] ago: 1 trigger message starts the new
+//! window. 1 process wins per window (the `_warm` mark under the file's lock). A harness without a
+//! report (0 plan window, an API key): 0 trigger.
 
 use std::process::{Command, Stdio};
 
@@ -14,6 +19,12 @@ use serde_json::Value;
 const WINDOW: &str = "five_hour";
 /// Min. seconds between 2 tries per harness.
 const GAP: u64 = 600;
+/// Seconds after a window's reset: the watch's trigger message.
+const DELAY: u64 = 60;
+/// The watch's tries end this long after its 1st chance (a trigger without a new report).
+const GIVE_UP: u64 = 3600;
+/// The watch reads `limits.json` this often.
+const TICK: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// A harness with a short plan window: its weakest model, the command of 1 message on it.
 struct Warm {
@@ -37,6 +48,40 @@ fn running(v: &Value, harness: &str, now: u64) -> bool {
 /// A try of HARNESS at NOW is due: its window not running, its last try GAP+ ago.
 fn due(v: &Value, harness: &str, now: u64) -> bool {
     !running(v, harness, now) && v["_warm"][harness].as_u64().is_none_or(|t| now.saturating_sub(t) >= GAP)
+}
+
+/// The watch's trigger of HARNESS at NOW is due: its window reset DELAY+ ago, 0 trigger since
+/// then (a trigger GAP+ ago that brought 0 new report: 1 more, up to GIVE_UP).
+fn due_new(v: &Value, harness: &str, now: u64) -> bool {
+    let Some(r) = v[harness][WINDOW]["resets"].as_u64() else { return false };
+    let at = r + DELAY;
+    if now < at {
+        return false;
+    }
+    // tries GAP apart while the last one is within GIVE_UP of the 1st chance
+    v["_warm"][harness].as_u64().is_none_or(|t| t < at || (now.saturating_sub(t) >= GAP && t < at + GIVE_UP))
+}
+
+/// The watch: a thread per process (once), every TICK the triggers that are due.
+pub fn watch() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ON: AtomicBool = AtomicBool::new(false);
+    if cfg!(test) || ON.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    std::thread::spawn(|| {
+        loop {
+            std::thread::sleep(TICK);
+            let Some(v) = std::fs::read(super::data_dir().join("limits.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { continue };
+            let now = super::now_ms() / 1000;
+            for w in ALL.iter().filter(|w| due_new(&v, w.harness, now)) {
+                if super::harnesses::get(w.harness).is_some_and(|h| super::harnesses::on_path(h.bin)) && super::limits::claim_warm(w.harness, now, |v| due_new(v, w.harness, now)) {
+                    super::trace(&format!("warm: new {WINDOW} window of {}", w.harness));
+                    run(w);
+                }
+            }
+        }
+    });
 }
 
 /// Start every short window that does not run (installed harnesses only), in the background.
@@ -85,5 +130,29 @@ mod tests {
         // a try 100 s ago: 0 try; 700 s ago: due
         assert!(!due(&json!({"_warm": {"claude": 900}}), "claude", 1000));
         assert!(due(&json!({"_warm": {"claude": 300}}), "claude", 1000));
+    }
+
+    #[test]
+    fn the_watch_triggers_1_min_after_a_reset_once() {
+        let v = |warm: Option<u64>| {
+            let mut v = json!({"claude": {"five_hour": {"resets": 1000}}});
+            if let Some(t) = warm {
+                v["_warm"]["claude"] = json!(t);
+            }
+            v
+        };
+        // 0 report: 0 trigger (an API key, 0 plan)
+        assert!(!due_new(&json!({}), "claude", 5000));
+        // the window runs / reset < 60 s ago: 0 trigger; 60 s after: due
+        assert!(!due_new(&v(None), "claude", 900));
+        assert!(!due_new(&v(None), "claude", 1059));
+        assert!(due_new(&v(None), "claude", 1060));
+        // a trigger before the reset (the last window's): due; after it: 0, until GAP
+        assert!(due_new(&v(Some(500)), "claude", 1060));
+        assert!(!due_new(&v(Some(1060)), "claude", 1200));
+        assert!(due_new(&v(Some(1060)), "claude", 1060 + GAP));
+        // codehead started hours after the reset: due; the last try GIVE_UP after the 1st chance: 0
+        assert!(due_new(&v(None), "claude", 1000 + 5 * GIVE_UP));
+        assert!(!due_new(&v(Some(1060 + GIVE_UP)), "claude", 1060 + 2 * GIVE_UP));
     }
 }

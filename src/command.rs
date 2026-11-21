@@ -6,7 +6,7 @@
 //! - `branch` (thread view): the thread copied into a new one, the view switches to it.
 //! - `skills` → the skills of the thread's harnesses, with their description; enter inserts `/name`.
 //!
-//! ↑↓ move, enter / tab open the next level. esc (or ← / ⌫ on an empty filter): 1 level back; on
+//! ↑↓ move (items: the item goes into the text at once, a live preview), enter / tab open the next level. esc (or ← / ⌫ on an empty filter): 1 level back; on
 //! the 1st level: closed until the next `>`.
 
 use std::path::{Path, PathBuf};
@@ -40,6 +40,8 @@ pub enum Action {
     Branch,
     Handoff,
     Reload,
+    /// The thread's flow box on the flows (change / set the flow).
+    Flow,
 }
 
 /// A dropdown of the open path.
@@ -56,8 +58,9 @@ const BRANCH: usize = 1;
 const SKILLS: usize = 2;
 const HANDOFF: usize = 3;
 const RELOAD: usize = 4;
+const FLOW: usize = 5;
 /// 1st level: name, what it does.
-const COMMANDS: [(&str, &str); 5] = [("mention", "path · name · url"), ("branch", "copy of this thread"), ("skills", "of the harnesses"), ("handoff", "new thread from a summary of this one"), ("reload", "new harness sessions: MCP servers, settings")];
+const COMMANDS: [(&str, &str); 6] = [("mention", "path · name · url"), ("branch", "copy of this thread"), ("skills", "of the harnesses"), ("handoff", "new thread from a summary of this one"), ("reload", "new harness sessions: MCP servers, settings"), ("flow", "set / change the thread's flow")];
 /// 2nd level of `mention`: kind, name, what goes into the text.
 const KINDS: [(Kind, &str, &str); 4] =
     [(Kind::Files, "files", "relative path"), (Kind::Notes, "notes", "path"), (Kind::Threads, "threads", "name"), (Kind::Artifacts, "artifacts", "url")];
@@ -109,6 +112,8 @@ pub struct Command {
     source: Option<String>,
     title_reads: crate::background::Reads<String, Option<String>>,
     title_checked: HashSet<String>,
+    /// ↑↓ on items: the item in the text in place of `>query` (the typed query: the filter).
+    preview: dropdown::Preview,
     /// Rows of the last draw (mouse): area, level, row.
     rows: Vec<(Rect, usize, usize)>,
     /// Dropdown areas of the last draw.
@@ -417,6 +422,12 @@ impl Command {
 
     /// The `>` under the cursor + the text after it. None: closed (state back to the 1st level).
     fn sync(&mut self, ta: &TextArea) -> Option<(Pos, String)> {
+        // a live preview in the text: the `>query` typed before it stays open
+        if let Some((at, typed)) = self.preview.typed(ta)
+            && self.at == Some(at)
+        {
+            return Some((at, typed.chars().skip(1).collect()));
+        }
         let found = ta.command();
         // the cursor left the closed `>`: a `>` typed there later opens again
         if found.is_none() {
@@ -463,7 +474,7 @@ impl Command {
     /// COMMANDS / KINDS. `branch`: only with a thread.
     fn menu(&self, level: Level, q: &str) -> Vec<usize> {
         let names: Vec<(usize, &str)> = match level {
-            Level::Commands => COMMANDS.iter().enumerate().filter(|(i, _)| !matches!(*i, BRANCH | HANDOFF | RELOAD) || self.can_branch).map(|(i, c)| (i, c.0)).collect(),
+            Level::Commands => COMMANDS.iter().enumerate().filter(|(i, _)| !matches!(*i, BRANCH | HANDOFF | RELOAD | FLOW) || self.can_branch).map(|(i, c)| (i, c.0)).collect(),
             _ => KINDS.iter().enumerate().map(|(i, k)| (i, k.1)).collect(),
         };
         let q = q.to_lowercase();
@@ -611,6 +622,12 @@ impl Command {
                         self.action = Some(Action::Reload);
                         return;
                     }
+                    FLOW => {
+                        ta.replace_to_cursor(at, "");
+                        self.reset();
+                        self.action = Some(Action::Flow);
+                        return;
+                    }
                     SKILLS => {
                         self.path.push(Level::Items(Kind::Skills));
                         self.load(Kind::Skills);
@@ -668,14 +685,23 @@ impl Command {
         let plain = k.modifiers.is_empty();
         let menu = !matches!(self.level(d), Level::Items(_));
         match k.code {
-            KeyCode::Up if plain && n > 0 => self.cursor[d] = (self.cursor[d] + n - 1) % n,
-            KeyCode::Down if plain && n > 0 => self.cursor[d] = (self.cursor[d] + 1) % n,
+            KeyCode::Up | KeyCode::Down if plain && n > 0 => {
+                self.cursor[d] = if k.code == KeyCode::Up { (self.cursor[d] + n - 1) % n } else { (self.cursor[d] + 1) % n };
+                // items: the item in the text at once
+                if !menu && let Some(item) = self.matched.1.get(self.cursor[d]).and_then(|&i| self.items.get(i)) {
+                    let typed = format!("{}{q}", crate::config::command_key());
+                    let insert = item.insert.clone();
+                    self.preview.show(ta, at, &typed, &insert);
+                }
+            }
             KeyCode::PageUp if plain && n > 0 => self.cursor[d] = self.cursor[d].saturating_sub(dropdown::MAX_ROWS),
             KeyCode::PageDown if plain && n > 0 => self.cursor[d] = (self.cursor[d] + dropdown::MAX_ROWS).min(n - 1),
             KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown if plain => {}
             KeyCode::Tab | KeyCode::Enter if plain => self.activate(ta, at, &q),
             KeyCode::Right if plain && menu && q.is_empty() && !(d == 0 && self.menu(Level::Commands, "").get(self.cursor[0]) == Some(&BRANCH)) => self.activate(ta, at, &q),
             KeyCode::Esc if plain => self.back(ta, at, &q),
+            // a filter char after a preview: the typed query again, the char after it
+            KeyCode::Char(c) if plain && !c.is_whitespace() && self.preview.revert(ta) => return false,
             KeyCode::Left | KeyCode::Backspace if plain && d > 0 && q.is_empty() => self.back(ta, at, &q),
             _ => return false,
         }
@@ -739,7 +765,8 @@ impl Command {
         let above = Rect { height: avoid.y.saturating_sub(bounds.y).min(bounds.height), ..bounds };
         let below_y = avoid.bottom().clamp(bounds.y, bounds.bottom());
         let below = Rect { y: below_y, height: bounds.bottom() - below_y, ..bounds };
-        let up = above.height >= 5 || above.height >= below.height;
+        // above: more room there, or room for a full list (12 rows)
+        let up = above.height >= 12 || above.height >= below.height;
         let room = if up { above } else { below };
         let mut parent: Option<(Rect, u16)> = None;
         let mut stack: Option<Rect> = None;
@@ -789,7 +816,7 @@ impl Command {
                     cur_y = row.y;
                 }
                 let (text, detail, submenu) = match level {
-                    Level::Commands => (COMMANDS[menu[idx]].0.to_string(), COMMANDS[menu[idx]].1.to_string(), !matches!(menu[idx], BRANCH | HANDOFF | RELOAD)),
+                    Level::Commands => (COMMANDS[menu[idx]].0.to_string(), COMMANDS[menu[idx]].1.to_string(), !matches!(menu[idx], BRANCH | HANDOFF | RELOAD | FLOW)),
                     Level::Kinds => (KINDS[menu[idx]].1.to_string(), KINDS[menu[idx]].2.to_string(), true),
                     Level::Items(_) => {
                         let it = &self.items[self.matched.1[idx]];
@@ -970,12 +997,16 @@ mod tests {
         // 0 thread (task screen): 0 branch
         assert_eq!(c.menu(Level::Commands, ""), [MENTION, SKILLS]);
         c.can_branch = true;
-        assert_eq!(c.menu(Level::Commands, ""), [MENTION, BRANCH, SKILLS, HANDOFF, RELOAD]);
+        assert_eq!(c.menu(Level::Commands, ""), [MENTION, BRANCH, SKILLS, HANDOFF, RELOAD, FLOW]);
         // `>rel` enter: the reload action
         ta.set_text(">rel");
         ta.move_end();
         assert!(key(&mut c, &mut ta, KeyCode::Enter));
         assert_eq!((ta.text().as_str(), c.action.take()), ("", Some(Action::Reload)));
+        ta.set_text(">flo");
+        ta.move_end();
+        assert!(key(&mut c, &mut ta, KeyCode::Enter));
+        assert_eq!((ta.text().as_str(), c.action.take()), ("", Some(Action::Flow)));
         // `>hand` enter: the handoff action
         ta.set_text(">hand");
         ta.move_end();

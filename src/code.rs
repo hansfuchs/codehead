@@ -80,6 +80,60 @@ pub fn language<'a>(text: &str, sources: &'a [Source]) -> &'a str {
     else { "text" }
 }
 
+/// Major languages: (hyperpolyglot / linguist name, fence tag).
+const MAJOR: [(&str, &str); 31] = [
+    ("Rust", "rs"), ("Python", "py"), ("JavaScript", "js"), ("TypeScript", "ts"), ("Go", "go"),
+    ("Java", "java"), ("C", "c"), ("C++", "cpp"), ("C#", "cs"), ("Ruby", "rb"), ("PHP", "php"),
+    ("Shell", "sh"), ("Kotlin", "kotlin"), ("Swift", "swift"), ("SQL", "sql"), ("HTML", "html"),
+    ("CSS", "css"), ("JSON", "json"), ("YAML", "yaml"), ("TOML", "toml"), ("Lua", "lua"),
+    ("Haskell", "haskell"), ("Scala", "scala"), ("Dockerfile", "dockerfile"), ("Makefile", "makefile"),
+    ("Elixir", "elixir"), ("Dart", "dart"), ("R", "r"), ("Perl", "perl"), ("Objective-C", "objc"),
+    ("PowerShell", "powershell"),
+];
+
+/// Fence tag for pasted TEXT (major languages, hyperpolyglot's classifier). None: 0 language matches.
+pub fn guess(text: &str) -> Option<&'static str> {
+    let tag = |name: &str| MAJOR.iter().find(|(n, _)| *n == name).map(|(_, t)| *t);
+    if serde_json::from_str::<serde_json::Value>(text).is_ok_and(|v| v.is_object() || v.is_array()) {
+        return Some("json");
+    }
+    if let Ok(names) = hyperpolyglot::detectors::get_languages_from_shebang(text.as_bytes())
+        && let Some(t) = names.iter().find_map(|n| tag(n))
+    {
+        return Some(t);
+    }
+    // strong marks the classifier misses on short snippets
+    let t = text.trim_start();
+    if t.starts_with("<?php") { return Some("php"); }
+    if t.starts_with("<!DOCTYPE") || t.starts_with("<html") { return Some("html"); }
+    if t.starts_with("package ") && text.contains("func ") { return Some("go"); }
+    let names: Vec<&'static str> = MAJOR.iter().map(|(n, _)| *n).collect();
+    let words = text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).count();
+    if words == 0 {
+        return None;
+    }
+    tag(hyperpolyglot::detectors::classify(text, &names))
+}
+
+/// Pasted TEXT is source code: 2+ lines, most lines with code marks, or a known start.
+pub fn looks_code(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() < 2 || text.trim_start().starts_with("```") {
+        return false;
+    }
+    if !matches!(language(text, &[]), "text" | "md") {
+        return true;
+    }
+    let marked = lines.iter().filter(|l| {
+        let t = l.trim_end();
+        t.ends_with([';', '{', '}', ')', ':', ']', ','])
+            || t.starts_with("    ") || t.starts_with('\t')
+            || t.trim_start().starts_with("//") || t.trim_start().starts_with("/*")
+            || t.contains(" = ") || t.contains("=>") || t.contains("->")
+    }).count();
+    marked * 2 > lines.len()
+}
+
 /// Colored characters of each line of TEXT.
 pub type Lines = std::sync::Arc<Vec<Vec<(Color, char)>>>;
 
@@ -143,6 +197,23 @@ pub fn last_line(text: &str, language: &str) -> Vec<(Color, char)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_guess_finds_major_languages() {
+        for (src, tag) in [
+            ("fn main() {\n    let x = vec![1];\n    println!(\"{x:?}\");\n}", "rs"),
+            ("def run(a):\n    return [x for x in a if x]\n", "py"),
+            ("package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hi\")\n}", "go"),
+            ("#include <stdio.h>\nint main(void) {\n  printf(\"hi\\n\");\n  return 0;\n}", "c"),
+            ("public class A {\n  public static void main(String[] args) {\n    System.out.println(1);\n  }\n}", "java"),
+            ("SELECT id, name\nFROM users\nWHERE id = 1;", "sql"),
+            ("#!/bin/bash\necho hi", "sh"),
+            ("{\"a\": [1, 2]}", "json"),
+        ] {
+            assert_eq!(guess(src), Some(tag), "{src}");
+        }
+        assert_eq!(guess(";;;\n{}"), None);
+    }
 
     #[test]
     fn fence_tags_select_language_before_content_detection() {

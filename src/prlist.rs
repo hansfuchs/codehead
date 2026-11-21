@@ -101,6 +101,8 @@ pub struct PrList {
     /// Index into the PR rows (headers skipped).
     cursor: usize,
     offset: usize,
+    /// The view follows the cursor (a key moved it); a mouse scroll frees the view.
+    free: bool,
     rows: Vec<(Rect, usize)>,
     /// Data version: up with each read that brings new PRs (the list dissolves in).
     version: u64,
@@ -278,12 +280,23 @@ impl PrList {
         (rows, prs)
     }
 
+    /// The cursor on the 1st PR (↑ leaves the list).
+    pub fn at_top(&self) -> bool {
+        self.cursor == 0
+    }
+
+    /// AT on a state tab (last draw).
+    pub fn tab_at(&self, at: Position) -> bool {
+        self.tabs.hit(at)
+    }
+
     pub fn key(&mut self, k: KeyEvent) -> Pick {
         let (_, prs) = self.layout();
         let n = prs.len();
+        self.free = false;
         match k.code {
-            KeyCode::Up | KeyCode::Char('j') => self.cursor = self.cursor.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('k') => self.cursor = (self.cursor + 1).min(n.saturating_sub(1)),
+            KeyCode::Up | KeyCode::Char('k') => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.cursor = (self.cursor + 1).min(n.saturating_sub(1)),
             KeyCode::PageUp => self.cursor = self.cursor.saturating_sub(10),
             KeyCode::PageDown => self.cursor = (self.cursor + 10).min(n.saturating_sub(1)),
             KeyCode::Home | KeyCode::Char('g') => self.cursor = 0,
@@ -315,8 +328,14 @@ impl PrList {
     pub fn mouse(&mut self, m: MouseEvent) -> Pick {
         let at = Position { x: m.column, y: m.row };
         match m.kind {
-            MouseEventKind::ScrollDown => self.offset += 3,
-            MouseEventKind::ScrollUp => self.offset = self.offset.saturating_sub(3),
+            MouseEventKind::ScrollDown => {
+                self.free = true;
+                self.offset += 3;
+            }
+            MouseEventKind::ScrollUp => {
+                self.free = true;
+                self.offset = self.offset.saturating_sub(3);
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.tabs.click(at) {
                     self.filter = Filter::ALL[self.tabs.i.min(Filter::ALL.len() - 1)];
@@ -325,6 +344,7 @@ impl PrList {
                     return Pick::None;
                 }
                 if let Some(&(_, k)) = self.rows.iter().find(|(r, _)| r.contains(at)) {
+                    self.free = true;
                     if self.cursor == k {
                         return self.key(KeyEvent::from(KeyCode::Enter));
                     }
@@ -338,12 +358,17 @@ impl PrList {
 
     /// The list in AREA: the cache at once, a read's new PRs dissolve in.
     pub fn draw(&mut self, f: &mut Frame, area: Rect, focused: bool) {
-        self.draw_now(f, area, focused);
+        self.draw_levels(f, area, focused, focused);
+    }
+
+    /// The list in AREA, TABS_ON: the state tabs have the keys, ROWS_ON: the PR rows have them.
+    pub fn draw_levels(&mut self, f: &mut Frame, area: Rect, tabs_on: bool, rows_on: bool) {
+        self.draw_now(f, area, tabs_on, rows_on);
         let list = Rect { y: area.y + 3, height: area.height.saturating_sub(3), ..area };
         self.fx.apply(f, list, self.version);
     }
 
-    fn draw_now(&mut self, f: &mut Frame, area: Rect, focused: bool) {
+    fn draw_now(&mut self, f: &mut Frame, area: Rect, tabs_on: bool, focused: bool) {
         self.rows.clear();
         if area.height < 2 {
             return;
@@ -365,7 +390,7 @@ impl PrList {
         // the state tabs on a line of their own
         self.tabs.i = Filter::ALL.iter().position(|f| *f == self.filter).unwrap_or(0);
         let labels: Vec<String> = Filter::ALL.iter().map(|f| f.label().to_string()).collect();
-        self.tabs.draw(f, Rect { y: area.y + 1, height: 1, ..area }, "state", &labels, focused);
+        self.tabs.draw(f, Rect { y: area.y + 1, height: 1, ..area }, "state", &labels, tabs_on);
         let list = Rect { y: area.y + 3, height: area.height.saturating_sub(3), ..area };
         if rows.is_empty() {
             let msg = if self.read.is_some() { "  reading…" } else { "  0 pull requests" };
@@ -374,10 +399,13 @@ impl PrList {
         }
         let h = list.height as usize;
         let cur_row = prs.get(self.cursor).and_then(|&i| rows.iter().position(|r| *r == RowKind::Pr(i))).unwrap_or(0);
-        if cur_row < self.offset + 1 {
-            self.offset = cur_row.saturating_sub(1);
-        } else if cur_row >= self.offset + h {
-            self.offset = cur_row + 1 - h;
+        // a key: the cursor in view; a mouse scroll: the view stays where the wheel put it
+        if !self.free {
+            if cur_row < self.offset + 1 {
+                self.offset = cur_row.saturating_sub(1);
+            } else if cur_row >= self.offset + h {
+                self.offset = cur_row + 1 - h;
+            }
         }
         self.offset = self.offset.min(rows.len().saturating_sub(h));
         let w = list.width as usize;

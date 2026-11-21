@@ -69,7 +69,7 @@ const SECTIONS: [(usize, &str, &str); 5] = [
     (16, "colors", "a preset; a set field below overrides 1 of its colors"),
 ];
 /// The alias group, after the plain fields.
-const ALIASES: (&str, &str) = ("path aliases", "short names for directories: name/ → target/ · enter: edit / done · d: delete · ctrl+n: add");
+const ALIASES: (&str, &str) = ("path aliases", "short names for directories: name/ → target/ · enter: edit / done · d: delete · ctrl+a: add");
 /// Fields and boxes: this many columns right of the group's heading.
 const INDENT: u16 = 2;
 
@@ -422,7 +422,7 @@ impl Form {
                     self.applied = self.reload();
                     return Action::None;
                 }
-                KeyCode::Char('n' | 'N') if self.aliases_on => {
+                KeyCode::Char('a' | 'A') if self.aliases_on => {
                     self.add_alias();
                     return Action::None;
                 }
@@ -462,7 +462,7 @@ impl Form {
             return Action::None;
         }
         match key.code {
-            // tab / shift+tab: the next / previous field (main tabs: ctrl+←→)
+            // tab / shift+tab: the next / previous field (main tabs: F1-F6)
             KeyCode::Tab => {
                 self.commit();
                 self.step(1);
@@ -751,7 +751,7 @@ impl Form {
         if self.aliases_on && let Some(row) = at(items[self.add_item()].0, 1) {
             let focused = active && self.focus == self.add_item();
             f.render_widget(
-                Paragraph::new(Line::styled(" + add path alias (ctrl+n) ", if focused { theme::pill() } else { theme::panel() })),
+                Paragraph::new(Line::styled(" + add path alias (ctrl+a) ", if focused { theme::pill() } else { theme::panel() })),
                 row,
             );
             self.rows.push((row, Hit::Add));
@@ -782,16 +782,18 @@ pub enum Sub {
     Codehead,
     Harnesses,
     Mcp,
+    Shortcuts,
 }
 
-const SUBS: [(Sub, &str); 3] = [(Sub::Codehead, "codehead"), (Sub::Harnesses, "harnesses"), (Sub::Mcp, "mcp servers")];
+const SUBS: [(Sub, &str); 4] = [(Sub::Codehead, "codehead"), (Sub::Harnesses, "harnesses"), (Sub::Mcp, "mcp servers"), (Sub::Shortcuts, "shortcuts")];
 
-/// The settings tab: a bar of sub-tabs (codehead, harnesses, mcp servers), the sub-tab below.
+/// The settings tab: a bar of sub-tabs (codehead, harnesses, mcp servers, shortcuts), the sub-tab below.
 /// ↑ from the 1st row of a sub-tab: the bar; ←→ there: another sub-tab; ↑ again: the main tabs.
 pub struct Settings {
     pub(crate) form: Form,
     pub(crate) harness: Form,
     pub(crate) mcp: crate::mcptab::McpTab,
+    pub(crate) shortcuts: crate::shortcuts::Tab,
     pub(crate) sub: Sub,
     /// The keys go to the sub-tab bar.
     pub(crate) bar: bool,
@@ -800,7 +802,7 @@ pub struct Settings {
 
 impl Settings {
     pub fn new(path: PathBuf) -> Self {
-        Self { form: Form::new(path.clone()), harness: crate::harnesstab::form(path), mcp: crate::mcptab::McpTab::new(), sub: Sub::Codehead, bar: false, bar_hits: Vec::new() }
+        Self { form: Form::new(path.clone()), harness: crate::harnesstab::form(path), mcp: crate::mcptab::McpTab::new(), shortcuts: crate::shortcuts::Tab::new(), sub: Sub::Codehead, bar: false, bar_hits: Vec::new() }
     }
 
     /// Background results of the MCP tab. true: redraw.
@@ -824,6 +826,7 @@ impl Settings {
                 self.harness.reload();
             }
             Sub::Mcp => self.mcp.enter(),
+            Sub::Shortcuts => self.shortcuts.enter(),
         }
     }
 
@@ -831,7 +834,7 @@ impl Settings {
         match self.sub {
             Sub::Codehead => self.form.commit(),
             Sub::Harnesses => self.harness.commit(),
-            Sub::Mcp => {}
+            Sub::Mcp | Sub::Shortcuts => {}
         }
     }
 
@@ -849,7 +852,7 @@ impl Settings {
         match self.sub {
             Sub::Codehead => self.form.focus_input(),
             Sub::Harnesses => self.harness.focus_input(),
-            Sub::Mcp => {}
+            Sub::Mcp | Sub::Shortcuts => {}
         }
     }
 
@@ -857,10 +860,11 @@ impl Settings {
         if self.bar {
             let at = SUBS.iter().position(|s| s.0 == self.sub).unwrap_or(0);
             match key.code {
-                KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => self.switch(SUBS[(at + SUBS.len() - 1) % SUBS.len()].0),
-                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.switch(SUBS[(at + 1) % SUBS.len()].0),
+                KeyCode::Left | KeyCode::Char('h') => self.switch(SUBS[(at + SUBS.len() - 1) % SUBS.len()].0),
+                KeyCode::Right | KeyCode::Char('l') => self.switch(SUBS[(at + 1) % SUBS.len()].0),
                 KeyCode::Up => return Action::Header,
-                KeyCode::Down | KeyCode::Enter | KeyCode::Char('j') | KeyCode::Esc => {
+                // tab: the next field, the sub-tab's content (as ↓)
+                KeyCode::Down | KeyCode::Enter | KeyCode::Char('j') | KeyCode::Esc | KeyCode::Tab => {
                     self.bar = false;
                     self.focus_input();
                 }
@@ -872,6 +876,7 @@ impl Settings {
             Sub::Codehead => matches!(self.form.key(key), Action::Header),
             Sub::Harnesses => matches!(self.harness.key(key), Action::Header),
             Sub::Mcp => !self.mcp.key(key),
+            Sub::Shortcuts => !self.shortcuts.key(key),
         };
         if up {
             self.bar = true;
@@ -896,6 +901,10 @@ impl Settings {
                 self.mcp.mouse(event);
                 Action::None
             }
+            Sub::Shortcuts => {
+                self.shortcuts.mouse(event);
+                Action::None
+            }
         }
     }
 
@@ -904,6 +913,7 @@ impl Settings {
             Sub::Codehead => self.form.paste(text),
             Sub::Harnesses => self.harness.paste(text),
             Sub::Mcp => self.mcp.paste(text),
+            Sub::Shortcuts => self.shortcuts.paste(text),
         }
     }
 
@@ -915,6 +925,7 @@ impl Settings {
             Sub::Codehead => self.form.row_at(at),
             Sub::Harnesses => self.harness.row_at(at),
             Sub::Mcp => None,
+            Sub::Shortcuts => self.shortcuts.row_at(at),
         }
     }
 
@@ -924,9 +935,10 @@ impl Settings {
             return &[("←→", "sub-tab"), ("↓ enter", "in"), ("↑", "main tabs")];
         }
         match self.sub {
-            Sub::Codehead => &[("↑↓", "move"), ("enter", "edit / done"), ("ctrl+d", "default"), ("d", "delete alias"), ("ctrl+n", "add alias"), ("tab", "next field"), ("esc", "undo edit")],
+            Sub::Codehead => &[("↑↓", "move"), ("enter", "edit / done"), ("ctrl+d", "default"), ("d", "delete alias"), ("ctrl+a", "add alias"), ("tab", "next field"), ("esc", "undo edit")],
             Sub::Harnesses => &[("↑↓", "move"), ("tab", "next field"), ("ctrl+d", "default"), ("esc", "undo edit")],
             Sub::Mcp => self.mcp.help(),
+            Sub::Shortcuts => self.shortcuts.help(),
         }
     }
 
@@ -964,6 +976,7 @@ impl Settings {
             Sub::Codehead => self.form.draw(f, body, inner),
             Sub::Harnesses => self.harness.draw(f, body, inner),
             Sub::Mcp => self.mcp.draw(f, body, inner),
+            Sub::Shortcuts => self.shortcuts.draw(f, body, inner),
         }
     }
 }
@@ -1084,8 +1097,8 @@ mod tests {
     fn alias_boxes_lock_apply_on_leave_and_delete_with_d() {
         let (dir, mut form) = fixture("save");
         assert!(!form.dirty());
-        // ctrl+n: a new box, open on its name
-        form.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        // ctrl+a: a new box, open on its name
+        form.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!((form.focus, form.editing), (PLAIN, Some(PLAIN)));
         form.paste("project:platform");
         // enter locks the box: 0 target → not applied, the error shows
@@ -1130,7 +1143,7 @@ mod tests {
     fn form_scrolls_to_controls_and_handles_invalid_reload() {
         let (dir, mut form) = fixture("render");
         for _ in 0..10 {
-            form.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+            form.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         }
         form.editing = None;
         form.focus = form.add_item();
@@ -1156,7 +1169,7 @@ mod tests {
     #[test]
     fn alias_box_draws_a_border_and_highlights_when_locked() {
         let (dir, mut form) = fixture("box");
-        form.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        form.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         form.paste("docs");
         key(&mut form, KeyCode::Down);
         form.paste("~/docs/");
@@ -1183,7 +1196,7 @@ mod tests {
         let (dir, mut form) = fixture("paths");
         std::fs::create_dir_all(dir.join("browse/child")).unwrap();
         std::fs::write(dir.join("browse/guide.md"), "guide").unwrap();
-        form.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        form.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         form.paste("notes");
         form.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         form.paste(&format!("{}/browse/", dir.display()));

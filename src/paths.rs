@@ -3,6 +3,7 @@
 //! shell, without the tab. Relative paths: from the repo / worktree top, else from the thread's dir.
 //! ↑↓ move, tab inserts the entry (a dir: with `/`, the dropdown goes on with its entries). enter
 //! inserts only after ↑↓ picked a row (else: enter is the input's). esc: closed for this word.
+//! ↑↓ put the row's name into the text at once (live preview; the typed name stays the filter).
 //! Opens only when the directory exists (`and/or`, `https://…`: 0 dropdown).
 
 use std::path::{Path, PathBuf};
@@ -44,6 +45,8 @@ pub struct Paths {
     area: Rect,
     /// Dirs only (a dir input: shell mode's dir).
     pub dirs_only: bool,
+    /// ↑↓: the row's name in the text (the typed name: the filter).
+    preview: dropdown::Preview,
 }
 
 /// The open dropdown: where the name starts, the directory (as typed), the matching entries.
@@ -52,6 +55,8 @@ struct Open {
     at: Pos,
     word_at: Pos,
     dir: String,
+    /// The name as typed (the filter; a live preview may sit in the text instead).
+    name: String,
     entries: Vec<(String, bool)>,
     /// The word sits after an open `"` (spaces allowed).
     quoted: bool,
@@ -146,6 +151,10 @@ impl Paths {
         }
         let (word_at, word, quoted) = found.filter(|(at, _, _)| self.closed != Some(*at))?;
         let (dir, name) = split(&word);
+        // a live preview in the text: the name typed before it filters
+        let name_at = Pos { row: word_at.row, col: word_at.col + dir.chars().count() };
+        let typed = self.preview.typed(ta).filter(|(p, _)| *p == name_at).map(|(_, t)| t);
+        let name = typed.as_deref().unwrap_or(name);
         // `/` alone (a slash in a sentence), `//`: not a path yet
         if dir == "/" && name.is_empty() || dir.contains("//") {
             return None;
@@ -161,15 +170,16 @@ impl Paths {
         if entries.is_empty() || (entries.len() == 1 && entries[0].0 == name && !entries[0].1) {
             return None;
         }
-        if self.seen != word {
-            self.seen = word.clone();
+        // the word as typed (a live preview: the typed name), new text: the 1st row again
+        let typed_word = format!("{dir}{name}");
+        if self.seen != typed_word {
+            self.seen = typed_word;
             self.cursor = 0;
             self.offset = 0;
             self.moved = false;
         }
         self.cursor = self.cursor.min(entries.len() - 1);
-        let at = Pos { row: word_at.row, col: word_at.col + dir.chars().count() };
-        Some(Open { at, word_at, dir: dir.to_string(), entries, quoted })
+        Some(Open { at: name_at, word_at, dir: dir.to_string(), name: name.to_string(), entries, quoted })
     }
 
     #[cfg(test)]
@@ -198,18 +208,22 @@ impl Paths {
         }
         let n = o.entries.len();
         match k.code {
-            KeyCode::Up => {
-                self.cursor = (self.cursor + n - 1) % n;
+            KeyCode::Up | KeyCode::Down => {
+                self.cursor = if k.code == KeyCode::Up { (self.cursor + n - 1) % n } else { (self.cursor + 1) % n };
                 self.moved = true;
-            }
-            KeyCode::Down => {
-                self.cursor = (self.cursor + 1) % n;
-                self.moved = true;
+                // the row's name in the text at once (a name with a space: on enter / tab only)
+                let name = &o.entries[self.cursor].0;
+                if o.quoted || !name.chars().any(|c| c.is_whitespace() || c == '"') {
+                    self.preview.show(ta, o.at, &o.name, name);
+                }
             }
             KeyCode::Tab => self.pick(ta, &o, self.cursor),
             // enter stays the input's key, unless ↑↓ picked a row
             KeyCode::Enter if self.moved => self.pick(ta, &o, self.cursor),
             KeyCode::Esc => self.closed = Some(o.word_at),
+            // a name char after a preview (not `/`: it goes into the previewed dir): the typed
+            // name again, the char after it
+            KeyCode::Char(c) if !c.is_whitespace() && c != '/' && self.preview.revert(ta) => return false,
             _ => return false,
         }
         true

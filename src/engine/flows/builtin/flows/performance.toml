@@ -1,0 +1,30 @@
+name = "performance"
+description = "baseline, profile, fix, measure again"
+roles = ["lead"]
+
+[[step]]
+use = "measure"
+label = "baseline"
+
+[[step]]
+use = "investigate"
+note = "Profile. Find where the time or memory goes, with numbers."
+
+[[step]]
+use = "plan"
+
+[[step]]
+id = "change"
+use = "implement"
+
+[[step]]
+use = "measure"
+label = "measure again"
+note = "Same method as the baseline. Compare."
+loop = { to = "change", until = "the target is met, or the next gain costs more than it gives", max = 3 }
+
+[[step]]
+use = "verify"
+
+[[step]]
+use = "report"

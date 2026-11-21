@@ -1,0 +1,12 @@
+name = "chore"
+description = "small task: do, verify, report"
+roles = ["lead"]
+
+[[step]]
+use = "implement"
+
+[[step]]
+use = "verify"
+
+[[step]]
+use = "report"

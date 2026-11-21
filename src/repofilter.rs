@@ -1,6 +1,7 @@
 //! Repo filter of both threads tabs (start screen, F2 menu): a chip `repo › all ▾` and its
 //! dropdown (all repos, each repo of the rows with its row count, rows outside any repo).
-//! ctrl+r or a click on the chip opens it; ↑↓ move, type: filter, enter: pick, esc: close.
+//! ←→ on the list: the previous / next repo at once. The menu command "filter by repo" or a
+//! click on the chip opens the dropdown; ↑↓ move, type: filter, enter: pick, esc: close.
 //! The last pick holds for the session in both tabs.
 
 use std::path::{Path, PathBuf};
@@ -152,6 +153,16 @@ impl RepoFilter {
         v.into_iter().map(|(_, i, m)| (i, m)).collect()
     }
 
+    /// ←→: the option D steps from the current pick (round). True: the choice changed.
+    pub fn step(&mut self, d: isize, opts: &[Opt]) -> bool {
+        if opts.is_empty() {
+            return false;
+        }
+        let at = opts.iter().position(|o| o.value == self.choice).unwrap_or(0) as isize;
+        let to = opts[(at + d).rem_euclid(opts.len() as isize) as usize].value.clone();
+        self.pick(to)
+    }
+
     /// Key for the open dropdown. Returns (handled, choice changed).
     pub fn key(&mut self, k: KeyEvent, opts: &[Opt]) -> (bool, bool) {
         if self.open.is_none() {
@@ -163,7 +174,6 @@ impl RepoFilter {
         let Some(o) = self.open.as_mut() else { return (false, false) };
         match k.code {
             KeyCode::Esc => self.open = None,
-            KeyCode::Char('r') if k.modifiers.contains(KeyModifiers::CONTROL) => self.open = None,
             KeyCode::Up if n > 0 => o.cursor = (o.cursor + n - 1) % n,
             KeyCode::Down if n > 0 => o.cursor = (o.cursor + 1) % n,
             KeyCode::PageUp => o.cursor = o.cursor.saturating_sub(dropdown::MAX_ROWS),
@@ -225,14 +235,14 @@ impl RepoFilter {
         }
     }
 
-    /// The chip, right-aligned in ROW (`repo › codehead ▾  ctrl+r`). Returns its width.
+    /// The chip, right-aligned in ROW (`repo › codehead ▾  ←→`). Returns its width.
     pub fn draw_chip(&mut self, f: &mut Frame, row: Rect) -> u16 {
         let on = self.choice.is_some();
         let label = self.label();
         let spans = vec![
             Span::styled("repo › ", if self.is_open() { theme::accent() } else { theme::muted() }),
             Span::styled(format!("{label} ▾"), if on { theme::accent() } else { theme::text() }),
-            Span::styled("  ctrl+r ", theme::panel().fg(theme::pal().line)),
+            Span::styled("  ←→ ", theme::panel().fg(theme::pal().line)),
         ];
         let line = Line::from(spans);
         let w = (line.width() as u16).min(row.width);

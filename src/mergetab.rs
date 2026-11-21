@@ -98,9 +98,12 @@ impl MergeTab {
             };
         };
         let ctrl = k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        let tab = matches!(k.code, KeyCode::Tab | KeyCode::BackTab) && !ctrl;
         if self.input_focus {
             match k.code {
+                // esc, tab: back to the pull request (tab: the next field, as in the thread view)
                 KeyCode::Esc => self.input_focus = false,
+                _ if tab => self.input_focus = false,
                 KeyCode::Enter if ctrl => {
                     let text = self.input.text();
                     if text.trim().is_empty() {
@@ -120,7 +123,7 @@ impl MergeTab {
             }
             return Out::None;
         }
-        if !m.typing() && k.code == KeyCode::Char('i') && !ctrl {
+        if !m.typing() && ((k.code == KeyCode::Char('i') && !ctrl) || tab) {
             self.input_focus = true;
             return Out::None;
         }
@@ -161,7 +164,7 @@ impl MergeTab {
     pub fn hints(&self) -> String {
         match &self.detail {
             None => "←→ state · ↑↓ move · enter: open · r: read again ".into(),
-            Some(_) if self.input_focus => "ctrl+⏎: new thread with this task · esc: back to the pull request ".into(),
+            Some(_) if self.input_focus => "ctrl+⏎: new thread with this task · tab / esc: back to the pull request ".into(),
             Some(m) => format!("{}· esc: the list ", m.hints()),
         }
     }

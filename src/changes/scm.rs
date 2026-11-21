@@ -1,5 +1,5 @@
 //! The source control panel left of the review (ctrl+b): the commit message on top, then
-//! sections as VS Code has them: staged, changes (by level), comments (by file), stash. Section
+//! sections as VS Code has them: staged, changes (by level), comments (by severity, then file), stash. Section
 //! and level labels stick to the top / bottom edge while their rows are out of view; a click
 //! on a stuck label scrolls to it.
 
@@ -43,12 +43,16 @@ impl Sec {
 enum Fold {
     Sec(Sec),
     Level(Level),
+    /// A severity of the comments.
+    CLevel(Level),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum PRow {
     Section(Sec, usize),
     Level(Level, usize),
+    /// A severity of the comments: its count.
+    CLevel(Level, usize),
     /// File (index), in the staged section.
     File(usize, bool),
     /// A file of the comments: path, count.
@@ -65,6 +69,7 @@ impl PRow {
         match self {
             PRow::Section(s, _) => Some(Fold::Sec(*s)),
             PRow::Level(l, _) => Some(Fold::Level(*l)),
+            PRow::CLevel(l, _) => Some(Fold::CLevel(*l)),
             _ => None,
         }
     }
@@ -201,16 +206,27 @@ impl View {
             if self.comments.is_empty() {
                 v.push(PRow::Empty("c on lines: a comment"));
             }
-            let mut paths: Vec<&str> = Vec::new();
-            for c in &self.comments {
-                if !paths.contains(&c.path.as_str()) {
-                    paths.push(&c.path);
+            // per severity (as the changes' levels): its files, their comments
+            for l in Level::ALL {
+                let at: Vec<usize> = (0..self.comments.len()).filter(|&i| self.comments[i].level == l).collect();
+                if at.is_empty() {
+                    continue;
                 }
-            }
-            for path in paths {
-                let of: Vec<usize> = (0..self.comments.len()).filter(|&i| self.comments[i].path == path).collect();
-                v.push(PRow::CommentFile(path.to_string(), of.len()));
-                v.extend(of.into_iter().map(PRow::Comment));
+                v.push(PRow::CLevel(l, at.len()));
+                if p.folded.contains(&Fold::CLevel(l)) {
+                    continue;
+                }
+                let mut paths: Vec<&str> = Vec::new();
+                for &i in &at {
+                    if !paths.contains(&self.comments[i].path.as_str()) {
+                        paths.push(&self.comments[i].path);
+                    }
+                }
+                for path in paths {
+                    let of: Vec<usize> = at.iter().copied().filter(|&i| self.comments[i].path == path).collect();
+                    v.push(PRow::CommentFile(path.to_string(), of.len()));
+                    v.extend(of.into_iter().map(PRow::Comment));
+                }
             }
         }
         if pr {
@@ -428,6 +444,10 @@ impl View {
                 let (done, all) = self.counts[*l as usize];
                 let st = Style::default().fg(level_color(*l)).add_modifier(Modifier::BOLD);
                 right_fill(&[Span::styled(format!("   {} {}", fold(Fold::Level(*l)), l.label()), st)], &[Span::styled(format!("{n} · {done}/{all} ✓ "), theme::muted())])
+            }
+            PRow::CLevel(l, n) => {
+                let st = Style::default().fg(level_color(*l)).add_modifier(Modifier::BOLD);
+                right_fill(&[Span::styled(format!("   {} {}", fold(Fold::CLevel(*l)), l.label()), st)], &[Span::styled(format!("{n} "), theme::muted())])
             }
             PRow::File(i, staged) => {
                 let Some(f) = self.changes.files.get(*i) else { return Line::raw("") };
@@ -652,8 +672,10 @@ impl View {
     fn parent(&self, i: usize) -> Option<usize> {
         let mine = &self.scm.rows.get(i)?;
         let is_file_of_level = matches!(mine, PRow::File(_, false));
+        let is_comment = matches!(mine, PRow::CommentFile(..) | PRow::Comment(_));
         (0..i).rev().find(|&j| match &self.scm.rows[j] {
             PRow::Level(..) => is_file_of_level,
+            PRow::CLevel(..) => is_comment,
             PRow::Section(..) => true,
             _ => false,
         })
@@ -668,8 +690,8 @@ impl View {
         if let Some(cur) = self.scm.pick {
             let n = self.pr_src.as_ref().map_or(0, |s| s.commits.len()) + 1;
             match k.code {
-                KeyCode::Up | KeyCode::Char('j') => self.scm.pick = Some(cur.saturating_sub(1)),
-                KeyCode::Down | KeyCode::Char('k') => self.scm.pick = Some((cur + 1).min(n - 1)),
+                KeyCode::Up | KeyCode::Char('k') => self.scm.pick = Some(cur.saturating_sub(1)),
+                KeyCode::Down | KeyCode::Char('j') => self.scm.pick = Some((cur + 1).min(n - 1)),
                 KeyCode::Home => self.scm.pick = Some(0),
                 KeyCode::End => self.scm.pick = Some(n - 1),
                 KeyCode::Enter | KeyCode::Right => self.pick(cur),
@@ -682,8 +704,8 @@ impl View {
         let last = self.scm.rows.len().saturating_sub(1);
         let row = self.scm.rows.get(self.scm.at).cloned();
         match k.code {
-            KeyCode::Up | KeyCode::Char('j') => self.scm.at = self.scm.at.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('k') => self.scm.at = (self.scm.at + 1).min(last),
+            KeyCode::Up | KeyCode::Char('k') => self.scm.at = self.scm.at.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.scm.at = (self.scm.at + 1).min(last),
             KeyCode::PageUp => self.scm.at = self.scm.at.saturating_sub(10),
             KeyCode::PageDown => self.scm.at = (self.scm.at + 10).min(last),
             KeyCode::Home | KeyCode::Char('g') => self.scm.at = 0,
@@ -722,6 +744,12 @@ impl View {
                     self.scm.focus = false;
                 }
                 Some(PRow::Comment(ci)) => self.edit_comment(ci),
+                // enter on a stash entry: its agent restores it
+                Some(PRow::Stash(si)) => {
+                    if let Some(id) = self.stash.get(si).map(|e| e.id.clone()) {
+                        return self.restore(&id);
+                    }
+                }
                 _ => {}
             },
             KeyCode::Char(' ') => {
@@ -735,17 +763,15 @@ impl View {
             }
             KeyCode::Char('s') => return self.panel_stage(),
             KeyCode::Char('p') => return self.panel_stash(),
+            // r: read again, as on every screen
             KeyCode::Char('r') => {
-                if let Some(PRow::Stash(si)) = row
-                    && let Some(id) = self.stash.get(si).map(|e| e.id.clone())
-                {
-                    return self.restore(&id);
-                }
+                self.refresh(true);
+                return Act::Toast("changes: reading git".into());
             }
             KeyCode::Char('x') | KeyCode::Delete => match row {
                 Some(PRow::Comment(ci)) => {
                     self.comments.remove(ci);
-                    super::write_comments(&self.id, &self.comments);
+                    self.save_comments();
                     self.rebuild_here();
                     return Act::Toast(format!("comment deleted · {} left", self.comments.len()));
                 }

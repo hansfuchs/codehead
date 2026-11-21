@@ -28,6 +28,7 @@ two-face = { version = "0.5.2", default-features = false, features = [
   "syntect-default-onig",
 ] }
 keyring = "4.2.0"
+hyperpolyglot = "0.1.7"
 
 [profile.release]
 strip = true
@@ -39,3 +40,7 @@ manual_checked_ops = "allow"
 needless_range_loop = "allow"
 too_many_arguments = "allow"
 type_complexity = "allow"
+
+# hyperpolyglot 0.1.7 with `pub mod detectors` (classify a paste without a file)
+[patch.crates-io]
+hyperpolyglot = { path = "vendor/hyperpolyglot" }

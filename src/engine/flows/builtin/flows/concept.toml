@@ -1,0 +1,24 @@
+name = "concept"
+description = "scrutinize, options, decision, write-up: 0 code"
+roles = ["lead"]
+
+[[step]]
+use = "scrutinize-task"
+
+[[step]]
+use = "open-questions"
+
+[[step]]
+id = "options"
+use = "options"
+
+[[step]]
+use = "owner-gate"
+label = "decision"
+gate = { changes = "options" }
+
+[[step]]
+use = "write-up"
+
+[[step]]
+use = "report"

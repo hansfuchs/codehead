@@ -55,6 +55,9 @@ pub struct Agent {
     /// codehead MCP servers the agent gets (names in `mcp.toml`; empty: 0).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<String>,
+    /// Flow roles the agent takes by default (`reviewer`, ...): a flow maps them to it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
     /// Archived agents keep their file (old threads still show them) but leave every list.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,

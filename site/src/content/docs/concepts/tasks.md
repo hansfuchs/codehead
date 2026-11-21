@@ -7,15 +7,18 @@ A task is what you write on the **new** tab before a thread starts: a prompt, a 
 agents and a place to work. Starting it makes a thread and sends the task to every picked
 agent as its first message. The prompt comes first; the title is optional: 0 title, the
 prompt's 1st line names the thread (and its branch). Type, then `ctrl+enter`. `tab` / `shift+tab`
-walk the fields; `F1`-`F4` (`alt+1`-`alt+4`) switch tabs.
+walk the fields; `F1`-`F5` (`alt+1`-`alt+5`) switch tabs.
 
 ## Prompt
 
 - `@` lists agent names. `>` lists commands: files, notes, threads, artifacts and skills.
 - A path (`src/`, `./a/b`, `~/x/`) lists that directory as you type. `tab` inserts the row.
-- `ctrl+v` pastes a clipboard image as `[Image #n]`. Text over 256 characters becomes
+- `ctrl+v` pastes a clipboard image as `[Image #n]`. Text over 1024 characters becomes
   `[Pasted text #n +L lines]`. Both go into the message as attachments.
-- Markdown lists continue on `enter`.
+- Pasted code (any length) goes in as a fenced code block, tagged with its language
+  (`rs`, `py`, ...; 0 match: no tag). Edit the tag after the backticks. Inside a code block, a
+  paste stays as is. Code blocks show syntax colors as you type.
+- Markdown lists continue on `enter`. `-` / `*` / `+` items show as `•`.
 
 ## Context
 
@@ -39,6 +42,8 @@ Outside a git repository, the thread works in the current directory.
 
 An unsent task is saved after every key to `~/.cache/codehead/drafts`. The new tab shows
 **view drafts (n)** on top. A started thread drops its draft; drafts older than 30 days go.
+`n` in the menu always opens an empty form: the task on screen stays in the drafts list.
 
-An idea for later (a usage limit hit, a thread you do not want yet): `ctrl+s` saves the task as
-a kept draft and empties the form. Kept drafts show **★ saved** in the list and never expire.
+An idea for later (a usage limit hit, a thread you do not want yet): **save as draft** (right of
+**view drafts**) or `ctrl+s` saves the task as a kept draft and empties the form. Kept drafts show
+**★ saved** in the list and never expire.

@@ -91,11 +91,18 @@ asks them 1 by 1.
 While its question waits, the agent turns yellow: its avatar, name and messages. Yellow is not
 an agent color, so a blocked agent stands out at once.
 
+## Where it works
+
+The row under the prompt names who gets your message, then where the thread works: per
+checkout, its repo, the branch now checked out (`⎇`) and `(worktree)` for a linked worktree,
+e.g. `in codehead ⎇ task/hotkeys (worktree), site ⎇ main`. It reads `.git/HEAD` every 3 s,
+so a branch switch by an agent shows within 3 s.
+
 ## Steering
 
 - `esc`: interrupt the running turns after 0.5 s (scrolled up: back to live first).
 - `esc esc`: back to the start screen. The thread keeps running.
-- `tab` (`F10` everywhere): the menu. `n` in its **quick** tab: a new thread. Its **agents** tab shows the agents of the
+- `ctrl+p` (every screen): the menu. `n` in its **quick** tab: a new thread. Its **agents** tab shows the agents of the
   thread as cards by harness, adds and removes them; **threads**
   switches to another thread.
 - `>` **branch**: a copy of the thread, see [threads](/docs/concepts/threads/#branching).

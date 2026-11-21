@@ -1126,6 +1126,12 @@ pub struct Comment {
     /// The diff lines it is on, as the modal showed them (`+ let b = 3;`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub quote: String,
+    /// Its severity (the panel groups the comments by it).
+    #[serde(default)]
+    pub level: crate::rank::Level,
+    /// The agent that wrote it ("": the owner).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub by: String,
 }
 
 impl Comment {
@@ -1139,14 +1145,44 @@ fn comments_path(id: &str) -> PathBuf {
     crate::engine::store::thread_dir(id).join("comments.json")
 }
 
-fn read_comments(id: &str) -> Vec<Comment> {
+pub(crate) fn read_comments(id: &str) -> Vec<Comment> {
     std::fs::read(comments_path(id)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
-fn write_comments(id: &str, c: &[Comment]) {
+/// The comments file's time (an agent wrote a comment: the view reads it again).
+fn comments_stamp(id: &str) -> Option<std::time::SystemTime> {
+    std::fs::metadata(comments_path(id)).and_then(|m| m.modified()).ok()
+}
+
+pub(crate) fn write_comments(id: &str, c: &[Comment]) {
     if let Ok(b) = serde_json::to_vec_pretty(c) {
         let _ = crate::engine::write_atomic(&comments_path(id), &b);
     }
+}
+
+/// MCP `comment`: AGENT's comments (`[{file, line, lines?, severity, text}]`) into the comments
+/// of THREAD (the changes view reads them at its next draw). ROOT: the worktree (absolute paths
+/// in it: relative). Returns the count added.
+pub fn agent_comments(thread: &str, agent: &str, root: Option<&Path>, list: &serde_json::Value) -> Result<usize, String> {
+    let items = list.as_array().ok_or("comments: an array required")?;
+    let mut add = Vec::new();
+    for c in items {
+        let file = c["file"].as_str().unwrap_or_default().trim();
+        let text = c["text"].as_str().unwrap_or_default().trim();
+        let line = c["line"].as_u64().unwrap_or(0) as u32;
+        if file.is_empty() || text.is_empty() {
+            return Err("each comment needs file and text".into());
+        }
+        let p = Path::new(file);
+        let rel = root.and_then(|r| p.strip_prefix(r).ok()).unwrap_or(p).to_string_lossy().trim_start_matches("./").to_string();
+        let level = crate::rank::Level::parse(c["severity"].as_str().unwrap_or_default()).unwrap_or_default();
+        add.push(Comment { path: rel, line, text: text.to_string(), lines: c["lines"].as_str().unwrap_or_default().to_string(), quote: String::new(), level, by: agent.to_string() });
+    }
+    let n = add.len();
+    let mut all = read_comments(thread);
+    all.extend(add);
+    write_comments(thread, &all);
+    Ok(n)
 }
 
 /// The batch message of COMMENTS (0 comments: None).
@@ -1157,7 +1193,8 @@ pub fn batch(comments: &[Comment]) -> Option<String> {
     let mut s = String::from("Review comments on the changes (file:line, new side). Address each one:\n");
     for c in comments {
         let mut lines = c.text.lines();
-        s.push_str(&format!("- `{}:{}`: {}\n", c.path, c.at(), lines.next().unwrap_or_default()));
+        let by = if c.by.is_empty() { String::new() } else { format!(" (by {})", c.by) };
+        s.push_str(&format!("- [{}] `{}:{}`{by}: {}\n", c.level.label(), c.path, c.at(), lines.next().unwrap_or_default()));
         for l in lines {
             s.push_str(&format!("  {l}\n"));
         }
@@ -1236,6 +1273,7 @@ pub struct View {
     stash_at: Option<std::time::SystemTime>,
     /// Review comments, for 1 batch message (`C`).
     comments: Vec<Comment>,
+    comments_at: Option<std::time::SystemTime>,
     /// The reviewer's findings, a review on its way, why 0, the model (None: `off`).
     review: Option<crate::review::Review>,
     reviewing: Option<Receiver<Result<crate::review::Review, String>>>,
@@ -1348,6 +1386,11 @@ impl View {
         }
     }
 
+    /// The checkout the view reads.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     pub fn new(id: &str, dir: &Path) -> View {
         View {
             version: 0,
@@ -1394,6 +1437,7 @@ impl View {
             stash: stash::read(id),
             stash_at: stash::stamp(id),
             comments: read_comments(id),
+            comments_at: comments_stamp(id),
             review: crate::review::cached(id),
             reviewing: None,
             review_error: None,
@@ -1658,6 +1702,26 @@ impl View {
             self.stash_at = stash::stamp(&self.id);
         }
         true
+    }
+
+    /// The comments to their file (the view's own write: 0 read again).
+    fn save_comments(&mut self) {
+        write_comments(&self.id, &self.comments);
+        self.comments_at = comments_stamp(&self.id);
+    }
+
+    /// The comments file changed (an agent wrote comments): read it again.
+    fn sync_comments(&mut self) {
+        let at = comments_stamp(&self.id);
+        if at == self.comments_at {
+            return;
+        }
+        self.comments_at = at;
+        let c = read_comments(&self.id);
+        if c != self.comments {
+            self.comments = c;
+            self.built = None;
+        }
     }
 
     /// Staged files exist (a commit can start).
@@ -2023,10 +2087,16 @@ impl View {
             Body::Comment(ci, k) => {
                 let Some(c) = self.comments.get(ci) else { return bar(Vec::new()) };
                 let st = Style::default().fg(theme::pal().accent);
-                let head = if k == 0 { format!("✎ {}: ", c.at()) } else { "  ".to_string() };
                 let l = c.text.lines().nth(k).unwrap_or_default();
-                let room = inner.saturating_sub(head.width());
-                bar(vec![Span::styled(head, st.add_modifier(Modifier::BOLD)), Span::styled(crate::nav::fit(l, room), st)])
+                if k > 0 {
+                    return bar(vec![Span::raw("  "), Span::styled(crate::nav::fit(l, inner.saturating_sub(2)), st)]);
+                }
+                // the 1st row: severity, lines, the agent that wrote it
+                let sev = format!("{} ", c.level.label());
+                let by = if c.by.is_empty() { String::new() } else { format!(" · {}", c.by) };
+                let head = format!("✎ {}{by}: ", c.at());
+                let room = inner.saturating_sub(head.width() + sev.width());
+                bar(vec![Span::styled(sev, Style::default().fg(scm::level_color(c.level)).add_modifier(Modifier::BOLD)), Span::styled(head, st.add_modifier(Modifier::BOLD)), Span::styled(crate::nav::fit(l, room), st)])
             }
         }
     }
@@ -2155,16 +2225,22 @@ impl View {
 
     /// Add a comment TEXT on SPOTS (1 per file); the selection it was on clears; the rows show
     /// it at once.
+    #[cfg(test)]
     pub fn add_comment(&mut self, spots: &[Spot], text: &str) {
+        self.add_comment_at(spots, text, crate::rank::Level::default());
+    }
+
+    /// `add_comment` with severity LEVEL.
+    fn add_comment_at(&mut self, spots: &[Spot], text: &str, level: crate::rank::Level) {
         let text = text.trim();
         if text.is_empty() {
             return;
         }
         for s in spots {
             let quote = self.quote(s);
-            self.comments.push(Comment { path: s.path.clone(), line: s.line, text: text.to_string(), lines: s.lines.clone(), quote });
+            self.comments.push(Comment { path: s.path.clone(), line: s.line, text: text.to_string(), lines: s.lines.clone(), quote, level, by: String::new() });
         }
-        write_comments(&self.id, &self.comments);
+        self.save_comments();
         self.sel.clear();
         self.rebuild_here();
     }
@@ -2198,7 +2274,7 @@ impl View {
             quote.extend(self.quote(s).lines().map(|l| QLine::Code(l.to_string())));
         }
         let title = spots.iter().map(Spot::label).collect::<Vec<_>>().join(", ");
-        self.modal = Some(Modal::Comment { title, quote, scroll: 0, edit: None, spots, text: comment_area("") });
+        self.modal = Some(Modal::Comment { title, quote, scroll: 0, edit: None, spots, text: comment_area(""), level: crate::rank::Level::default(), on_level: true });
     }
 
     /// The comment modal on comment CI: its text to edit (0 text: it goes).
@@ -2206,12 +2282,12 @@ impl View {
         let Some(c) = self.comments.get(ci) else { return };
         let title = format!("{}:{}", c.path, c.at());
         let quote = c.quote.lines().map(|l| QLine::Code(l.to_string())).collect();
-        self.modal = Some(Modal::Comment { title, quote, scroll: 0, edit: Some(ci), spots: Vec::new(), text: comment_area(&c.text) });
+        self.modal = Some(Modal::Comment { title, quote, scroll: 0, edit: Some(ci), spots: Vec::new(), text: comment_area(&c.text), level: c.level, on_level: false });
     }
 
     /// The modal's save: a new comment, an edit (0 text: deleted).
     fn save_comment(&mut self) -> Act {
-        let Some(Modal::Comment { spots, edit, text, .. }) = self.modal.take() else { return Act::None };
+        let Some(Modal::Comment { spots, edit, text, level, .. }) = self.modal.take() else { return Act::None };
         let t = text.text().trim().to_string();
         match edit {
             Some(ci) if ci < self.comments.len() => {
@@ -2219,15 +2295,16 @@ impl View {
                     self.comments.remove(ci);
                 } else {
                     self.comments[ci].text = t;
+                    self.comments[ci].level = level;
                 }
-                write_comments(&self.id, &self.comments);
+                self.save_comments();
                 self.rebuild_here();
                 Act::Toast(format!("comment saved · {} in the batch", self.comments.len()))
             }
             Some(_) => Act::None,
             None if t.is_empty() => Act::Toast("0 text: 0 comment".into()),
             None => {
-                self.add_comment(&spots, &t);
+                self.add_comment_at(&spots, &t, level);
                 let on = spots.iter().map(Spot::label).collect::<Vec<_>>().join(", ");
                 Act::Toast(format!("comment on {on} · {} in the batch · ctrl+enter: send", self.comments.len()))
             }
@@ -2238,9 +2315,28 @@ impl View {
     fn modal_key(&mut self, k: KeyEvent) -> Act {
         let send = k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
         match self.modal.as_mut() {
-            Some(Modal::Comment { text, scroll, .. }) => match k.code {
+            // the severity row: ←→ cycle it, ↓ / a letter: the text
+            // alt+↑↓: the selected lines scroll
+            Some(Modal::Comment { scroll, .. }) if k.modifiers.contains(KeyModifiers::ALT) && matches!(k.code, KeyCode::Up | KeyCode::Down) => {
+                *scroll = if k.code == KeyCode::Up { scroll.saturating_sub(1) } else { *scroll + 1 };
+            }
+            Some(Modal::Comment { text, level, on_level: on @ true, .. }) => match k.code {
                 KeyCode::Esc => self.modal = None,
                 KeyCode::Enter if send => return self.save_comment(),
+                KeyCode::Left | KeyCode::Right => *level = level.step(if k.code == KeyCode::Right { 1 } else { -1 }),
+                KeyCode::Up => {}
+                KeyCode::Down | KeyCode::Enter | KeyCode::Tab => *on = false,
+                _ => {
+                    *on = false;
+                    text.key(k);
+                }
+            },
+            Some(Modal::Comment { text, scroll, on_level, .. }) => match k.code {
+                KeyCode::Esc => self.modal = None,
+                KeyCode::Enter if send => return self.save_comment(),
+                // ↑ on the text's 1st row, shift+tab: the severity row
+                KeyCode::Up if !k.modifiers.contains(KeyModifiers::ALT) && text.on_first_row() => *on_level = true,
+                KeyCode::BackTab => *on_level = true,
                 // alt+↑↓: the selected lines scroll
                 KeyCode::Up if k.modifiers.contains(KeyModifiers::ALT) => *scroll = scroll.saturating_sub(1),
                 KeyCode::Down if k.modifiers.contains(KeyModifiers::ALT) => *scroll += 1,
@@ -2309,14 +2405,14 @@ impl View {
         let w = area.width.saturating_sub(4).clamp(20, 110);
         let x = area.x + (area.width.saturating_sub(w)) / 2;
         match modal {
-            Modal::Comment { title, quote, scroll, edit, text, .. } => {
+            Modal::Comment { title, quote, scroll, edit, text, level, on_level, .. } => {
                 let tw = w.saturating_sub(4);
                 let th = (text.rows_for(tw) as u16).clamp(3, 8);
                 // the selected lines: at most half the screen (and 24 rows); more: they scroll
-                let room = (area.height.saturating_sub(th + 6) as usize).min(usize::from(area.height / 2).max(3)).min(24);
+                let room = (area.height.saturating_sub(th + 8) as usize).min(usize::from(area.height / 2).max(3)).min(24);
                 let qh = quote.len().min(room);
                 *scroll = (*scroll).min(quote.len() - qh);
-                let h = (qh as u16 + th + 5 + u16::from(qh > 0)).min(area.height);
+                let h = (qh as u16 + th + 7 + u16::from(qh > 0)).min(area.height);
                 let y = area.y + (area.height.saturating_sub(h)) / 3;
                 let r = Rect { x, y, width: w, height: h };
                 f.render_widget(Clear, r);
@@ -2359,8 +2455,23 @@ impl View {
                 if qh > 0 {
                     yy += 1;
                 }
+                // the severity row: the 4 levels, the picked one a pill (accent: the row has the keys)
+                let mut spans = vec![Span::styled("severity ", if *on_level { theme::accent_bold() } else { theme::muted() })];
+                for l in crate::rank::Level::ALL {
+                    let st = if l == *level {
+                        let bg = if *on_level { scm::level_color(l) } else { theme::pal().panel };
+                        Style::default().bg(bg).fg(if *on_level { theme::pal().on_accent } else { scm::level_color(l) }).add_modifier(Modifier::BOLD)
+                    } else {
+                        theme::muted()
+                    };
+                    spans.push(Span::styled(format!(" {} ", l.label()), st));
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled(if *on_level { " ←→ · ↓ text" } else { " ↑ on the 1st row: severity" }, theme::muted()));
+                f.render_widget(Paragraph::new(Line::from(spans)), Rect { y: yy, height: 1, ..inner });
+                yy += 2;
                 let tr = Rect { y: yy, height: th.min(inner.bottom().saturating_sub(yy + 1)), ..inner };
-                text.render(f, tr, true);
+                text.render(f, tr, !*on_level);
                 let hint = Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner };
                 let (save, cancel) = (" save ", " cancel ");
                 f.render_widget(Paragraph::new(Line::from(vec![Span::styled(save, theme::pill()), Span::raw(" "), Span::styled(cancel, theme::muted()), Span::styled("  ctrl+⏎ save · esc cancel · 0 text: delete", theme::muted())])), hint);
@@ -2439,6 +2550,11 @@ impl View {
         self.built = None;
     }
 
+    /// The cursor on the 1st row of the diff, 0 panel / modal / filter: ↑ leaves the view.
+    pub fn at_top(&self) -> bool {
+        self.at == 0 && !self.scm.focus && self.modal.is_none() && !self.filtering
+    }
+
     /// The view has the letters: the filter, a modal, the commit message.
     pub fn typing(&self) -> bool {
         self.filtering || self.modal.is_some() || (self.scm.focus && self.scm.msg_focus)
@@ -2463,17 +2579,17 @@ impl View {
             } else if self.filtering {
                 "type to filter · enter: 1st hit · esc: clear "
             } else {
-                "j k: file · space: select · c: comment · r: reviewed · alt: panel · i: prompt "
+                "j k: file · space: select · c: comment · v: reviewed · alt: panel · i: prompt "
             };
         }
         if self.scm.focus && self.scm.msg_focus {
             "commit message · ctrl+⏎: commit the staged files · ctrl+g: draft by model · esc: back "
         } else if self.scm.focus {
-            "j k · space: pick · e: IDE · s: stage / unstage · p: stash · →: open · x: remove · r: restore · alt: review "
+            "j k · space: pick · e: IDE · s: stage / unstage · p: stash · →: open · x: remove · enter: restore · alt: review "
         } else if self.filtering {
             "type to filter · enter: 1st hit · esc: clear "
         } else {
-            "j k: file · space: select · e: IDE · s: stage · c: comment · r: reviewed · alt: panel · i: prompt "
+            "j k: file · space: select · e: IDE · s: stage · c: comment · v: reviewed · alt: panel · i: prompt "
         }
     }
 
@@ -2598,6 +2714,7 @@ impl View {
             self.version += 1;
         }
         self.sync_stash(false);
+        self.sync_comments();
         self.refresh(false);
         // the panel left (ctrl+b; room permitting), a line, the review right
         let panel = self.scm.shown && area.width >= PANEL_MIN;
@@ -2742,6 +2859,13 @@ impl View {
         self.alt_tap = false;
     }
 
+    /// The side panel on / off (ctrl+b: from the view, from the prompt too).
+    pub fn toggle_panel(&mut self) {
+        self.scm.shown = !self.scm.shown;
+        self.scm.focus &= self.scm.shown;
+        self.scm.msg_focus &= self.scm.shown;
+    }
+
     pub fn key(&mut self, k: KeyEvent) -> Act {
         if matches!(k.code, KeyCode::Modifier(_)) {
             self.modifier(k);
@@ -2758,9 +2882,7 @@ impl View {
         // ctrl+b: the panel on / off; alt alone (a tap: press, release, 0 key between): the keys
         // to the panel / the review
         if ctrl && k.code == KeyCode::Char('b') {
-            self.scm.shown = !self.scm.shown;
-            self.scm.focus &= self.scm.shown;
-            self.scm.msg_focus &= self.scm.shown;
+            self.toggle_panel();
             return Act::None;
         }
 
@@ -2772,8 +2894,8 @@ impl View {
             // ↑↓: 1 line; j / ctrl+↑: 1 file up, k / ctrl+↓: 1 file down (the owner's pick)
             KeyCode::Down if !ctrl => self.at = (self.at + 1).min(last),
             KeyCode::Up if !ctrl => self.at = self.at.saturating_sub(1),
-            KeyCode::Char('k') | KeyCode::Down => self.jump(true, |r| r.head),
-            KeyCode::Char('j') | KeyCode::Up => self.jump(false, |r| r.head),
+            KeyCode::Char('j') | KeyCode::Down => self.jump(true, |r| r.head),
+            KeyCode::Char('k') | KeyCode::Up => self.jump(false, |r| r.head),
             KeyCode::PageDown => self.at = (self.at + self.page()).min(last),
             KeyCode::PageUp => self.at = self.at.saturating_sub(self.page()),
             KeyCode::Char('}') => self.jump(true, |r| r.head),
@@ -2788,11 +2910,12 @@ impl View {
                 self.select_row(self.at, on);
                 self.at = (self.at + 1).min(last);
             }
-            KeyCode::Char('r') if ctrl => {
+            // r (ctrl+r too): read again, as on every screen; v: reviewed
+            KeyCode::Char('r') => {
                 self.refresh(true);
                 return Act::Toast("changes: reading git".into());
             }
-            KeyCode::Char('r') => return self.toggle_reviewed(),
+            KeyCode::Char('v') => return self.toggle_reviewed(),
             KeyCode::Left => self.fold(true),
             KeyCode::Right => self.fold(false),
             KeyCode::Char('f') => self.filtering = true,
@@ -2809,7 +2932,7 @@ impl View {
             KeyCode::Enter if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) => {
                 let Some(text) = batch(&self.comments) else { return Act::Toast("0 comments · c: comment on the line".into()) };
                 self.comments.clear();
-                write_comments(&self.id, &self.comments);
+                self.save_comments();
                 self.built = None;
                 return Act::Send(text);
             }
@@ -2895,7 +3018,7 @@ impl View {
             KeyCode::Char('x') => {
                 if let Some(ci) = self.rows.get(self.at).and_then(|r| r.comment) {
                     self.comments.remove(ci);
-                    write_comments(&self.id, &self.comments);
+                    self.save_comments();
                     self.rebuild_here();
                     return Act::Toast(format!("comment deleted · {} left", self.comments.len()));
                 }
@@ -2911,8 +3034,9 @@ impl View {
                     && let Some(x) = self.review.as_ref().and_then(|r| r.findings.get(fi)).cloned()
                 {
                     self.drop_finding(fi);
-                    self.comments.push(Comment { path: x.file.clone(), line: x.line, text: crate::review::as_comment(&x), lines: String::new(), quote: String::new() });
-                    write_comments(&self.id, &self.comments);
+                    let level = crate::rank::Level::parse(&x.severity).unwrap_or_default();
+                    self.comments.push(Comment { path: x.file.clone(), line: x.line, text: crate::review::as_comment(&x), lines: String::new(), quote: String::new(), level, by: String::new() });
+                    self.save_comments();
                     self.rebuild_here();
                     return Act::Toast(format!("finding → comment batch · {} · ctrl+enter: send", self.comments.len()));
                 }
@@ -3118,7 +3242,8 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// A modal over the changes view.
 enum Modal {
     /// A comment: on SPOTS (new) or comment EDIT; the diff lines it is on.
-    Comment { title: String, quote: Vec<QLine>, scroll: usize, edit: Option<usize>, spots: Vec<Spot>, text: Box<crate::textarea::TextArea> },
+    /// LEVEL: its severity; ON_LEVEL: the keys go to the severity row (←→), else the text.
+    Comment { title: String, quote: Vec<QLine>, scroll: usize, edit: Option<usize>, spots: Vec<Spot>, text: Box<crate::textarea::TextArea>, level: crate::rank::Level, on_level: bool },
     /// A yes / no question; THEN runs on yes.
     Confirm { question: String, yes: bool, then: Then },
 }
@@ -3380,7 +3505,7 @@ Binary files a/img.png and b/img.png differ
         v.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert_eq!(v.comment_count(), 1);
         match v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)) {
-            Act::Send(s) => assert_eq!(s, "Review comments on the changes (file:line, new side). Address each one:\n- `src/a.rs:11`: why 3?\n  keep 2"),
+            Act::Send(s) => assert_eq!(s, "Review comments on the changes (file:line, new side). Address each one:\n- [medium] `src/a.rs:11`: why 3?\n  keep 2"),
             a => panic!("{a:?}"),
         }
         assert_eq!(v.comment_count(), 0);
@@ -3450,11 +3575,11 @@ Binary files a/img.png and b/img.png differ
     }
 
     #[test]
-    fn r_marks_reviewed_folds_and_a_changed_diff_shows_updated() {
+    fn v_marks_reviewed_folds_and_a_changed_diff_shows_updated() {
         let mut v = view(parse(DIFF));
         v.build(100);
         v.at = v.rows.iter().position(|r| r.head).unwrap();
-        v.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
         assert_eq!(v.progress(), (1, 4));
         let t = text(&v);
         let h = t.iter().position(|l| l.contains("☑ src/a.rs")).unwrap();
@@ -3545,12 +3670,12 @@ Binary files a/img.png and b/img.png differ
         let buf = t.backend().buffer().clone();
         assert_eq!(buf[(0, head as u16 + 1)].fg, theme::pal().accent);
         assert_ne!(buf[(0, next as u16 + 1)].fg, theme::pal().accent);
-        press(&mut v, KeyCode::Char('k'));
-        let s = screen(&mut v, 100, 30);
-        assert!(s[next].ends_with('▌'), "k: 1 file down: {s:#?}");
         press(&mut v, KeyCode::Char('j'));
         let s = screen(&mut v, 100, 30);
-        assert!(s[head].ends_with('▌'), "j: 1 file up: {s:#?}");
+        assert!(s[next].ends_with('▌'), "j: 1 file down: {s:#?}");
+        press(&mut v, KeyCode::Char('k'));
+        let s = screen(&mut v, 100, 30);
+        assert!(s[head].ends_with('▌'), "k: 1 file up: {s:#?}");
         v.key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
         let s = screen(&mut v, 100, 30);
         assert!(s[next].ends_with('▌'), "ctrl+↓: 1 file down: {s:#?}");
@@ -3606,7 +3731,7 @@ Binary files a/img.png and b/img.png differ
         assert!(s[c - 1].contains("+ let c = 4;"), "under the last selected line: {s:#?}");
         assert!(!s.iter().any(|l| l.chars().nth(1) == Some('▌')), "the selection clears: {s:#?}");
         let Act::Send(b) = v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)) else { panic!() };
-        assert!(b.ends_with("- `src/a.rs:12 · removed 11`: both wrong"), "{b}");
+        assert!(b.ends_with("- [medium] `src/a.rs:12 · removed 11`: both wrong"), "{b}");
         // esc (the view's while a selection is on) clears it
         v.at = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("+ let b = 3;")).unwrap();
         press(&mut v, KeyCode::Char(' '));
@@ -3922,6 +4047,33 @@ Binary files a/img.png and b/img.png differ
     }
 
     #[test]
+    fn severity_row_cycles_and_agent_comments_group_by_severity() {
+        let mut v = view(parse(DIFF));
+        v.id = "changes-sev-0000".into();
+        let _ = std::fs::create_dir_all(crate::engine::store::thread_dir(&v.id));
+        v.build(100);
+        v.at = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("+ let c = 4;")).unwrap();
+        press(&mut v, KeyCode::Char('c'));
+        // the severity row has the keys: ←→ cycle (medium → high → critical), a letter: the text
+        press(&mut v, KeyCode::Left);
+        press(&mut v, KeyCode::Left);
+        press(&mut v, KeyCode::Char('x'));
+        let Some(Modal::Comment { level, on_level, text, .. }) = &v.modal else { panic!() };
+        assert_eq!((*level, *on_level, text.text().as_str()), (crate::rank::Level::Critical, false, "x"));
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!(v.comments[0].level, crate::rank::Level::Critical);
+        // an agent's comments (the MCP tool): into the file, the view reads them at its next draw
+        let root = Path::new("/w");
+        let n = agent_comments(&v.id, "amon", Some(root), &serde_json::json!([{"file": "/w/src/a.rs", "line": 12, "severity": "low", "text": "nit"}])).unwrap();
+        assert_eq!(n, 1);
+        let s = screen(&mut v, 140, 40).join("\n");
+        assert_eq!(v.comments.len(), 2);
+        assert_eq!((v.comments[1].path.as_str(), v.comments[1].by.as_str()), ("src/a.rs", "amon"));
+        assert!(s.contains("critical") && s.contains("low"), "{s}");
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(&v.id));
+    }
+
+    #[test]
     fn the_comment_modal_groups_lines_per_file_and_scrolls_them() {
         let mut v = view(parse(DIFF));
         v.id = "changes-modal-0000".into();
@@ -3965,7 +4117,7 @@ Binary files a/img.png and b/img.png differ
         assert!(v.context().is_none());
         let i = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("+ let c = 4;")).unwrap();
         v.select_row(i, true);
-        v.comments.push(Comment { path: "src/a.rs".into(), line: 11, text: "why 3?".into(), lines: String::new(), quote: String::new() });
+        v.comments.push(Comment { path: "src/a.rs".into(), line: 11, text: "why 3?".into(), lines: String::new(), quote: String::new(), level: Default::default(), by: String::new() });
         let c = v.context().unwrap();
         assert!(c.contains("- `src/a.rs:12`\n```diff\n+ let c = 4;\n```") && c.contains("- `src/a.rs:11`: why 3?"), "{c}");
     }
@@ -4109,7 +4261,7 @@ Binary files a/img.png and b/img.png differ
         let fold = t0.elapsed() / 20;
         let t0 = Instant::now();
         for _ in 0..20 {
-            v.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+            v.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
             t.draw(|f| v.draw(f, f.area())).unwrap();
         }
         let reviewed = t0.elapsed() / 20;

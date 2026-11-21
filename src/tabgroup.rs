@@ -38,6 +38,11 @@ impl TabGroup {
         self.rects.iter().find(|(_, k)| *k == i).map(|(r, _)| *r)
     }
 
+    /// AT on a tab (last draw).
+    pub fn hit(&self, at: Position) -> bool {
+        self.rects.iter().any(|(r, _)| r.contains(at))
+    }
+
     /// A click at AT on a tab: it is picked. True: a tab was hit.
     pub fn click(&mut self, at: Position) -> bool {
         match self.rects.iter().find(|(r, _)| r.contains(at)) {

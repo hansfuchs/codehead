@@ -153,6 +153,8 @@ struct View {
     clicks: Option<(Instant, (usize, u16), u8)>,
     /// Mouse position: the clickable row under it gets the hover bg.
     hover: Option<Position>,
+    /// The last drawn frame: ctrl+click reads the URL under the mouse from it.
+    last_frame: ratatui::buffer::Buffer,
     // ask
     /// The 1st open ask: cursor, picks, answers so far, focus.
     ask: crate::ask::Picker,
@@ -169,6 +171,9 @@ struct View {
     /// The repo tabs on top of the changes view (shift+←→, ctrl+w, a click): 1 per checkout.
     checkout_tabs: crate::tabgroup::TabGroup,
     checkout_labels: Vec<String>,
+    /// Under the prompt: the repos, branches, worktrees the thread works in (read again every 3 s).
+    spots: Vec<crate::workspot::Spot>,
+    spots_at: Option<Instant>,
     /// The merge tab: the thread's pull requests.
     merge: crate::merge::Merge,
     merge_sources_at: Option<Instant>,
@@ -178,6 +183,8 @@ struct View {
     hist: crate::histsearch::HistSearch,
     command: crate::command::Command,
     paths: crate::paths::Paths,
+    /// `#` of the prompt: the shortcuts.
+    shortcuts: crate::shortcuts::Pick,
     paster: Paster,
     attachments: Vec<(String, PathBuf)>,
     history: Vec<String>,
@@ -185,6 +192,9 @@ struct View {
     draft: String,
     /// A search result to scroll to (its message time); the item it found, marked until a key.
     jump: Option<u64>,
+    /// The notifications dropdown (ctrl+n); the seen tracker of this thread's stream.
+    notes_panel: Option<crate::notify::Panel>,
+    watch: crate::notify::Watch,
     flash: Option<usize>,
     /// The prompt draft as last written to disk (`prompt_path`): 0 write without a change.
     prompt_saved: String,
@@ -242,6 +252,8 @@ struct View {
     // chrome
     monitors: crate::monitors::Monitors,
     subagents: crate::subagents::Subagents,
+    /// The flow row + its box (ctrl+f, `> flow`).
+    flowbar: crate::flowbar::FlowBar,
     menu: Option<crate::menu::Menu>,
     cost: Option<crate::cost::Snap>,
     cost_at: Instant,
@@ -308,6 +320,7 @@ impl View {
             dragging: false,
             clicks: None,
             hover: None,
+            last_frame: ratatui::buffer::Buffer::default(),
             ask: crate::ask::Picker::default(),
             #[cfg(test)]
             ops: Default::default(),
@@ -318,12 +331,15 @@ impl View {
             checkout: 0,
             checkout_tabs: crate::tabgroup::TabGroup::default(),
             checkout_labels: Vec::new(),
+            spots: Vec::new(),
+            spots_at: None,
             merge: crate::merge::Merge::for_thread(id),
             merge_sources_at: None,
             merge_reads: crate::background::Reads::default(),
             hist: Default::default(),
             command,
             paths: crate::paths::Paths::new(cwd),
+            shortcuts: crate::shortcuts::Pick::default(),
             paster: Paster::new(crate::engine::data_dir().join("paste").join(id)),
             attachments: Vec::new(),
             history: Vec::new(),
@@ -331,6 +347,8 @@ impl View {
             draft: String::new(),
             prompt_saved: String::new(),
             jump: crate::search::take_jump(id),
+            notes_panel: None,
+            watch: crate::notify::Watch::default(),
             flash: None,
             replace: None,
             queued: None,
@@ -364,6 +382,7 @@ impl View {
             // tests: 0 shared state between parallel views
             monitors: crate::monitors::Monitors::new(id),
             subagents: Default::default(),
+            flowbar: Default::default(),
             menu: None,
             cost: None,
             cost_at: Instant::now() - Duration::from_secs(60),
@@ -835,6 +854,8 @@ impl View {
             self.run_shell(cmd);
             return;
         }
+        // `#name` of a shortcut: its text
+        text = crate::shortcuts::expand(&text);
         // from the changes view: the selected lines and the open comments go along
         if self.pane == Pane::Changes
             && let Some(c) = self.changes.context()
@@ -1031,6 +1052,24 @@ impl View {
     }
 
     /// `> branch`: a copy of the thread, its view next.
+    /// A key of the flow box asks for ACT.
+    fn flow_act(&mut self, act: crate::flowbar::Act) {
+        match act {
+            crate::flowbar::Act::None => {}
+            crate::flowbar::Act::Host(op, c) => self.host(op, c),
+            crate::flowbar::Act::Answer(choice) => {
+                // the prompt's text: the owner's note to the agent
+                let note = self.input.text().trim().to_string();
+                if !note.is_empty() {
+                    self.input.set_text("");
+                }
+                self.host("flow_answer", json!({"op": "flow_answer", "choice": choice, "note": note}));
+                self.toast(format!("flow: {choice}"));
+            }
+            crate::flowbar::Act::Edit(slug) => self.exit = Exit::Home(crate::menu::Home::Flows(Some(slug))),
+        }
+    }
+
     fn branch(&mut self) -> bool {
         if !self.thread.busy.is_empty() {
             self.toast("branch: wait for the turn to end");
@@ -1112,7 +1151,7 @@ impl View {
 
     fn paste(&mut self, text: &str) {
         match self.paster.paste(text) {
-            Pasted::Text(t) => self.input.insert(&t),
+            Pasted::Text(t) => self.input.paste(&t),
             Pasted::File { path, marker } => {
                 self.input.insert(&marker);
                 self.attachments.push((marker, path));
@@ -1164,9 +1203,37 @@ impl View {
         if self.menu.is_none() && self.flash.take().is_some() {
             self.dirty = true;
         }
+        // notifications (ctrl+n): over everything, the menu too
+        if let Some(p) = self.notes_panel.as_mut() {
+            let pick = p.key(k);
+            return self.notes_pick(pick);
+        }
+        if crate::notify::is_key(&k) {
+            self.menu = None;
+            self.notes_panel = Some(crate::notify::Panel::open(Some(&self.id)));
+            self.dirty = true;
+            return false;
+        }
         if let Some(m) = self.menu.as_mut() {
             let a = m.key(k);
             return self.menu_action(a);
+        }
+        // the menu key (ctrl+p): the menu from every field, box and dropdown
+        if crate::config::menu_key().matches(&k) {
+            self.open_menu();
+            return false;
+        }
+        // the flow box: ctrl+f opens / closes it; its keys while open
+        if k.code == KeyCode::Char('f') && k.modifiers.contains(KeyModifiers::CONTROL) && !self.flowbar.is_open() {
+            self.flowbar.open();
+            self.dirty = true;
+            return false;
+        }
+        if let Some(act) = self.flowbar.key(k) {
+            let edit = matches!(act, crate::flowbar::Act::Edit(_));
+            self.flow_act(act);
+            self.dirty = true;
+            return edit;
         }
         // the open subagents box: its keys (d: stop the selected one)
         if let Some(act) = self.subagents.key(k, &self.thread.subs) {
@@ -1205,18 +1272,29 @@ impl View {
             }
             return false;
         }
+        // ctrl+b in the changes view: its side panel on / off, the prompt's focus too
+        if self.pane == Pane::Changes && self.prompt_focus && ctrl && !alt && k.code == KeyCode::Char('b') {
+            self.changes.toggle_panel();
+            self.dirty = true;
+            return false;
+        }
         // the files view's filter input: every key but ctrl+c (esc: clears it)
         if self.pane == Pane::Files && !self.prompt_focus && self.files.typing() && !(ctrl && k.code == KeyCode::Char('c')) {
             let act = self.files.key(k);
             self.files_act(act);
             return false;
         }
-        // the changes view with the focus: its keys (esc, tab, ctrl+c and the menu key: as in chat)
+        let tab = matches!(k.code, KeyCode::Tab | KeyCode::BackTab) && !ctrl && !alt;
+        // the changes view with the focus: its keys (esc, ctrl+c: as in chat; tab: the prompt)
         if self.pane != Pane::Chat && !self.prompt_focus {
+            // tab: the next field, the prompt (as i)
+            if tab && !(self.pane == Pane::Changes && self.changes.typing()) && !(self.pane == Pane::Merge && self.merge.typing()) {
+                self.prompt_focus = true;
+                return false;
+            }
             // the changes view's filter, selection: esc is the view's
             let esc_here = k.code == KeyCode::Esc && ((self.pane == Pane::Changes && self.changes.takes_esc()) || (self.pane == Pane::Merge && self.merge.takes_esc()));
-            let tab = matches!(k.code, KeyCode::Tab | KeyCode::BackTab) && !ctrl;
-            let through = ((k.code == KeyCode::Esc || tab) && !esc_here) || (ctrl && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('y'))) || crate::config::menu_key().matches(&k);
+            let through = (k.code == KeyCode::Esc && !esc_here) || (ctrl && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('y')));
             if !through {
                 if k.code == KeyCode::Char('i') && !ctrl && !alt && !(self.pane == Pane::Changes && self.changes.typing()) && !(self.pane == Pane::Merge && self.merge.typing()) {
                     self.prompt_focus = true;
@@ -1251,8 +1329,11 @@ impl View {
                 return false;
             }
         }
-        // an open ask with the focus: its keys before the prompt's (text in the prompt or not)
-        if let Some(a) = self.thread.asks.first().cloned() {
+        // an open ask with the focus: its keys before the prompt's (text in the prompt or not);
+        // another view on screen: tab from the prompt goes back to that view, not to the ask
+        if let Some(a) = self.thread.asks.first().cloned()
+            && !(tab && self.pane != Pane::Chat && self.prompt_focus)
+        {
             let act = self.ask.key(&a, k);
             if self.ask_act(act) {
                 return false;
@@ -1289,19 +1370,19 @@ impl View {
                 Some(crate::command::Action::Branch) => return self.branch(),
                 Some(crate::command::Action::Handoff) => self.handoff(),
                 Some(crate::command::Action::Reload) => self.reload_sessions(),
+                Some(crate::command::Action::Flow) => {
+                    self.flowbar.pick();
+                    self.dirty = true;
+                }
                 None => {}
             }
             return false;
         }
-        if self.paths.key(k, &mut self.input) {
+        if self.shortcuts.key(k, &mut self.input) || self.paths.key(k, &mut self.input) {
             return false;
         }
         let empty = self.input.is_empty();
         match k.code {
-            _ if crate::config::menu_key().matches(&k) => {
-                self.open_menu();
-                return false;
-            }
             // the prompt in the changes view: esc gives the keys back to the view (side by side
             // with the chat: an agent at work gets interrupted first, as in the chat)
             KeyCode::Esc if self.pane != Pane::Chat && self.prompt_focus && !(self.wide_split && (!self.thread.busy.is_empty() || self.queued.is_some() || self.back > 0)) => {
@@ -1324,9 +1405,12 @@ impl View {
                 }
                 return false;
             }
-            // tab: the menu (prompt text or not; dropdowns took theirs above)
-            KeyCode::Tab | KeyCode::BackTab if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && !self.mention_open() => {
-                self.open_menu();
+            // tab: the next field (dropdowns took theirs above): the prompt → the view in focus
+            // before it (changes, merge, files); the chat alone: 0 other field
+            KeyCode::Tab | KeyCode::BackTab if tab && !self.mention_open() => {
+                if self.pane != Pane::Chat {
+                    self.prompt_focus = false;
+                }
                 return false;
             }
             KeyCode::Char('c') if ctrl && self.sel.is_some() => {
@@ -1367,7 +1451,7 @@ impl View {
             KeyCode::Char('v') if ctrl => {
                 let p = self.paster.clipboard();
                 match p {
-                    Pasted::Text(t) => self.input.insert(&t),
+                    Pasted::Text(t) => self.input.paste(&t),
                     Pasted::File { path, marker } => {
                         self.input.insert(&marker);
                         self.attachments.push((marker, path));
@@ -1538,7 +1622,12 @@ impl View {
     /// The thread's checkouts (more of them: an agent edited in another repo / worktree).
     fn load_checkouts(&mut self) {
         if let Some(t) = store::load(&self.id) {
-            let all: Vec<store::Checkout> = t.all_checkouts().into_iter().filter(|c| Path::new(&c.dir).is_dir()).collect();
+            let mut all: Vec<store::Checkout> = t.all_checkouts().into_iter().filter(|c| Path::new(&c.dir).is_dir()).collect();
+            // a work dir without git (codehead started outside of a repo), agents in a repo: the
+            // changes of the repos only
+            if all.iter().any(|c| crate::threads::repo_root(Path::new(&c.dir)).is_some()) {
+                all.retain(|c| crate::threads::repo_root(Path::new(&c.dir)).is_some());
+            }
             let name = |c: &store::Checkout| {
                 let d = Path::new(&c.dir);
                 let root = crate::threads::repo_root(d).unwrap_or_else(|| d.to_path_buf());
@@ -1557,6 +1646,13 @@ impl View {
             self.checkouts = all.into_iter().map(|c| PathBuf::from(c.dir)).collect();
         }
         self.checkout = self.checkout.min(self.checkouts.len().saturating_sub(1));
+        // the changes view on the checkout picked (the view opened on another dir: a work dir
+        // without git, the dir of the thread before)
+        if let Some(d) = self.checkouts.get(self.checkout).filter(|d| **d != self.changes.dir()).cloned() {
+            self.changes = crate::changes::View::new(&self.id, &d);
+            self.changes.refresh(true);
+            self.dirty = true;
+        }
     }
 
     /// The changes view on checkout I.
@@ -1833,7 +1929,33 @@ impl View {
         false
     }
 
+    /// A key / click of the notifications dropdown: a jump goes to the note's event.
+    fn notes_pick(&mut self, p: crate::notify::Pick) -> bool {
+        use crate::notify::Pick;
+        self.dirty = true;
+        match p {
+            Pick::Stay => false,
+            Pick::Close => {
+                self.notes_panel = None;
+                false
+            }
+            Pick::Jump(n) => {
+                self.notes_panel = None;
+                self.menu_action(crate::menu::Action::Jump(n.card(), n.ts))
+            }
+        }
+    }
+
     fn mouse(&mut self, m: MouseEvent) {
+        if let Some(p) = self.notes_panel.as_mut() {
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                let pick = p.click(ratatui::layout::Position { x: m.column, y: m.row });
+                if self.notes_pick(pick) {
+                    self.mouse_exit = true;
+                }
+            }
+            return;
+        }
         if let Some(menu) = self.menu.as_mut() {
             let a = menu.mouse(m);
             if self.menu_action(a) {
@@ -1843,10 +1965,12 @@ impl View {
             }
             return;
         }
-        if self.subagents.mouse(m)
+        if self.flowbar.mouse(m)
+            || self.subagents.mouse(m)
             || self.monitors.mouse(m)
             || self.mention.mouse(m, &mut self.input, &self.roster)
             || self.command.mouse(m, &mut self.input)
+            || self.shortcuts.mouse(m, &mut self.input)
             || self.paths.mouse(m, &mut self.input)
         {
             return;
@@ -1854,6 +1978,15 @@ impl View {
         let at = Position { x: m.column, y: m.row };
         self.hover = Some(at);
         let click = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
+        // ctrl+click on a URL anywhere on screen: the browser
+        if click
+            && m.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+            && let Some(url) = crate::urls::at(&self.last_frame, at)
+        {
+            crate::merge::open_url(&url);
+            self.toast(format!("open {url}"));
+            return;
+        }
         // the worktree's URL (portless): the browser
         if click && let Some((r, url)) = &self.url_rect
             && r.contains(at)
@@ -2154,13 +2287,27 @@ impl View {
             }
             // a search result: its message 2 rows below the top, marked
             if let Some(ts) = self.jump.take() {
-                match self.thread.items.iter().position(|it| item_ts(it) == Some(ts)) {
+                // exact (a search hit), else the 1st message at / after it (a notification's event)
+                let items = &self.thread.items;
+                let at = items.iter().position(|it| item_ts(it) == Some(ts)).or_else(|| items.iter().position(|it| item_ts(it).is_some_and(|t| t >= ts))).or_else(|| items.len().checked_sub(1));
+                match at {
                     Some(i) => {
                         self.back = back_for(&self.drawn.starts, self.drawn.rows.len(), (i, 0), h).saturating_add(2).min(self.drawn.rows.len().saturating_sub(h));
                         self.flash = Some(i);
                     }
                     None => self.toast("search: the message is gone from the stream"),
                 }
+            }
+        }
+        // seen: the newest message on screen (at the bottom: every event) for 1 s
+        if self.menu.is_none() && self.notes_panel.is_none() {
+            let ts = (self.back > 0).then(|| {
+                let bottom = self.drawn.rows.len().saturating_sub(self.back).min(self.drawn.rows.len());
+                let last = self.drawn.starts.iter().take(self.thread.items.len()).rposition(|&s| s < bottom);
+                last.and_then(|i| self.thread.items[..=i].iter().rev().find_map(item_ts)).unwrap_or(0)
+            });
+            if ts != Some(0) {
+                self.watch.on_screen(&self.id, ts);
             }
         }
         // sends the log does not show yet, a queued replace: below the stream
@@ -2341,8 +2488,11 @@ impl View {
         let bubble_top = in_top.saturating_sub(1);
         let header = Rect { y: (bubble_top + 1).saturating_sub(head_h), height: head_h, ..area };
         let title = Rect { y: if head_h > 0 { header.y } else { bubble_top }.saturating_sub(1), height: 1, ..area };
+        // the flow row (its open box) right above the title row
+        let flow_h = self.flowbar.rows(area.height / 2);
+        let flow = Rect { y: title.y.saturating_sub(flow_h), height: flow_h, ..area };
         let mon_h = self.monitors.rows(area.width, area.height / 3);
-        let mon = Rect { y: title.y.saturating_sub(mon_h), height: mon_h, ..area };
+        let mon = Rect { y: flow.y.saturating_sub(mon_h), height: mon_h, ..area };
         // the subagents row (its open box) above the monitors row
         let sub_h = self.subagents.rows(&self.thread.subs, area.width, area.height / 3);
         let sub = Rect { y: mon.y.saturating_sub(sub_h), height: sub_h, ..area };
@@ -2415,6 +2565,9 @@ impl View {
         if mon_h > 0 {
             self.monitors.render(f, mon, self.tick());
         }
+        if flow_h > 0 {
+            self.flowbar.render(f, flow, true);
+        }
         if sub_h > 0 {
             let tick = self.tick();
             self.subagents.render(f, sub, tick, &self.thread.subs);
@@ -2458,7 +2611,15 @@ impl View {
             (format!("↗ {host}{more} "), u.clone())
         });
         let link_w = link.as_ref().map_or(0, |(t, _)| unicode_width::UnicodeWidthStr::width(t.as_str()));
-        let room = usize::from(top.width.saturating_sub(4)).saturating_sub(used + link_w + 1);
+        // notifications of the other threads; this thread's while scrolled back: ↓ N new
+        let mut badge = crate::notify::badge(&crate::notify::unseen(Some(&self.id)));
+        let here = crate::notify::unseen_of(&self.id).len();
+        if here > 0 && self.back > 0 {
+            badge.insert(0, Span::styled(format!("↓ {here} new  "), theme::accent_bold()));
+        }
+        let badge_w = usize::from(crate::notify::width(&badge));
+        let badge_w = if top.width as usize > used + link_w + badge_w + 24 { badge_w } else { 0 };
+        let room = usize::from(top.width.saturating_sub(4)).saturating_sub(used + link_w + badge_w + 1);
         spans.push(Span::styled(format!("{} ", crate::nav::fit(&self.title, room)), theme::accent_bold()));
         f.render_widget(Paragraph::new(Line::from(spans)), Rect { x: top.x + 2, width: top.width.saturating_sub(2), ..top });
         if let Some((text, url)) = link
@@ -2467,6 +2628,11 @@ impl View {
             let r = Rect { x: top.right() - link_w as u16, width: link_w as u16, ..top };
             f.render_widget(Paragraph::new(Span::styled(text, theme::accent().add_modifier(Modifier::UNDERLINED))), r);
             self.url_rect = Some((r, url));
+        }
+        if badge_w > 0 {
+            let lw = if top.width as usize > link_w + used + 4 { link_w } else { 0 };
+            let r = Rect { x: top.right().saturating_sub((lw + badge_w + 1) as u16), width: badge_w as u16, ..top };
+            f.render_widget(Paragraph::new(Line::from(badge)), r);
         }
         let mut low: Vec<Span<'static>> = Vec::new();
         if !note.is_empty() {
@@ -2563,28 +2729,27 @@ impl View {
             if self.cwd_edit.is_none() {
                 to.push(Span::styled(tilde(&self.shell_cwd), theme::muted()));
             }
-        } else if self.shell_running > 0 {
-            to.push(Span::styled(format!("  · ! {} running", self.shell_running), Style::default().fg(theme::shell())));
+        } else {
+            if self.shell_running > 0 {
+                to.push(Span::styled(format!("  · ! {} running", self.shell_running), Style::default().fg(theme::shell())));
+            }
+            // where the thread works: repo ⎇ branch (worktree), per checkout
+            if self.spots_at.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
+                self.spots = crate::workspot::of_thread(&self.id);
+                self.spots_at = Some(Instant::now());
+            }
+            to.extend(crate::workspot::spans(&self.spots));
         }
         let lead: u16 = to.iter().map(|s| s.content.chars().count() as u16).sum();
-        f.render_widget(Paragraph::new(Line::from(to)), hint);
+        let left_w = to_width(&hint, self.cwd_edit.is_some() && shell, self.hist.is_open(), shell, self.input.is_empty());
+        f.render_widget(Paragraph::new(Line::from(to)), Rect { width: left_w, ..hint });
         // the dir input: right of `in`, half the row at most
         let mut cwd_rect = Rect::default();
         if let Some(ta) = self.cwd_edit.as_mut().filter(|_| shell) {
             cwd_rect = Rect { x: hint.x + lead, width: (hint.width / 2).saturating_sub(lead).max(10).min(hint.width.saturating_sub(lead)), ..hint };
             ta.render(f, cwd_rect, true);
         }
-        let keys = if self.cwd_edit.is_some() && shell {
-            "tab: complete · ⏎ cd · esc / ↑: back "
-        } else if self.hist.is_open() {
-            "↑↓ ctrl+r: pick · ⏎ take · esc close · type to filter "
-        } else if shell {
-            "⏎ run · ↑↓ history · ctrl+r search · ↓ dir · output: to the agents with your next message "
-        } else if self.input.is_empty() {
-            "! for shell mode · ⌘/ctrl+⏎ send · ↑↓ history "
-        } else {
-            "⌘/ctrl+⏎ send · ↑↓ history "
-        };
+        let keys = hint_keys(self.cwd_edit.is_some() && shell, self.hist.is_open(), shell, self.input.is_empty());
         f.render_widget(Paragraph::new(Line::styled(keys, theme::muted())).right_aligned(), Rect { x: hint.x + hint.width / 2, width: hint.width - hint.width / 2, ..hint });
 
         // footer: keys or toast right
@@ -2593,8 +2758,8 @@ impl View {
             _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled(self.changes.hints(), theme::muted()),
             _ if self.pane == Pane::Merge && !self.prompt_focus => Span::styled(self.merge.hints(), theme::muted()),
             _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · pgup pgdn: scroll · o: IDE · y: yazi · c: copy path · S: share · i: prompt ", theme::muted()),
-            _ if self.pane != Pane::Chat => Span::styled("esc: back to the view · F1-F4: views ", theme::muted()),
-            _ => Span::styled("tab: menu · F1-F4: views · esc: interrupt · esc esc: codehead ", theme::muted()),
+            _ if self.pane != Pane::Chat => Span::styled("tab / esc: back to the view · F1-F4: views ", theme::muted()),
+            _ => Span::styled(format!("{}: menu · F1-F4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label), theme::muted()),
         };
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), foot);
 
@@ -2603,7 +2768,11 @@ impl View {
             self.mention.render(f, &self.input, &self.roster, area);
             self.hist.render(f, area, self.input_rect);
             self.command.render(f, &self.input, area, self.input_rect);
+            self.shortcuts.render(f, &self.input, area, self.input_rect);
             self.paths.render(f, &self.input, area, self.input_rect);
+            let open = self.shortcuts.is_open(&self.input);
+            let keys = self.pane == Pane::Chat || self.prompt_focus;
+            crate::shortcuts::render_popup(f, &self.input, self.hover, keys, area, open);
             match self.cwd_edit.as_ref() {
                 Some(ta) if shell => self.cwd_paths.render(f, ta, area, cwd_rect),
                 _ => self.cwd_paths.hide(),
@@ -2613,9 +2782,13 @@ impl View {
         self.draw_spawns(f);
         if let Some(m) = self.menu.as_mut() {
             f.render_widget(Clear, Rect::default());
-            // centered on the chat history (the stream), not the whole terminal
-            m.render(f, area, self.view_rect);
+            // a command palette: below the view bar, centered on the screen's width
+            m.render(f, f.area());
         }
+        if let Some(p) = self.notes_panel.as_mut() {
+            p.draw(f, f.area());
+        }
+        self.last_frame.clone_from(f.buffer_mut());
     }
 }
 
@@ -2860,8 +3033,15 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     // the tail: on a `wake` of the host; each second as a fallback (0 host, a lost line)
     let mut wake = true;
     let mut read_at = Instant::now();
+    let mut notes_v = crate::notify::version();
     let mut count_sec = 0;
     loop {
+        // new notifications / seen marks: the header redraws
+        let nv = crate::notify::version();
+        if nv != notes_v {
+            notes_v = nv;
+            dirty = true;
+        }
         // a frame on change; animations (wave, spinners, toast) at 150 ms; else 1 per second
         // (clock, cost box, sending timer)
         let every = if v.spawning() || crate::dissolve::active() || v.menu.as_ref().is_some_and(|m| m.waiting()) { Duration::from_millis(33) } else if v.animating() { Duration::from_millis(150) } else { Duration::from_secs(1) };
@@ -3007,6 +3187,10 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
         }
         dirty |= v.monitors.tick(id);
         dirty |= v.subagents.tick(&v.thread.subs);
+        if v.flowbar.tick(id, false) {
+            v.dirty = true;
+            dirty = true;
+        }
         if roster_at.elapsed() > Duration::from_secs(5) {
             roster_at = Instant::now();
             v.set_roster(crate::agents::load());
@@ -3065,6 +3249,69 @@ mod ask_tests {
         term.draw(|f| v.draw(f)).unwrap();
         let buf = term.backend().buffer().clone();
         (0..buf.area.height).map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect()
+    }
+
+    #[test]
+    fn changes_follow_the_repo_when_the_work_dir_has_0_git() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("codehead-nogit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (plain, repo) = (root.join("plain"), root.join("plain/app"));
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&repo).status().unwrap().success());
+        // codehead started in a dir without git; an agent edited in the repo below it
+        let mut t = store::Thread::new("no git", "task", &plain, vec!["ada".into()]);
+        t.checkouts.push(store::Checkout { dir: repo.display().to_string(), branch: None });
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(&t.id, &plain, "no git", tx);
+        v.load_checkouts();
+        assert_eq!(v.checkouts, [repo.clone()]);
+        assert_eq!(v.changes.dir(), repo.as_path());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_flow_row_shows_a_gate_and_its_box_answers_and_switches() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut t = store::Thread::new("flow view", "task", Path::new("/tmp"), vec!["ada".into()]);
+        let lib = crate::engine::flows::Library::load(None);
+        let mut st = crate::engine::flows::run::FlowState::new(lib.flow("new-feature").unwrap(), &lib, 3, &t.agents, &[], 0);
+        st.wait = Some(crate::engine::flows::run::Wait::Gate);
+        t.flow = Some(st);
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(&t.id, Path::new("/tmp"), "flow view", tx);
+        v.flowbar.tick(&t.id, true);
+        let s = screen(&mut v).join("\n");
+        assert!(s.contains("◆ new feature · 4/9 plan approval · @ada") && s.contains("⏸ gate plan approval: ctrl+f answer"), "{s}");
+        // ctrl+f: the wait's choices; the prompt's text goes along as the note
+        v.input.set_text("split the plan");
+        v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        let s = screen(&mut v).join("\n");
+        println!("{s}");
+        assert!(s.contains("approve · go on") && s.contains("back to plan"), "{s}");
+        press(&mut v, &[KeyCode::Down, KeyCode::Enter]);
+        let op = v.ops.borrow().iter().find(|o| o["op"] == "flow_answer").cloned().unwrap();
+        assert_eq!((op["choice"].as_str(), op["note"].as_str()), (Some("changes"), Some("split the plan")));
+        assert!(v.input.text().is_empty());
+        // change the flow: the box asks now / after at once, then the start step
+        v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        let s = screen(&mut v).join("\n");
+        println!("{s}");
+        assert!(s.contains("roles @lead ada  @reviewer ?") && s.contains("◀"), "{s}");
+        press(&mut v, &[KeyCode::Char('c'), KeyCode::Char('r'), KeyCode::Char('e'), KeyCode::Char('f'), KeyCode::Enter]);
+        let s = screen(&mut v).join("\n");
+        println!("{s}");
+        assert!(s.contains("switch now") && s.contains("after current flow"), "{s}");
+        press(&mut v, &[KeyCode::Enter, KeyCode::Down, KeyCode::Enter]);
+        let op = v.ops.borrow().iter().find(|o| o["op"] == "flow_set").cloned().unwrap();
+        assert_eq!((op["flow"].as_str(), op["start"].as_u64(), op["mode"].as_str()), (Some("refactor"), Some(1), Some("now")));
+        let s = screen(&mut v).join("\n");
+        assert!(s.contains("→ refactor at the next tool boundary"), "{s}");
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
     }
 
     fn answers(v: &View) -> Vec<Value> {
@@ -3208,9 +3455,32 @@ mod pane_tests {
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
         assert_eq!(v.pane, Pane::Changes);
         let s = screen(&mut v);
-        assert!(s.contains("space: select") && s.contains("r: reviewed") && s.contains("i: prompt"), "{s}");
+        assert!(s.contains("space: select") && s.contains("v: reviewed") && s.contains("i: prompt"), "{s}");
         press(&mut v, KeyCode::Char('1'), KeyModifiers::ALT);
         assert_eq!(v.pane, Pane::Chat);
+    }
+
+    #[test]
+    fn tab_moves_between_the_view_and_the_prompt_ctrl_p_is_the_menu() {
+        let mut v = view();
+        press(&mut v, KeyCode::F(2), KeyModifiers::NONE);
+        press(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(v.prompt_focus && v.menu.is_none(), "tab: the prompt, 0 menu");
+        press(&mut v, KeyCode::Char('h'), KeyModifiers::NONE);
+        press(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(!v.prompt_focus && v.input.text() == "h", "tab: back to the view, the text stays");
+        // the chat: tab never opens the menu; ctrl+p does, from every field
+        press(&mut v, KeyCode::F(1), KeyModifiers::NONE);
+        press(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(v.menu.is_none());
+        press(&mut v, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert!(v.menu.is_some());
+        press(&mut v, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert!(v.menu.is_none(), "ctrl+p again: closed");
+        // the changes view with the keys: ctrl+p opens the menu there too
+        press(&mut v, KeyCode::F(2), KeyModifiers::NONE);
+        press(&mut v, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert!(v.menu.is_some());
     }
 
     #[test]
@@ -3820,6 +4090,27 @@ fn busiest_checkout(t: &store::Thread) -> Option<PathBuf> {
         }
     }
     best.map(|b| b.2)
+}
+
+/// The hint row's left part: its width, short of the keys on the right (0 overlap).
+fn to_width(hint: &Rect, cwd: bool, hist: bool, shell: bool, empty: bool) -> u16 {
+    let keys = hint_keys(cwd, hist, shell, empty);
+    hint.width.saturating_sub((keys.chars().count() as u16 + 1).min(hint.width - hint.width / 2))
+}
+
+/// The keys at the right of the hint row.
+fn hint_keys(cwd: bool, hist: bool, shell: bool, empty: bool) -> &'static str {
+    if cwd {
+        "tab: complete · ⏎ cd · esc / ↑: back "
+    } else if hist {
+        "↑↓ ctrl+r: pick · ⏎ take · esc close · type to filter "
+    } else if shell {
+        "⏎ run · ↑↓ history · ctrl+r search · ↓ dir · output: to the agents with your next message "
+    } else if empty {
+        "! for shell mode · ⌘/ctrl+⏎ send · ↑↓ history "
+    } else {
+        "⌘/ctrl+⏎ send · ↑↓ history "
+    }
 }
 
 fn tilde(p: &Path) -> String {

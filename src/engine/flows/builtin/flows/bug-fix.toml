@@ -1,0 +1,25 @@
+name = "bug fix"
+description = "reproduce, root cause, fix, regression test"
+roles = ["lead"]
+
+[[step]]
+use = "reproduce"
+
+[[step]]
+use = "investigate"
+
+[[step]]
+use = "plan"
+note = "The smallest fix of the root cause, not of the symptom."
+
+[[step]]
+id = "fix"
+use = "implement"
+
+[[step]]
+use = "verify"
+note = "Add a regression test that fails without the fix."
+loop = { to = "fix", until = "the regression test and every other test pass", max = 3 }
+
+[[step]]
+use = "report"

@@ -1,5 +1,5 @@
 //! Paste like Claude Code, shared by the task prompt and the thread view: a clipboard image (ctrl+v)
-//! or a dropped image path → `[Image #n]`, text over 256 chars → `[Pasted text #n +L lines]`.
+//! or a dropped image path → `[Image #n]`, text over 1024 chars (code: never) → `[Pasted text #n +L lines]`.
 //! Both are files in a paste dir; the caller attaches them (compose: the path, a new task: a list).
 
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::clip;
 
 /// Pasted text longer than this (chars) goes in as a file attachment plus a marker.
-pub const PASTE_INLINE_MAX: usize = 256;
+pub const PASTE_INLINE_MAX: usize = 1024;
 const IMAGE_EXT: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "heic"];
 
 /// Paste of 1 dropped file path: `'/a b.png'`, `/a\ b.png`, `file:///a.png`. None: not 1 existing file.
@@ -66,7 +66,7 @@ impl Paster {
             }
             return Pasted::Text(f.display().to_string());
         }
-        if text.chars().count() <= PASTE_INLINE_MAX {
+        if text.chars().count() <= PASTE_INLINE_MAX || crate::code::looks_code(text) {
             return Pasted::Text(text.to_string());
         }
         // terminals paste line breaks as \r: count and store them as \n
@@ -115,10 +115,12 @@ mod tests {
         let mut p = Paster::new(dir.join("out"));
         assert_eq!(p.paste(&s), Pasted::File { path: img.clone(), marker: "[Image #1]".into() });
         assert_eq!(p.paste("short"), Pasted::Text("short".into()));
-        let long = "x\r".repeat(200);
+        let long = "x\r".repeat(600);
+        let code = "let a = 1;\n".repeat(200);
+        assert_eq!(p.paste(&code), Pasted::Text(code.clone()));
         match p.paste(&long) {
             Pasted::File { path, marker } => {
-                assert_eq!(marker, "[Pasted text #1 +200 lines]");
+                assert_eq!(marker, "[Pasted text #1 +600 lines]");
                 assert!(std::fs::read_to_string(path).unwrap().starts_with("x\nx\n"));
             }
             other => panic!("{other:?}"),

@@ -44,6 +44,7 @@ See [threads](https://codehead.sh/docs/concepts/threads/) for the details.
 just check     # clippy (warnings fail) + tests, like CI
 just install   # release build, linked into ~/.local/bin
 just site      # website dev server (site/, Astro)
+just lab       # ASCII lab: moai mascot, 3D avatars, dither loaders (examples/lab)
 ```
 
 - Rust toolchain: pinned in `rust-toolchain.toml`.

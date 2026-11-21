@@ -1,0 +1,34 @@
+name = "refactor"
+description = "invariants first, 0 behavior change, review"
+roles = ["lead", "reviewer"]
+
+[[step]]
+use = "scrutinize-task"
+
+[[step]]
+id = "plan"
+use = "plan"
+note = "List the invariants: the behavior that must stay the same. Tests that pin it come first."
+
+[[step]]
+use = "owner-gate"
+label = "plan approval"
+gate = { changes = "plan" }
+
+[[step]]
+use = "implement"
+
+[[step]]
+use = "verify"
+note = "0 behavior change: the tests from before pass without changes."
+
+[[step]]
+id = "review"
+use = "peer-review"
+
+[[step]]
+use = "address-review"
+loop = { to = "review", until = "the reviewer reports 0 findings of severity medium or higher", max = 3 }
+
+[[step]]
+use = "report"

@@ -364,7 +364,6 @@ impl McpTab {
             KeyCode::PageDown => self.cursor = (self.cursor + 10).min(n.saturating_sub(1)),
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = n.saturating_sub(1),
-            KeyCode::Char('n') if ctrl => self.open_add(),
             KeyCode::Char('a') => self.open_add(),
             KeyCode::Char('r') if ctrl || k.modifiers.is_empty() => {
                 self.natives.clear();

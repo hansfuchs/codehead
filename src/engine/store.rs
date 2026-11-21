@@ -62,6 +62,9 @@ pub struct Thread {
     /// there add them. The 1st checkout: DIR / WORKTREE / BRANCH.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkouts: Vec<Checkout>,
+    /// The flow the thread follows (`flows::run`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<super::flows::run::FlowState>,
 }
 
 /// A checkout of a thread: its dir (a git toplevel), its branch when added.
@@ -305,6 +308,9 @@ pub enum Kind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dir: Option<String>,
     },
+    /// The thread's flow moved: OP `set`, `step`, `wait`, `answer`, `skip`, `jump`, `switch`,
+    /// `queued`, `pending`, `role`, `finished`, `clear`; TEXT the line the thread shows.
+    Flow { op: String, text: String },
     /// A subagent of the agent (its master) started: ID (the tool call that started it), PARENT
     /// (the subagent that started it; None: the master itself), what it does.
     SubStart {

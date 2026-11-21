@@ -34,3 +34,7 @@ sprites *args:
 demo *flows:
     cargo build --release --locked
     ~/.cache/codehead-demo/venv/bin/python scripts/demo/demo.py {{flows}}
+
+# Perf suite (src/perf.rs): every case under 20 ms, cold call included. Release build, 1 thread.
+perf *filter:
+    cargo test --release --locked --bin codehead perf::cases::{{filter}} -- --ignored --test-threads=1 --nocapture

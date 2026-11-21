@@ -1,0 +1,21 @@
+name = "bug investigation"
+description = "reproduce, root cause, options: 0 fix yet"
+roles = ["lead"]
+
+[[step]]
+use = "reproduce"
+
+[[step]]
+use = "investigate"
+
+[[step]]
+use = "options"
+note = "Options for the fix. 0 code changes."
+
+[[step]]
+use = "owner-gate"
+label = "pick the next flow"
+note = "Ask the owner which option to take and which flow comes next (bug fix, refactor, ...)."
+
+[[step]]
+use = "report"

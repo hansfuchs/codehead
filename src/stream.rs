@@ -259,6 +259,14 @@ impl Thread {
             }
             Kind::Error { message } => self.items.push(Item::Note { agent, text: message.clone(), color: theme::pal().danger }),
             Kind::Shell { command, output, code, dir } => self.items.push(Item::Shell { command: command.clone(), output: output.clone(), code: *code, ts: e.ts, dir: dir.clone() }),
+            Kind::Flow { op, text } => {
+                let color = match op.as_str() {
+                    "wait" | "pending" | "warn" => theme::pal().warn,
+                    "finished" => theme::pal().ok,
+                    _ => theme::pal().accent,
+                };
+                self.items.push(Item::Note { agent: "flow".into(), text: text.clone(), color });
+            }
             Kind::Edits { summary } => self.items.push(Item::Note { agent, text: format!("got the edits since its last turn · {summary}"), color: theme::pal().muted }),
             Kind::SubStart { id, parent, description, agent_type, background, prompt } => {
                 if !self.subs.iter().any(|s| &s.id == id) {

@@ -119,6 +119,8 @@ struct Tab {
     sub: Sub,
     focus: Option<Stop>,
     scroll: usize,
+    /// A mouse scroll moved the view: the focused stop need not be in view (a key: it is again).
+    free: bool,
     checks_open: bool,
     edit: Option<(Edit, TextArea)>,
     menu: Option<Menu>,
@@ -597,7 +599,18 @@ impl Merge {
             if ctrl && k.code == KeyCode::Char('r') {
                 return self.manual();
             }
+            // the bar rows (PR tabs, views) with the focus: their keys, as on the overview
+            if let Some(s) = self.tab_ref().and_then(|t| t.focus).filter(|s| matches!(s, Stop::Tabs | Stop::Subs)) {
+                return self.bar_key(s, k);
+            }
             let Some(c) = self.changes_view() else { return Act::None };
+            // ↑ on the diff's 1st row: the views row (as ↑ from the overview's 1st stop)
+            if k.code == KeyCode::Up && k.modifiers.is_empty() && c.at_top() {
+                if let Some(t) = self.tab() {
+                    t.focus = Some(Stop::Subs);
+                }
+                return Act::None;
+            }
             return match c.key(k) {
                 crate::changes::Act::Toast(t) => Act::Toast(t),
                 crate::changes::Act::Open(f, l) => Act::Open(f, l),
@@ -607,13 +620,19 @@ impl Merge {
         }
         let stops = self.stops();
         let Some(tab) = self.tab() else { return Act::None };
+        tab.free = false;
         let cur = tab.focus.filter(|s| stops.contains(s)).or(stops.get(2).copied()).or(stops.first().copied());
         tab.focus = cur;
         let pos = cur.and_then(|c| stops.iter().position(|s| *s == c)).unwrap_or(0);
         let last = stops.len().saturating_sub(1);
         let mv = |tab: &mut Tab, i: usize| tab.focus = stops.get(i).copied();
         match k.code {
-            KeyCode::Down | KeyCode::Char('k') => {
+            // the last stop (the description): ↓ scrolls on to its end
+            KeyCode::Down | KeyCode::Char('j') if pos == last && cur.is_some() => {
+                tab.free = true;
+                tab.scroll += 1;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
                 // the next stop of another row (a row of stops: its 1st)
                 let row = stops.get(pos).map(|s| s.row()).unwrap_or(0);
                 let mut i = pos + 1;
@@ -622,7 +641,11 @@ impl Merge {
                 }
                 mv(tab, i.min(last));
             }
-            KeyCode::Up | KeyCode::Char('j') => {
+            KeyCode::Up | KeyCode::Char('k') if pos == last && tab.free && tab.scroll > 0 => {
+                tab.free = true;
+                tab.scroll -= 1;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
                 let row = stops.get(pos).map(|s| s.row()).unwrap_or(0);
                 let mut i = pos;
                 while row != 0 && i > 0 && stops[i - 1].row() == row {
@@ -644,7 +667,13 @@ impl Merge {
             KeyCode::Left | KeyCode::Right => {
                 let right = k.code == KeyCode::Right;
                 match cur {
-                    Some(Stop::Tabs) => return self.step_pr(if right { 1 } else { -1 }),
+                    Some(Stop::Tabs) => {
+                        let a = self.step_pr(if right { 1 } else { -1 });
+                        if let Some(t) = self.tab() {
+                            t.focus = Some(Stop::Tabs);
+                        }
+                        return a;
+                    }
                     Some(Stop::Subs) => return self.set_sub(if right { Sub::Changes } else { Sub::Overview }),
                     Some(Stop::Checks) => {
                         tab.checks_open = right;
@@ -673,6 +702,33 @@ impl Merge {
                     return self.activate(s);
                 }
             }
+            _ => {}
+        }
+        Act::None
+    }
+
+    /// The changes view: a key on the bar rows. ←→: PR / view; ↑↓: row; ↓ from the views row,
+    /// enter: into the diff.
+    fn bar_key(&mut self, s: Stop, k: KeyEvent) -> Act {
+        let to = |m: &mut Merge, f: Option<Stop>| {
+            if let Some(t) = m.tab() {
+                t.focus = f;
+            }
+        };
+        match (s, k.code) {
+            (Stop::Tabs, KeyCode::Left | KeyCode::Right) => {
+                let a = self.step_pr(if k.code == KeyCode::Right { 1 } else { -1 });
+                to(self, Some(Stop::Tabs));
+                return a;
+            }
+            (Stop::Subs, KeyCode::Left | KeyCode::Right) => {
+                let a = self.set_sub(if k.code == KeyCode::Right { Sub::Changes } else { Sub::Overview });
+                to(self, Some(Stop::Subs));
+                return a;
+            }
+            (Stop::Subs, KeyCode::Up | KeyCode::Char('k')) => to(self, Some(Stop::Tabs)),
+            (Stop::Tabs, KeyCode::Down | KeyCode::Char('j')) => to(self, Some(Stop::Subs)),
+            (Stop::Subs, KeyCode::Down | KeyCode::Char('j')) | (_, KeyCode::Enter) => to(self, None),
             _ => {}
         }
         Act::None
@@ -736,7 +792,11 @@ impl Merge {
         let Some(t) = self.tab() else { return Act::None };
         match s {
             Stop::Tabs => return self.step_pr(1),
-            Stop::Subs => return self.set_sub(Sub::Changes),
+            // enter on the views row: the changes, the keys in the diff
+            Stop::Subs => {
+                t.focus = None;
+                return self.set_sub(Sub::Changes);
+            }
             Stop::Title if p.can_edit => edit(t, Edit::Title, &p.title, true),
             Stop::Body if p.can_edit => edit(t, Edit::Body, &p.body, false),
             Stop::Title | Stop::Body => return Act::Toast("0 rights to edit this pull request".into()),
@@ -956,12 +1016,14 @@ impl Merge {
         match m.kind {
             MouseEventKind::ScrollDown => {
                 if let Some(t) = self.tab() {
+                    t.free = true;
                     t.scroll += 3;
                 }
                 return Act::None;
             }
             MouseEventKind::ScrollUp => {
                 if let Some(t) = self.tab() {
+                    t.free = true;
                     t.scroll = t.scroll.saturating_sub(3);
                 }
                 return Act::None;
@@ -994,6 +1056,8 @@ impl Merge {
         }
         let Some(&(_, s)) = self.hits.iter().find(|(r, _)| r.contains(at)) else { return Act::None };
         if let Some(t) = self.tab() {
+            // a click: the view stays put
+            t.free = true;
             t.focus = Some(s);
             t.edit = None;
         }
@@ -1153,7 +1217,7 @@ impl Merge {
         let h = inner.height as usize;
         let scroll = {
             let t = self.tab().expect("a tab");
-            if let Some(i) = fi {
+            if let Some(i) = fi.filter(|_| !t.free) {
                 let span = rows.iter().skip(i + 1).take_while(|r| r.input > 0).map(|r| r.input as usize).sum::<usize>() + 1;
                 if i < t.scroll {
                     t.scroll = i.saturating_sub(1);
@@ -1515,7 +1579,10 @@ impl Merge {
     pub fn hints(&self) -> String {
         let Some(t) = self.tab_ref() else { return "r: read again · i: prompt ".into() };
         if t.sub == Sub::Changes {
-            return t.changes.as_ref().map(|c| c.hints().to_string()).unwrap_or_default();
+            if matches!(t.focus, Some(Stop::Tabs | Stop::Subs)) {
+                return "←→ PR / view · ↑↓ row · ↓ ⏎: the diff · i tab: prompt ".into();
+            }
+            return t.changes.as_ref().map(|c| format!("{}· ↑ on top: views ", c.hints())).unwrap_or_default();
         }
         if t.edit.is_some() {
             return "ctrl+⏎ save · esc drop ".into();
@@ -1707,6 +1774,32 @@ pub mod tests {
         m.tab().unwrap().focus = Some(Stop::Update);
         let a = key(&mut m, KeyCode::Enter);
         assert!(matches!(a, Act::Prompt(ref t) if t.contains("resolve every conflict")), "{a:?}");
+    }
+
+    #[test]
+    fn the_changes_view_reaches_the_bar_rows() {
+        let mut m = with(pr());
+        let sub = |m: &Merge| m.tab_ref().unwrap().sub;
+        key(&mut m, KeyCode::Char('>'));
+        assert_eq!((sub(&m), focus(&m)), (Sub::Changes, None));
+        // ↑ on the diff's 1st row: the views row; ←→ there: overview / changes, the focus stays
+        key(&mut m, KeyCode::Up);
+        assert_eq!(focus(&m), Some(Stop::Subs));
+        key(&mut m, KeyCode::Left);
+        assert_eq!((sub(&m), focus(&m)), (Sub::Overview, Some(Stop::Subs)));
+        key(&mut m, KeyCode::Right);
+        assert_eq!((sub(&m), focus(&m)), (Sub::Changes, Some(Stop::Subs)));
+        assert!(m.hints().contains("←→ PR / view"), "{}", m.hints());
+        // ↑: the PR tabs; ↓ ↓: back in the diff
+        key(&mut m, KeyCode::Up);
+        assert_eq!(focus(&m), Some(Stop::Tabs));
+        key(&mut m, KeyCode::Down);
+        key(&mut m, KeyCode::Down);
+        assert_eq!((sub(&m), focus(&m)), (Sub::Changes, None));
+        // enter on the views row: into the diff too
+        key(&mut m, KeyCode::Up);
+        key(&mut m, KeyCode::Enter);
+        assert_eq!(focus(&m), None);
     }
 
     #[test]

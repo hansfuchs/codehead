@@ -11,6 +11,47 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear};
 
 use crate::theme;
 
+/// Live preview of a suggestion dropdown: ↑↓ put the current row into the text at once (enter /
+/// tab not needed). The text typed before the 1st move stays the dropdown's query while the
+/// text holds the preview; a key that changes the text ends it (the text stays).
+#[derive(Clone, Debug, Default)]
+pub struct Preview {
+    at: Option<crate::textarea::Pos>,
+    typed: String,
+    shown: String,
+}
+
+impl Preview {
+    /// TA holds the preview: its start and the text typed before it. None: 0 preview.
+    pub fn typed(&self, ta: &crate::textarea::TextArea) -> Option<(crate::textarea::Pos, String)> {
+        let at = self.at?;
+        (ta.since(at)? == self.shown).then(|| (at, self.typed.clone()))
+    }
+
+    /// TEXT into TA from AT to the cursor (in place of TYPED, the query, or the last preview).
+    pub fn show(&mut self, ta: &mut crate::textarea::TextArea, at: crate::textarea::Pos, typed: &str, text: &str) {
+        if self.typed(ta).is_none() {
+            self.typed = typed.to_string();
+        }
+        ta.replace_to_cursor(at, text);
+        self.at = Some(at);
+        self.shown = text.to_string();
+    }
+
+    pub fn clear(&mut self) {
+        self.at = None;
+    }
+
+    /// A key that goes on with the query (a filter char): the typed text back in place of the
+    /// preview (the key then types after it). True: a preview was in the text.
+    pub fn revert(&mut self, ta: &mut crate::textarea::TextArea) -> bool {
+        let Some((at, typed)) = self.typed(ta) else { return false };
+        ta.replace_to_cursor(at, &typed);
+        self.at = None;
+        true
+    }
+}
+
 /// Most rows a dropdown shows at a time.
 pub const MAX_ROWS: usize = 10;
 

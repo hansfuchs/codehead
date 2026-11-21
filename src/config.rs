@@ -34,7 +34,7 @@ pub struct File {
     pub editor: Option<String>,
     /// Dev server ports: `auto` (default: portless when on PATH), `portless`, `block`.
     pub ports: Option<String>,
-    /// `[keys] menu`: the menu key (F10; tab in the thread view).
+    /// `[keys] menu`: the menu key (ctrl+p, on every screen).
     pub menu_key: Option<String>,
     /// `[keys] command`: the char that opens the command dropdown (`>`).
     pub command_key: Option<String>,
@@ -559,12 +559,12 @@ pub fn palette_of(f: &File) -> crate::theme::Palette {
     crate::theme::Palette::build(scheme.as_deref(), f.colors.iter().map(|(k, v)| (k.as_str(), v.as_str())))
 }
 
-/// The menu key: $CODEHEAD_MENU_KEY, else `[keys] menu`, else F10.
+/// The menu key: $CODEHEAD_MENU_KEY, else `[keys] menu`, else ctrl+p.
 pub fn menu_key() -> Bind {
     // tests: the defaults, never the machine's config
     let set = if cfg!(test) { None } else { env("CODEHEAD_MENU_KEY").or_else(|| load().ok()?.menu_key) };
-    // F1-F4: the tabs; tab: the menu in the thread view
-    set.and_then(|k| Bind::parse(&k)).unwrap_or_else(|| Bind::parse("F10").expect("F10 parses"))
+    // F1-F6: the tabs; tab: the next field
+    set.and_then(|k| Bind::parse(&k)).unwrap_or_else(|| Bind::parse("ctrl+p").expect("ctrl+p parses"))
 }
 
 /// The command trigger: $CODEHEAD_COMMAND_KEY, else `[keys] command`, else `>`.
@@ -641,7 +641,7 @@ pub fn defaults() -> File {
         review: Some("claude:sonnet".into()),
         editor: Some("auto".into()),
         ports: Some("auto".into()),
-        menu_key: Some("F10".into()),
+        menu_key: Some("ctrl+p".into()),
         command_key: Some(">".into()),
         scheme: Some(crate::theme::PRESETS[0].0.into()),
         ..File::default()

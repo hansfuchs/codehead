@@ -1,0 +1,33 @@
+name = "migration / upgrade"
+description = "breaking changes first, plan, gate, migrate, review"
+roles = ["lead", "reviewer"]
+
+[[step]]
+use = "investigate"
+note = "Read the changelogs and migration guides. List each breaking change that hits this codebase."
+
+[[step]]
+id = "plan"
+use = "plan"
+
+[[step]]
+use = "owner-gate"
+label = "plan approval"
+gate = { changes = "plan" }
+
+[[step]]
+use = "implement"
+
+[[step]]
+use = "verify"
+
+[[step]]
+id = "review"
+use = "peer-review"
+
+[[step]]
+use = "address-review"
+loop = { to = "review", until = "the reviewer reports 0 findings of severity medium or higher", max = 2 }
+
+[[step]]
+use = "report"

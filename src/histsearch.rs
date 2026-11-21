@@ -1,7 +1,7 @@
 //! ctrl+r in shell mode: the command history, searched by fzf in the background (`fzf --filter`:
 //! 0 TTY, 0 suspend), the matches in a dropdown above the input, the best one at the bottom
 //! (right above the input). The input after `!` is the query; every change runs fzf again (an
-//! older run's result is dropped). ↑ (ctrl+r, ctrl+p) worse matches, ↓ (ctrl+n) better ones,
+//! older run's result is dropped). ↑ (ctrl+r) worse matches, ↓ (ctrl+n) better ones,
 //! enter / tab put the match into the input, esc closes. 0 fzf on PATH: the built-in fuzzy filter.
 //!
 //! The history: the thread's `!commands` (newest first), then the shell's own history file
@@ -115,7 +115,7 @@ impl HistSearch {
             KeyCode::Char('n') if ctrl => self.cursor = self.cursor.saturating_sub(1),
             // ctrl+r again: the next (older) match, like a shell
             KeyCode::Up => self.cursor = (self.cursor + 1).min(self.matches.len().saturating_sub(1)),
-            KeyCode::Char('p' | 'r') if ctrl => self.cursor = (self.cursor + 1).min(self.matches.len().saturating_sub(1)),
+            KeyCode::Char('r') if ctrl => self.cursor = (self.cursor + 1).min(self.matches.len().saturating_sub(1)),
             KeyCode::PageDown => self.cursor = self.cursor.saturating_sub(dropdown::MAX_ROWS),
             KeyCode::PageUp => self.cursor = (self.cursor + dropdown::MAX_ROWS).min(self.matches.len().saturating_sub(1)),
             KeyCode::Enter | KeyCode::Tab => {

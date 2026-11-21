@@ -147,7 +147,7 @@ impl Avatar {
         rows(&self.cells(s, t))
     }
 
-    fn cells(&self, s: Status, t: f32) -> Vec<glyph::Cell> {
+    pub fn cells(&self, s: Status, t: f32) -> Vec<glyph::Cell> {
         match self.cat {
             Cat::Regi => regi::render(&regi::all()[self.idx], s.index(), t, &self.look()),
             Cat::Geo => {

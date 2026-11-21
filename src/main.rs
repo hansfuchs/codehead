@@ -24,6 +24,9 @@ mod histsearch;
 mod home;
 mod editor;
 mod files;
+mod flowbar;
+mod flowrail;
+mod flows;
 mod fuzzy;
 mod engine;
 mod dropdown;
@@ -37,7 +40,10 @@ mod mcplist;
 mod mcptab;
 mod menu;
 mod notes;
+mod notify;
 mod paths;
+#[cfg(test)]
+mod perf;
 mod picker;
 mod prlist;
 mod portless;
@@ -49,6 +55,7 @@ mod render;
 mod repofilter;
 mod repopick;
 mod settings;
+mod shortcuts;
 mod setup;
 mod skills;
 mod sprites;
@@ -60,7 +67,9 @@ mod tabgroup;
 mod textarea;
 mod theme;
 mod threads;
+mod workspot;
 mod update;
+mod urls;
 mod view;
 
 use std::io::{self, Stdout, Write};
@@ -102,7 +111,7 @@ config:  ~/.config/codehead.toml ($CODEHEAD_CONFIG overrides). keys, each overri
            models = \"fable,opus,sonnet,haiku\"  Claude models ($CODEHEAD_MODELS)
            messages = \"bubbles\"  thread view messages: bubbles or lines ($CODEHEAD_MESSAGES)
            thoughts = \"hidden\"  thread view thoughts: hidden, folded or open ($CODEHEAD_THOUGHTS)
-           [keys]   menu = \"F10\" ($CODEHEAD_MENU_KEY), command = \">\" ($CODEHEAD_COMMAND_KEY)
+           [keys]   menu = \"ctrl+p\" ($CODEHEAD_MENU_KEY), command = \">\" ($CODEHEAD_COMMAND_KEY)
            [colors] scheme = \"coral\" | \"amber\" ($CODEHEAD_SCHEME); accent, text, … = \"#RRGGBB\"
            [aliases]
            \"project:platform\" = \"~/projects/exampleorg/project/notes/platform/\"
@@ -137,15 +146,17 @@ prompt:  @: agent names. >: commands, in dropdowns above the prompt box (never o
          aliases work as paths: project:platform/ lists the target directory. prompts retain
          short aliases; sent messages expand aliases to full paths.
          ctrl+v: clipboard image → [Image #n], a dropped image path too; text over
-         256 chars → [Pasted text #n +L lines]. the files go into the message as a list.
+         1024 chars (code: never) → [Pasted text #n +L lines]. the files go into the message as a list.
 drafts:  an unsent task goes to ~/.cache/codehead/drafts ($CODEHEAD_DRAFTS) after every key. the new tab
          shows \"view drafts (n)\" on top: enter lists them; enter loads 1, d deletes it, esc: back.
-         a started thread drops its draft. drafts older than 30 days go. ctrl+s: the task as a kept
-         draft (★ saved, 0 cleanup by age), the form starts over.
+         a started thread drops its draft. drafts older than 30 days go. \"save as draft\" (right of
+         it) or ctrl+s: the task as a kept draft (★ saved, 0 cleanup by age), the form starts over.
+         n in the menu: an empty form, the task on screen stays a draft.
 artifacts: codehead sets CLAUDE_CODE_ARTIFACT=1 for the sessions it starts: Claude Code agents can
          publish web artifacts (off by default in SDK sessions). a value set before codehead stays.
 esc:     1 level back: never applies, never drops edits unasked (agent form, ctrl+r reset: asked).
-tabs:    F1-F4 (alt+1-4) switch tabs (word jumps: ctrl / alt+←→). tab / shift+tab: next / previous field.
+tabs:    F1-F6 (alt+1-6) switch tabs (word jumps: ctrl / alt+←→). tab / shift+tab: next / previous field
+         (on a row of tabs: into its content). ←→ on a row of tabs: the next / previous tab.
 esc esc: quit from the new tab. ctrl+c: quit at once.
 updates: 1 check per day (github.com releases, in the background). a newer release: 1 line after
          codehead quits. codehead --update installs it. $CODEHEAD_NO_UPDATE_CHECK=1: 0 checks.
@@ -162,25 +173,30 @@ threads: worktrees, then recent Claude Code sessions. enter on a session:
 thread view: the thread's agents on top (sprite, model, working / idle / waits on you; ★ the lead),
          the stream (every message, tool run and open question, from the thread's event log), the
          prompt below, the cost box beside it (screens ≥ 100 columns).
+         below the prompt: who gets the message, where the thread works (repo ⎇ branch, (worktree);
+         1 per checkout, read again every 3 s).
          a message without @name goes to the lead; @name: to that agent (an agent not on the thread
          joins it). agents message each other with the `send` tool of codehead's MCP server.
          wheel, pgup / pgdn, shift+↑↓: scroll · esc: back to live, else interrupt (after 0.5 s) · esc esc: back.
          send: ctrl+enter (⌘enter, alt+enter); ctrl+s never sends. a question: ↑↓ space enter 1-9,
          letters: Other, tab: question ↔ prompt.
-         click a link: open it. ctrl+c: clears the prompt, 2× on an empty one closes codehead.
+         click a link: open it; ctrl+click: any URL on screen. ctrl+c: clears the prompt, 2× on an empty one closes codehead.
+         #: shortcuts (settings → shortcuts): #name stands for its text; tab / enter puts the text in,
+         a #name left in the prompt: its text on send. ↑↓ in any dropdown: the row into the text at once.
          >: commands, as in the task prompt (files: of the thread's worktree), and
          branch: a copy of the thread (events, members, dir); each agent's next session forks its
          Claude Code session (claude --resume ID --fork-session). the old thread stays.
          @: agent names. ←→ on a name: + add, or ⇄ replace an agent of the thread: on send, the old
          agent leaves and the new one gets the message with the old one's last messages.
          ctrl+i / ⌘i: the IDE on the thread's worktree (setting editor: auto, code, cursor, zed, idea …).
-         views (row 0): alt/option+←→ previous / next (chat, changes, merge, files), alt+1-4. ctrl+y: yazi. changes: 1 box per file in review
-         order (schema, logic, config, UI, docs, tests, generated), j k box, n p hunk, space
-         reviewed, enter fold, o VS Code at the line, s side by side / unified, i prompt (esc back).
+         views (row 0): alt/option+←→ previous / next (chat, changes, merge, files), alt+1-4. tab / i: the prompt, tab / esc: back to the view. ctrl+y: yazi. changes: 1 box per file in review
+         order (schema, logic, config, UI, docs, tests, generated), j k box (j: down), n N hunk,
+         v reviewed, enter fold, e / o IDE at the line, w side by side / unified, r read git again,
+         i / tab prompt (esc / tab back). ↑ on the 1st row of a PR's diff: its views row.
          tool runs (▸): click opens / closes the calls (input + output); ctrl+o: all.
          thoughts (setting thoughts = hidden | folded | open): ∴ rows, a click opens 1, ctrl+t: all.
          ctrl+v pastes a clipboard image as [Image #n], a dropped image path too. pasted text over
-         256 chars: [Pasted text #n +L lines]. both go in as attachments.
+         1024 chars (code: never): [Pasted text #n +L lines]. both go in as attachments.
          ⌘/ctrl+Enter (alt+Enter, ctrl+s) sends, Enter: new line. ↑ on the 1st row of an empty
          prompt / ↓ on the last: the thread's sent messages.
          agent questions and permission requests: ↑↓ / 1-9 / space / enter on the empty prompt, or a
@@ -194,7 +210,8 @@ engine:  codehead runs the agents itself. 1 host process per thread (codehead ho
          events.jsonl; $CODEHEAD_HOME). agents: ~/.config/codehead/agents/<name>.toml.
          sockets: $XDG_RUNTIME_DIR/codehead. logs: ~/.local/share/codehead/logs.
          codehead ctl <thread> '<json>': 1 command to a thread's host (scripts).
-menu:    tab in the thread view, F10 everywhere, esc closes. tab / shift+tab, ←→: tabs. quick: new, settings + the commands of
+menu:    ctrl+p on every screen (setting keys.menu), esc / ctrl+p closes. ←→: tabs; ↓ / ↑ at the top of a list: in / out of a
+         tab's sub-tabs (threads: repos, merge: states) and its list. quick: new, settings + the commands of
          the screen (keys: the keys of the screen). threads: filter (type) + thread cards, enter opens.
          agents: the agents of the thread in view (enter, enter: remove = it leaves the thread), add,
          edit → the agents tab of the start screen.";
@@ -440,8 +457,9 @@ fn open_view(term: &mut Term, tty: &mut Tty, out: &mut Stdout, id: &str, cwd: &P
         Ok(view::Exit::Open { id: new, dir, title: new_title, note: new_note }) => {
             note = Some(new_note);
             wake(&new);
+            // the thread's own work dir (a menu row without a dir: the dir of the thread before)
+            cwd = engine::store::load(&new).map(|t| t.work_dir()).filter(|p| p.is_dir()).unwrap_or(dir);
             id = new;
-            cwd = dir;
             title = new_title;
         }
         Ok(view::Exit::Back) => {
@@ -542,6 +560,10 @@ fn start(args: Args) {
     };
     restore_on_panic();
     catch_signals();
+    // a plan window ends: its next one starts 1 min after (1 trigger message per harness)
+    if !args.dry {
+        engine::warm::watch();
+    }
     // agents stopped on a usage limit whose host is gone (a reboot, a kill): their host again,
     // it resumes them at the reset
     if !args.dry {
@@ -569,6 +591,7 @@ fn start(args: Args) {
     let plain = args.view.is_none() && args.title.is_empty() && args.agent.is_none() && args.branch.is_none() && !args.copy && !args.dry;
     let latest = plain.then(engine::store::latest).flatten().map(|t| t.id);
     // the thread view first: the start screen (App) is built when it ends
+    notify::start();
     let mut back: Option<Option<menu::Home>> = None;
     if let Some(id) = args.view.as_ref().or(latest.as_ref()) {
         // 1 thread.json (an id prefix: the newest match), 0 scan of every thread's host and log
@@ -599,9 +622,16 @@ fn start(args: Args) {
     // draws only after an event, a background read or once per second (relative times):
     // an idle start screen builds 1 frame per second, not 12
     let mut dirty = true;
+    let mut notes_v = crate::notify::version();
     let mut drawn = Instant::now();
     'screens: loop {
     loop {
+        // new notifications / seen marks: the header redraws
+        let nv = crate::notify::version();
+        if nv != notes_v {
+            notes_v = nv;
+            dirty = true;
+        }
         // a dissolve under way: 30 frames per second
         if dirty || drawn.elapsed() >= Duration::from_secs(1) || (dissolve::active() && drawn.elapsed() >= Duration::from_millis(33)) {
             let _w = engine::watch(|| "start: draw".to_string());
@@ -697,7 +727,7 @@ fn start(args: Args) {
             }
             break 'screens;
         }
-        Outcome::New { message, target, agents: picked, clone } => {
+        Outcome::New { message, target, agents: picked, clone, flow } => {
             engine::trace("start: submit");
             // a home repo not on disk yet: clone it first
             if let Some((url, path)) = &clone {
@@ -807,6 +837,13 @@ fn start(args: Args) {
                 }
             } else if !label.is_empty() && repo.join(".git").exists() {
                 t.branch = Some(threads::current_branch(&dir)).filter(|b| !b.is_empty());
+            }
+            // the flow: its 1st step goes to its agent with the task (the host's `prompt`)
+            if let Some(slug) = &flow {
+                let lib = engine::flows::Library::load(Some(&t.work_dir()));
+                if let Some(fl) = lib.flow(slug) {
+                    t.flow = Some(engine::flows::run::FlowState::new(fl, &lib, 0, &t.agents, &engine::roster::active(), engine::now_ms()));
+                }
             }
             if let Err(e) = t.save() {
                 tty.leave(&mut out);

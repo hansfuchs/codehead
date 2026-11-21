@@ -24,11 +24,13 @@ pub struct RFile {
     pub level: String,
 }
 
-/// How much a file's change needs a review: the tabs of the changes view.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// How much a file's change needs a review: the tabs of the changes view. A comment's severity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Level {
     Critical,
     High,
+    #[default]
     Medium,
     Low,
 }
@@ -46,7 +48,19 @@ impl Level {
     }
 
     pub fn parse(s: &str) -> Option<Level> {
-        Level::ALL.into_iter().find(|l| l.label().eq_ignore_ascii_case(s.trim()))
+        let s = s.trim();
+        // the reviewer's words too: major, minor
+        match s.to_ascii_lowercase().as_str() {
+            "major" => Some(Level::High),
+            "minor" => Some(Level::Low),
+            _ => Level::ALL.into_iter().find(|l| l.label().eq_ignore_ascii_case(s)),
+        }
+    }
+
+    /// D steps through ALL, wrapping (the comment modal's ←→).
+    pub fn step(self, d: isize) -> Level {
+        let i = Level::ALL.iter().position(|l| *l == self).unwrap_or(2) as isize;
+        Level::ALL[(i + d).rem_euclid(Level::ALL.len() as isize) as usize]
     }
 }
 

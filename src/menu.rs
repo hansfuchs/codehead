@@ -1,7 +1,9 @@
 //! F2 menu: 1 modal for the start screen and the thread view. Tabs: quick (commands),
 //! threads (filter + thread cards), search (the messages of every thread), tokens, agents (the agents of the thread in view: remove, add; edit →
-//! the agents tab of the start screen). ↑↓ move, ←→: next / previous tab, enter: run,
-//! a single esc or tab closes.
+//! the agents tab of the start screen). 3 focus levels: the tab bar, a tab's tab group (threads:
+//! repos, merge: states), its list. ↑ at the top of a list: up 1 level; ↓: down 1 level. ←→ on
+//! the tab bar (a list without a tab group too): next / previous tab; on a tab group: its tabs.
+//! enter: run, a single esc or tab closes.
 
 use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
@@ -39,6 +41,8 @@ pub enum Home {
     Agents,
     /// The merge tab, a PR open in it (0 thread has it).
     Merge(Option<crate::gh::PrRef>),
+    /// The flows tab, a flow open on its rail.
+    Flows(Option<String>),
 }
 
 /// What the host does after a key / click.
@@ -67,6 +71,14 @@ pub struct Item {
     pub section: &'static str,
 }
 
+/// Where the keys go: the tab bar, the tab group of the tab (threads, merge), the list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Level {
+    Bar,
+    Group,
+    Body,
+}
+
 /// Agents tab rows: the edit button, the agents of the thread, the add button.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Row {
@@ -77,6 +89,7 @@ enum Row {
 
 pub struct Menu {
     pub tab: Tab,
+    pub level: Level,
     items: Vec<Item>,
     qcursor: usize,
     filter: TextArea,
@@ -160,6 +173,7 @@ impl Menu {
         search.style = Some(theme::text());
         Menu {
             tab: Tab::Quick,
+            level: Level::Body,
             items: all,
             qcursor: 0,
             filter,
@@ -289,8 +303,8 @@ impl Menu {
     fn search_key(&mut self, k: KeyEvent) -> Action {
         let n = self.hits.len();
         match k.code {
-            KeyCode::Up if n > 0 => self.scursor = (self.scursor + n - 1) % n,
-            KeyCode::Down if n > 0 => self.scursor = (self.scursor + 1) % n,
+            KeyCode::Up => self.scursor = self.scursor.saturating_sub(1),
+            KeyCode::Down if n > 0 => self.scursor = (self.scursor + 1).min(n - 1),
             KeyCode::PageUp => self.scursor = self.scursor.saturating_sub(5),
             KeyCode::PageDown if n > 0 => self.scursor = (self.scursor + 5).min(n - 1),
             KeyCode::Enter => return self.jump(self.scursor),
@@ -414,8 +428,66 @@ impl Menu {
     fn switch(&mut self, d: isize) {
         let i = TABS.iter().position(|(t, _)| *t == self.tab).unwrap_or(0) as isize;
         self.tab = TABS[(i + d).rem_euclid(TABS.len() as isize) as usize].0;
+        self.level = Level::Bar;
         self.armed = None;
         self.adding = None;
+    }
+
+    /// The tab has a tab group (threads: repos, merge: states).
+    fn grouped(&self) -> bool {
+        matches!(self.tab, Tab::Threads | Tab::Merge)
+    }
+
+    /// The list of the tab shows its 1st row (↑: up 1 level).
+    fn at_top(&self) -> bool {
+        match self.tab {
+            Tab::Quick => self.qcursor == 0,
+            Tab::Threads => self.tcursor == 0,
+            Tab::Merge => self.prs.at_top(),
+            Tab::Search => self.scursor == 0,
+            Tab::Tokens => self.dscroll == 0,
+            Tab::Agents => self.adding.is_none() && self.acursor == 0,
+        }
+    }
+
+    /// Keys on the tab bar / the tab group. Some: the key is done.
+    fn level_key(&mut self, k: KeyEvent) -> Option<Action> {
+        let up = k.code == KeyCode::Up;
+        match self.level {
+            Level::Body if up && self.at_top() => {
+                self.level = if self.grouped() { Level::Group } else { Level::Bar };
+                Some(Action::None)
+            }
+            Level::Body => None,
+            Level::Bar => {
+                match k.code {
+                    KeyCode::Left | KeyCode::Right => self.switch(if k.code == KeyCode::Right { 1 } else { -1 }),
+                    KeyCode::Down | KeyCode::Enter => self.level = if self.grouped() { Level::Group } else { Level::Body },
+                    KeyCode::Up => {}
+                    // a letter: the list (its filter) takes it
+                    _ => {
+                        self.level = Level::Body;
+                        return None;
+                    }
+                }
+                Some(Action::None)
+            }
+            Level::Group => {
+                match k.code {
+                    KeyCode::Up => self.level = Level::Bar,
+                    KeyCode::Down | KeyCode::Enter => self.level = Level::Body,
+                    KeyCode::Left | KeyCode::Right if self.tab == Tab::Threads => self.step_repo(if k.code == KeyCode::Right { 1 } else { -1 }),
+                    KeyCode::Left | KeyCode::Right => {
+                        self.prs.key(k);
+                    }
+                    _ => {
+                        self.level = Level::Body;
+                        return None;
+                    }
+                }
+                Some(Action::None)
+            }
+        }
     }
 
     pub fn key(&mut self, k: KeyEvent) -> Action {
@@ -423,15 +495,23 @@ impl Menu {
         let ctrl = k.modifiers.contains(ratatui::crossterm::event::KeyModifiers::CONTROL);
         // a tab with a tab group (threads: repos, merge: states): ←→ move in the group, ctrl+←→
         // switch the menu tabs; the other tabs: ←→ switch them too
-        let group = matches!(self.tab, Tab::Threads | Tab::Merge);
+        let group = self.grouped();
         match k.code {
-            // tab: closes (tab opens the menu in the thread view)
-            KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => return Action::Close,
+            // esc or the menu key again: closed
+            KeyCode::Esc => return Action::Close,
             _ if crate::config::menu_key().matches(&k) => return Action::Close,
-            KeyCode::Right | KeyCode::Left if ctrl || !group => {
+            KeyCode::Right | KeyCode::Left if ctrl || (!group && self.level == Level::Body) => {
                 self.switch(if k.code == KeyCode::Right { 1 } else { -1 });
                 return Action::None;
             }
+            _ if self.level != Level::Body || k.code == KeyCode::Up => {
+                if let Some(a) = self.level_key(k) {
+                    return a;
+                }
+            }
+            _ => {}
+        }
+        match k.code {
             KeyCode::Right | KeyCode::Left if self.tab == Tab::Threads => {
                 self.step_repo(if k.code == KeyCode::Right { 1 } else { -1 });
                 return Action::None;
@@ -464,10 +544,13 @@ impl Menu {
     fn quick_key(&mut self, k: KeyEvent) -> Action {
         let n = self.items.len();
         match k.code {
-            KeyCode::Up | KeyCode::Char('k') => self.qcursor = (self.qcursor + n - 1) % n,
-            KeyCode::Down | KeyCode::Char('j') => self.qcursor = (self.qcursor + 1) % n,
+            KeyCode::Up | KeyCode::Char('k') => self.qcursor = self.qcursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.qcursor = (self.qcursor + 1).min(n - 1),
             KeyCode::Char('n') => return Action::Home(Home::New),
-            KeyCode::Char('f') => self.tab = Tab::Search,
+            KeyCode::Char('f') => {
+                self.tab = Tab::Search;
+                self.level = Level::Body;
+            }
             KeyCode::Enter => return self.run_item(self.qcursor),
             _ => {}
         }
@@ -479,6 +562,7 @@ impl Menu {
             Some(usize::MAX) => Action::Home(Home::New),
             Some(id) if id == usize::MAX - 2 => {
                 self.tab = Tab::Search;
+                self.level = Level::Body;
                 Action::None
             }
             Some(id) if id == usize::MAX - 1 => Action::Home(Home::Settings),
@@ -491,8 +575,8 @@ impl Menu {
         let vis = self.visible();
         let n = vis.len();
         match k.code {
-            KeyCode::Up if n > 0 => self.tcursor = (self.tcursor + n - 1) % n,
-            KeyCode::Down if n > 0 => self.tcursor = (self.tcursor + 1) % n,
+            KeyCode::Up => self.tcursor = self.tcursor.saturating_sub(1),
+            KeyCode::Down if n > 0 => self.tcursor = (self.tcursor + 1).min(n - 1),
             KeyCode::PageUp => self.tcursor = self.tcursor.saturating_sub(5),
             KeyCode::PageDown if n > 0 => self.tcursor = (self.tcursor + 5).min(n - 1),
             KeyCode::Enter => {
@@ -534,8 +618,8 @@ impl Menu {
             self.armed = None;
         }
         match k.code {
-            KeyCode::Up | KeyCode::Char('k') => self.acursor = (self.acursor + n - 1) % n,
-            KeyCode::Down | KeyCode::Char('j') => self.acursor = (self.acursor + 1) % n,
+            KeyCode::Up | KeyCode::Char('k') => self.acursor = self.acursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.acursor = (self.acursor + 1).min(n - 1),
             KeyCode::Enter | KeyCode::Char('d') | KeyCode::Delete => return self.activate(rows[self.acursor.min(n - 1)]),
             _ => {}
         }
@@ -569,6 +653,7 @@ impl Menu {
             MouseEventKind::Down(MouseButton::Left) => {
                 // a repo tab of the threads tab
                 if self.tab == Tab::Threads && self.repos.click(at) {
+                    self.level = Level::Group;
                     self.repo_pick = self.repo_tabs().get(self.repos.i).cloned();
                     self.tcursor = 0;
                     self.toffset = 0;
@@ -579,17 +664,20 @@ impl Menu {
                 }
                 if let Some((_, t)) = self.tab_rects.iter().find(|(r, _)| r.contains(at)) {
                     self.tab = *t;
+                    self.level = Level::Bar;
                     self.armed = None;
                     self.adding = None;
                     return Action::None;
                 }
                 if self.tab == Tab::Merge {
+                    self.level = if self.prs.tab_at(at) { Level::Group } else { Level::Body };
                     return match self.prs.mouse(m) {
                         crate::prlist::Pick::Open(e) => Action::Pr(e),
                         _ => Action::None,
                     };
                 }
                 let Some(&(_, i)) = self.rows.iter().find(|(r, _)| r.contains(at)) else { return Action::None };
+                self.level = Level::Body;
                 match self.tab {
                     Tab::Quick => {
                         self.qcursor = i;
@@ -646,15 +734,16 @@ impl Menu {
         self.rows.iter().find(|(r, _)| r.contains(at)).map(|(r, _)| *r).or_else(|| self.tab_rects.iter().find(|(r, _)| r.contains(at)).map(|(r, _)| *r))
     }
 
-    /// The menu in AREA, centered on CENTER (the chat history; AREA keeps it on screen).
-    pub fn render(&mut self, f: &mut Frame, area: Rect, center: Rect) {
+    /// The menu in AREA (the whole screen), as a command palette: centered on the screen's
+    /// width, its top on the row below the header row (row 0).
+    pub fn render(&mut self, f: &mut Frame, area: Rect) {
         self.poll();
         self.poll_detail();
-        let w = area.width.saturating_sub(4).min(76);
-        let h = area.height.saturating_sub(2).min(32).max(8.min(area.height));
-        let center = if center.width == 0 || center.height == 0 { area } else { center };
-        let mid = |c: u16, len: u16, n: u16, lo: u16, hi: u16| (c + len / 2).saturating_sub(n / 2).max(lo).min(hi.saturating_sub(n));
-        let r = Rect { x: mid(center.x, center.width, w, area.x, area.right()), y: mid(center.y, center.height, h, area.y, area.bottom()), width: w, height: h };
+        // wide screens: up to 100 columns (45% of the width), 76 at least
+        let w = area.width.saturating_sub(4).min((area.width * 45 / 100).clamp(76, 100));
+        let top = area.y + 1.min(area.height.saturating_sub(8));
+        let h = area.bottom().saturating_sub(top + 1).min(32).max(8.min(area.height));
+        let r = Rect { x: area.x + (area.width - w) / 2, y: top, width: w, height: h };
         self.frame = r;
         f.render_widget(Clear, r);
         let block = Block::new()
@@ -675,7 +764,11 @@ impl Menu {
         for (t, label) in TABS {
             let text = format!(" {label} ");
             let wd = text.chars().count() as u16;
-            let st = if t == self.tab { Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD) } else { theme::muted() };
+            let st = match (t == self.tab, self.level) {
+                (true, Level::Bar) => Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD),
+                (true, _) => theme::panel().add_modifier(Modifier::BOLD),
+                _ => theme::muted(),
+            };
             let rr = Rect { x, y: inner.y, width: wd.min(inner.right().saturating_sub(x)), height: 1 };
             f.render_widget(Paragraph::new(Span::styled(text, st)), rr);
             self.tab_rects.push((rr, t));
@@ -687,23 +780,31 @@ impl Menu {
         let hints: &[(&str, &str)] = match self.tab {
             Tab::Quick => {
                 self.draw_quick(f, body);
-                &[("↑↓", "move"), ("enter", "run"), ("←→", "tabs"), ("esc tab", "close")]
+                &[("↑↓", "move"), ("enter", "run"), ("←→", "tabs"), ("esc", "close")]
             }
             Tab::Threads => {
                 self.draw_threads(f, body);
-                &[("type", "filter"), ("←→", "repo"), ("↑↓", "move"), ("enter", "open"), ("ctrl+←→", "tabs"), ("esc tab", "close")]
+                match self.level {
+                    Level::Bar => &[("←→", "tabs"), ("↓", "repos"), ("type", "filter"), ("esc", "close")],
+                    Level::Group => &[("←→", "repo"), ("↑", "tabs"), ("↓", "threads"), ("esc", "close")],
+                    Level::Body => &[("type", "filter"), ("←→", "repo"), ("↑↓", "move"), ("enter", "open"), ("ctrl+←→", "tabs"), ("esc", "close")],
+                }
             }
             Tab::Merge => {
-                self.prs.draw(f, body, true);
-                &[("←→", "state"), ("↑↓", "move"), ("enter", "open: its thread, else the merge tab"), ("ctrl+←→", "tabs"), ("esc", "close")]
+                self.prs.draw_levels(f, body, self.level == Level::Group, self.level == Level::Body);
+                match self.level {
+                    Level::Bar => &[("←→", "tabs"), ("↓", "states"), ("esc", "close")],
+                    Level::Group => &[("←→", "state"), ("↑", "tabs"), ("↓", "list"), ("esc", "close")],
+                    Level::Body => &[("←→", "state"), ("↑↓", "move"), ("enter", "open: its thread, else the merge tab"), ("ctrl+←→", "tabs"), ("esc", "close")],
+                }
             }
             Tab::Search => {
                 self.draw_search(f, body);
-                &[("type", "search"), ("↑↓", "move"), ("enter", "jump to it"), ("←→", "tabs"), ("esc tab", "close")]
+                &[("type", "search"), ("↑↓", "move"), ("enter", "jump to it"), ("←→", "tabs"), ("esc", "close")]
             }
             Tab::Tokens => {
                 self.draw_tokens(f, body);
-                &[("↑↓", "scroll"), ("r", "reload"), ("←→", "tabs"), ("esc tab", "close")]
+                &[("↑↓", "scroll"), ("r", "reload"), ("←→", "tabs"), ("esc", "close")]
             }
             Tab::Agents if self.adding.is_some() => {
                 self.draw_agents(f, body);
@@ -711,7 +812,7 @@ impl Menu {
             }
             Tab::Agents => {
                 self.draw_agents(f, body);
-                &[("↑↓", "move"), ("enter", "run · remove (2×)"), ("←→", "tabs"), ("esc tab", "close")]
+                &[("↑↓", "move"), ("enter", "run · remove (2×)"), ("←→", "tabs"), ("esc", "close")]
             }
         };
         let mut spans = Vec::new();
@@ -771,7 +872,7 @@ impl Menu {
         let cur = self.repo_tab();
         self.repos.i = tabs.iter().position(|t| *t == cur).unwrap_or(0);
         let labels: Vec<String> = tabs.iter().map(RepoTab::label).collect();
-        self.repos.draw(f, Rect { y: body.y + 1, height: 1, ..body }, "repo", &labels, true);
+        self.repos.draw(f, Rect { y: body.y + 1, height: 1, ..body }, "repo", &labels, self.level == Level::Group);
         let list = Rect { y: body.y + 3, height: body.height.saturating_sub(3), ..body };
         let vis = self.visible();
         if vis.is_empty() {
@@ -788,11 +889,13 @@ impl Menu {
             self.toffset = self.tcursor + 1 - fits;
         }
         let tick = (self.started.elapsed().as_millis() / nav::WAVE_MS) as usize;
+        let notes = crate::notify::unseen(self.thread.as_deref());
         for (slot, &i) in vis.iter().enumerate().skip(self.toffset).take(fits) {
             let y = list.y + (slot - self.toffset) as u16 * nav::CARD_H;
             let r = Rect { y, height: nav::CARD_H, ..list };
             let c = &self.cards[i];
-            nav::draw_card(f.buffer_mut(), r, c, slot == self.tcursor, self.thread.as_deref() == Some(c.id.as_str()), true, tick);
+            nav::draw_card(f.buffer_mut(), r, c, slot == self.tcursor && self.level == Level::Body, self.thread.as_deref() == Some(c.id.as_str()), true, tick);
+            crate::notify::card_badge(f.buffer_mut(), r, &notes, &c.id);
             self.rows.push((r, i));
         }
         self.cards_fx.apply(f, list, self.cards_version);
@@ -1004,17 +1107,36 @@ mod tests {
         let mut m = menu();
         assert_eq!(m.tab, Tab::Quick);
         m.key(k(KeyCode::Right));
-        assert_eq!(m.tab, Tab::Threads);
-        // threads, merge: ←→ walk their tab group; ctrl+←→ the menu tabs (every tab)
+        assert_eq!((m.tab, m.level), (Tab::Threads, Level::Bar));
+        // the tab bar keeps the keys: ←→ walk past the tabs with a tab group
         m.key(k(KeyCode::Right));
-        assert_eq!(m.tab, Tab::Threads);
-        let ctrl = |c| KeyEvent::new(c, KeyModifiers::CONTROL);
-        m.key(ctrl(KeyCode::Right));
         assert_eq!(m.tab, Tab::Merge);
         m.key(k(KeyCode::Left));
+        assert_eq!(m.tab, Tab::Threads);
+        // ↓: the repo tabs (←→ there), ↓: the list; ↑ at its top: the repo tabs, ↑: the tab bar
+        m.key(k(KeyCode::Down));
+        assert_eq!(m.level, Level::Group);
+        m.key(k(KeyCode::Down));
+        assert_eq!(m.level, Level::Body);
+        m.key(k(KeyCode::Right));
+        assert_eq!(m.tab, Tab::Threads, "the list: ←→ walk the repos");
+        m.key(k(KeyCode::Up));
+        assert_eq!(m.level, Level::Group);
+        m.key(k(KeyCode::Up));
+        assert_eq!(m.level, Level::Bar);
+        m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Merge);
+        // merge: the same 3 levels; ctrl+←→ switch the tabs from any level
+        m.key(k(KeyCode::Down));
+        m.key(k(KeyCode::Down));
+        assert_eq!(m.level, Level::Body);
+        m.key(k(KeyCode::Up));
+        m.key(k(KeyCode::Up));
+        assert_eq!(m.level, Level::Bar);
+        m.key(k(KeyCode::Down));
+        let ctrl = |c| KeyEvent::new(c, KeyModifiers::CONTROL);
         m.key(ctrl(KeyCode::Right));
-        assert_eq!(m.tab, Tab::Search);
+        assert_eq!((m.tab, m.level), (Tab::Search, Level::Bar));
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Tokens);
         m.key(k(KeyCode::Right));
@@ -1024,8 +1146,23 @@ mod tests {
         m.key(k(KeyCode::Left));
         assert_eq!(m.tab, Tab::Agents);
         assert_eq!(m.key(k(KeyCode::Esc)), Action::Close);
-        assert_eq!(m.key(k(KeyCode::Tab)), Action::Close);
-        assert_eq!(m.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)), Action::Close);
+        // the menu key closes it too; tab: 0 close (tab walks fields, ctrl+p is the menu)
+        assert_eq!(m.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)), Action::Close);
+        assert_ne!(m.key(k(KeyCode::Tab)), Action::Close);
+    }
+
+    #[test]
+    fn a_command_palette_below_the_header_centered_on_wide_screens() {
+        let mut m = menu();
+        for (w, h) in [(240u16, 60u16), (90, 30)] {
+            let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            t.draw(|f| m.render(f, f.area())).unwrap();
+            let r = m.frame;
+            assert_eq!(r.y, 1, "below the header row");
+            let (left, right) = (r.x, w - r.right());
+            assert!(left.abs_diff(right) <= 1, "centered: {r:?} in {w}");
+            assert!(r.width <= 100 && r.width >= 76.min(w - 4), "{r:?}");
+        }
     }
 
     #[test]
@@ -1040,6 +1177,13 @@ mod tests {
         m.tab = Tab::Quick;
         m.key(k(KeyCode::Down));
         assert_eq!(m.key(k(KeyCode::Enter)), Action::Command(7));
+        // the last row: ↓ stays; ↑ at the 1st row: the tab bar
+        m.key(k(KeyCode::Down));
+        assert_eq!(m.key(k(KeyCode::Enter)), Action::Command(7));
+        for _ in 0..4 {
+            m.key(k(KeyCode::Up));
+        }
+        assert_eq!(m.level, Level::Bar);
         m.key(k(KeyCode::Down));
         assert_eq!(m.key(k(KeyCode::Enter)), Action::Home(Home::New));
     }
@@ -1061,7 +1205,7 @@ mod tests {
         assert!(matches!(m.key(k(KeyCode::Enter)), Action::Jump(c, 10) if c.id == "t1"));
         let s = {
             let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 30)).unwrap();
-            t.draw(|f| m.render(f, f.area(), f.area())).unwrap();
+            t.draw(|f| m.render(f, f.area())).unwrap();
             let b = t.backend().buffer().clone();
             (0..30).map(|y| (0..90).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
         };
@@ -1075,6 +1219,8 @@ mod tests {
         let mut m = menu();
         m.key(k(KeyCode::Right));
         m.key(k(KeyCode::Down));
+        m.key(k(KeyCode::Down));
+        m.key(k(KeyCode::Down));
         assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "t2"));
         for c in "first".chars() {
             m.key(k(KeyCode::Char(c)));
@@ -1087,6 +1233,9 @@ mod tests {
         let cards = vec![card("t1", "newest"), card("t2", "older"), card("t3", "this one")];
         let mut m = Menu::new(Vec::new(), Some("t3".into()), Vec::new(), Vec::new(), cards);
         m.key(k(KeyCode::Right));
+        // a letter on the tab bar: the filter takes it (here: enter dives into the list)
+        m.key(k(KeyCode::Enter));
+        m.key(k(KeyCode::Enter));
         let ids = |m: &Menu| m.visible().iter().map(|&i| m.cards[i].id.clone()).collect::<Vec<_>>();
         assert_eq!(ids(&m), ["t3", "t1", "t2"]);
         assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "t3"));
@@ -1108,9 +1257,10 @@ mod tests {
         let mut m = Menu::new(Vec::new(), Some("t1".into()), Vec::new(), Vec::new(), cards);
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Threads);
+        m.key(k(KeyCode::Down));
         let draw = |m: &mut Menu| {
             let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 30)).unwrap();
-            t.draw(|f| m.render(f, f.area(), f.area())).unwrap();
+            t.draw(|f| m.render(f, f.area())).unwrap();
             let b = t.backend().buffer().clone();
             (0..30).map(|y| (0..90).map(|x| b[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>()
         };
@@ -1144,6 +1294,7 @@ mod tests {
         let mut m = menu();
         m.key(k(KeyCode::Left));
         assert_eq!(m.tab, Tab::Agents);
+        m.key(k(KeyCode::Down));
         assert_eq!(m.key(k(KeyCode::Enter)), Action::Home(Home::Agents));
         m.key(k(KeyCode::Down));
         assert_eq!(m.key(k(KeyCode::Enter)), Action::None);
@@ -1173,13 +1324,13 @@ mod tests {
         let mut m = Menu::new(Vec::new(), cards.first().map(|c| c.id.clone()), vec!["amon".into()], crate::agents::cached(), cards);
         m.key(k(KeyCode::Right));
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 34)).unwrap();
-        t.draw(|f| m.render(f, f.area(), f.area())).unwrap();
+        t.draw(|f| m.render(f, f.area())).unwrap();
         let b = t.backend().buffer().clone();
         let s: Vec<String> = (0..34).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect()).collect();
         println!("{}", s.join("\n"));
         m.key(k(KeyCode::Right));
         m.detail = Some(crate::cost::detail(m.thread.as_deref()));
-        t.draw(|f| m.render(f, f.area(), f.area())).unwrap();
+        t.draw(|f| m.render(f, f.area())).unwrap();
         let b = t.backend().buffer().clone();
         let s: Vec<String> = (0..34).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect()).collect();
         println!("{}", s.join("\n"));
@@ -1197,7 +1348,7 @@ mod render_tests {
 
     fn screen(m: &mut Menu) -> String {
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 34)).unwrap();
-        t.draw(|f| m.render(f, f.area(), f.area())).unwrap();
+        t.draw(|f| m.render(f, f.area())).unwrap();
         let b = t.backend().buffer().clone();
         let s = (0..34).map(|y| (0..90).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n");
         if std::env::var_os("SHOW").is_some() {
@@ -1212,6 +1363,7 @@ mod render_tests {
         let mut m = Menu::new(Vec::new(), Some("t1".into()), vec!["nova".into(), "amon".into(), "lilith".into()], roster, vec![Card { id: "t1".into(), ..Default::default() }]);
         assert_eq!(m.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)), Action::Home(Home::New));
         m.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         let s = screen(&mut m);
         assert!(s.contains("claude · 2") && s.contains("codex · 1") && s.contains("+ add an agent"), "{s}");
         // 0 blank rows between the harness groups: the heading right below the cards above

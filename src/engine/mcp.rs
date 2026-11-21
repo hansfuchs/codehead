@@ -41,6 +41,36 @@ fn tools() -> Value {
             }, "required": ["id"]}
         },
         {
+            "name": "comment",
+            "description": "Write review comments on lines of the changed files, in the owner's changes view (as the owner's own comments). Only when the owner asks for it (e.g. a review of the changes: 1 comment per finding). Never on your own: 0 unasked comments.",
+            "inputSchema": {"type": "object", "properties": {
+                "comments": {"type": "array", "items": {"type": "object", "properties": {
+                    "file": {"type": "string", "description": "Path relative to the repo root of the worktree (an absolute path in it: fine)"},
+                    "line": {"type": "integer", "description": "Line number in the new version of the file"},
+                    "lines": {"type": "string", "description": "Optional: the lines it is on, e.g. `11-13, 15`"},
+                    "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+                    "text": {"type": "string", "description": "The comment: what is wrong, how to fix it"}
+                }, "required": ["file", "line", "severity", "text"]}}
+            }, "required": ["comments"]}
+        },
+        {
+            "name": "flow_step",
+            "description": "Report the current step of the thread's flow done (a step comes as a message that starts with `[codehead flow: ...]`). codehead returns the next step for you, hands it to another agent, or holds the flow at a gate for the owner. Call it once per step, only when the step's `Done when` holds.",
+            "inputSchema": {"type": "object", "properties": {
+                "again": {"type": "boolean", "description": "Loop step: its loop condition is not met yet, go back to the loop's start"},
+                "pass_gate": {"type": "boolean", "description": "Gate step, agents on autopilot only: go on without the owner's approval (the situation makes the wait pointless). Say why in note"},
+                "note": {"type": "string", "description": "1 line: the result of the step"}
+            }}
+        },
+        {
+            "name": "flow_suggest",
+            "description": "Propose another flow to the owner when the task changed kind (e.g. a bug investigation turns into a refactor). The owner decides; go on with the current step until then.",
+            "inputSchema": {"type": "object", "properties": {
+                "flow": {"type": "string", "description": "Flow name or slug, e.g. `refactor`, `bug-fix`"},
+                "reason": {"type": "string", "description": "1 line: why"}
+            }, "required": ["flow", "reason"]}
+        },
+        {
             "name": "list_agents",
             "description": "Every agent: name, harness/model, mode, whether it is on this thread.",
             "inputSchema": {"type": "object", "properties": {}}
@@ -60,6 +90,19 @@ fn call(thread: &str, agent: &str, name: &str, args: &Value) -> Result<String, S
         }
         "stash_name" => crate::changes::stash::set_name(thread, args["id"].as_str().unwrap_or_default(), args["name"].as_str().unwrap_or_default()),
         "stash_restored" => crate::changes::stash::restored(thread, args["id"].as_str().unwrap_or_default()),
+        "comment" => {
+            let root = super::store::load(thread).map(|t| t.work_dir());
+            let n = crate::changes::agent_comments(thread, agent, root.as_deref(), &args["comments"])?;
+            Ok(format!("{n} comments added to the changes view"))
+        }
+        "flow_step" => {
+            let r = client::send(thread, &json!({"op": "flow_step", "agent": agent, "again": args["again"], "pass_gate": args["pass_gate"], "note": args["note"]}))?;
+            Ok(flow_reply(&r))
+        }
+        "flow_suggest" => {
+            client::send(thread, &json!({"op": "flow_suggest", "agent": agent, "flow": args["flow"], "reason": args["reason"]}))?;
+            Ok("suggestion shown to the owner. Go on with the current step until the owner switches.".into())
+        }
         "list_agents" => {
             let on = super::store::load(thread).map(|t| t.agents).unwrap_or_default();
             let rows: Vec<Value> = roster::active()
@@ -69,6 +112,22 @@ fn call(thread: &str, agent: &str, name: &str, args: &Value) -> Result<String, S
             Ok(serde_json::to_string_pretty(&rows).unwrap_or_default())
         }
         _ => Err(format!("unknown tool {name}")),
+    }
+}
+
+/// The `flow_step` reply for the agent: the next step's text, a handoff, a wait, the end.
+fn flow_reply(r: &Value) -> String {
+    if let Some(t) = r["text"].as_str() {
+        return format!("Step done. Your next step:\n\n{t}");
+    }
+    if let Some(a) = r["handed"].as_str() {
+        return format!("Step done. The next step went to @{a}. End your turn; codehead brings the flow back to you.");
+    }
+    match r["wait"].as_str() {
+        Some("owner") => "Step done. The flow waits for the owner's decision. End your turn and wait.".into(),
+        Some("role") => "Step done. The next step's role has 0 agent: the owner picks one. End your turn.".into(),
+        _ if r["finished"].as_bool() == Some(true) => "Step done. The flow finished.".into(),
+        _ => "Step done.".into(),
     }
 }
 
@@ -119,7 +178,7 @@ mod tests {
         let r = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})).unwrap();
         assert_eq!(r["result"]["protocolVersion"], "2025-03-26");
         let r = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
-        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 5);
+        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 8);
         assert!(handle("t", "a", &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none());
     }
 }
