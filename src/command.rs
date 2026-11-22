@@ -681,6 +681,12 @@ impl Command {
         self.sync(ta).map(|_| self.depth())
     }
 
+    /// Dropdown areas of the last draw.
+    #[cfg(test)]
+    pub fn areas(&self) -> &[Rect] {
+        &self.areas
+    }
+
     /// The dropdown shows (as `key` sees it: a deeper level, or 1+ command matching the text).
     pub fn is_open(&mut self, ta: &TextArea) -> bool {
         let Some((_, q)) = self.sync(ta) else { return false };

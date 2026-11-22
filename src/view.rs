@@ -3094,6 +3094,9 @@ impl View {
         };
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), foot);
 
+        // spawns over the header, under every dropdown and menu
+        self.draw_spawns(f);
+
         // dropdowns over everything, then the menu
         if !menu_open {
             self.mention.render(f, &self.input, &self.roster, area);
@@ -3114,8 +3117,6 @@ impl View {
             }
         }
         self.draw_ide_pick(f, area);
-        // spawns over the header, under the menu
-        self.draw_spawns(f);
         if let Some(m) = self.menu.as_mut() {
             f.render_widget(Clear, Rect::default());
             // a command palette: below the view bar, centered on the screen's width
@@ -3960,6 +3961,41 @@ mod pane_tests {
         t.draw(|f| v.draw(f)).unwrap();
         let b = t.backend().buffer().clone();
         (0..30).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// A spawn under way (the thread just opened): the `>` dropdown stays over its goo.
+    #[test]
+    fn spawn_never_draws_over_the_command_dropdown() {
+        fn buffer(v: &mut View, text: &str) -> ratatui::buffer::Buffer {
+            v.input.set_text(text);
+            let mut t = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+            t.draw(|f| v.draw(f)).unwrap();
+            t.backend().buffer().clone()
+        }
+
+        let mut v = view();
+        v.members = vec!["ada".into()];
+        v.sync_order();
+        let key = crate::config::command_key().to_string();
+        let (calm, calm_menu) = (buffer(&mut v, ""), buffer(&mut v, &key));
+        let areas = v.command.areas().to_vec();
+        assert!(!areas.is_empty(), "the dropdown shows");
+
+        // the goo at its densest: just before the snap
+        let start = crate::avatar::now() - crate::avatar::spawn::timing(0).2 * 0.95;
+        v.spawns.insert("ada".into(), crate::avatar::Spawn { anim: 0, start });
+        let (goo, goo_menu) = (buffer(&mut v, ""), buffer(&mut v, &key));
+        let slot = v.slots.borrow()[0].1;
+        assert!(slot.intersects(areas[0]), "the dropdown covers the sprite");
+        let differs = (slot.top()..slot.bottom()).any(|y| (slot.left()..slot.right()).any(|x| calm[(x, y)].symbol() != goo[(x, y)].symbol()));
+        assert!(differs, "the spawn draws");
+        for r in &areas {
+            for y in r.top()..r.bottom() {
+                for x in r.left()..r.right() {
+                    assert_eq!(calm_menu[(x, y)].symbol(), goo_menu[(x, y)].symbol(), "spawn over the dropdown at {x},{y}");
+                }
+            }
+        }
     }
 
     #[test]
