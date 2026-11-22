@@ -893,12 +893,13 @@ impl View {
         }
         // `#name` of a shortcut: its text
         text = crate::shortcuts::expand(&text);
-        // from the changes view: the selected lines and the open comments go along
+        // from the changes view: the selected lines and the picked comments go along (once)
         if self.pane == Pane::Changes
             && let Some(c) = self.changes.context()
         {
             text = format!("{text}\n\n{c}");
             self.mini_chat = true;
+            self.changes.took_context();
         }
         // from the merge tab: the pull request in view
         if self.pane == Pane::Merge
@@ -3979,7 +3980,7 @@ mod pane_tests {
         press(&mut v, KeyCode::Enter, KeyModifiers::CONTROL);
         assert_eq!(v.changes.comment_count(), 1);
         let s = screen(&mut v);
-        assert!(s.contains("✎ 2 · removed 2: n"), "{s}");
+        assert!(s.contains("2 · removed 2 · you: n"), "{s}");
         // f: the filter takes letters, i too; esc leaves it (0 interrupt timer)
         press(&mut v, KeyCode::Char('f'), KeyModifiers::NONE);
         press(&mut v, KeyCode::Char('i'), KeyModifiers::NONE);

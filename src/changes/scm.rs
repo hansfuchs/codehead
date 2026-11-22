@@ -45,6 +45,8 @@ enum Fold {
     Level(Level),
     /// A severity of the comments.
     CLevel(Level),
+    /// The comments' group: resolved (true) / open.
+    CState(bool),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,6 +64,8 @@ pub(super) enum PRow {
     Empty(&'static str),
     /// PR mode: the commit picker.
     Pick,
+    /// The comments' group (resolved: true): its count.
+    CState(bool, usize),
 }
 
 impl PRow {
@@ -70,6 +74,7 @@ impl PRow {
             PRow::Section(s, _) => Some(Fold::Sec(*s)),
             PRow::Level(l, _) => Some(Fold::Level(*l)),
             PRow::CLevel(l, _) => Some(Fold::CLevel(*l)),
+            PRow::CState(r, _) => Some(Fold::CState(*r)),
             _ => None,
         }
     }
@@ -95,6 +100,8 @@ pub(super) struct Panel {
     folded: HashSet<Fold>,
     /// Picked files (space, shift+click): s / p take them.
     pub picked: BTreeSet<String>,
+    /// Picked comments (ids; space): the next prompt takes them along, then they clear.
+    pub comment_picks: BTreeSet<String>,
     anchor: Option<usize>,
     pub rect: Rect,
     msg_rect: Rect,
@@ -135,6 +142,7 @@ impl Panel {
             top: 0,
             folded: HashSet::new(),
             picked: BTreeSet::new(),
+            comment_picks: BTreeSet::new(),
             anchor: None,
             rect: Rect::default(),
             msg_rect: Rect::default(),
@@ -201,23 +209,18 @@ impl View {
                 }
             }
         }
-        v.push(PRow::Section(Sec::Comments, self.comments.len()));
+        let open = self.comments.iter().filter(|c| c.open()).count();
+        v.push(PRow::Section(Sec::Comments, open));
         if !p.folded.contains(&Fold::Sec(Sec::Comments)) {
             if self.comments.is_empty() {
                 v.push(PRow::Empty("c on lines: a comment"));
             }
-            // per severity (as the changes' levels): its files, their comments
-            for l in Level::ALL {
-                let at: Vec<usize> = (0..self.comments.len()).filter(|&i| self.comments[i].level == l).collect();
-                if at.is_empty() {
-                    continue;
-                }
-                v.push(PRow::CLevel(l, at.len()));
-                if p.folded.contains(&Fold::CLevel(l)) {
-                    continue;
-                }
+
+            // OPEN (per severity, as the changes' levels: its files, their comments), RESOLVED
+            // (its files, their comments)
+            let with_files = |v: &mut Vec<PRow>, at: &[usize]| {
                 let mut paths: Vec<&str> = Vec::new();
-                for &i in &at {
+                for &i in at {
                     if !paths.contains(&self.comments[i].path.as_str()) {
                         paths.push(&self.comments[i].path);
                     }
@@ -226,6 +229,31 @@ impl View {
                     let of: Vec<usize> = at.iter().copied().filter(|&i| self.comments[i].path == path).collect();
                     v.push(PRow::CommentFile(path.to_string(), of.len()));
                     v.extend(of.into_iter().map(PRow::Comment));
+                }
+            };
+            for resolved in [false, true] {
+                let at: Vec<usize> = (0..self.comments.len()).filter(|&i| self.comments[i].open() != resolved).collect();
+                if at.is_empty() {
+                    continue;
+                }
+                v.push(PRow::CState(resolved, at.len()));
+                if p.folded.contains(&Fold::CState(resolved)) {
+                    continue;
+                }
+
+                if resolved {
+                    with_files(&mut v, &at);
+                    continue;
+                }
+                for l in Level::ALL {
+                    let of: Vec<usize> = at.iter().copied().filter(|&i| self.comments[i].level == l).collect();
+                    if of.is_empty() {
+                        continue;
+                    }
+                    v.push(PRow::CLevel(l, of.len()));
+                    if !p.folded.contains(&Fold::CLevel(l)) {
+                        with_files(&mut v, &of);
+                    }
                 }
             }
         }
@@ -398,9 +426,12 @@ impl View {
                     buf[(x, y)].set_bg(theme::pal().panel);
                 }
             }
-            if let PRow::File(fi, _) = row
-                && self.changes.files.get(fi).is_some_and(|x| self.scm.picked.contains(&x.path))
-            {
+            let picked = match row {
+                PRow::File(fi, _) => self.changes.files.get(fi).is_some_and(|x| self.scm.picked.contains(&x.path)),
+                PRow::Comment(ci) => self.comments.get(ci).is_some_and(|c| self.scm.comment_picks.contains(&c.id)),
+                _ => false,
+            };
+            if picked {
                 for x in rect.x + 1..rect.right() {
                     buf[(x, y)].set_bg(sel_bg);
                 }
@@ -477,12 +508,21 @@ impl View {
                 }
                 right_fill(&left, &[Span::styled(format!("{n} "), theme::muted())])
             }
+            PRow::CState(resolved, n) => {
+                let (label, color) = if *resolved { ("RESOLVED", theme::pal().muted) } else { ("OPEN", theme::pal().accent) };
+                let st = Style::default().fg(color).add_modifier(Modifier::BOLD);
+                right_fill(&[Span::styled(format!("   {} {label}", fold(Fold::CState(*resolved))), st)], &[Span::styled(format!("{n} "), theme::muted())])
+            }
+            // open: ✎ line, text, author right; resolved: ✓, muted, who resolved it
             PRow::Comment(ci) => {
                 let Some(c) = self.comments.get(*ci) else { return Line::raw("") };
-                let head = format!("     ✎ {}: ", c.at());
+                let (mark, st) = if c.open() { ("✎", Style::default().fg(theme::pal().accent)) } else { ("✓", theme::muted()) };
+                let who = if c.open() || c.resolved_by.is_empty() { c.author() } else { format!("{} ✓ @{}", c.author(), c.resolved_by) };
+                let right = vec![Span::styled(format!("{who} "), theme::muted())];
+                let head = format!("     {mark} {}: ", c.at());
                 let text = c.text.lines().next().unwrap_or_default();
-                let st = Style::default().fg(theme::pal().accent);
-                Line::from(vec![Span::styled(crate::nav::fit(&head, w), st.add_modifier(Modifier::BOLD)), Span::styled(crate::nav::fit(text, w.saturating_sub(head.width())), st)])
+                let room = w.saturating_sub(head.width() + who.width() + 2);
+                right_fill(&[Span::styled(head, st.add_modifier(Modifier::BOLD)), Span::styled(crate::nav::fit(text, room), st)], &right)
             }
             PRow::Stash(si) => {
                 let Some(e) = self.stash.get(*si).cloned() else { return Line::raw("") };
@@ -675,9 +715,11 @@ impl View {
         let mine = &self.scm.rows.get(i)?;
         let is_file_of_level = matches!(mine, PRow::File(_, false));
         let is_comment = matches!(mine, PRow::CommentFile(..) | PRow::Comment(_));
+        let is_clevel = matches!(mine, PRow::CLevel(..));
         (0..i).rev().find(|&j| match &self.scm.rows[j] {
             PRow::Level(..) => is_file_of_level,
             PRow::CLevel(..) => is_comment,
+            PRow::CState(..) => is_comment || is_clevel,
             PRow::Section(..) => true,
             _ => false,
         })
@@ -761,7 +803,23 @@ impl View {
                 {
                     self.scm.picked.insert(p);
                 }
+
+                // a comment: picked for the next prompt
+                if let Some(PRow::Comment(ci)) = row
+                    && let Some(id) = self.comments.get(ci).map(|c| c.id.clone())
+                    && !self.scm.comment_picks.remove(&id)
+                {
+                    self.scm.comment_picks.insert(id);
+                }
                 self.scm.at = (self.scm.at + 1).min(last);
+            }
+            // d on a comment: resolved / open again
+            KeyCode::Char('d') => {
+                if let Some(PRow::Comment(ci)) = row {
+                    let act = self.toggle_resolved(ci);
+                    self.scm.rows = self.panel_rows();
+                    return act;
+                }
             }
             KeyCode::Char('s') => return self.panel_stage(),
             KeyCode::Char('p') => return self.panel_stash(),
@@ -798,7 +856,11 @@ impl View {
                     return Act::Open(f.path.clone(), f.first_line());
                 }
             }
-            KeyCode::Esc => self.scm.picked.clear(),
+            KeyCode::Esc => {
+                self.scm.picked.clear();
+                self.scm.comment_picks.clear();
+                self.built = None;
+            }
             _ => {}
         }
         Act::None
@@ -1018,5 +1080,75 @@ mod tests {
         v.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         let PRow::File(i, _) = v.scm.rows[first + 1] else { panic!() };
         assert!(v.rows[v.at].head && v.rows[v.at].file == i);
+    }
+
+    #[test]
+    fn comments_split_into_open_and_resolved_space_picks_d_resolves() {
+        let mut v = test_view();
+        v.id = format!("changes-cstate-{}", std::process::id());
+        let c = |id: &str, by: &str, line: u32| super::super::Comment { path: "src/a.rs".into(), line, text: format!("{id} text"), id: id.into(), by: by.into(), ..Default::default() };
+        v.comments = vec![c("c1", "", 11), c("c2", "REGI", 12)];
+        v.comments[1].state = super::super::CState::Resolved;
+        v.comments[1].resolved_by = "REGI".into();
+
+        let all = draw(&mut v, 140, 40).join("\n");
+
+        assert!(all.contains("▾ COMMENTS  1") && all.contains("▾ OPEN") && all.contains("▾ RESOLVED"), "{all}");
+        assert!(all.contains("c1 text") && all.contains("you"), "author: you: {all}");
+        assert!(all.contains("@REGI ✓ @REGI"), "resolved: author, who resolved it: {all}");
+        let review: String = all.lines().map(|l| l.chars().skip(36).collect::<String>()).collect::<Vec<_>>().join("\n");
+        assert!(review.contains("c1 text") && !review.contains("c2 text"), "resolved: out of the file view: {review}");
+
+        // the panel: space picks c1 for the prompt, d resolves it, d again opens it
+        alt_tap(&mut v);
+        v.scm.at = v.scm.rows.iter().position(|r| *r == PRow::Comment(0)).unwrap();
+        v.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(v.scm.comment_picks.contains("c1") && v.context().unwrap().contains("c1 [medium, open]"));
+
+        v.scm.at = v.scm.rows.iter().position(|r| *r == PRow::Comment(0)).unwrap();
+        v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(!v.comments[0].open());
+        let all = draw(&mut v, 140, 40).join("\n");
+        assert!(all.contains("▾ COMMENTS  0") && !all.contains("▾ OPEN"), "{all}");
+
+        v.scm.at = v.scm.rows.iter().position(|r| *r == PRow::Comment(0)).unwrap();
+        v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(v.comments[0].open());
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(&v.id));
+    }
+
+    #[test]
+    fn agents_list_resolve_and_reopen_comments_by_id() {
+        let id = format!("changes-agent-cstate-{}", std::process::id());
+        let ids = super::super::agent_comments(&id, "REV", None, &serde_json::json!([{"file": "a.rs", "line": 3, "severity": "high", "text": "off by 1"}, {"file": "b.rs", "line": 9, "severity": "low", "text": "nit"}])).unwrap();
+        assert_eq!(ids, vec!["c1", "c2"]);
+
+        let open: serde_json::Value = serde_json::from_str(&super::super::list_comments(&id, "open")).unwrap();
+        assert_eq!(open.as_array().unwrap().len(), 2);
+        assert_eq!((open[0]["id"].as_str(), open[0]["author"].as_str(), open[0]["state"].as_str()), (Some("c1"), Some("REV"), Some("open")));
+
+        super::super::set_comment_state(&id, "LEAD", &["c1".into()], "resolved", "fixed in a.rs:3").unwrap();
+        let c = super::super::read_comments(&id);
+        assert_eq!((c[0].state, c[0].resolved_by.as_str(), c[0].note.as_str()), (super::super::CState::Resolved, "LEAD", "fixed in a.rs:3"));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&super::super::list_comments(&id, "open")).unwrap().as_array().unwrap().len(), 1);
+
+        // the reviewer re-opens it; an unknown id: an error, 0 change
+        super::super::set_comment_state(&id, "REV", &["c1".into()], "open", "still off").unwrap();
+        assert!(super::super::read_comments(&id)[0].open());
+        assert!(super::super::set_comment_state(&id, "REV", &["c9".into()], "resolved", "x").unwrap_err().contains("c9"));
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(&id));
+    }
+
+    #[test]
+    fn an_older_comments_file_gets_ids_on_read() {
+        let id = format!("changes-ids-{}", std::process::id());
+        std::fs::create_dir_all(crate::engine::store::thread_dir(&id)).unwrap();
+        std::fs::write(crate::engine::store::thread_dir(&id).join("comments.json"), r#"[{"path": "a.rs", "line": 1, "text": "old"}]"#).unwrap();
+
+        let c = super::super::read_comments(&id);
+
+        assert_eq!((c[0].id.as_str(), c[0].open()), ("c1", true));
+        assert!(std::fs::read_to_string(crate::engine::store::thread_dir(&id).join("comments.json")).unwrap().contains("\"c1\""), "written back");
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(&id));
     }
 }

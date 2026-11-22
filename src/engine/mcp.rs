@@ -54,6 +54,22 @@ fn tools() -> Value {
             }, "required": ["comments"]}
         },
         {
+            "name": "comments",
+            "description": "List the review comments of the changes view (the owner's and the agents'): id, file, line, severity, author, state (open / resolved), text. Read them when you address review comments, or when the owner asks you to.",
+            "inputSchema": {"type": "object", "properties": {
+                "state": {"type": "string", "enum": ["open", "resolved", "all"], "description": "Default: open"}
+            }}
+        },
+        {
+            "name": "comment_status",
+            "description": "Resolve review comments once addressed (fixed, or answered with a reason not to fix), as on GitHub: they leave the owner's file view. A reviewer re-opens a comment whose fix does not hold. 1 note per call: what fixed it, or why not.",
+            "inputSchema": {"type": "object", "properties": {
+                "ids": {"type": "array", "items": {"type": "string"}, "description": "Comment ids, e.g. [\"c3\", \"c4\"]"},
+                "state": {"type": "string", "enum": ["resolved", "open"]},
+                "note": {"type": "string", "description": "1 line: the fix (file:line), or why not"}
+            }, "required": ["ids", "state", "note"]}
+        },
+        {
             "name": "flow_step",
             "description": "Report the current step of the thread's flow done (a step comes as a message that starts with `[codehead flow: ...]`). codehead returns the next step for you, hands it to another agent, or holds the flow at a gate for the owner. Call it once per step, only when the step's `Done when` holds.",
             "inputSchema": {"type": "object", "properties": {
@@ -92,8 +108,16 @@ fn call(thread: &str, agent: &str, name: &str, args: &Value) -> Result<String, S
         "stash_restored" => crate::changes::stash::restored(thread, args["id"].as_str().unwrap_or_default()),
         "comment" => {
             let root = super::store::load(thread).map(|t| t.work_dir());
-            let n = crate::changes::agent_comments(thread, agent, root.as_deref(), &args["comments"])?;
-            Ok(format!("{n} comments added to the changes view"))
+            let ids = crate::changes::agent_comments(thread, agent, root.as_deref(), &args["comments"])?;
+            Ok(format!("{} comments added to the changes view (open): {}", ids.len(), ids.join(", ")))
+        }
+        "comments" => Ok(crate::changes::list_comments(thread, args["state"].as_str().unwrap_or("open"))),
+        "comment_status" => {
+            let ids: Vec<String> = args["ids"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+            if ids.is_empty() {
+                return Err("ids: 1 comment id or more (the `comments` tool lists them)".into());
+            }
+            crate::changes::set_comment_state(thread, agent, &ids, args["state"].as_str().unwrap_or("resolved"), args["note"].as_str().unwrap_or_default())
         }
         "flow_step" => {
             let r = client::send(thread, &json!({"op": "flow_step", "agent": agent, "again": args["again"], "pass_gate": args["pass_gate"], "note": args["note"]}))?;
@@ -178,7 +202,7 @@ mod tests {
         let r = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})).unwrap();
         assert_eq!(r["result"]["protocolVersion"], "2025-03-26");
         let r = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
-        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 8);
+        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 10);
         assert!(handle("t", "a", &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none());
     }
 }

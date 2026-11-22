@@ -1116,7 +1116,7 @@ fn lines_label(keys: &std::collections::BTreeSet<LKey>) -> String {
 
 /// A review comment on LINE (new side) of PATH (LINES: the selected lines it is on), for the
 /// batch to an agent.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Comment {
     pub path: String,
     pub line: u32,
@@ -1132,6 +1132,35 @@ pub struct Comment {
     /// The agent that wrote it ("": the owner).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub by: String,
+    /// `c7`: agents name it in `comment_status` (an older file: given on read).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// Open / resolved, as on GitHub: a resolved comment leaves the file view.
+    #[serde(default, skip_serializing_if = "CState::is_open")]
+    pub state: CState,
+    /// Who resolved it ("": the owner), why (the agent's 1-line note).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub resolved_by: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// In a batch to the agents already (ctrl+enter sends only the new open ones).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sent: bool,
+}
+
+/// The state of a comment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CState {
+    #[default]
+    Open,
+    Resolved,
+}
+
+impl CState {
+    fn is_open(&self) -> bool {
+        *self == CState::Open
+    }
 }
 
 impl Comment {
@@ -1139,14 +1168,38 @@ impl Comment {
     fn at(&self) -> String {
         if self.lines.is_empty() { self.line.to_string() } else { self.lines.clone() }
     }
+
+    pub fn open(&self) -> bool {
+        self.state == CState::Open
+    }
+
+    /// The author for the owner's eyes: `you`, `@REGI`.
+    pub fn author(&self) -> String {
+        if self.by.is_empty() { "you".into() } else { format!("@{}", self.by) }
+    }
 }
 
 fn comments_path(id: &str) -> PathBuf {
     crate::engine::store::thread_dir(id).join("comments.json")
 }
 
+/// The comments of thread ID; comments of an older file get their id (written back).
 pub(crate) fn read_comments(id: &str) -> Vec<Comment> {
-    std::fs::read(comments_path(id)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    let mut v: Vec<Comment> = std::fs::read(comments_path(id)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    if v.iter().any(|c| c.id.is_empty()) {
+        give_ids(&mut v);
+        write_comments(id, &v);
+    }
+    v
+}
+
+/// Comments with 0 id get the next free `c<n>`.
+fn give_ids(v: &mut [Comment]) {
+    let mut n = v.iter().filter_map(|c| c.id.strip_prefix('c')?.parse::<u32>().ok()).max().unwrap_or(0);
+    for c in v.iter_mut().filter(|c| c.id.is_empty()) {
+        n += 1;
+        c.id = format!("c{n}");
+    }
 }
 
 /// The comments file's time (an agent wrote a comment: the view reads it again).
@@ -1162,8 +1215,8 @@ pub(crate) fn write_comments(id: &str, c: &[Comment]) {
 
 /// MCP `comment`: AGENT's comments (`[{file, line, lines?, severity, text}]`) into the comments
 /// of THREAD (the changes view reads them at its next draw). ROOT: the worktree (absolute paths
-/// in it: relative). Returns the count added.
-pub fn agent_comments(thread: &str, agent: &str, root: Option<&Path>, list: &serde_json::Value) -> Result<usize, String> {
+/// in it: relative). Returns the new comments' ids.
+pub fn agent_comments(thread: &str, agent: &str, root: Option<&Path>, list: &serde_json::Value) -> Result<Vec<String>, String> {
     let items = list.as_array().ok_or("comments: an array required")?;
     let mut add = Vec::new();
     for c in items {
@@ -1173,28 +1226,80 @@ pub fn agent_comments(thread: &str, agent: &str, root: Option<&Path>, list: &ser
         if file.is_empty() || text.is_empty() {
             return Err("each comment needs file and text".into());
         }
+
         let p = Path::new(file);
         let rel = root.and_then(|r| p.strip_prefix(r).ok()).unwrap_or(p).to_string_lossy().trim_start_matches("./").to_string();
         let level = crate::rank::Level::parse(c["severity"].as_str().unwrap_or_default()).unwrap_or_default();
-        add.push(Comment { path: rel, line, text: text.to_string(), lines: c["lines"].as_str().unwrap_or_default().to_string(), quote: String::new(), level, by: agent.to_string() });
+        add.push(Comment { path: rel, line, text: text.to_string(), lines: c["lines"].as_str().unwrap_or_default().to_string(), level, by: agent.to_string(), ..Default::default() });
     }
-    let n = add.len();
+
     let mut all = read_comments(thread);
+    let from = all.len();
     all.extend(add);
+    give_ids(&mut all);
     write_comments(thread, &all);
-    Ok(n)
+    Ok(all[from..].iter().map(|c| c.id.clone()).collect())
 }
 
-/// The batch message of COMMENTS (0 comments: None).
-pub fn batch(comments: &[Comment]) -> Option<String> {
+/// MCP `comments`: THREAD's comments in STATE (`open`, `resolved`, `all`) as JSON for an agent.
+pub fn list_comments(thread: &str, state: &str) -> String {
+    let rows: Vec<serde_json::Value> = read_comments(thread)
+        .iter()
+        .filter(|c| match state {
+            "resolved" => !c.open(),
+            "all" => true,
+            _ => c.open(),
+        })
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id, "file": c.path, "line": c.line, "lines": c.lines, "severity": c.level.label(),
+                "author": if c.by.is_empty() { "owner" } else { c.by.as_str() },
+                "state": if c.open() { "open" } else { "resolved" },
+                "resolved_by": c.resolved_by, "note": c.note, "text": c.text,
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&rows).unwrap_or_default()
+}
+
+/// MCP `comment_status`: AGENT sets comments IDS of THREAD to STATE (`resolved` / `open`) with
+/// NOTE (what fixed it, why not). Ok: what changed.
+pub fn set_comment_state(thread: &str, agent: &str, ids: &[String], state: &str, note: &str) -> Result<String, String> {
+    let to = match state {
+        "resolved" => CState::Resolved,
+        "open" => CState::Open,
+        _ => return Err("state: resolved or open".into()),
+    };
+    let mut all = read_comments(thread);
+    let unknown: Vec<&String> = ids.iter().filter(|id| !all.iter().any(|c| &c.id == *id)).collect();
+    if !unknown.is_empty() {
+        return Err(format!("unknown comment ids: {} (the `comments` tool lists them)", unknown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+    }
+
+    for c in all.iter_mut().filter(|c| ids.contains(&c.id)) {
+        c.state = to;
+        c.resolved_by = if to == CState::Resolved { agent.to_string() } else { String::new() };
+        c.note = note.trim().to_string();
+        // reopened: the next batch takes it again
+        if to == CState::Open {
+            c.sent = false;
+        }
+    }
+    write_comments(thread, &all);
+    Ok(format!("{} comment{} {state}", ids.len(), if ids.len() == 1 { "" } else { "s" }))
+}
+
+/// The batch message of COMMENTS (0 comments: None): each with its id, severity, author.
+pub fn batch(comments: &[&Comment]) -> Option<String> {
     if comments.is_empty() {
         return None;
     }
-    let mut s = String::from("Review comments on the changes (file:line, new side). Address each one:\n");
+    let mut s = String::from(
+        "Review comments on the changes (file:line, new side). Address each one. After a fix, or with a reason not to fix, call the `comment_status` tool (codehead MCP) with its id, state `resolved` and a 1-line note:\n",
+    );
     for c in comments {
         let mut lines = c.text.lines();
-        let by = if c.by.is_empty() { String::new() } else { format!(" (by {})", c.by) };
-        s.push_str(&format!("- [{}] `{}:{}`{by}: {}\n", c.level.label(), c.path, c.at(), lines.next().unwrap_or_default()));
+        s.push_str(&format!("- {} [{}] `{}:{}` by {}: {}\n", c.id, c.level.label(), c.path, c.at(), c.author(), lines.next().unwrap_or_default()));
         for l in lines {
             s.push_str(&format!("  {l}\n"));
         }
@@ -1296,6 +1401,8 @@ pub struct View {
     note: Option<String>,
     /// A pull request's diff (the merge tab): read only, 0 git steps.
     pub pr_src: Option<PrSrc>,
+    /// The comments in the file view: 1 row each (C), else their whole text.
+    comments_folded: bool,
 }
 
 /// The pull request of a PR-mode view: its commits (the panel's picker), the picked 1 (None:
@@ -1456,6 +1563,7 @@ impl View {
             op: None,
             note: None,
             pr_src: None,
+            comments_folded: false,
         }
     }
 
@@ -1712,6 +1820,7 @@ impl View {
 
     /// The comments to their file (the view's own write: 0 read again).
     fn save_comments(&mut self) {
+        give_ids(&mut self.comments);
         write_comments(&self.id, &self.comments);
         self.comments_at = comments_stamp(&self.id);
     }
@@ -1949,8 +2058,10 @@ impl View {
             let n = 1 + x.body.lines().take(3).count();
             notes.push((x.line, (0..n).map(|k| Row::new(Body::Finding(fi, k), i, Some(x.line))).collect()));
         }
-        for (ci, c) in self.comments.iter().enumerate().filter(|(_, c)| c.path == f.path) {
-            notes.push((c.line, (0..c.text.lines().count().max(1)).map(|k| Row::new(Body::Comment(ci, k), i, Some(c.line))).collect()));
+        // open comments only (resolved: the panel's RESOLVED); C folded: 1 row each
+        for (ci, c) in self.comments.iter().enumerate().filter(|(_, c)| c.path == f.path && c.open()) {
+            let n = if self.comments_folded { 1 } else { c.text.lines().count().max(1) };
+            notes.push((c.line, (0..n).map(|k| Row::new(Body::Comment(ci, k), i, Some(c.line))).collect()));
         }
         // PR mode: the GitHub threads on the file's lines
         for (ti, t) in self.pr_src.iter().flat_map(|s| s.threads.iter().enumerate()).filter(|(_, t)| t.path.as_deref() == Some(f.path.as_str())) {
@@ -2097,12 +2208,21 @@ impl View {
                 if k > 0 {
                     return bar(vec![Span::raw("  "), Span::styled(crate::nav::fit(l, inner.saturating_sub(2)), st)]);
                 }
-                // the 1st row: severity, lines, the agent that wrote it
-                let sev = format!("{} ", c.level.label());
-                let by = if c.by.is_empty() { String::new() } else { format!(" · {}", c.by) };
-                let head = format!("✎ {}{by}: ", c.at());
-                let room = inner.saturating_sub(head.width() + sev.width());
-                bar(vec![Span::styled(sev, Style::default().fg(scm::level_color(c.level)).add_modifier(Modifier::BOLD)), Span::styled(head, st.add_modifier(Modifier::BOLD)), Span::styled(crate::nav::fit(l, room), st)])
+                // the 1st row: picked mark, severity, id, lines, author (you / @agent), sent; folded
+                // (C): the count of the lines out of view
+                let pick = if self.scm.comment_picks.contains(&c.id) { "● " } else { "" };
+                let sev = format!("{pick}{} ", c.level.label());
+                let sent = if c.sent { " · sent" } else { "" };
+                let head = format!("✎ {} {} · {}{sent}: ", c.id, c.at(), c.author());
+                let more = c.text.lines().count().saturating_sub(1);
+                let tail = if self.comments_folded && more > 0 { format!(" (+{more} lines)") } else { String::new() };
+                let room = inner.saturating_sub(head.width() + sev.width() + tail.width());
+                bar(vec![
+                    Span::styled(sev, Style::default().fg(scm::level_color(c.level)).add_modifier(Modifier::BOLD)),
+                    Span::styled(head, st.add_modifier(Modifier::BOLD)),
+                    Span::styled(crate::nav::fit(l, room), st),
+                    Span::styled(tail, theme::muted()),
+                ])
             }
         }
     }
@@ -2224,9 +2344,31 @@ impl View {
         out
     }
 
-    #[cfg(test)]
+    /// The open comments.
     pub fn comment_count(&self) -> usize {
-        self.comments.len()
+        self.comments.iter().filter(|c| c.open()).count()
+    }
+
+    /// The prompt took the context (picked comments): the picks clear, 1 prompt each.
+    pub fn took_context(&mut self) {
+        self.scm.comment_picks.clear();
+    }
+
+    /// Comment CI open → resolved by the owner, resolved → open.
+    fn toggle_resolved(&mut self, ci: usize) -> Act {
+        let Some(c) = self.comments.get_mut(ci) else { return Act::None };
+        let open = c.open();
+        c.state = if open { CState::Resolved } else { CState::Open };
+        c.resolved_by.clear();
+        c.note.clear();
+        if !open {
+            c.sent = false;
+        }
+
+        let id = c.id.clone();
+        self.save_comments();
+        self.rebuild_here();
+        Act::Toast(format!("{id} {}", if open { "resolved" } else { "open again" }))
     }
 
     /// Add a comment TEXT on SPOTS (1 per file); the selection it was on clears; the rows show
@@ -2244,7 +2386,7 @@ impl View {
         }
         for s in spots {
             let quote = self.quote(s);
-            self.comments.push(Comment { path: s.path.clone(), line: s.line, text: text.to_string(), lines: s.lines.clone(), quote, level, by: String::new() });
+            self.comments.push(Comment { path: s.path.clone(), line: s.line, text: text.to_string(), lines: s.lines.clone(), quote, level, ..Default::default() });
         }
         self.save_comments();
         self.sel.clear();
@@ -2688,10 +2830,14 @@ impl View {
                 s.push_str(&format!("- `{}`\n```diff\n{}\n```\n", spot.label(), self.quote(&spot)));
             }
         }
-        if !self.comments.is_empty() {
-            s.push_str("Open review comments (file:line, new side):\n");
-            for c in &self.comments {
-                s.push_str(&format!("- `{}:{}`: {}\n", c.path, c.at(), c.text.replace('\n', " / ")));
+        // only the comments the owner picked (space): 0 with each prompt; every comment: 1 batch
+        // on ctrl+enter, or an agent reads them (MCP `comments`)
+        let picked: Vec<&Comment> = self.comments.iter().filter(|c| self.scm.comment_picks.contains(&c.id)).collect();
+        if !picked.is_empty() {
+            s.push_str("Picked review comments (file:line, new side; `comment_status` resolves them):\n");
+            for c in picked {
+                let state = if c.open() { "open" } else { "resolved" };
+                s.push_str(&format!("- {} [{}, {state}] `{}:{}` by {}: {}\n", c.id, c.level.label(), c.path, c.at(), c.author(), c.text.replace('\n', " / ")));
             }
         }
         (!s.is_empty()).then(|| format!("[codehead: context from the changes view]\n{}", s.trim_end()))
@@ -2721,7 +2867,7 @@ impl View {
     /// Esc is the view's: it closes a modal, leaves the filter or the message, clears the
     /// filter, the selection or the panel's picks.
     pub fn takes_esc(&self) -> bool {
-        self.typing() || !self.filter.is_empty() || !self.sel.is_empty() || (self.scm.focus && !self.scm.picked.is_empty()) || self.scm.picking()
+        self.typing() || !self.filter.is_empty() || !self.sel.is_empty() || (self.scm.focus && !self.scm.picked.is_empty()) || !self.scm.comment_picks.is_empty() || self.scm.picking()
     }
 
     /// The keys of the footer now.
@@ -2748,7 +2894,7 @@ impl View {
         } else if self.filtering {
             "type to filter · enter: 1st hit · esc: clear "
         } else {
-            "j k: file · space: select · s: stage · c: comment · v: reviewed · S: ship · ctrl+b: git · i: prompt "
+            "j k: file · space: select · s: stage · c: comment · v: reviewed · S: ship · ctrl+b: git · i: prompt · d: resolve · C: comments "
         }
     }
 
@@ -3106,10 +3252,32 @@ impl View {
             KeyCode::Char('g') | KeyCode::Home => self.at = 0,
             KeyCode::Char('G') | KeyCode::End => self.at = last,
             // space: the line selected / not, the cursor 1 down
+            // space on a comment: picked for the next prompt (only picked comments go along)
+            KeyCode::Char(' ') if self.rows.get(self.at).is_some_and(|r| r.comment.is_some()) => {
+                if let Some(id) = self.rows.get(self.at).and_then(|r| r.comment).and_then(|ci| self.comments.get(ci)).map(|c| c.id.clone())
+                    && !self.scm.comment_picks.remove(&id)
+                {
+                    self.scm.comment_picks.insert(id);
+                }
+                self.built = None;
+                self.at = (self.at + 1).min(last);
+            }
             KeyCode::Char(' ') => {
                 let on = !self.selected(self.at);
                 self.select_row(self.at, on);
                 self.at = (self.at + 1).min(last);
+            }
+            // d on a comment: resolved (it leaves the file view; the panel's RESOLVED has it)
+            KeyCode::Char('d') => {
+                if let Some(ci) = self.rows.get(self.at).and_then(|r| r.comment) {
+                    return self.toggle_resolved(ci);
+                }
+            }
+            // C: every comment 1 row / its whole text
+            KeyCode::Char('C') => {
+                self.comments_folded = !self.comments_folded;
+                self.rebuild_here();
+                return Act::Toast(if self.comments_folded { "comments: 1 row each".into() } else { "comments: whole text".into() });
             }
             // r (ctrl+r too): read again, as on every screen; v: reviewed
             KeyCode::Char('r') => {
@@ -3127,12 +3295,18 @@ impl View {
                     self.built = None;
                 } else {
                     self.sel.clear();
+                    self.scm.comment_picks.clear();
+                    self.built = None;
                 }
             }
             // ctrl+enter (⌘enter, alt+enter): the comment batch to the thread, as a send in the thread
             KeyCode::Enter if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) => {
-                let Some(text) = batch(&self.comments) else { return Act::Toast("0 comments · c: comment on the line".into()) };
-                self.comments.clear();
+                // the open comments not sent yet; they stay (open) until an agent resolves them
+                let new: Vec<&Comment> = self.comments.iter().filter(|c| c.open() && !c.sent).collect();
+                let Some(text) = batch(&new) else { return Act::Toast(format!("0 new comments · {} open, sent already · c: comment on the line", self.comment_count())) };
+                for c in self.comments.iter_mut().filter(|c| c.open()) {
+                    c.sent = true;
+                }
                 self.save_comments();
                 self.built = None;
                 return Act::Send(text);
@@ -3220,7 +3394,7 @@ impl View {
                 {
                     self.drop_finding(fi);
                     let level = crate::rank::Level::parse(&x.severity).unwrap_or_default();
-                    self.comments.push(Comment { path: x.file.clone(), line: x.line, text: crate::review::as_comment(&x), lines: String::new(), quote: String::new(), level, by: String::new() });
+                    self.comments.push(Comment { path: x.file.clone(), line: x.line, text: crate::review::as_comment(&x), level, ..Default::default() });
                     self.save_comments();
                     self.rebuild_here();
                     return Act::Toast(format!("finding → comment batch · {} · ctrl+enter: send", self.comments.len()));
@@ -3685,18 +3859,37 @@ Binary files a/img.png and b/img.png differ
         v.add_comment(&spot(99), "outside any hunk");
         let t = text(&v);
         let at = t.iter().position(|l| l.contains("+ let b = 3;")).unwrap();
-        assert!(t[at + 1].contains("✎ 11: why 3?") && t[at + 2].contains("keep 2"), "{t:#?}");
+        assert!(t[at + 1].contains("✎ c1 11 · you: why 3?") && t[at + 2].contains("keep 2"), "id, line, author: {t:#?}");
         let end = t.iter().position(|l| l.contains("outside any hunk")).unwrap();
         assert!(t[end + 1].starts_with('└'), "orphan at the box end: {t:#?}");
+
+        // C: 1 row per comment, the hidden line count; C again: the whole text
+        v.key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT));
+        let t = text(&v);
+        let at = t.iter().position(|l| l.contains("✎ c1")).unwrap();
+        assert!(t[at].contains("(+1 lines)") && !t[at + 1].contains("keep 2"), "{t:#?}");
+        v.key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT));
+        assert!(text(&v).iter().any(|l| l.contains("keep 2")));
+
         // x on a comment row deletes it
         v.at = v.rows.iter().position(|r| r.comment == Some(1)).unwrap();
         v.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert_eq!(v.comment_count(), 1);
+
+        // ctrl+enter: the batch (id, severity, author, the tool); the comment stays open, sent
         match v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)) {
-            Act::Send(s) => assert_eq!(s, "Review comments on the changes (file:line, new side). Address each one:\n- [medium] `src/a.rs:11`: why 3?\n  keep 2"),
+            Act::Send(s) => assert!(s.contains("`comment_status`") && s.ends_with("- c1 [medium] `src/a.rs:11` by you: why 3?\n  keep 2"), "{s}"),
             a => panic!("{a:?}"),
         }
+        assert_eq!(v.comment_count(), 1);
+        assert!(v.comments[0].sent);
+        assert!(matches!(v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)), Act::Toast(t) if t.contains("0 new comments")), "sent once");
+
+        // d on the comment: resolved, it leaves the file view; d in the panel: open again
+        v.at = v.rows.iter().position(|r| r.comment == Some(0)).unwrap();
+        v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(v.comment_count(), 0);
+        assert!(!text(&v).iter().any(|l| l.contains("why 3?")), "resolved: out of the file view");
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-comments-0000"));
     }
 
@@ -3915,11 +4108,11 @@ Binary files a/img.png and b/img.png differ
         v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
         assert!(v.modal.is_none() && v.comments[0].quote == "- let b = 2;\n+ let c = 4;");
         let s = screen(&mut v, 100, 30);
-        let c = row_of(&s, "✎ 12 · removed 11: both wrong");
+        let c = row_of(&s, "12 · removed 11 · you: both wrong");
         assert!(s[c - 1].contains("+ let c = 4;"), "under the last selected line: {s:#?}");
         assert!(!s.iter().any(|l| l.chars().nth(1) == Some('▌')), "the selection clears: {s:#?}");
         let Act::Send(b) = v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)) else { panic!() };
-        assert!(b.ends_with("- [medium] `src/a.rs:12 · removed 11`: both wrong"), "{b}");
+        assert!(b.ends_with("- c1 [medium] `src/a.rs:12 · removed 11` by you: both wrong"), "{b}");
         // esc (the view's while a selection is on) clears it
         v.at = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("+ let b = 3;")).unwrap();
         press(&mut v, KeyCode::Char(' '));
@@ -4253,7 +4446,7 @@ Binary files a/img.png and b/img.png differ
         // an agent's comments (the MCP tool): into the file, the view reads them at its next draw
         let root = Path::new("/w");
         let n = agent_comments(&v.id, "amon", Some(root), &serde_json::json!([{"file": "/w/src/a.rs", "line": 12, "severity": "low", "text": "nit"}])).unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n, vec!["c2".to_string()], "ids after the owner's c1");
         let s = screen(&mut v, 140, 40).join("\n");
         assert_eq!(v.comments.len(), 2);
         assert_eq!((v.comments[1].path.as_str(), v.comments[1].by.as_str()), ("src/a.rs", "amon"));
@@ -4297,7 +4490,7 @@ Binary files a/img.png and b/img.png differ
     }
 
     #[test]
-    fn the_prompt_takes_the_selection_and_the_comments_along() {
+    fn the_prompt_takes_the_selection_and_only_picked_comments_along_once() {
         let mut v = view(parse(DIFF));
         v.id = "changes-context-0000".into();
         v.comments.clear();
@@ -4305,9 +4498,23 @@ Binary files a/img.png and b/img.png differ
         assert!(v.context().is_none());
         let i = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("+ let c = 4;")).unwrap();
         v.select_row(i, true);
-        v.comments.push(Comment { path: "src/a.rs".into(), line: 11, text: "why 3?".into(), lines: String::new(), quote: String::new(), level: Default::default(), by: String::new() });
+        v.comments.push(Comment { path: "src/a.rs".into(), line: 11, text: "why 3?".into(), id: "c1".into(), ..Default::default() });
+        v.comments.push(Comment { path: "src/a.rs".into(), line: 12, text: "and 4?".into(), id: "c2".into(), by: "REGI".into(), ..Default::default() });
+        v.built = None;
+        v.build(100);
+
         let c = v.context().unwrap();
-        assert!(c.contains("- `src/a.rs:12`\n```diff\n+ let c = 4;\n```") && c.contains("- `src/a.rs:11`: why 3?"), "{c}");
+
+        assert!(c.contains("- `src/a.rs:12`\n```diff\n+ let c = 4;\n```") && !c.contains("why 3?") && !c.contains("and 4?"), "0 unpicked comment: {c}");
+
+        // space on c2's row: picked; the prompt takes it, then the pick clears
+        v.at = v.rows.iter().position(|r| r.comment == Some(1)).unwrap();
+        v.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let c = v.context().unwrap();
+
+        assert!(c.contains("- c2 [medium, open] `src/a.rs:12` by @REGI: and 4?") && !c.contains("why 3?"), "{c}");
+        v.took_context();
+        assert!(!v.context().unwrap_or_default().contains("and 4?"), "1 prompt only");
     }
 
     #[test]

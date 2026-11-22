@@ -95,11 +95,18 @@ by file name and diff content, best hit first) stay on top; a box's head (and it
 under them until the box scrolls past.
 
 The source control panel on the left (`ctrl+b`, from 90 columns): the commit message on top,
-then staged, changes (by level, `U` `A` `M` `D` `R` per file), comments (by file) and the stash.
+then staged, changes (by level, `U` `A` `M` `D` `R` per file), comments (open by severity,
+resolved) and the stash.
 Labels out of view stick to the top / bottom edge; a click on one scrolls to it. Narrow (0 chat on
 the left): the chat sits above the prompt (`t` or a click on its title row folds it). A message
-from the changes view takes the selected lines and the open comments along: "stage only these",
-"work on the comments".
+from the changes view takes the selected lines and the picked comments (`space` on a comment) along,
+once: "stage only these", "work on c3". 0 comment goes along unpicked; an agent reads all of them
+with the MCP tool `comments` when you ask it to.
+
+Comments, as on GitHub: each has an id (`c3`), an author (`you`, `@REGI`) and a state, open or
+resolved. Agents resolve the comments they addressed (MCP tool `comment_status`, with a note) and
+a reviewer re-opens one whose fix does not hold. A resolved comment leaves the file view; the
+panel's RESOLVED lists it with who resolved it (`✓ @REGI`).
 
 The stash: lines or files out of the worktree, each with the patch that puts them back (not a git
 stash). The agent that wrote the lines names the entry (MCP tool `stash_name`). `↺` restore: the
@@ -126,7 +133,10 @@ the entry). `✕` remove one, `✕ clear` all (both ask first).
 | `c` | comment on the selected lines (else the line under the cursor): a modal shows the lines per file (`alt+↑` `↓`, the wheel: scroll them), `⌘/ctrl+⏎` adds it to the batch, `esc` closes (typed text: `esc` again within 2 s) |
 | `enter`, click on a comment | edit it in the modal (0 text: deleted) |
 | `x` | delete the comment (or dismiss the finding) under the cursor |
-| `ctrl+enter` (`⌘enter`, `alt+enter`) | send all comments as 1 message to the lead (`file:line`: text each) |
+| `space` on a comment | pick it: the next prompt takes it along (once) |
+| `d` | the comment under the cursor: resolved (it leaves the file view) |
+| `C` | every comment: 1 row (`+n lines`) / its whole text |
+| `ctrl+enter` (`⌘enter`, `alt+enter`) | send the open comments not sent yet as 1 message to the lead (`id [severity] file:line by author`: text each); they stay open until resolved |
 | `a` / `u` | stage / unstage: on a box head the file, on a diff row its hunk (box head: `●` staged, `◐` a part) |
 | `m` | the commit message (panel): `ctrl+g` drafts it from the staged diff (setting `rank` model), `⌘/ctrl+⏎` commits (the keys go back to the review: `P` / `O` next), `esc` leaves it |
 | `ctrl+b` | the source control panel: hidden → shown with the keys; shown, keys in the review → the keys to the panel; the panel with the keys → hidden (any terminal) |
@@ -144,7 +154,8 @@ In the panel:
 | --- | --- |
 | `j` / `k`, `↑` `↓` | move the cursor |
 | `←` / `→` | on a label: fold / open; `←` on a row: to its label; `→` on a file / comment: jump to it |
-| `space`, `shift+click` | pick files |
+| `space`, `shift+click` | pick files, comments (comments: for the next prompt) |
+| `d` | on a comment: resolved / open again |
 | `s` | stage the picked files (staged section: unstage) |
 | `p` | stash the picked files (whole) |
 | `enter` | on a comment: edit it; on a file: jump to it, the keys to the review |
