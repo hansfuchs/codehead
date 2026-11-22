@@ -118,6 +118,10 @@ impl Ask {
         if self.tool == "ExitPlanMode" {
             return "leave plan mode and start on the plan".into();
         }
+        // a flow's wait: its question
+        if self.tool == crate::flowbar::WAIT_TOOL {
+            return self.input["question"].as_str().unwrap_or_default().to_string();
+        }
         format!("{} {}", self.tool, call_summary(&self.tool, &self.input))
     }
 }
@@ -955,7 +959,7 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
         blank(&mut d);
         let edge = Style::default().fg(theme::pal().warn);
         let more = if t.asks.len() > 1 { format!(" · {} more waiting", t.asks.len() - 1) } else { String::new() };
-        let what = if a.questions().is_empty() { "asks to run" } else { "asks" };
+        let what = if a.tool == crate::flowbar::WAIT_TOOL { "waits on you" } else if a.questions().is_empty() { "asks to run" } else { "asks" };
         d.rows.push(Row::plain(Line::from(vec![Span::styled("┃ ", edge), Span::styled(a.agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD)), Span::styled(format!(" {what}{more}"), edge)])));
         ask_rows(&mut d, a, w, &[Span::styled("┃ ", edge)], ask);
     }
@@ -1460,7 +1464,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
         let c = color_of(colors, &a.agent);
         let border = Style::default().fg(theme::pal().warn);
         let more = if t.asks.len() > 1 { format!(" · {} more waiting", t.asks.len() - 1) } else { String::new() };
-        let what = if a.questions().is_empty() { "asks to run" } else { "asks" };
+        let what = if a.tool == crate::flowbar::WAIT_TOOL { "waits on you" } else if a.questions().is_empty() { "asks to run" } else { "asks" };
         let name = vec![Span::styled(a.agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD)), Span::styled(format!(" {what}{more}"), border)];
         let (top, _) = top_border(w, border, name, false, "");
         cur = Some(Open { start: d.rows.len(), border, agent: None, minute: String::new() });

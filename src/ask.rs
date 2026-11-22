@@ -152,6 +152,10 @@ impl Picker {
         let mut h: Vec<&str> = vec!["↑↓ move"];
         if qs.is_empty() {
             h.push("enter / 1-9: pick");
+            // a flow's wait: the prompt's text goes along
+            if a.tool == crate::flowbar::WAIT_TOOL {
+                h.push("text in the prompt: your note");
+            }
         } else {
             let last = (0..qs.len()).filter(|&j| j != self.q).all(|j| self.answers.get(j).is_some_and(Option::is_some));
             if self.multi(a) {

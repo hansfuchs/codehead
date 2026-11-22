@@ -657,6 +657,7 @@ impl View {
                 self.sync_order();
             }
         }
+        self.place_flow_ask();
         if self.thread.asks.first().map(|a| a.id.clone()) != asks {
             self.sync_ask();
         }
@@ -674,6 +675,7 @@ impl View {
         }
         let asks = self.thread.asks.first().map(|a| a.id.clone());
         self.thread = t;
+        self.place_flow_ask();
         if self.thread.asks.first().map(|a| a.id.clone()) != asks {
             self.sync_ask();
         }
@@ -1136,6 +1138,16 @@ impl View {
                 self.dirty = true;
                 true
             }
+            // the flow's wait: its step (flow_answer with the prompt's note, flow_role), 0 host ask
+            crate::ask::Act::Answer(c) if c["id"].as_str().is_some_and(|id| id.starts_with("flow:")) => {
+                let option = c["option"].as_str().unwrap_or_default().to_string();
+                if let Some(act) = self.flowbar.wait_answer(&option) {
+                    self.flow_act(act);
+                }
+                self.sync_flow_ask();
+                self.dirty = true;
+                true
+            }
             crate::ask::Act::Answer(c) => {
                 self.ask.sent = true;
                 self.dirty = true;
@@ -1155,7 +1167,7 @@ impl View {
                 // the prompt's text: the owner's note to the agent
                 let note = self.input.text().trim().to_string();
                 if !note.is_empty() {
-                    self.input.set_text("");
+                    self.input.load_text("");
                 }
                 self.host("flow_answer", json!({"op": "flow_answer", "choice": choice, "note": note}));
                 self.toast(format!("flow: {choice}"));
@@ -1921,6 +1933,40 @@ impl View {
     fn sync_ask(&mut self) {
         let focus = self.ask_may_focus();
         self.ask.sync_with(self.thread.asks.first(), focus);
+    }
+
+    /// The flow's wait (gate, loop max, role) as the last open ask: the agents' asks first, the
+    /// question picker answers it. True: the asks changed.
+    fn place_flow_ask(&mut self) -> bool {
+        let want = self.flowbar.wait_ask();
+        let asks = &mut self.thread.asks;
+        let have = asks.iter().position(|a| a.tool == crate::flowbar::WAIT_TOOL);
+        if let (Some(i), Some(w)) = (have, want.as_ref())
+            && asks[i].id == w.id
+            && i + 1 == asks.len()
+        {
+            return false;
+        }
+
+        if have.is_none() && want.is_none() {
+            return false;
+        }
+        if let Some(i) = have {
+            asks.remove(i);
+        }
+        asks.extend(want);
+        true
+    }
+
+    /// `place_flow_ask`, then the picker on the 1st ask.
+    fn sync_flow_ask(&mut self) {
+        let first = self.thread.asks.first().map(|a| a.id.clone());
+        if self.place_flow_ask() {
+            if self.thread.asks.first().map(|a| a.id.clone()) != first {
+                self.sync_ask();
+            }
+            self.dirty = true;
+        }
     }
 
     /// The repo roots the thread works in (its work dir 1st), with their labels
@@ -3490,6 +3536,8 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
         dirty |= v.subagents.tick(&v.thread.subs);
         dirty |= v.subthreads.tick(id);
         if v.flowbar.tick(id, false) {
+            // a wait came / went: the question picker's ask too
+            v.sync_flow_ask();
             v.dirty = true;
             dirty = true;
         }
@@ -3588,17 +3636,21 @@ mod ask_tests {
         let mut v = View::new(&t.id, Path::new("/tmp"), "flow view", tx);
         v.flowbar.tick(&t.id, true);
         let s = screen(&mut v).join("\n");
-        assert!(s.contains("◆ new feature · 4/9 plan approval · @ada") && s.contains("⏸ gate plan approval: ctrl+f answer"), "{s}");
-        // ctrl+f: the wait's choices; the prompt's text goes along as the note
+        assert!(s.contains("◆ new feature · 4/9 plan approval · @ada") && s.contains("⏸ gate plan approval: answer below"), "{s}");
+        // the gate: a question in the picker under the stream (an empty prompt: it has the keys);
+        // the prompt's text goes along as the note
+        v.sync_flow_ask();
+        assert!(v.ask.focus);
         v.input.set_text("split the plan");
-        v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         let s = screen(&mut v).join("\n");
-        println!("{s}");
-        assert!(s.contains("approve · go on") && s.contains("back to plan"), "{s}");
+        assert!(s.contains("waits on you") && s.contains("gate after “plan approval”") && s.contains("approve · go on") && s.contains("changes · back to plan"), "{s}");
+
         press(&mut v, &[KeyCode::Down, KeyCode::Enter]);
         let op = v.ops.borrow().iter().find(|o| o["op"] == "flow_answer").cloned().unwrap();
         assert_eq!((op["choice"].as_str(), op["note"].as_str()), (Some("changes"), Some("split the plan")));
         assert!(v.input.text().is_empty());
+        assert!(v.thread.asks.is_empty(), "answered: the flow's ask goes");
+        assert!(!v.ops.borrow().iter().any(|o| o["op"] == "answer"), "0 host ask answer");
         // change the flow: the box asks now / after at once, then the start step
         v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         let s = screen(&mut v).join("\n");
@@ -4746,14 +4798,30 @@ mod key_fix_tests {
     }
 
     #[test]
-    fn the_gate_answer_box_lets_the_note_go_into_the_prompt() {
+    fn a_flow_gate_waits_in_the_picker_behind_the_agents_asks() {
         let mut v = view("keyfix-gate-0000");
-        v.flowbar.state = Some(crate::engine::flows::run::FlowState { flow: "chore".into(), wait: Some(crate::engine::flows::run::Wait::Gate), ..Default::default() });
-        v.flowbar.open();
-        assert!(v.flowbar.is_open());
-
         typed(&mut v, "looks good");
-        assert_eq!(v.input.text(), "looks good");
-        assert!(v.flowbar.is_open(), "the box stays for enter");
+        v.flowbar.state = Some(crate::engine::flows::run::FlowState { flow: "chore".into(), wait: Some(crate::engine::flows::run::Wait::Gate), ..Default::default() });
+        v.sync_flow_ask();
+        assert_eq!(v.thread.asks.len(), 1);
+        assert!(!v.ask.focus, "the owner types: the gate waits for tab");
+
+        // an agent's ask comes: it goes first, the gate stays last
+        ask(&mut v, "p1", false);
+        v.sync_flow_ask();
+        assert_eq!(v.thread.asks.first().map(|a| a.id.as_str()), Some("p1"));
+        assert_eq!(v.thread.asks.last().map(|a| a.tool.as_str()), Some(crate::flowbar::WAIT_TOOL));
+
+        // the agent's ask answered (its event): the gate; tab, 1: approve with the note
+        v.thread.asks.remove(0);
+        v.sync_ask();
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        key(&mut v, KeyCode::Char('1'), KeyModifiers::NONE);
+        let op = v.ops.borrow().iter().find(|o| o["op"] == "flow_answer").cloned().expect("flow_answer");
+        assert_eq!((op["choice"].as_str(), op["note"].as_str()), (Some("approve"), Some("looks good")));
+        assert!(v.thread.asks.is_empty());
+
+        key(&mut v, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(v.input.text(), "looks good", "the note: back with ctrl+z");
     }
 }

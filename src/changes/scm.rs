@@ -788,6 +788,8 @@ impl View {
                 self.modal = Some(Modal::Confirm { question: format!("clear the stash? {} entries, their lines gone for good", self.stash.len()), yes: false, then: Then::ClearStash });
             }
             KeyCode::Char('m') => self.scm.msg_focus = true,
+            // S: the ship menu, as in the review
+            KeyCode::Char('S') => return self.open_ship(),
             // o / e: the file in the IDE (its 1st changed line)
             KeyCode::Char('o') | KeyCode::Char('e') => {
                 if let Some(PRow::File(i, _)) = row
@@ -950,6 +952,34 @@ mod tests {
         v.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
         let all = draw(&mut v, 120, 30).join("\n");
         assert!(!all.contains("STAGED") && !v.scm.focus, "{all}");
+    }
+
+    #[test]
+    fn s_opens_the_ship_menu_outward_steps_ask_with_a_2nd_enter() {
+        let mut v = test_view();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        let all = draw(&mut v, 120, 30).join("\n");
+        assert!(all.contains(" ship ") && all.contains("push") && all.contains("open the pull request"), "{all}");
+
+        // push: a 1st enter asks (0 git step), esc closes
+        assert_eq!(v.key(enter), Act::None);
+        assert!(v.op.is_none() && draw(&mut v, 120, 30).join("\n").contains("enter again: push"));
+        v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(v.modal.is_none() && v.op.is_none());
+
+        // a stopped rebase: its steps only; the agents resolve at once, abort asks
+        v.changes.stopped = Some(vec!["src/a.rs".into()]);
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        let all = draw(&mut v, 120, 30).join("\n");
+        assert!(all.contains("resolve the conflicts") && !all.contains("open the pull request"), "{all}");
+        assert!(matches!(v.key(enter), Act::Send(t) if t.contains("src/a.rs")));
+
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(v.key(enter), Act::None);
+        assert!(v.op.is_none(), "abort: a 1st enter only asks");
     }
 
     #[test]

@@ -212,7 +212,11 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          order (schema, logic, config, UI, docs, tests, generated), j k box (j: down), n N hunk,
          v reviewed, enter fold, e / o IDE at the line, w side by side / unified, r read git again,
          f / filter, ctrl+b: panel shown → its keys → hidden, i / tab prompt (esc / tab back).
+         S: the ship menu: push, fetch + rebase, open the PR, merge it, CI log → agents (a stopped
+         rebase: the agents resolve, continue, abort); outward steps: enter enter.
          ↑ on the 1st row of a PR's diff: its views row.
+         flow waits (gate, loop max, role with 0 agent): a question in the picker under the stream,
+         after the agents' ones; text in the prompt goes along as the note. ctrl+f: the flow's steps.
          tool runs (▸): click opens / closes the calls (input + output); ctrl+o: all.
          thoughts (setting thoughts = hidden | folded | open): ∴ rows, a click opens 1, ctrl+t: all.
          ctrl+v pastes a clipboard image as [Image #n], a dropped image path too. pasted text over

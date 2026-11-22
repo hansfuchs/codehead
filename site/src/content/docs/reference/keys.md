@@ -74,7 +74,8 @@ Rules on every screen:
 | `pgup` `pgdn`, `shift+↑↓`, wheel | scroll the stream |
 | `alt+1`-`alt+4` (`⌥1`-`⌥4`) | chat / changes / merge / files view (the view bar on the top row) |
 | `alt+\` | changes view: the chat on its right on / off (from 160 columns; on by default) |
-| `ctrl+f` | the flow box; a gate: `↑↓` `enter` answer, typed text goes into the prompt as the note |
+| `ctrl+f` | the flow box: the steps (`s` skip, `j` jump, `@` role, `c` change, `e` edit, `x x` remove) |
+| a flow wait | a gate (approve or an outcome), a loop at its max (1 more round, move on), a role with 0 agent (the agents): a question in the picker under the stream, after the agents' questions; `1`-`9` / `↑↓` `enter`; text in the prompt goes along as your note |
 | menu → yazi, files view `y` | yazi (full screen) on the worktree; a picked file goes into the prompt as its path |
 | `d d` | subagents / monitors box: stop the subagent / end the watch; another key closes the box and acts as usual |
 
@@ -132,14 +133,9 @@ the entry). `✕` remove one, `✕ clear` all (both ask first).
 | `ctrl+w`, `shift+←→` | the next checkout / the repo tabs (several checkouts) |
 | `alt` (alone: press, release) | the keys to the panel / the review (terminals with the kitty keyboard protocol) |
 | `t` | the chat above the prompt: fold / open |
-| `P` | push (`git push -u origin HEAD`) |
-| `U` | fetch + rebase on the base (`origin/<default>`) |
-| `A` / `K` / `X` | a rebase stopped on conflicts: the agent resolves / continue / abort |
+| `S` | the ship menu (review and panel): the steps valid now, each with its state; `↑↓` `j` `k`, `enter` runs, an outward step asks first (`enter enter`), `esc` closes. Steps: push (`git push -u origin HEAD`, `n ahead`) · fetch + rebase on the base (`origin/<default>`, `n behind`) · push + open the pull request (`gh pr create --fill`) · merge the PR when its checks pass (`gh pr merge --squash --auto`, `✓ ✗ ●`) · CI failed: the latest failed run's log (last 150 lines) to the agents of your last message. A rebase stopped on conflicts: only its steps: the agents resolve · continue · abort |
 | `V` | the reviewer (setting `review`) reads the diff: findings show under their line (`⚠ severity · title`) |
 | `y` | on a finding: into the comment batch (`ctrl+enter` sends it) |
-| `O` | ship: push + open the pull request (`gh pr create --fill`); the summary row shows `PR #n` and its checks `✓ ✗ ●` (read every 30 s) |
-| `F` | CI failed: the latest failed run's log (last 150 lines) goes to the agents of your last message |
-| `M` | merge the PR when its checks pass (`gh pr merge --squash --auto`) |
 | `i`, `tab` | the prompt gets the keys; `esc` / `tab` gives them back |
 
 In the panel:

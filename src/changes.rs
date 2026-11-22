@@ -2005,7 +2005,7 @@ impl View {
                 let files = if c.is_empty() { "0 conflicts".to_string() } else { format!("{} conflicts: {}", c.len(), c.join(", ")) };
                 Line::from(vec![
                     Span::styled(" rebase stopped ", theme::pill()),
-                    Span::styled(crate::nav::fit(&format!(" {files} · A: agent resolves · K: continue · X: abort"), w.saturating_sub(16)), Style::default().fg(theme::pal().warn)),
+                    Span::styled(crate::nav::fit(&format!(" {files} · S: the agents resolve · continue · abort"), w.saturating_sub(16)), Style::default().fg(theme::pal().warn)),
                 ])
             }
             Body::Blank => Line::raw(""),
@@ -2375,7 +2375,118 @@ impl View {
                 }
                 _ => {}
             },
+            Some(Modal::Ship { .. }) => return self.ship_key(k),
             None => {}
+        }
+        Act::None
+    }
+
+    /// S: the ship menu (a pull request's diff: read only).
+    pub(crate) fn open_ship(&mut self) -> Act {
+        if self.pr_src.is_some() {
+            return Act::Toast("a pull request's diff: read only (the merge tab's prompt tells the agents)".into());
+        }
+        self.modal = Some(Modal::Ship { cur: 0, armed: false });
+        Act::None
+    }
+
+    /// The ship menu's rows: the steps valid now (a stopped rebase: only its steps).
+    fn ship_rows(&self) -> Vec<ShipRow> {
+        let row = |step, label: String, state: String, asks| ShipRow { step, label, state, asks };
+        let c = &self.changes;
+        if let Some(files) = &c.stopped {
+            return vec![
+                row(Ship::Resolve, "the agents resolve the conflicts".into(), format!("{} conflicts", files.len()), false),
+                row(Ship::Continue, "continue the rebase".into(), "git rebase --continue".into(), true),
+                row(Ship::Abort, "abort the rebase".into(), "the branch as before".into(), true),
+            ];
+        }
+
+        let mut v = vec![row(Ship::Push, "push".into(), format!("{} ahead of {}", c.ahead, c.base), true)];
+        if c.base != "HEAD" {
+            v.push(row(Ship::Update, format!("fetch + rebase on {}", c.base), format!("{} behind", c.behind), true));
+        }
+        match &self.pr {
+            None => v.push(row(Ship::OpenPr, "push + open the pull request".into(), "gh pr create --fill".into(), true)),
+            Some(p) => {
+                v.push(row(Ship::Merge, format!("merge PR #{} when its checks pass", p.number), format!("✓{} ✗{} ●{}", p.pass, p.fail, p.pending), true));
+                if p.fail > 0 {
+                    v.push(row(Ship::CiLog, "CI failed: the log to the agents".into(), format!("{} failed", p.fail), false));
+                }
+            }
+        }
+        v
+    }
+
+    /// Step S of the ship menu.
+    fn ship(&mut self, s: Ship) -> Act {
+        match s {
+            Ship::Push => self.start_op(Op::Push),
+            Ship::Update => self.start_op(Op::Update(self.changes.base.clone())),
+            Ship::Continue => self.start_op(Op::Continue),
+            Ship::Abort => self.start_op(Op::Abort),
+            Ship::Resolve => {
+                let c = self.changes.stopped.clone().unwrap_or_default();
+                Act::Send(format!(
+                    "The rebase on {} stopped with conflicts in: {}. Resolve each conflict (keep the intent of both sides), `git add` the files, then run `git -c core.editor=true rebase --continue`. Repeat until the rebase is done; report what you decided per conflict.",
+                    self.changes.base,
+                    c.join(", ")
+                ))
+            }
+            Ship::OpenPr => {
+                self.pr_at = None;
+                self.start_op(Op::OpenPr)
+            }
+            Ship::Merge => {
+                self.pr_at = None;
+                self.start_op(Op::Merge)
+            }
+            Ship::CiLog => {
+                if self.ci.is_some() {
+                    return Act::Toast("CI: reading the log…".into());
+                }
+                let (tx, rx) = mpsc::channel();
+                let dir = self.dir.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(ci_fix_message(&dir));
+                });
+                self.ci = Some(rx);
+                Act::Toast("CI: reading the failed log for the lead…".into())
+            }
+        }
+    }
+
+    /// A key of the ship menu: ↑↓ j k move, enter runs (an outward step: enter enter), esc closes.
+    fn ship_key(&mut self, k: KeyEvent) -> Act {
+        let rows = self.ship_rows();
+        let Some(Modal::Ship { cur, armed }) = self.modal.as_mut() else { return Act::None };
+        let n = rows.len();
+        *cur = (*cur).min(n.saturating_sub(1));
+        match k.code {
+            KeyCode::Esc => self.modal = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                *cur = cur.saturating_sub(1);
+                *armed = false;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                *cur = (*cur + 1).min(n.saturating_sub(1));
+                *armed = false;
+            }
+            KeyCode::Enter => {
+                let Some(r) = rows.get(*cur) else {
+                    self.modal = None;
+                    return Act::None;
+                };
+                if r.asks && !*armed {
+                    *armed = true;
+                    return Act::None;
+                }
+
+                let step = r.step;
+                self.modal = None;
+                return self.ship(step);
+            }
+            _ => {}
         }
         Act::None
     }
@@ -2420,6 +2531,7 @@ impl View {
     fn draw_modal(&mut self, f: &mut Frame, area: Rect) {
         use ratatui::widgets::{Block, Clear};
         self.modal_btns.clear();
+        let ship_rows = if matches!(self.modal, Some(Modal::Ship { .. })) { self.ship_rows() } else { Vec::new() };
         let Some(modal) = self.modal.as_mut() else { return };
         let w = area.width.saturating_sub(4).clamp(20, 110);
         let x = area.x + (area.width.saturating_sub(w)) / 2;
@@ -2511,6 +2623,33 @@ impl View {
                 self.modal_btns.push((Rect { width: 5, ..row }, true));
                 self.modal_btns.push((Rect { x: row.x + 7, width: 4, ..row }, false));
             }
+            Modal::Ship { cur, armed } => {
+                let w = w.min(76);
+                let x = area.x + (area.width.saturating_sub(w)) / 2;
+                let h = (ship_rows.len() as u16 + 4).min(area.height);
+                let r = Rect { x, y: area.y + area.height / 4, width: w, height: h };
+                f.render_widget(Clear, r);
+                f.render_widget(Block::bordered().border_style(theme::accent()).title(Span::styled(" ship ", theme::accent_bold())).style(theme::text()), r);
+                let inner = Rect { x: r.x + 2, y: r.y + 1, width: w.saturating_sub(4), height: h.saturating_sub(2) };
+                let cur = (*cur).min(ship_rows.len().saturating_sub(1));
+                for (i, row) in ship_rows.iter().enumerate().take(usize::from(inner.height.saturating_sub(2))) {
+                    let on = i == cur;
+                    let state = if on && *armed { format!("enter again: {}", row.label) } else { row.state.clone() };
+                    let state_st = if on && *armed { Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD) } else { theme::muted() };
+                    let label_w = usize::from(inner.width).saturating_sub(state.width() + 4);
+                    let label = crate::nav::fit(&row.label, label_w);
+                    let gap = usize::from(inner.width).saturating_sub(2 + label.width() + state.width());
+                    let line = Line::from(vec![
+                        Span::styled(if on { "› " } else { "  " }, theme::accent()),
+                        Span::styled(label, if on { theme::accent_bold() } else { theme::text() }),
+                        Span::raw(" ".repeat(gap)),
+                        Span::styled(state, state_st),
+                    ]);
+                    f.render_widget(Paragraph::new(line), Rect { y: inner.y + i as u16, height: 1, ..inner });
+                }
+                let hint = Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner };
+                f.render_widget(Paragraph::new(Line::styled("↑↓ · enter: run (push, rebase, PR, merge: enter enter) · esc", theme::muted())), hint);
+            }
         }
     }
 
@@ -2590,6 +2729,7 @@ impl View {
         match &self.modal {
             Some(Modal::Comment { .. }) => return "ctrl+⏎: save · esc: close (edited: esc esc) · alt+↑↓ / wheel: scroll the lines · 0 text: delete ",
             Some(Modal::Confirm { .. }) => return "y / enter: yes · n / esc: no ",
+            Some(Modal::Ship { .. }) => return "↑↓ move · enter: run (outward: enter enter) · esc: close ",
             None => {}
         }
         if self.pr_src.is_some() {
@@ -2604,11 +2744,11 @@ impl View {
         if self.scm.focus && self.scm.msg_focus {
             "commit message · ctrl+⏎: commit the staged files · ctrl+g: draft by model · esc: back "
         } else if self.scm.focus {
-            "j k · space: pick · e: IDE · s: stage / unstage · p: stash · →: open · x: remove · enter: restore · alt: review "
+            "j k · space: pick · e: IDE · s: stage / unstage · p: stash · →: open · x: remove · enter: restore · S: ship · ctrl+b: review "
         } else if self.filtering {
             "type to filter · enter: 1st hit · esc: clear "
         } else {
-            "j k: file · space: select · e: IDE · s: stage · c: comment · v: reviewed · alt: panel · i: prompt "
+            "j k: file · space: select · s: stage · c: comment · v: reviewed · S: ship · ctrl+b: git · i: prompt "
         }
     }
 
@@ -3048,24 +3188,8 @@ impl View {
                 }
             }
             KeyCode::Char('m') => self.focus_message(),
-            KeyCode::Char('P') => return self.start_op(Op::Push),
-            KeyCode::Char('U') => {
-                if self.changes.base == "HEAD" {
-                    return Act::Toast("0 remote base (on the default branch, or 0 origin)".into());
-                }
-                return self.start_op(Op::Update(self.changes.base.clone()));
-            }
-            KeyCode::Char('K') if self.changes.stopped.is_some() => return self.start_op(Op::Continue),
-            KeyCode::Char('X') if self.changes.stopped.is_some() => return self.start_op(Op::Abort),
-            KeyCode::Char('A') => {
-                if let Some(c) = &self.changes.stopped {
-                    return Act::Send(format!(
-                        "The rebase on {} stopped with conflicts in: {}. Resolve each conflict (keep the intent of both sides), `git add` the files, then run `git -c core.editor=true rebase --continue`. Repeat until the rebase is done; report what you decided per conflict.",
-                        self.changes.base,
-                        c.join(", ")
-                    ));
-                }
-            }
+            // S: the ship menu (push, rebase, PR, merge, CI log; a stopped rebase: its steps)
+            KeyCode::Char('S') => return self.open_ship(),
             // c: the comment modal on the selected lines, else on the cursor's line
             KeyCode::Char('c') => {
                 let spots = self.spots();
@@ -3103,33 +3227,6 @@ impl View {
                 }
             }
             KeyCode::Char('V') => return self.start_review(),
-            // ship: open the PR (push + gh pr create --fill), merge on green, the lead fixes CI
-            KeyCode::Char('O') => {
-                if self.pr.is_some() {
-                    return Act::Toast(format!("PR exists: {}", self.pr.as_ref().map(|p| p.url.clone()).unwrap_or_default()));
-                }
-                self.pr_at = None;
-                return self.start_op(Op::OpenPr);
-            }
-            KeyCode::Char('M') => {
-                if self.pr.is_none() {
-                    return Act::Toast("0 PR · O: open one".into());
-                }
-                self.pr_at = None;
-                return self.start_op(Op::Merge);
-            }
-            KeyCode::Char('F') => {
-                if self.ci.is_some() {
-                    return Act::Toast("CI: reading the log…".into());
-                }
-                let (tx, rx) = mpsc::channel();
-                let dir = self.dir.clone();
-                std::thread::spawn(move || {
-                    let _ = tx.send(ci_fix_message(&dir));
-                });
-                self.ci = Some(rx);
-                return Act::Toast("CI: reading the failed log for the lead…".into());
-            }
             // o / e: the IDE at the 1st selected line, else at the cursor's line
             KeyCode::Char('o') | KeyCode::Char('e') => {
                 if let Some((path, line)) = self.open_spot() {
@@ -3313,6 +3410,30 @@ enum Modal {
     Comment { title: String, quote: Vec<QLine>, scroll: usize, edit: Option<usize>, spots: Vec<Spot>, text: Box<crate::textarea::TextArea>, level: crate::rank::Level, on_level: bool },
     /// A yes / no question; THEN runs on yes.
     Confirm { question: String, yes: bool, then: Then },
+    /// The ship menu (S): the git / GitHub steps of the branch valid now; CUR: the cursor;
+    /// ARMED: a 1st enter on an outward row (a 2nd runs it).
+    Ship { cur: usize, armed: bool },
+}
+
+/// A step of the ship menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ship {
+    Push,
+    Update,
+    OpenPr,
+    Merge,
+    CiLog,
+    Resolve,
+    Continue,
+    Abort,
+}
+
+/// A row of the ship menu: its step, label, state, and whether it asks first (enter enter).
+struct ShipRow {
+    step: Ship,
+    label: String,
+    state: String,
+    asks: bool,
 }
 
 /// A line of the comment modal's selected lines: a file's path, a diff line, a gap between

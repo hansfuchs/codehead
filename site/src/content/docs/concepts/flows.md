@@ -100,13 +100,15 @@ The last layer wins per name. `r` in the flows tab resets an edited built-in.
   is the next task's default. Step 1 goes to its agent with the task.
 - the thread view: the flow row above the agents shows the flow, the step, its agent, a
   wait, warnings. `ctrl+f` (or a click) opens its box (`> flow`: the flow picker): the steps with their
-  arcs, `enter` a step's text, `a` answer a wait, `s` skip, `j` jump, `@` map a role,
+  arcs, `enter` a step's text, `s` skip, `j` jump, `@` map a role,
   `c` change the flow, `u` undo a queued change, `e` edit it, `x x` remove it.
-- a gate: the row says `⏸ gate ...`. `ctrl+f`, pick approve or an outcome (`↑↓` `enter`); type the
-  note while the box is open: text in the prompt
-  goes to the agent as your note.
-- a role with 0 agent: the flow waits; pick the agent to bring in. Agent files take default
-  roles: `roles = ["reviewer"]`.
+- a wait: the row says `⏸ … answer below`. The wait is a question in the picker under the
+  stream, after the agents' questions, answered like them (`1`-`9`, `↑↓` `enter`, `tab` between
+  the question and the prompt). Text in the prompt goes to the agent as your note.
+  - a gate: approve, or an outcome (`changes · back to plan`).
+  - a loop at its max: 1 more round, or move on.
+  - a role with 0 agent: the agent to bring in. Agent files take default roles:
+    `roles = ["reviewer"]`.
 - change the flow: `switch now` stops the running turn at its next tool boundary and starts
   the new flow at the step you pick; `after current flow` queues it.
 

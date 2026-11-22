@@ -46,8 +46,6 @@ enum Mode {
     Start(String),
     /// The agent for ROLE.
     Role(String),
-    /// The choices of the wait.
-    Answer,
 }
 
 pub struct FlowBar {
@@ -123,7 +121,55 @@ fn choices(w: &Wait, n: Option<&Resolved>) -> Vec<(String, String)> {
     }
 }
 
+/// The tool name of a flow wait shown as an ask (the question picker answers it).
+pub const WAIT_TOOL: &str = "FlowWait";
+
 impl FlowBar {
+    /// The flow's wait as an ask for the question picker under the stream: a gate (approve or an
+    /// outcome), a loop at its max (1 more round, move on), a role with 0 agent (the agents to
+    /// bring in). Its choices: `_options` (id, name); the prompt's text goes along as the note.
+    /// None: 0 wait.
+    pub fn wait_ask(&self) -> Option<crate::stream::Ask> {
+        let st = self.state.as_ref()?;
+        let w = st.wait.as_ref()?;
+        let node = self.nodes.get(st.node);
+        let step = node.map_or_else(|| format!("step {}", st.node + 1), |n| n.title.clone());
+        let flow = if st.title.is_empty() { st.flow.clone() } else { st.title.clone() };
+        // an outcome: where it goes back to
+        let back = |c: &str| node.and_then(|n| n.edges.iter().find(|(k, _)| k == c)).and_then(|(_, j)| self.nodes.get(*j)).map(|t| format!(" · back to {}", t.title)).unwrap_or_default();
+        let (kind, question, options): (&str, String, Vec<(String, String)>) = match w {
+            Wait::Gate => ("gate", format!("gate after “{step}”: go on? (text in the prompt: your note)"), choices(w, node).into_iter().map(|(c, l)| (c.clone(), format!("{l}{}", back(&c)))).collect()),
+            Wait::LoopMax => ("loop", format!("“{step}” ran its max rounds (text in the prompt: your note)"), choices(w, node)),
+            Wait::Role { role } => {
+                let agents = self.role_agents().into_iter().map(|(a, on)| (format!("role:{a}"), if on { a } else { format!("{a} (joins the thread)") })).collect();
+                ("role", format!("role {role} has 0 agent: bring 1 in"), agents)
+            }
+        };
+        let opts: Vec<Value> = options.into_iter().map(|(id, name)| json!({"id": id, "name": name, "kind": "flow"})).collect();
+        Some(crate::stream::Ask {
+            id: format!("flow:{}:{}:{kind}", st.flow, st.node),
+            agent: format!("flow {flow}"),
+            tool: WAIT_TOOL.into(),
+            input: json!({"question": question, "_options": opts}),
+            ts: st.node_started,
+        })
+    }
+
+    /// The answer OPTION (an id of `wait_ask`): the flow's step to send, the wait gone here.
+    pub fn wait_answer(&mut self, option: &str) -> Option<Act> {
+        let st = self.state.as_mut()?;
+        let w = st.wait.clone()?;
+        if let Wait::Role { role } = w {
+            let agent = option.strip_prefix("role:")?.to_string();
+            st.roles.insert(role.clone(), agent.clone());
+            st.wait = None;
+            return Some(Act::Host("flow_role", json!({"op": "flow_role", "role": role, "agent": agent})));
+        }
+
+        st.wait = None;
+        Some(Act::Answer(option.to_string()))
+    }
+
     /// Read thread ID's flow again: every second, at once with FORCE (a flow event came).
     pub fn tick(&mut self, id: &str, force: bool) -> bool {
         if !force && self.read_at.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
@@ -178,16 +224,10 @@ impl FlowBar {
         self.reload_lib(false);
         match &self.state {
             None => self.pick(),
+            // the steps (a wait: the question picker under the stream answers it; a: here)
             Some(st) => {
                 self.cur = st.node;
-                self.mode = match &st.wait {
-                    Some(Wait::Role { role }) => Mode::Role(role.clone()),
-                    Some(_) => Mode::Answer,
-                    None => Mode::Steps,
-                };
-                if matches!(self.mode, Mode::Role(_) | Mode::Answer) {
-                    self.cur = 0;
-                }
+                self.mode = Mode::Steps;
             }
         }
     }
@@ -216,7 +256,6 @@ impl FlowBar {
             Mode::How(_) => 3,
             Mode::Start(slug) => self.lib.flow(slug).map_or(0, |f| f.steps.len()),
             Mode::Role(_) => self.role_agents().len(),
-            Mode::Answer => self.state.as_ref().and_then(|s| s.wait.as_ref()).map_or(0, |w| choices(w, self.nodes.get(self.state.as_ref().map_or(0, |s| s.node))).len()),
         }
     }
 
@@ -245,7 +284,7 @@ impl FlowBar {
                 match &self.mode {
                     Mode::Steps if self.detail => self.detail = false,
                     Mode::Steps => self.open = false,
-                    Mode::Pick(_) | Mode::Answer | Mode::Role(_) if self.state.is_some() => {
+                    Mode::Pick(_) | Mode::Role(_) if self.state.is_some() => {
                         self.mode = Mode::Steps;
                         self.cur = self.state.as_ref().map_or(0, |s| s.node);
                     }
@@ -342,28 +381,9 @@ impl FlowBar {
                 }
                 _ => Act::None,
             },
-            Mode::Answer => match k.code {
-                KeyCode::Enter => {
-                    let Some(st) = self.state.as_ref() else { return Some(Act::None) };
-                    let Some(w) = st.wait.clone() else { return Some(Act::None) };
-                    let Some((choice, _)) = choices(&w, self.nodes.get(st.node)).get(self.cur).cloned() else { return Some(Act::None) };
-                    if let Some(st) = self.state.as_mut() {
-                        st.wait = None;
-                    }
-                    self.mode = Mode::Steps;
-                    self.open = false;
-                    Act::Answer(choice)
-                }
-                // other keys: the prompt's (the note goes along with the answer)
-                _ => return None,
-            },
             Mode::Steps => match k.code {
                 KeyCode::Enter => {
                     self.detail = !self.detail;
-                    Act::None
-                }
-                KeyCode::Char('a') if self.state.as_ref().is_some_and(|s| s.wait.is_some()) => {
-                    self.open();
                     Act::None
                 }
                 KeyCode::Char('s') if self.running() => {
@@ -465,9 +485,9 @@ impl FlowBar {
             spans.push(Span::raw(s));
         }
         match &st.wait {
-            Some(Wait::Gate) => spans.push(Span::styled(format!("  ⏸ gate {step}: ctrl+f answer"), Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD))),
-            Some(Wait::LoopMax) => spans.push(Span::styled("  ⏸ loop max reached: ctrl+f decide".to_string(), Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD))),
-            Some(Wait::Role { role }) => spans.push(Span::styled(format!("  ⏸ @{role} has 0 agent: ctrl+f pick"), Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD))),
+            Some(Wait::Gate) => spans.push(Span::styled(format!("  ⏸ gate {step}: answer below"), Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD))),
+            Some(Wait::LoopMax) => spans.push(Span::styled("  ⏸ loop max reached: answer below".to_string(), Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD))),
+            Some(Wait::Role { role }) => spans.push(Span::styled(format!("  ⏸ @{role} has 0 agent: pick below"), Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD))),
             None => {}
         }
         if let Some(p) = &st.pending {
@@ -569,42 +589,19 @@ impl FlowBar {
                 let rows: Vec<(String, String)> = self.role_agents().into_iter().map(|(a, on)| (a, if on { "on the thread".into() } else { "joins the thread".into() })).collect();
                 self.list(f, Rect { y: inner.y + 2, height: inner.height.saturating_sub(2), ..inner }, &rows, focus);
             }
-            Mode::Answer => {
-                let Some(st) = self.state.clone() else { return };
-                let n = self.nodes.get(st.node).cloned().unwrap_or_default();
-                let what = match &st.wait {
-                    Some(Wait::LoopMax) => format!("loop of {}: max rounds reached", n.title),
-                    _ => format!("gate {}: the agent waits", n.title),
-                };
-                f.render_widget(Paragraph::new(Line::styled(what, Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD))), Rect { height: 1, ..inner });
-                f.render_widget(Paragraph::new(Line::styled("text in the prompt goes along as the note", theme::muted())), Rect { y: inner.y + 1, height: 1, ..inner });
-                let rows: Vec<(String, String)> = st
-                    .wait
-                    .as_ref()
-                    .map(|w| choices(w, Some(&n)))
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(c, l)| {
-                        let to = n.edges.iter().find(|(k, _)| *k == c).and_then(|(_, j)| self.nodes.get(*j)).map(|t| format!("back to {}", t.title)).unwrap_or_default();
-                        (l, to)
-                    })
-                    .collect();
-                self.list(f, Rect { y: inner.y + 3, height: inner.height.saturating_sub(3), ..inner }, &rows, focus);
-            }
         }
     }
 
     fn frame_text(&self) -> (String, &'static str) {
         match &self.mode {
             Mode::Steps if self.armed => (format!("flow · {}", self.name), "x again: remove the flow · any key: keep"),
-            Mode::Steps if self.state.as_ref().is_some_and(|s| s.wait.is_some()) => (format!("flow · {}", self.name), "a answer · ↑↓ · enter text · s skip · j jump · @ role · c change · e edit · esc"),
+            Mode::Steps if self.state.as_ref().is_some_and(|s| s.wait.is_some()) => (format!("flow · {}", self.name), "the wait: answer below the stream · ↑↓ · enter text · s skip · j jump · @ role · c change · e edit · esc"),
             Mode::Steps if self.state.as_ref().is_some_and(|s| s.pending.is_some() || s.queued.is_some()) => (format!("flow · {}", self.name), "↑↓ · enter text · u undo switch · s skip · j jump · @ role · c change · e edit · esc"),
             Mode::Steps => (format!("flow · {}", self.name), "↑↓ · enter text · s skip · j jump here · @ role · c change · e edit · x x remove · esc"),
             Mode::Pick(_) => ("pick a flow".into(), "type: filter · ↑↓ · enter · esc"),
             Mode::How(_) => ("change flow".into(), "↑↓ · enter · esc: back"),
             Mode::Start(_) => ("start step".into(), "↑↓ · enter: switch · esc: back"),
             Mode::Role(_) => ("role".into(), "↑↓ · enter: map · esc: back"),
-            Mode::Answer => ("answer".into(), "↑↓ · enter · type: the note · esc: back"),
         }
     }
 
@@ -714,4 +711,41 @@ pub fn rail_row(n: &Resolved, mark: &str, ms: Style, agent: Option<String>) -> f
 fn dur(ms: u64) -> String {
     let s = ms / 1000;
     if s < 60 { format!("{s}s") } else if s < 3600 { format!("{}m", s / 60) } else { format!("{}h{:02}", s / 3600, s / 60 % 60) }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    fn bar(wait: Wait) -> FlowBar {
+        let mut b = FlowBar { agents: vec!["ada".into()], ..Default::default() };
+        b.state = Some(FlowState { flow: "chore".into(), title: "chore".into(), wait: Some(wait), ..Default::default() });
+        b
+    }
+
+    #[test]
+    fn a_loop_at_its_max_asks_1_more_round_or_move_on() {
+        let mut b = bar(Wait::LoopMax);
+        let a = b.wait_ask().unwrap();
+        assert_eq!(a.tool, WAIT_TOOL);
+        assert!(a.id.starts_with("flow:chore:0:loop"));
+        let names: Vec<String> = a.options().into_iter().map(|o| o.1).collect();
+        assert_eq!(names, ["1 more round", "move on"]);
+
+        assert!(matches!(b.wait_answer("next"), Some(Act::Answer(c)) if c == "next"));
+        assert!(b.wait_ask().is_none(), "answered: 0 wait");
+    }
+
+    #[test]
+    fn a_role_with_0_agent_offers_the_agents_and_maps_the_pick() {
+        let mut b = bar(Wait::Role { role: "reviewer".into() });
+        let a = b.wait_ask().unwrap();
+        assert!(a.summary().contains("role reviewer has 0 agent"));
+        assert_eq!(a.options().first().map(|o| (o.0.clone(), o.1.clone())), Some(("role:ada".into(), "ada".into())));
+
+        let act = b.wait_answer("role:ada");
+        assert!(matches!(act, Some(Act::Host("flow_role", ref c)) if c["role"] == "reviewer" && c["agent"] == "ada"));
+        assert_eq!(b.state.as_ref().unwrap().roles.get("reviewer").map(String::as_str), Some("ada"));
+        assert!(b.wait_ask().is_none());
+    }
 }
