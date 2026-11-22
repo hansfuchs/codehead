@@ -181,7 +181,7 @@ impl Coach {
             (Task::Mention, None) => (format!("ask again: @{lead} add a 2nd line"), "ctrl+enter"),
             (Task::Watch, Some(r)) => (format!("watch {r} and {b} work it out"), "wait"),
             (Task::Watch, None) => (String::new(), ""),
-            (Task::Changes, _) => ("see what changed: the changes tab".into(), "alt+→"),
+            (Task::Changes, _) => ("see what changed: the changes tab".into(), "alt+2"),
             (Task::Menu, _) => ("open the menu".into(), "ctrl+p"),
             (Task::Switch, _) => (format!("open the thread \"{SEEDED}\""), "↑↓ · enter"),
             (Task::Menu2, _) => ("open the menu again".into(), "ctrl+p"),
@@ -463,7 +463,7 @@ fn chrome(f: &mut ratatui::Frame, coach: &Coach, dry: bool, view: Rect, side: Op
         }
     }
     let leave = if coach.finished() { "next" } else { "back" };
-    let keys = [("esc esc", leave), ("ctrl+enter", "send"), ("ctrl+p", "menu"), ("alt+←→", "tabs"), ("ctrl+c ctrl+c", "quit")];
+    let keys = [("esc esc", leave), ("ctrl+enter", "send"), ("ctrl+p", "menu"), ("alt+1-4", "views"), ("ctrl+c ctrl+c", "quit")];
     let mut spans = Vec::new();
     for (i, (k, what)) in keys.iter().enumerate() {
         if i > 0 {
