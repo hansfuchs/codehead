@@ -228,6 +228,43 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// The modifiers of the row keys (⌫: to the row's start, ←→: row start / end): ⌘ (super, kitty
+/// protocol), alt off macOS. On macOS a terminal's alt is ⌥, the key of the word keys.
+pub fn line_mod(m: KeyModifiers) -> bool {
+    m.contains(KeyModifiers::SUPER) || (!cfg!(target_os = "macos") && m.contains(KeyModifiers::ALT))
+}
+
+/// Delete keys of a 1-line text kept as a String (dropdown filters): ⌫ 1 char; ⌥⌫ / ctrl+⌫ /
+/// ctrl+w / ctrl+h the string left of the end (a path: 1 segment, as [`TextArea`]); ⌘⌫ (alt+⌫ off
+/// macOS) / ctrl+u all. True: S changed or the key was 1 of these.
+pub fn delete_key(s: &mut String, k: &KeyEvent) -> bool {
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = k.modifiers.contains(KeyModifiers::ALT);
+    let all = (k.code == KeyCode::Backspace && line_mod(k.modifiers)) || (ctrl && k.code == KeyCode::Char('u'));
+    let word = (k.code == KeyCode::Backspace && (ctrl || alt)) || (ctrl && matches!(k.code, KeyCode::Char('w' | 'h')));
+    if all {
+        s.clear();
+    } else if word {
+        let l: Vec<char> = s.chars().collect();
+        let mut c = l.len();
+        while c > 0 && l[c - 1].is_whitespace() {
+            c -= 1;
+        }
+        while c > 0 && l[c - 1] == '/' {
+            c -= 1;
+        }
+        while c > 0 && !l[c - 1].is_whitespace() && l[c - 1] != '/' {
+            c -= 1;
+        }
+        *s = l[..c].iter().collect();
+    } else if k.code == KeyCode::Backspace {
+        s.pop();
+    } else {
+        return false;
+    }
+    true
+}
+
 /// Soft word wrap of 1 line into char ranges of max. WIDTH display columns.
 pub fn wrap(line: &[char], width: usize) -> Vec<(usize, usize)> {
     let width = width.max(1);
@@ -683,7 +720,7 @@ impl TextArea {
         let pushed = self.snapshot(self.del_op(word));
         if !self.delete_selection() {
             let end = self.cur;
-            let start = if word { self.word_left(end) } else { self.left_of(end) };
+            let start = if word { self.string_left(end) } else { self.left_of(end) };
             if start != end {
                 self.delete_range(start, end);
             }
@@ -730,6 +767,28 @@ impl TextArea {
         } else {
             p
         }
+    }
+
+    /// Start of what a word delete (⌥⌫, ctrl+⌫, ctrl+w) takes left of P: the string back to the
+    /// whitespace before it; in a path (a `/` in the string) 1 segment, its `/` stays
+    /// (`cd ~/a/bc` → `cd ~/a/`, again → `cd ~/`).
+    fn string_left(&self, p: Pos) -> Pos {
+        if p.col == 0 {
+            return self.left_of(p);
+        }
+        let l = &self.lines[p.row];
+        let mut c = p.col;
+        while c > 0 && l[c - 1].is_whitespace() {
+            c -= 1;
+        }
+        // the slash(es) after a segment go with it
+        while c > 0 && l[c - 1] == '/' {
+            c -= 1;
+        }
+        while c > 0 && !l[c - 1].is_whitespace() && l[c - 1] != '/' {
+            c -= 1;
+        }
+        Pos { row: p.row, col: c }
     }
 
     fn word_left(&self, p: Pos) -> Pos {
@@ -1055,9 +1114,11 @@ impl TextArea {
                 'z' => self.restore(true),
                 'y' => self.restore(false),
                 // readline keys: ctrl only (⌘ + these = 0 effect)
-                'e' | 'w' | 'u' | 'k' if !ctrl => return Outcome::Ignored,
+                'e' | 'w' | 'u' | 'k' | 'h' if !ctrl => return Outcome::Ignored,
                 'e' => self.line_edge(true, false),
                 'w' => self.backspace(true),
+                // ctrl+⌫ in terminals without the kitty protocol: ^H
+                'h' => self.backspace(true),
                 // ⌘⌫ in macOS terminals (ctrl+u, readline): delete to the start of the row; ctrl+k: to its end
                 'u' => self.kill_to_edge(false),
                 'k' => self.kill_to_edge(true),
@@ -1072,14 +1133,16 @@ impl TextArea {
             KeyCode::Char(' ') if !alt && self.indent_item() => {}
             KeyCode::Char(c) if !alt => self.insert(&c.to_string()),
             KeyCode::Enter if !self.single && !ctrl && !alt => self.newline(),
-            // ⌘⌫ with the kitty protocol: super+backspace
-            KeyCode::Backspace if k.modifiers.contains(KeyModifiers::SUPER) => self.kill_to_edge(false),
-            KeyCode::Delete if k.modifiers.contains(KeyModifiers::SUPER) => self.kill_to_edge(true),
+            // the row: ⌘ (kitty protocol: super), alt off macOS. ⌫: from the cursor to the row's
+            // start, ←→: to the row's start / end
+            KeyCode::Backspace if line_mod(k.modifiers) => self.kill_to_edge(false),
+            KeyCode::Delete if line_mod(k.modifiers) => self.kill_to_edge(true),
+            KeyCode::Left if line_mod(k.modifiers) => self.line_edge(false, shift),
+            KeyCode::Right if line_mod(k.modifiers) => self.line_edge(true, shift),
+            // the string: ctrl, ⌥ (= alt on macOS). ⌫: the string left of the cursor (in a path:
+            // 1 segment), ←→: word jumps
             KeyCode::Backspace => self.backspace(ctrl || alt),
             KeyCode::Delete => self.delete(ctrl || alt),
-            // ⌘←/⌘→ (kitty protocol: super): line start / end
-            KeyCode::Left if k.modifiers.contains(KeyModifiers::SUPER) => self.line_edge(false, shift),
-            KeyCode::Right if k.modifiers.contains(KeyModifiers::SUPER) => self.line_edge(true, shift),
             KeyCode::Left if ctrl || alt => self.move_to(self.word_left(self.cur), shift),
             KeyCode::Right if ctrl || alt => self.move_to(self.word_right(self.cur), shift),
             KeyCode::Left => match (shift, self.range()) {
@@ -1761,5 +1824,69 @@ mod tests {
         s.insert("a\nb");
         assert_eq!(s.text(), "a b");
     }
-}
 
+    /// ⌥⌫ / ctrl+⌫ / ctrl+h / ctrl+w: the string left of the cursor; in a path 1 segment.
+    /// ⌘⌫ (alt+⌫ off macOS): to the row's start. ⌘←→ (alt off macOS): row start / end.
+    #[test]
+    fn word_and_row_deletes_in_every_terminal_encoding() {
+        let word = [
+            (KeyCode::Backspace, KeyModifiers::CONTROL),
+            (KeyCode::Char('h'), KeyModifiers::CONTROL),
+            (KeyCode::Char('w'), KeyModifiers::CONTROL),
+        ];
+        for (c, m) in word {
+            let mut t = ta("git commit -m foo.bar-baz");
+            t.move_end();
+            press(&mut t, c, m);
+            assert_eq!(t.text(), "git commit -m ", "{c:?} {m:?}");
+            // a path: 1 segment, its `/` stays
+            let mut t = ta("cd ~/projects/code-head");
+            t.move_end();
+            press(&mut t, c, m);
+            assert_eq!(t.text(), "cd ~/projects/");
+            press(&mut t, c, m);
+            assert_eq!(t.text(), "cd ~/");
+            press(&mut t, c, m);
+            assert_eq!(t.text(), "cd ");
+        }
+        // ⌥ (alt) on macOS: the string; off macOS: the row
+        let mut t = ta("one two-three");
+        t.move_end();
+        press(&mut t, KeyCode::Backspace, KeyModifiers::ALT);
+        assert_eq!(t.text(), if cfg!(target_os = "macos") { "one " } else { "" });
+        // ⌘⌫ (super) and ctrl+u (⌘⌫ of macOS terminals): to the row's start
+        for (c, m) in [(KeyCode::Backspace, KeyModifiers::SUPER), (KeyCode::Char('u'), KeyModifiers::CONTROL)] {
+            let mut t = ta("first\nsecond row");
+            t.render_for_test(40);
+            t.move_end();
+            press(&mut t, c, m);
+            assert_eq!(t.text(), "first\n", "{c:?}");
+        }
+        // ⌘← row start, ⌘→ row end; ctrl+← a word
+        let mut t = ta("alpha beta gamma");
+        t.render_for_test(40);
+        t.move_end();
+        press(&mut t, KeyCode::Left, KeyModifiers::SUPER);
+        assert_eq!(t.cur.col, 0);
+        press(&mut t, KeyCode::Right, KeyModifiers::SUPER);
+        assert_eq!(t.cur.col, 16);
+        press(&mut t, KeyCode::Left, KeyModifiers::CONTROL);
+        assert_eq!(t.cur.col, 11);
+        press(&mut t, KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(t.cur.col, if cfg!(target_os = "macos") { 6 } else { 0 });
+    }
+
+    #[test]
+    fn delete_key_of_a_string_filter() {
+        let k = |c, m| KeyEvent::new(c, m);
+        let mut s = String::from("src/app.rs");
+        assert!(delete_key(&mut s, &k(KeyCode::Backspace, KeyModifiers::CONTROL)));
+        assert_eq!(s, "src/");
+        assert!(delete_key(&mut s, &k(KeyCode::Backspace, KeyModifiers::NONE)));
+        assert_eq!(s, "src");
+        s = "a b".into();
+        assert!(delete_key(&mut s, &k(KeyCode::Backspace, KeyModifiers::SUPER)));
+        assert!(s.is_empty());
+        assert!(!delete_key(&mut s, &k(KeyCode::Char('u'), KeyModifiers::NONE)));
+    }
+}

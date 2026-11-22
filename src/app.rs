@@ -1638,7 +1638,13 @@ impl App {
                     self.pick_where(i);
                 }
             }
-            KeyCode::Backspace if typed => query = Some(q.chars().take(q.chars().count().saturating_sub(1)).collect::<String>()),
+            KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h') if {
+                let mut s = q.clone();
+                crate::textarea::delete_key(&mut s, &k) && {
+                    query = Some(s);
+                    true
+                }
+            } => {}
             KeyCode::Char(c) if typed => query = Some(format!("{q}{c}")),
             _ => {}
         }
@@ -2139,10 +2145,7 @@ impl App {
                 None => {}
             },
             KeyCode::Char('r') if model && (ctrl || q.is_empty()) => self.ensure_models(&h, true),
-            KeyCode::Backspace if typed => {
-                p.query.pop();
-                (p.cursor, p.offset) = (0, 0);
-            }
+            KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h') if crate::textarea::delete_key(&mut p.query, &k) => (p.cursor, p.offset) = (0, 0),
             KeyCode::Char(c) if typed => {
                 p.query.push(c);
                 (p.cursor, p.offset) = (0, 0);

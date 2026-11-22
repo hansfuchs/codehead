@@ -276,9 +276,7 @@ impl FlowsTab {
                     self.filtering = false;
                 }
                 KeyCode::Enter | KeyCode::Down => self.filtering = false,
-                KeyCode::Backspace => {
-                    self.filter.pop();
-                }
+                KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h') if crate::textarea::delete_key(&mut self.filter, &k) => {}
                 KeyCode::Char(c) if !ctrl => self.filter.push(c),
                 _ => {}
             }

@@ -277,8 +277,7 @@ impl FlowBar {
                     self.mode = if self.running() { Mode::How(slug) } else { Mode::Start(slug) };
                     Act::None
                 }
-                KeyCode::Backspace => {
-                    q.pop();
+                KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h') if crate::textarea::delete_key(&mut q, &k) => {
                     self.cur = 0;
                     self.mode = Mode::Pick(q);
                     Act::None

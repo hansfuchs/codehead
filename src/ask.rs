@@ -178,8 +178,7 @@ impl Picker {
             KeyCode::Left if self.q > 0 => self.show(a, self.q - 1),
             KeyCode::Right if self.q + 1 < qn && self.answers[self.q].is_some() => self.show(a, self.q + 1),
             KeyCode::Enter => return self.enter(a, self.at),
-            KeyCode::Backspace if on_other => {
-                self.others[self.q].pop();
+            KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h') if on_other && crate::textarea::delete_key(&mut self.others[self.q], &k) => {
                 if self.others[self.q].is_empty() {
                     self.picks[self.q].remove(&self.at);
                 }

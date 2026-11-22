@@ -182,10 +182,7 @@ impl RepoFilter {
                 let value = shown.get(o.cursor).map(|&(i, _)| opts[i].value.clone());
                 return (true, value.is_some_and(|v| self.pick(v)));
             }
-            KeyCode::Backspace if typed => {
-                o.query.pop();
-                o.cursor = 0;
-            }
+            KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h') if crate::textarea::delete_key(&mut o.query, &k) => o.cursor = 0,
             KeyCode::Char(c) if typed => {
                 o.query.push(c);
                 o.cursor = 0;
