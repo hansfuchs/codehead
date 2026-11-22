@@ -140,6 +140,15 @@ pub fn repo_of(path: &Path) -> Option<PathBuf> {
     common.parent().map(Path::to_path_buf)
 }
 
+/// DIR is a linked worktree (`git worktree add`): its `.git` file points into
+/// `<repo>/.git/worktrees/` (a submodule's points into `.git/modules/`: 0). Filesystem only.
+pub fn linked_worktree(dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join(".git")) else { return false };
+    let Some(gitdir) = text.trim().strip_prefix("gitdir:").map(|g| PathBuf::from(g.trim())) else { return false };
+    let names: Vec<String> = gitdir.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    names.windows(2).any(|w| w[0] == ".git" && w[1] == "worktrees")
+}
+
 /// Main checkout of the git repo that holds PATH, by the file system only (0 git runs: the threads
 /// tabs call it per row): the nearest `.git` dir, or for a linked worktree the repo its `.git`
 /// file points to (`gitdir: <repo>/.git/worktrees/<name>`).

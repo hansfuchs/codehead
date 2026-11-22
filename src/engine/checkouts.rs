@@ -64,6 +64,12 @@ fn toplevel(p: &Path) -> Option<(PathBuf, Option<String>)> {
     Some((top, branch))
 }
 
+/// Path P sits in a linked worktree nested inside checkout C (`.claude/worktrees/x`; a submodule
+/// or a nested repo: 0, they stay the checkout's). Filesystem only.
+fn nested(p: &Path, c: &Path) -> bool {
+    p.ancestors().take_while(|a| *a != c && a.starts_with(c)).any(crate::threads::linked_worktree)
+}
+
 /// Tool call NAME / INPUT of thread T: its edits outside T's checkouts add theirs.
 pub fn note(t: &store::Thread, name: &str, input: &Value) {
     // a dir checked once per process: 0 more git calls
@@ -71,7 +77,8 @@ pub fn note(t: &store::Thread, name: &str, input: &Value) {
     let have: Vec<PathBuf> = t.all_checkouts().iter().map(|c| PathBuf::from(&c.dir)).collect();
     let data = super::data_dir();
     for p in edited(name, input) {
-        if have.iter().any(|c| p.starts_with(c)) || p.starts_with(&data) {
+        // a worktree / repo inside a checkout (`.claude/worktrees/x`): a checkout of its own
+        if have.iter().any(|c| p.starts_with(c) && !nested(&p, c)) || p.starts_with(&data) {
             continue;
         }
         let dir = if p.is_dir() { p.clone() } else { p.parent().map(Path::to_path_buf).unwrap_or_default() };
@@ -114,5 +121,24 @@ mod tests {
         assert!(!t.add_checkout(store::Checkout { dir: "/a".into(), branch: None }));
         let all = t.all_checkouts();
         assert_eq!(all.iter().map(|c| c.dir.as_str()).collect::<Vec<_>>(), vec!["/a", "/b"]);
+    }
+
+    #[test]
+    fn a_worktree_inside_a_checkout_counts_as_its_own() {
+        let root = std::env::temp_dir().join(format!("codehead-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let wt = root.join(".claude/worktrees/x");
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(wt.join(".git"), "gitdir: ../../../.git/worktrees/x").unwrap();
+
+        assert!(nested(&wt.join("src/a.rs"), &root), "under the nested worktree");
+        assert!(!nested(&root.join("src/a.rs"), &root), "the checkout's own file");
+
+        // a submodule: the checkout's own
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("lib/.git"), "gitdir: ../.git/modules/lib").unwrap();
+        assert!(!nested(&root.join("lib/x.c"), &root), "a submodule");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
