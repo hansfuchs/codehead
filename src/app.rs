@@ -586,6 +586,9 @@ pub struct App {
     hover: Option<Position>,
     /// The last drawn frame: ctrl+click reads the URL under the mouse from it.
     last_frame: ratatui::buffer::Buffer,
+    /// Mouse selection in the preview (a thread's chat, a note, an agent); KEY: what it showed.
+    psel: crate::screensel::ScreenSel,
+    psel_key: String,
     /// Input of the notes filter (undo / redo, cursor); FILTER holds its text.
     filter_ta: TextArea,
     tab: Tab,
@@ -924,6 +927,8 @@ impl App {
             filter_ta: TextArea::new(true, ""),
             hover: None,
             last_frame: ratatui::buffer::Buffer::default(),
+            psel: Default::default(),
+            psel_key: String::new(),
             warmed: false,
             merge_tab: Default::default(),
             flows_tab: crate::flows::FlowsTab::new(Some(cfg.cwd.clone())),
@@ -3870,6 +3875,21 @@ impl App {
         let list = self.regions.list;
         let in_list = list.contains(at);
         let in_preview = self.regions.preview.contains(at);
+        // the preview: text selection (drag, 2 clicks: word, 3: row), copied at the release
+        let wheel = matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp);
+        if (in_preview && !wheel) || self.psel.is_dragging() {
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                self.tabs_focus = false;
+            }
+            if let Some(t) = self.psel.mouse(m, self.regions.preview, &self.last_frame) {
+                let ok = crate::clip::copy(&t);
+                self.toast(if ok { format!("copied {} chars", t.chars().count()) } else { "0 clipboard tools found (wl-copy, xclip, xsel)".into() }, !ok);
+            }
+            return;
+        }
+        if matches!(m.kind, MouseEventKind::Down(_)) {
+            self.psel.clear();
+        }
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) if in_list => {
                 self.tabs_focus = false;
@@ -4213,6 +4233,13 @@ impl App {
             p = p.wrap(Wrap { trim: false });
         }
         f.render_widget(p, inner);
+        // the preview's selection: gone once the preview shows something else
+        let key = format!("{:?} {} {} {} {} {inner:?}", self.tab, self.cursor, self.tcursor, self.acursor, self.pscroll);
+        if key != self.psel_key {
+            self.psel_key = key;
+            self.psel.clear();
+        }
+        self.psel.paint(inner, f.buffer_mut());
         match self.tab {
             Tab::Notes => self.draw_notes(f, list),
             Tab::Threads => {
@@ -6686,5 +6713,47 @@ mod nav_keys {
         a.tabs_focus = true;
         press(&mut a, KeyCode::Up);
         assert!(a.tabs_focus && a.tab == Tab::Agents);
+    }
+}
+
+/// The start screen's preview: mouse selection + copy (as the chat's).
+#[cfg(test)]
+mod preview_select {
+    use super::*;
+    use super::render_tests::app_with;
+    use ratatui::backend::TestBackend;
+
+    fn screen(a: &mut App) -> Vec<String> {
+        let mut t = ratatui::Terminal::new(TestBackend::new(120, 30)).unwrap();
+        t.draw(|f| a.draw(f)).unwrap();
+        let b = t.backend().buffer().clone();
+        (0..30).map(|y| (0..120).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect()
+    }
+
+    fn mouse(a: &mut App, kind: MouseEventKind, x: u16, y: u16) {
+        a.mouse(MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE });
+    }
+
+    #[test]
+    fn the_preview_selects_and_copies() {
+        let mut a = app_with(None);
+        a.agents = vec![Agent { name: "zagan".into(), harness: "amp".into(), mode: "plan".into(), ..Default::default() }];
+        a.switch_tab(Tab::Agents);
+        a.agent_reads = Reads::default();
+        a.tabs_focus = false;
+        let s = screen(&mut a);
+        let p = a.regions.preview;
+        let y = (p.y..p.bottom()).find(|&y| s[y as usize].contains("mode ")).unwrap_or_else(|| panic!("{s:#?}"));
+        let x = s[y as usize].find("plan").map(|b| s[y as usize][..b].chars().count()).unwrap() as u16;
+        assert!(p.contains(Position { x, y }));
+        // a drag over "plan"
+        mouse(&mut a, MouseEventKind::Down(MouseButton::Left), x, y);
+        mouse(&mut a, MouseEventKind::Drag(MouseButton::Left), x + 3, y);
+        mouse(&mut a, MouseEventKind::Up(MouseButton::Left), x + 3, y);
+        assert_eq!(crate::clip::LAST.with_borrow(|l| l.clone()), "plan");
+        // drawn: accent cells
+        let mut t = ratatui::Terminal::new(TestBackend::new(120, 30)).unwrap();
+        t.draw(|f| a.draw(f)).unwrap();
+        assert_eq!(t.backend().buffer()[(x, y)].bg, theme::pal().accent);
     }
 }

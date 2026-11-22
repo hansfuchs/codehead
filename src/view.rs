@@ -2033,10 +2033,7 @@ impl View {
                 self.dirty = true;
                 return;
             }
-            // the chat of the split: its scroll below; a click there: 0 selection
-            if in_stream && click {
-                return;
-            }
+            // the chat of the split: as the chat view below (scroll, links, selection + copy)
             if click && self.input_rect.contains(at) {
                 self.prompt_focus = true;
             }
@@ -3888,6 +3885,33 @@ mod select_tests {
         let row2 = lit(y + 1);
         assert!(!row2.is_empty() && row2[0] >= x, "row {}: {row2:?}\n{s:#?}", y + 1);
         assert!(lit(agent).is_empty(), "agent row unlit");
+    }
+
+    /// The chat beside the changes view (wide split): the same selection + copy.
+    #[test]
+    fn the_chat_of_the_split_selects_and_copies() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("selecttest-0001", Path::new("/tmp"), "t", tx);
+        v.members = vec!["ada".into()];
+        v.thread.push(&store::Event { ts: 2, agent: Some("ada".into()), kind: store::Kind::Text { text: "copy me from the split".into() } });
+        v.set_pane(Pane::Changes);
+        let draw = |v: &mut View| {
+            let mut t = Terminal::new(TestBackend::new(200, 40)).unwrap();
+            t.draw(|f| v.draw(f)).unwrap();
+            let b = t.backend().buffer().clone();
+            (0..40).map(|y| (0..200).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<String>>()
+        };
+        let s = draw(&mut v);
+        assert!(v.pane == Pane::Changes && v.stream_rect.width > 0, "{s:#?}");
+        let y = s.iter().position(|r| r.contains("copy me")).expect("chat in the split") as u16;
+        let x = s[y as usize].find("copy me").map(|b| s[y as usize][..b].chars().count()).unwrap() as u16;
+        // 3 clicks: the row
+        for _ in 0..3 {
+            mouse(&mut v, MouseEventKind::Down(MouseButton::Left), x + 1, y);
+            mouse(&mut v, MouseEventKind::Up(MouseButton::Left), x + 1, y);
+        }
+        let got = crate::clip::LAST.with_borrow(|l| l.clone());
+        assert_eq!(got, "copy me from the split");
     }
 }
 

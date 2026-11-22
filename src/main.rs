@@ -49,6 +49,7 @@ mod prlist;
 mod portless;
 mod preview;
 mod rank;
+mod screensel;
 mod search;
 mod review;
 mod render;
