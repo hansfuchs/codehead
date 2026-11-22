@@ -46,11 +46,13 @@ pub struct ChatSearch {
     msgs: Vec<Msg>,
     /// The query and the item count of the last match run.
     seen: (String, usize),
+    /// After a reset: the item of the shown match (the next refresh shows it again).
+    keep: Option<usize>,
 }
 
 impl Default for ChatSearch {
     fn default() -> Self {
-        ChatSearch { open: false, focus: false, ta: TextArea::new(true, "search the chat"), hits: Vec::new(), cur: None, msgs: Vec::new(), seen: (String::new(), 0) }
+        ChatSearch { open: false, focus: false, ta: TextArea::new(true, "search the chat"), hits: Vec::new(), cur: None, msgs: Vec::new(), seen: (String::new(), 0), keep: None }
     }
 }
 
@@ -65,8 +67,10 @@ impl ChatSearch {
         *self = ChatSearch::default();
     }
 
-    /// The stream was built again (the log's head in front): the texts and matches again.
-    pub fn reset(&mut self) {
+    /// The stream was built again with SHIFT items in front (the log's head): the texts and
+    /// matches again, the shown match stays (its index + SHIFT).
+    pub fn reset(&mut self, shift: usize) {
+        self.keep = self.current().map(|i| i + shift);
         self.msgs.clear();
         self.seen.1 = usize::MAX;
         self.cur = None;
@@ -97,7 +101,11 @@ impl ChatSearch {
         let q = self.ta.text();
         let n = t.items.len();
         let mut grown = false;
-        for i in n.saturating_sub(TAIL)..n.min(self.msgs.len()) {
+        let mut grow: Vec<usize> = (n.saturating_sub(TAIL)..n).chain(t.open_runs()).collect();
+        grow.sort_unstable();
+        grow.dedup();
+        let have = n.min(self.msgs.len());
+        for i in grow.into_iter().filter(|&i| i < have) {
             let text = item_text(t, &t.items[i]);
             if self.msgs[i].text != text {
                 self.msgs[i] = Msg::new("", "", "", 0, &text);
@@ -117,7 +125,7 @@ impl ChatSearch {
             let i = self.msgs.len();
             self.msgs.push(Msg::new("", "", "", 0, &item_text(t, &t.items[i])));
         }
-        let shown = self.current();
+        let shown = self.keep.take().or_else(|| self.current());
         let words = search::words(&q);
         self.hits = (0..n).filter(|&i| search::hit(&self.msgs[i], &words)).collect();
         self.seen = (q, n);
@@ -317,10 +325,11 @@ mod tests {
         assert!(s.is_hit(0));
         // the head comes in front: the hit is item 2 now
         let t = thread(&["head 1", "head 2", "fix it", "other"]);
-        s.reset();
+        s.reset(2);
         s.refresh(&t);
         assert!(s.is_hit(2) && !s.is_hit(0), "{:?}", s.hits);
         assert_eq!(s.label(), "1/1");
+        assert_eq!(s.current(), Some(2), "the shown match stays");
         // a flow section grows by a line: found with 0 new item
         let mut t = stream::Thread::default();
         let flow = |text: &str| Event { ts: 1, agent: Some("ada".into()), kind: Kind::Flow { op: "step".into(), text: text.into() } };
@@ -333,6 +342,20 @@ mod tests {
         assert_eq!(t.items.len(), 1);
         s.refresh(&t);
         assert_eq!(s.label(), "1/1");
+        // an open run further back than the last items gets a call: found
+        let mut t = stream::Thread::default();
+        let tool = |id: &str, file: &str| Event { ts: 1, agent: Some("ada".into()), kind: Kind::Tool { id: id.into(), name: "Read".into(), input: serde_json::json!({"file_path": file}) } };
+        t.push(&tool("1", "src/a.rs"));
+        for i in 0..6 {
+            t.push(&Event { ts: 2, agent: Some("zed".into()), kind: Kind::Text { text: format!("zed {i}") } });
+        }
+        let mut s = ChatSearch::default();
+        s.open();
+        typed(&mut s, &t, "special");
+        assert_eq!(s.label(), "0 matches");
+        t.push(&tool("2", "src/special.rs"));
+        s.refresh(&t);
+        assert!(s.is_hit(0), "{} items", t.items.len());
     }
 
     #[test]

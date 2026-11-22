@@ -713,9 +713,10 @@ impl View {
             t.push(e);
         }
         let asks = self.thread.asks.first().map(|a| a.id.clone());
+        let shift = t.items.len().saturating_sub(self.thread.items.len());
         self.thread = t;
         // the head in front: every item index moved, the search's texts again
-        self.find.reset();
+        self.find.reset(shift);
         self.place_flow_ask();
         if self.thread.asks.first().map(|a| a.id.clone()) != asks {
             self.sync_ask();
@@ -993,10 +994,15 @@ impl View {
         } else {
             format!("[codehead: the owner ran these shell commands since the last message]\n\n{}", std::mem::take(&mut self.shell_ctx).join("\n\n"))
         };
-        if named.is_empty() {
-            // a flow wait's reply: to that flow's agent
-            let to = self.reply_to.take().map_or_else(|| self.default_to(), |a| vec![a]);
+        // a flow wait's reply: to that flow's agent (+ the @named ones)
+        if let Some(a) = self.reply_to.take() {
+            let mut to = named;
+            if !to.contains(&a) {
+                to.insert(0, a);
+            }
             self.host("send", json!({"op": "prompt", "text": text, "to": to, "context": context}));
+        } else if named.is_empty() {
+            self.host("send", json!({"op": "prompt", "text": text, "to": self.default_to(), "context": context}));
         } else {
             self.host("send", json!({"op": "prompt", "text": text, "context": context}));
         }
@@ -2899,6 +2905,8 @@ impl View {
     /// the pane's area, 0 width: 0 tokens box), straight lines between them.
     fn draw_header(&self, f: &mut Frame, area: Rect, cost: Rect) {
         if area.height == 0 {
+            // 0 cards drawn: 0 slots (the agents box's menu then sits over the prompt)
+            self.slots.borrow_mut().clear();
             return;
         }
         let cards: Vec<Card> = self.order.iter().map(|n| self.card(n)).collect();
@@ -5693,6 +5701,12 @@ mod agents_box_tests {
         assert_eq!(op["to"], json!(["zed"]), "{op}");
         assert!(!v.ops.borrow().iter().any(|o| o["op"] == "flow_answer"));
         assert!(v.reply_to.is_none());
+        // an @name in the reply: that agent too, the waiting agent first
+        v.input.set_text("check with @ada first");
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        key(&mut v, KeyCode::Char('2'), KeyModifiers::NONE);
+        let op = v.ops.borrow().iter().rev().find(|o| o["op"] == "prompt").cloned().unwrap();
+        assert_eq!(op["to"], json!(["zed", "ada"]), "{op}");
     }
 
     /// ctrl+f, then another view: the view gets the keys, 0 hidden search bar takes them.

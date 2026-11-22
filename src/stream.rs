@@ -341,6 +341,11 @@ impl Thread {
     }
 
     /// The owner's messages, oldest first (compose history).
+    /// Items of the runs still open (an agent's calls append to them in place).
+    pub fn open_runs(&self) -> Vec<usize> {
+        self.open_run.values().copied().collect()
+    }
+
     pub fn sent(&self) -> Vec<String> {
         self.items
             .iter()
