@@ -145,6 +145,10 @@ impl Picker {
         if self.sent {
             return "answer sent…".into();
         }
+        if !self.focus && a.tool == crate::flowbar::WAIT_TOOL {
+            return "ctrl+enter: your message (the wait stays) · tab: the choices".into();
+        }
+
         if !self.focus {
             return "tab: answer the question".into();
         }

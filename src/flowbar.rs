@@ -124,7 +124,15 @@ fn choices(w: &Wait, n: Option<&Resolved>) -> Vec<(String, String)> {
 /// The tool name of a flow wait shown as an ask (the question picker answers it).
 pub const WAIT_TOOL: &str = "FlowWait";
 
+/// The choice of a flow wait that sends the prompt's text as a message: the wait stays.
+pub const REPLY: &str = "reply";
+
 impl FlowBar {
+    /// The flow waits at a gate.
+    pub fn waits_gate(&self) -> bool {
+        self.state.as_ref().is_some_and(|s| s.wait == Some(Wait::Gate))
+    }
+
     /// The flow's wait as an ask for the question picker under the stream: a gate (approve or an
     /// outcome), a loop at its max (1 more round, move on), a role with 0 agent (the agents to
     /// bring in). Its choices: `_options` (id, name); the prompt's text goes along as the note.
@@ -138,8 +146,16 @@ impl FlowBar {
         // an outcome: where it goes back to
         let back = |c: &str| node.and_then(|n| n.edges.iter().find(|(k, _)| k == c)).and_then(|(_, j)| self.nodes.get(*j)).map(|t| format!(" · back to {}", t.title)).unwrap_or_default();
         let (kind, question, options): (&str, String, Vec<(String, String)>) = match w {
-            Wait::Gate => ("gate", format!("gate after “{step}”: go on? (text in the prompt: your note)"), choices(w, node).into_iter().map(|(c, l)| (c.clone(), format!("{l}{}", back(&c)))).collect()),
-            Wait::LoopMax => ("loop", format!("“{step}” ran its max rounds (text in the prompt: your note)"), choices(w, node)),
+            Wait::Gate => {
+                let mut v: Vec<(String, String)> = choices(w, node).into_iter().map(|(c, l)| (c.clone(), format!("{l}{}", back(&c)))).collect();
+                v.push((REPLY.into(), "reply · the prompt's text to the agent, the gate stays open".into()));
+                ("gate", format!("gate after “{step}”: go on? (text in the prompt: your note)"), v)
+            }
+            Wait::LoopMax => {
+                let mut v = choices(w, node);
+                v.push((REPLY.into(), "reply · the prompt's text to the agent, the wait stays".into()));
+                ("loop", format!("“{step}” ran its max rounds (text in the prompt: your note)"), v)
+            }
             Wait::Role { role } => {
                 let agents = self.role_agents().into_iter().map(|(a, on)| (format!("role:{a}"), if on { a } else { format!("{a} (joins the thread)") })).collect();
                 ("role", format!("role {role} has 0 agent: bring 1 in"), agents)
@@ -726,7 +742,7 @@ mod wait_tests {
         assert_eq!(a.tool, WAIT_TOOL);
         assert!(a.id.starts_with("flow:chore:0:loop"));
         let names: Vec<String> = a.options().into_iter().map(|o| o.1).collect();
-        assert_eq!(names, ["1 more round", "move on"]);
+        assert_eq!(names, ["1 more round", "move on", "reply · the prompt's text to the agent, the wait stays"]);
 
         assert!(matches!(b.wait_answer("next"), Some(Act::Answer(c)) if c == "next"));
         assert!(b.wait_ask().is_none(), "answered: 0 wait");

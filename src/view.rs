@@ -1152,6 +1152,27 @@ impl View {
             // the flow's wait: its step (flow_answer with the prompt's note, flow_role), 0 host ask
             crate::ask::Act::Answer(c) if c["id"].as_str().is_some_and(|id| id.starts_with("flow:")) => {
                 let option = c["option"].as_str().unwrap_or_default().to_string();
+                let empty = self.input.text().trim().is_empty();
+                // reply: the prompt's text as a message, the wait stays
+                if option == crate::flowbar::REPLY {
+                    self.ask.focus = false;
+                    if empty {
+                        self.toast("reply: type the message in the prompt first (ctrl+enter sends it too)");
+                    } else {
+                        self.submit();
+                    }
+                    self.dirty = true;
+                    return true;
+                }
+
+                // a gate's outcome back to a step: 0 send without the owner's words what to change
+                if empty && option != "approve" && self.flowbar.waits_gate() {
+                    self.ask.focus = false;
+                    self.toast(format!("{option}: type what to change in the prompt first, then pick it again"));
+                    self.dirty = true;
+                    return true;
+                }
+
                 if let Some(act) = self.flowbar.wait_answer(&option) {
                     self.flow_act(act);
                 }
@@ -1993,7 +2014,8 @@ impl View {
 
     /// Bind the picker to the 1st open ask.
     fn sync_ask(&mut self) {
-        let focus = self.ask_may_focus();
+        // a flow's wait never takes the keys: the owner may want to write first (tab: the choices)
+        let focus = self.ask_may_focus() && self.thread.asks.first().is_none_or(|a| a.tool != crate::flowbar::WAIT_TOOL);
         self.ask.sync_with(self.thread.asks.first(), focus);
     }
 
@@ -3096,7 +3118,7 @@ impl View {
             }
         }
         // asks: what the keys do now, in the bubble's bottom border
-        if !self.thread.asks.is_empty() && self.input.is_empty() {
+        if !self.thread.asks.is_empty() && self.input.is_empty() && self.ask.focus {
             let label = " ↑↓ · 1-9: pick · enter: answer ";
             let lw = label.chars().count() as u16;
             if bubble.width > lw + 6 {
@@ -3724,6 +3746,54 @@ mod ask_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The owner writes freely while a gate waits: the prompt keeps the keys, ctrl+enter sends a
+    /// message (the gate stays), `changes` with 0 words sends nothing, `reply` sends the prompt.
+    #[test]
+    fn a_gate_never_blocks_the_owners_message() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut t = store::Thread::new("gate input", "task", Path::new("/tmp"), vec!["ada".into()]);
+        let lib = crate::engine::flows::Library::load(None);
+        let mut st = crate::engine::flows::run::FlowState::new(lib.flow("new-feature").unwrap(), &lib, 3, &t.agents, &[], 0);
+        st.wait = Some(crate::engine::flows::run::Wait::Gate);
+        t.flow = Some(st);
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(&t.id, Path::new("/tmp"), "gate input", tx);
+        v.flowbar.tick(&t.id, true);
+        v.sync_flow_ask();
+        let sends = |v: &View| v.ops.borrow().iter().filter(|o| o["op"] == "prompt").count();
+        let answers = |v: &View| v.ops.borrow().iter().filter(|o| o["op"] == "flow_answer").count();
+
+        // typed text: the prompt's; the hint says how to send and how to answer
+        let s = screen(&mut v).join("\n");
+        assert!(s.contains("ctrl+enter: your message (the wait stays) · tab: the choices"), "{s}");
+        for c in "1 more".chars() {
+            v.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(v.input.text(), "1 more", "digits and letters: the prompt's, 0 pick");
+        assert_eq!(answers(&v), 0);
+
+        // ctrl+enter: a message, the gate stays
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!((sends(&v), answers(&v)), (1, 0));
+        assert!(v.thread.asks.iter().any(|a| a.tool == crate::flowbar::WAIT_TOOL), "the gate stays");
+
+        // changes (2) with an empty prompt: 0 answer, the keys back to the prompt
+        press(&mut v, &[KeyCode::Tab, KeyCode::Char('2')]);
+        assert_eq!(answers(&v), 0, "{:?}", v.ops.borrow());
+        assert!(!v.ask.focus);
+
+        // reply (3): empty → 0 send; with text → a message, the gate stays
+        press(&mut v, &[KeyCode::Tab, KeyCode::Char('3')]);
+        assert_eq!(sends(&v), 1);
+        v.input.set_text("also split the plan");
+        press(&mut v, &[KeyCode::Tab, KeyCode::Char('3')]);
+        assert_eq!((sends(&v), answers(&v)), (2, 0));
+        assert!(v.thread.asks.iter().any(|a| a.tool == crate::flowbar::WAIT_TOOL));
+        let _ = store::delete(&t.id);
+    }
+
     #[test]
     fn changes_follow_the_worktree_an_agent_moved_the_work_to_until_the_owner_picks() {
         let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -3842,13 +3912,15 @@ mod ask_tests {
         v.flowbar.tick(&t.id, true);
         let s = screen(&mut v).join("\n");
         assert!(s.contains("◆ new feature · 4/9 plan approval · @ada") && s.contains("⏸ gate plan approval: answer below"), "{s}");
-        // the gate: a question in the picker under the stream (an empty prompt: it has the keys);
-        // the prompt's text goes along as the note
+        // the gate: a question in the picker under the stream; it never takes the keys (the owner
+        // may write first), tab gives them to it; the prompt's text goes along as the note
         v.sync_flow_ask();
-        assert!(v.ask.focus);
+        assert!(!v.ask.focus, "an empty prompt, 0 keys: the gate still waits for tab");
         v.input.set_text("split the plan");
         let s = screen(&mut v).join("\n");
-        assert!(s.contains("waits on you") && s.contains("gate after “plan approval”") && s.contains("approve · go on") && s.contains("changes · back to plan"), "{s}");
+        assert!(s.contains("waits on you") && s.contains("gate after “plan approval”") && s.contains("approve · go on") && s.contains("changes · back to plan") && s.contains("reply · the prompt's text"), "{s}");
+        press(&mut v, &[KeyCode::Tab]);
+        assert!(v.ask.focus);
 
         press(&mut v, &[KeyCode::Down, KeyCode::Enter]);
         let op = v.ops.borrow().iter().find(|o| o["op"] == "flow_answer").cloned().unwrap();

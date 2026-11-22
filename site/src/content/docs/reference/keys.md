@@ -76,7 +76,7 @@ Rules on every screen:
 | `alt+\` | changes view: the chat on its right on / off (from 160 columns; on by default) |
 | `ctrl+f` | the search bar above the prompt: the chat's messages, notes, shell, tool calls; `tab` / `enter` / `↑` the next older match, `shift+tab` / `↓` the next newer one (both wrap), `esc` closes. Another view: its filter |
 | `> flow` | the flow box: the steps (`s` skip, `j` jump, `@` role, `c` change, `e` edit, `x x` remove) |
-| a flow wait | a gate (approve or an outcome), a loop at its max (1 more round, move on), a role with 0 agent (the agents): a question in the picker under the stream, after the agents' questions; `1`-`9` / `↑↓` `enter`; text in the prompt goes along as your note |
+| a flow wait | a gate (approve or an outcome), a loop at its max (1 more round, move on), a role with 0 agent (the agents): a question in the picker under the stream, after the agents' questions. It never takes the keys: write in the prompt, `ctrl+enter` sends it as a message (the wait stays); `tab` then `1`-`9` / `↑↓` `enter` answers, the prompt's text goes along as your note. An outcome back to a step needs that note; `reply` sends the prompt's text, the wait stays |
 | menu → yazi, files view `y` | yazi (full screen) on the worktree; a picked file goes into the prompt as its path |
 | `d d` | subagents / monitors box: stop the subagent / end the watch; another key closes the box and acts as usual |
 
