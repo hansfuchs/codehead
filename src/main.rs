@@ -839,11 +839,12 @@ fn start(args: Args) {
             } else if !label.is_empty() && repo.join(".git").exists() {
                 t.branch = Some(threads::current_branch(&dir)).filter(|b| !b.is_empty());
             }
-            // the flow: its 1st step goes to its agent with the task (the host's `prompt`)
-            if let Some(slug) = &flow {
+            // the flow: its start step (the 1st, else the owner's pick) goes to its agent with the
+            // task (the host's `prompt`)
+            if let Some((slug, start)) = &flow {
                 let lib = engine::flows::Library::load(Some(&t.work_dir()));
                 if let Some(fl) = lib.flow(slug) {
-                    t.flow = Some(engine::flows::run::FlowState::new(fl, &lib, 0, &t.agents, &engine::roster::active(), engine::now_ms()));
+                    t.flow = Some(engine::flows::run::FlowState::new(fl, &lib, *start, &t.agents, &engine::roster::active(), engine::now_ms()));
                 }
             }
             if let Err(e) = t.save() {

@@ -181,13 +181,19 @@ pub struct Row {
 /// Returns the new offset and the drawn rows (area, index in ROWS) for clicks.
 #[allow(clippy::too_many_arguments)]
 pub fn list(f: &mut Frame, r: Rect, label: &str, note: &str, rows: &[Row], cur: usize, offset: usize, empty: &str) -> (usize, Vec<(Rect, usize)>) {
+    list_in(f, r, label, note, rows, cur, offset, empty, true)
+}
+
+/// [`list`]; ACTIVE: the dropdown with the keys (a parent of an open submenu: false, gray).
+#[allow(clippy::too_many_arguments)]
+pub fn list_in(f: &mut Frame, r: Rect, label: &str, note: &str, rows: &[Row], cur: usize, offset: usize, empty: &str, active: bool) -> (usize, Vec<(Rect, usize)>) {
     use ratatui::style::Modifier;
     use ratatui::widgets::Paragraph;
     use unicode_width::UnicodeWidthStr;
     let n = rows.len();
     let shown = (r.height as usize).saturating_sub(2);
     let off = fit(offset, cur, n, shown);
-    let inner = frame(f, r, label, note, off > 0, off + shown < n, true);
+    let inner = frame(f, r, label, note, off > 0, off + shown < n, active);
     if n == 0 {
         f.render_widget(Paragraph::new(Line::styled(format!(" {empty}"), theme::muted())), Rect { height: inner.height.min(1), ..inner });
     }
