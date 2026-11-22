@@ -205,7 +205,7 @@ fn builtin(all: &[String], q: &str) -> Vec<String> {
 }
 
 /// The shell's history, newest first: fish, then zsh, then bash (each file that exists).
-fn shell_history() -> Vec<String> {
+pub(crate) fn shell_history() -> Vec<String> {
     let home = crate::config::home();
     let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share"));
     let mut out = Vec::new();

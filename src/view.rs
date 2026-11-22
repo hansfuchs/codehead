@@ -190,6 +190,8 @@ struct View {
     hist: crate::histsearch::HistSearch,
     command: crate::command::Command,
     paths: crate::paths::Paths,
+    /// Shell mode: the completions (tasks, commands, arguments), the history's suggestion.
+    comp: crate::shellcomp::ShellComp,
     /// `#` of the prompt: the shortcuts.
     shortcuts: crate::shortcuts::Pick,
     paster: Paster,
@@ -351,6 +353,7 @@ impl View {
             hist: Default::default(),
             command,
             paths: crate::paths::Paths::new(cwd),
+            comp: Default::default(),
             shortcuts: crate::shortcuts::Pick::default(),
             paster: Paster::new(crate::engine::data_dir().join("paste").join(id)),
             attachments: Vec::new(),
@@ -696,6 +699,16 @@ impl View {
     /// Shell mode: the prompt starts with `!`.
     fn shell_mode(&self) -> bool {
         self.input.text().starts_with('!')
+    }
+
+    /// The thread's `!commands`, oldest first.
+    fn shell_cmds(&self) -> Vec<String> {
+        self.thread.items.iter().filter_map(|i| if let stream::Item::Shell { command, .. } = i { Some(command.clone()) } else { None }).collect()
+    }
+
+    /// Shell mode, not in the `!commands` (↑↓): the completions and the suggestion are on.
+    fn comp_on(&self) -> bool {
+        self.shell_mode() && self.shell_at.is_none() && !self.hist.is_open()
     }
 
     /// Run COMMAND (shell mode) in the worktree, off the UI thread: $SHELL -c, stdout and stderr
@@ -1376,7 +1389,7 @@ impl View {
             return false;
         }
         if k.code == KeyCode::Char('r') && k.modifiers.contains(KeyModifiers::CONTROL) && self.shell_mode() {
-            let cmds = self.thread.items.iter().filter_map(|i| if let stream::Item::Shell { command, .. } = i { Some(command.clone()) } else { None }).collect();
+            let cmds = self.shell_cmds();
             let text = self.input.text();
             self.hist.open(cmds, text.strip_prefix('!').unwrap_or_default().trim_start());
             return false;
@@ -1404,6 +1417,13 @@ impl View {
         }
         if self.shortcuts.key(k, &mut self.input) || self.paths.key(k, &mut self.input) {
             return false;
+        }
+        // shell mode: the completions, then the history's suggestion (→ / End / ctrl+f)
+        if self.comp_on() {
+            let cmds = self.shell_cmds();
+            if self.comp.key(k, &mut self.input, &self.shell_cwd, &cmds) || self.comp.accept(k, &mut self.input, &cmds) {
+                return false;
+            }
         }
         let empty = self.input.is_empty();
         match k.code {
@@ -2090,6 +2110,10 @@ impl View {
             || self.command.mouse(m, &mut self.input)
             || self.shortcuts.mouse(m, &mut self.input)
             || self.paths.mouse(m, &mut self.input)
+            || (self.comp_on() && {
+                let cmds = self.shell_cmds();
+                self.comp.mouse(m, &mut self.input, &self.shell_cwd, &cmds)
+            })
         {
             return;
         }
@@ -2825,6 +2849,10 @@ impl View {
         let ask_keys = !self.thread.asks.is_empty() && self.ask.focus && !self.ask.sent;
         let prompt_keys = self.pane == Pane::Chat || self.prompt_focus;
         self.input.render(f, self.input_rect, !menu_open && !ask_keys && prompt_keys);
+        let comp_cmds = if self.comp_on() { Some(self.shell_cmds()) } else { None };
+        if let Some(cmds) = &comp_cmds {
+            self.comp.render_suggestion(f, &self.input, cmds, self.input_rect);
+        }
 
         // hint row: who gets the message, the send keys
         let mut to = vec![Span::styled("  → ", theme::muted())];
@@ -2886,6 +2914,10 @@ impl View {
             self.command.render(f, &self.input, area, self.input_rect);
             self.shortcuts.render(f, &self.input, area, self.input_rect);
             self.paths.render(f, &self.input, area, self.input_rect);
+            match &comp_cmds {
+                Some(cmds) => self.comp.render(f, &self.input, &self.shell_cwd, cmds, area, self.input_rect),
+                None => self.comp.hide(),
+            }
             let open = self.shortcuts.is_open(&self.input);
             let keys = self.pane == Pane::Chat || self.prompt_focus;
             crate::shortcuts::render_popup(f, &self.input, self.hover, keys, area, open);
@@ -3227,6 +3259,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
         let pane = v.pane;
         let _w = crate::engine::watch(move || format!("view: tick {pane:?}"));
         dirty |= v.hist.poll();
+        dirty |= v.comp.poll();
         dirty |= v.merge.poll(v.pane == Pane::Merge);
         dirty |= v.files.poll();
         dirty |= v.poll_merge_sources();
@@ -3384,7 +3417,7 @@ mod ask_tests {
         let (tx, _rx) = mpsc::channel();
         let mut v = View::new(&t.id, &plain, "no git", tx);
         v.load_checkouts();
-        assert_eq!(v.checkouts, [repo.clone()]);
+        assert_eq!(v.checkouts, std::slice::from_ref(&repo));
         assert_eq!(v.changes.dir(), repo.as_path());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3687,6 +3720,47 @@ mod comment_tests {
         v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
         assert_eq!(v.ops.borrow().last().unwrap()["context"], "");
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("shelltest-0000"));
+    }
+
+    #[test]
+    fn shell_mode_completes_project_tasks_and_suggests_from_the_history() {
+        let dir = std::env::temp_dir().join(format!("ch-shellcomp-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join("justfile"), "# build the app\nbuild:\n    true\n\n# run the tests\ntest:\n    true\n").unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("shelltest-0002", &dir, "t", tx);
+        v.shell_cwd = dir.clone();
+        v.comp.history = Some(std::sync::Arc::new(Vec::new()));
+        let mut t = Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
+        let shown = |t: &Terminal<ratatui::backend::TestBackend>| t.backend().buffer().content().iter().map(|c| c.symbol().to_string()).collect::<String>();
+        let key = |v: &mut View, c: KeyCode| {
+            v.key(KeyEvent::new(c, KeyModifiers::NONE));
+        };
+        // `just `: its recipes at once, with their docs; tab: the 1st in the prompt, enter takes it
+        for c in "!just ".chars() {
+            key(&mut v, KeyCode::Char(c));
+        }
+        t.draw(|f| v.draw(f)).unwrap();
+        assert!(shown(&t).contains("build the app") && shown(&t).contains("run the tests"), "{}", shown(&t));
+        key(&mut v, KeyCode::Tab);
+        key(&mut v, KeyCode::Tab);
+        assert_eq!(v.input.text(), "! just test");
+        key(&mut v, KeyCode::Enter);
+        assert_eq!(v.input.text(), "! just test ", "enter took the row, 0 run");
+        assert_eq!(v.shell_running, 0);
+        // the thread's commands: the rest in gray after the cursor, → takes it
+        v.thread.items.push(stream::Item::Shell { command: "just test --nocapture".into(), output: String::new(), code: 0, ts: 0, dir: None });
+        t.draw(|f| v.draw(f)).unwrap();
+        assert!(shown(&t).contains("! just test --nocapture"), "{}", shown(&t));
+        key(&mut v, KeyCode::Right);
+        assert_eq!(v.input.text(), "! just test --nocapture");
+        // ↑ with text: the thread's commands, 0 dropdown
+        v.input.set_text("! just b");
+        key(&mut v, KeyCode::Up);
+        assert_eq!(v.input.text(), "! just test --nocapture");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("shelltest-0002"));
     }
 
     #[test]
@@ -4257,7 +4331,7 @@ fn hint_keys(cwd: bool, hist: bool, shell: bool, empty: bool) -> &'static str {
     } else if hist {
         "↑↓ ctrl+r: pick · ⏎ take · esc close · type to filter "
     } else if shell {
-        "⏎ run · ↑↓ history · ctrl+r search · ↓ dir · output: to the agents with your next message "
+        "⏎ run · tab complete · → suggestion · ↑↓ history · ctrl+r search · ↓ dir · output: to the agents with your next message "
     } else if empty {
         "! for shell mode · ⌘/ctrl+⏎ send · ↑↓ history "
     } else {

@@ -56,6 +56,7 @@ mod render;
 mod repofilter;
 mod repopick;
 mod settings;
+mod shellcomp;
 mod shortcuts;
 mod setup;
 mod skills;
