@@ -100,7 +100,12 @@ pub fn place_max(anchor: Rect, w: u16, rows: usize, max: usize, bounds: Rect, ab
 /// both sides: above STACK (the area of the open dropdowns), else below it, cut to the room there;
 /// only with 0 room at all: over the parent.
 pub fn place_beside(parent: Rect, row_y: u16, w: u16, rows: usize, bounds: Rect, stack: Rect) -> Option<Rect> {
-    let h = (rows.clamp(1, MAX_ROWS) as u16 + 2).min(bounds.height);
+    place_beside_max(parent, row_y, w, rows, MAX_ROWS, bounds, stack)
+}
+
+/// [`place_beside`] with max. MAX rows in view (a preview that shows a whole flow).
+pub fn place_beside_max(parent: Rect, row_y: u16, w: u16, rows: usize, max: usize, bounds: Rect, stack: Rect) -> Option<Rect> {
+    let h = (rows.clamp(1, max) as u16 + 2).min(bounds.height);
     if h < 3 {
         return None;
     }

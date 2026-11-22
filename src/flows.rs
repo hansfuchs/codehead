@@ -1148,19 +1148,10 @@ impl FlowsTab {
         let errs: Vec<(usize, String)> = nodes.iter().enumerate().flat_map(|(i, n)| n.errors.iter().map(move |e| (i, e.clone()))).chain(nodes.iter().enumerate().flat_map(|(i, n)| flows::unknown_shortcuts(&n.text).into_iter().map(move |s| (i, format!("#{s}: 0 shortcut"))))).collect();
         let err_h = errs.len().min(3) as u16;
         let rail = Rect { y: area.y + 3, height: area.height.saturating_sub(3 + ed_h + err_h + u16::from(ed_h > 0)), ..area };
-        let rows: Vec<flowrail::Row> = nodes
-            .iter()
+        let rows: Vec<flowrail::Row> = rail_rows(&nodes)
+            .into_iter()
             .enumerate()
-            .map(|(i, n)| {
-                let (mark, st) = if n.step.is_some() { ("✓", Style::default().fg(theme::pal().ok)) } else { ("◇", theme::accent()) };
-                let mut row = crate::flowbar::rail_row(n, mark, st, None);
-                if n.role != flows::LEAD && !row.tags.iter().any(|(t, _)| t.starts_with('@')) {
-                    row.tags.push((format!("@{}", n.role), theme::muted()));
-                }
-                if n.step.is_none() {
-                    row.tags.retain(|(t, _)| t != "◇");
-                    row.tags.push(("one-off".into(), theme::muted()));
-                }
+            .map(|(i, mut row)| {
                 if errs.iter().any(|(j, _)| *j == i) {
                     row.tags.push(("!".into(), Style::default().fg(theme::pal().danger)));
                 }
@@ -1339,6 +1330,36 @@ impl FlowsTab {
             f.render_widget(Paragraph::new(line).style(if on { st } else { Style::default() }), rr);
         }
     }
+}
+
+/// The rail rows of NODES: ✓ a library step (◇ one-off), the role when not the lead, the gate and
+/// loop tags (flowbar::rail_row). The flows tab and the new thread's flow dropdown draw them.
+pub fn rail_rows(nodes: &[flows::Resolved]) -> Vec<flowrail::Row> {
+    nodes
+        .iter()
+        .map(|n| {
+            let (mark, st) = if n.step.is_some() { ("✓", Style::default().fg(theme::pal().ok)) } else { ("◇", theme::accent()) };
+            let mut row = crate::flowbar::rail_row(n, mark, st, None);
+            if n.role != flows::LEAD && !row.tags.iter().any(|(t, _)| t.starts_with('@')) {
+                row.tags.push((format!("@{}", n.role), theme::muted()));
+            }
+            if n.step.is_none() {
+                row.tags.retain(|(t, _)| t != "◇");
+                row.tags.push(("one-off".into(), theme::muted()));
+            }
+            row
+        })
+        .collect()
+}
+
+/// The head of flow FL (its NODES): name · n steps · layer · roles.
+pub fn head_line(fl: &flows::Flow, nodes: &[flows::Resolved]) -> Line<'static> {
+    let layer = match (fl.layer, fl.edited) {
+        (_, true) => "edited built-in".to_string(),
+        (l, _) => l.label().to_string(),
+    };
+    let roles = flows::roles(fl, nodes).join(", ");
+    Line::from(vec![Span::styled(fl.name.clone(), theme::accent_bold()), Span::styled(format!(" · {} steps · {layer} · roles: {roles}", nodes.len()), theme::muted())])
 }
 
 fn list_names(v: &[String]) -> String {

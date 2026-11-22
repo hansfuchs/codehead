@@ -3469,7 +3469,7 @@ impl App {
         let n = items.len();
         let w = items.iter().map(|r| r.text.width() + r.detail.width() + 8).max().unwrap_or(0).clamp(30, 60) as u16;
         let Some(r) = dropdown::place(self.regions.flow_row, w, n, bounds, false) else { return };
-        let note = if sub.is_some() { "← back".to_string() } else { "enter: steps".to_string() };
+        let note = if sub.is_some() { "← back".to_string() } else { "→ start step".to_string() };
         // the parent: gray while the steps have the keys
         let (off, drawn) = dropdown::list_in(f, r, "flow", &note, &items, cur, off, "0 flows", sub.is_none());
         self.regions.flow_menu = r;
@@ -3477,30 +3477,47 @@ impl App {
         if let Some(m) = self.flow_menu.as_mut() {
             m.offset = off;
         }
-        let Some((s, soff)) = sub else { return };
-        let steps = self.flow_steps(cur);
-        let rows: Vec<dropdown::Row> = steps
-            .iter()
-            .enumerate()
-            .map(|(j, st)| {
-                let mut detail = Vec::new();
-                if !st.role.is_empty() {
-                    detail.push(format!("@{}", st.role));
-                }
-                if st.gate {
-                    detail.push("gate".into());
-                }
-                dropdown::Row { text: format!("{}. {}", j + 1, st.title), detail: detail.join(" · "), now: cur == self.flow_i && j == self.flow_start, marks: Vec::new() }
-            })
-            .collect();
-        let sw = rows.iter().map(|r| r.text.width() + r.detail.width() + 8).max().unwrap_or(0).clamp(30, 70) as u16;
+        // the flow under the cursor: its rail beside the list at once (the flows tab's look);
+        // enter / →: the rail takes the keys (the start step)
+        self.regions.flow_steps.clear();
+        let Some(fl) = cur.checked_sub(1).and_then(|i| self.flow_lib.flows.get(i)).cloned() else { return };
+        let nodes = crate::engine::flows::resolve(&fl, &self.flow_lib);
+        let rows = crate::flows::rail_rows(&nodes);
+        let arcs = crate::flowrail::arcs(&nodes, |_| 0);
+        let head = crate::flows::head_line(&fl, &nodes);
+        let titles = rows.iter().map(|r| r.title.width() + r.tags.iter().map(|(t, _)| t.width() + 2).sum::<usize>()).max().unwrap_or(0);
+        let labels = nodes.iter().flat_map(|n| n.edges.iter().map(|(k, _)| k.width() + 4)).chain(nodes.iter().map(|n| n.loops.as_ref().map_or(0, |l| l.1.width() + 14))).max().unwrap_or(0);
+        let want = (head.width().max(fl.description.width()).max(titles + 8 + usize::from(crate::flowrail::arcs_width(&arcs)) + labels) + 4) as u16;
         let row_y = drawn.iter().find(|(_, i)| *i == cur).map_or(r.y + 1, |(rr, _)| rr.y);
-        let Some(sr) = dropdown::place_beside(r, row_y, sw, rows.len(), bounds, r) else { return };
-        let name = self.flow_lib.flows.get(cur.wrapping_sub(1)).map_or(String::new(), |fl| fl.name.clone());
-        let (soff, sdrawn) = dropdown::list(f, sr, &format!("{name} · start at"), "enter: pick", &rows, s, soff, "0 steps");
-        self.regions.flow_steps = sdrawn;
-        if let Some(m) = self.flow_menu.as_mut() {
-            m.sub = Some((s, soff));
+        // beside the list when 50+ columns are there (long loop labels then cut), else above / below it
+        let right = bounds.right().saturating_sub(r.right());
+        let w = if right >= 50 { want.clamp(40, right) } else { want.max(40) };
+        let Some(sr) = dropdown::place_beside_max(r, row_y, w, rows.len() + 3, 40, bounds, r) else { return };
+        f.render_widget(ratatui::widgets::Clear, sr);
+        let note = if sub.is_some() { " ↑↓ start · enter: pick · ← back " } else { " → start step · enter: from step 1 " };
+        let block = ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_style(if sub.is_some() { theme::accent() } else { theme::line() })
+            .title(Span::styled(" preview ", theme::muted()))
+            .title_bottom(Span::styled(note, theme::muted()));
+        let inner = block.inner(sr);
+        f.render_widget(block, sr);
+        let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
+        f.render_widget(Paragraph::new(head), Rect { height: 1.min(inner.height), ..inner });
+        if !fl.description.is_empty() && inner.height > 1 {
+            f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(&fl.description, usize::from(inner.width)), theme::muted())), Rect { y: inner.y + 1, height: 1, ..inner });
+        }
+        let rail = Rect { y: inner.y + 3, height: inner.height.saturating_sub(3), ..inner };
+        let cursor = match sub {
+            Some((s, _)) => Some(s),
+            None => (cur == self.flow_i).then_some(self.flow_start),
+        };
+        let off = sub.map_or(0, |(s, soff)| crate::dropdown::fit(soff, s, rows.len(), usize::from(rail.height)));
+        self.regions.flow_steps = crate::flowrail::draw(f.buffer_mut(), rail, &rows, &arcs, cursor, sub.is_some(), off);
+        if let Some(m) = self.flow_menu.as_mut()
+            && let Some((s, _)) = m.sub
+        {
+            m.sub = Some((s, off));
         }
     }
 
@@ -7001,15 +7018,20 @@ mod flow_menu_tests {
         let s = screen(&mut a);
         let first = a.flow_lib.flows[0].name.clone();
         assert!(s.contains(&format!("◆ {first}")) && s.contains("0 flow"), "{s}");
-        // ↓ to the 1st flow, enter: its steps beside the flows
+        // ↓ to the 1st flow: its preview beside the flows at once (head, rail of every step)
         press(&mut a, KeyCode::Down);
-        press(&mut a, KeyCode::Enter);
-        assert_eq!(a.flow_menu.as_ref().and_then(|m| m.sub).map(|s| s.0), Some(0));
         let steps = a.flow_steps(1);
         assert!(steps.len() > 1);
         let s = screen(&mut a);
-        println!("--- flows + steps\n{s}");
-        assert!(s.contains("start at") && s.contains(&format!("2. {}", steps[1].title)), "{s}");
+        let head = format!("{first} · {} steps", steps.len());
+        assert!(s.contains("preview") && s.contains(&head) && s.contains(&steps[steps.len() - 1].title), "every step in view: {s}");
+        assert!(a.flow_menu.as_ref().is_some_and(|m| m.sub.is_none()), "a highlight only: the list keeps the keys");
+        // enter: the rail takes the keys (the start step)
+        press(&mut a, KeyCode::Enter);
+        assert_eq!(a.flow_menu.as_ref().and_then(|m| m.sub).map(|s| s.0), Some(0));
+        let s = screen(&mut a);
+        println!("--- flows + preview\n{s}");
+        assert!(s.contains("↑↓ start · enter: pick"), "{s}");
         // ← back to the flows, → into the steps again, ↓ enter: flow 1 from step 2
         press(&mut a, KeyCode::Left);
         assert!(a.flow_menu.as_ref().is_some_and(|m| m.sub.is_none()));
