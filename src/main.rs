@@ -207,7 +207,7 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          @: agent names. ←→ on a name: + add, or ⇄ replace an agent of the thread: on send, the old
          agent leaves and the new one gets the message with the old one's last messages.
          ctrl+i / ⌘i (every pane): the IDE on the repo root, several repos: a picker (setting editor: auto, code, cursor, zed, idea …).
-         views (row 0): alt+1-4 (option+1-4): chat, changes, merge, files. tab / i: the prompt, tab / esc:
+         views (row 0): F1-F4 (ctrl+1-4, alt+1-4): chat, changes, merge, files. tab / i: the prompt, tab / esc:
          back to the view. yazi: files view y, menu. changes: 1 box per file in review
          order (schema, logic, config, UI, docs, tests, generated), j k box (j: down), n N hunk,
          v reviewed, enter fold, e / o IDE at the line, w side by side / unified, r read git again,

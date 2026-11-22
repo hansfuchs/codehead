@@ -72,7 +72,7 @@ Rules on every screen:
 | `ctrl+t` | open / close all thoughts (hidden: show them) |
 | `ctrl+i` | the IDE (setting `editor`) on the thread's worktree (`⌘i`): the window that has it open, else a new one |
 | `pgup` `pgdn`, `shift+↑↓`, wheel | scroll the stream |
-| `alt+1`-`alt+4` (`⌥1`-`⌥4`) | chat / changes / merge / files view (the view bar on the top row) |
+| `F1`-`F4`, `ctrl+1`-`ctrl+4`, `alt+1`-`alt+4` | chat / changes / merge / files view (the view bar on the top row) |
 | `alt+\` | changes view: the chat on its right on / off (from 160 columns; on by default) |
 | `ctrl+f` | the flow box: the steps (`s` skip, `j` jump, `@` role, `c` change, `e` edit, `x x` remove) |
 | a flow wait | a gate (approve or an outcome), a loop at its max (1 more round, move on), a role with 0 agent (the agents): a question in the picker under the stream, after the agents' questions; `1`-`9` / `↑↓` `enter`; text in the prompt goes along as your note |

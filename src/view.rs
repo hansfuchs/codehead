@@ -49,7 +49,7 @@ fn take_pr(id: &str) -> Option<crate::gh::PrRef> {
     if g.as_ref().is_some_and(|(t, _)| t == id) { g.take().map(|x| x.1) } else { None }
 }
 
-/// Views of a thread: the view bar on row 0 (alt/option+←→: previous / next, alt+1-4).
+/// Views of a thread: the view bar on row 0 (F1-F4, ctrl+1-4, alt+1-4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Pane {
     #[default]
@@ -1397,11 +1397,15 @@ impl View {
             self.toast(if self.split { "changes: the chat on the right (≥ 160 columns)" } else { "changes: full width" });
             return false;
         }
-        // views of the thread: alt+1-4 (chat, changes, merge, files)
-        if alt && !ctrl && let KeyCode::Char(c @ '1'..='9') = k.code {
-            if let Some(p) = Pane::ALL.get(usize::from(c as u8 - b'1')) {
-                self.set_pane(*p);
-            }
+        // views of the thread: F1-F4, ctrl+1-4 (kitty protocol), alt+1-4 (chat, changes, merge,
+        // files). macOS terminals without option-as-alt send ⌥1 as `¡`: F-keys and ctrl work there
+        let view_key = match k.code {
+            KeyCode::F(n @ 1..=4) if k.modifiers.is_empty() => Some(usize::from(n) - 1),
+            KeyCode::Char(c @ '1'..='4') if alt != ctrl => Some(usize::from(c as u8 - b'1')),
+            _ => None,
+        };
+        if let Some(p) = view_key.and_then(|i| Pane::ALL.get(i)) {
+            self.set_pane(*p);
             return false;
         }
         // ctrl+b from the prompt of the changes view: the panel's cycle; the panel with the keys:
@@ -2133,7 +2137,7 @@ impl View {
             Item { label: "IDE on the repo root (several repos: pick 1)".into(), key: "ctrl+i · ⌘i".into(), id: 2, section: "thread" },
             Item { label: "interrupt the agents".into(), key: "esc".into(), id: 12, section: "thread" },
             Item { label: "yazi on the worktree (its pick: into the prompt)".into(), key: "files view: y".into(), id: 14, section: "thread" },
-            Item { label: "views: chat · changes · merge · files".into(), key: "alt+1-4".into(), id: 15, section: "thread" },
+            Item { label: "views: chat · changes · merge · files".into(), key: "F1-F4".into(), id: 15, section: "thread" },
             Item { label: "tool calls: open / close all".into(), key: "ctrl+o".into(), id: 1, section: "chat" },
             Item { label: "thoughts: open / close all".into(), key: "ctrl+t".into(), id: 13, section: "chat" },
             Item { label: "scroll the stream".into(), key: "wheel · pgup".into(), id: 10, section: "chat" },
@@ -3089,8 +3093,8 @@ impl View {
             _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled(self.changes.hints(), theme::muted()),
             _ if self.pane == Pane::Merge && !self.prompt_focus => Span::styled(self.merge.hints(), theme::muted()),
             _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · / filter · pgup pgdn: scroll · o e: IDE · y: yazi · c: copy path · S S: share · i: prompt ", theme::muted()),
-            _ if self.pane != Pane::Chat => Span::styled("tab / esc: back to the view · alt+1-4: views ", theme::muted()),
-            _ => Span::styled(format!("{}: menu · ctrl+i: IDE · alt+1-4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label), theme::muted()),
+            _ if self.pane != Pane::Chat => Span::styled("tab / esc: back to the view · F1-F4: views ", theme::muted()),
+            _ => Span::styled(format!("{}: menu · ctrl+i: IDE · F1-F4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label), theme::muted()),
         };
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), foot);
 
@@ -4004,7 +4008,7 @@ mod pane_tests {
         let s = screen(&mut v);
         // the changes label may carry a count (other tests share the thread id)
         assert!(s.contains(" chat   changes") && s.contains("files  │ thread p"), "{s}");
-        assert!(s.contains("alt+1-4: views"), "{s}");
+        assert!(s.contains("F1-F4: views"), "{s}");
         // the view bar on row 0
         assert!(s.lines().next().unwrap().contains(" chat "), "{s}");
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
@@ -4952,13 +4956,25 @@ mod key_fix_tests {
     }
 
     #[test]
-    fn views_switch_on_alt_digits_only() {
+    fn views_switch_on_f_keys_ctrl_and_alt_digits() {
         let mut v = view("keyfix-pane-0000");
+        typed(&mut v, "draft");
         key(&mut v, KeyCode::F(2), KeyModifiers::NONE);
-        assert_eq!(v.pane, Pane::Chat, "F-keys: 0 view switch");
+        assert_eq!(v.pane, Pane::Changes, "F2: changes (macOS without option-as-alt)");
 
-        key(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
-        assert_eq!(v.pane, Pane::Changes);
+        key(&mut v, KeyCode::Char('1'), KeyModifiers::CONTROL);
+        assert_eq!(v.pane, Pane::Chat, "ctrl+1: chat");
+
+        key(&mut v, KeyCode::Char('4'), KeyModifiers::ALT);
+        assert_eq!(v.pane, Pane::Files);
+
+        key(&mut v, KeyCode::F(1), KeyModifiers::NONE);
+        assert_eq!(v.pane, Pane::Chat);
+        assert_eq!(v.input.text(), "draft", "view keys type 0 chars into the prompt");
+
+        // a plain digit: text, 0 view switch
+        key(&mut v, KeyCode::Char('2'), KeyModifiers::NONE);
+        assert_eq!(v.pane, Pane::Chat);
     }
 
     #[test]
