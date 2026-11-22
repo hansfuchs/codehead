@@ -206,6 +206,7 @@ fn item_text(t: &stream::Thread, it: &Item) -> String {
         Item::Run { calls, .. } => calls.iter().map(|c| stream::call_summary(&c.name, &c.input)).collect::<Vec<_>>().join("\n"),
         Item::Shell { command, output, .. } => format!("{command}\n{output}"),
         Item::Settled { question, answer, .. } => format!("{question}\n{answer}"),
+        Item::Kid { title, text, .. } => format!("{title}\n{text}"),
         Item::Sub { sub, .. } => t.subs.get(*sub).map(|s| format!("{}\n{}", s.description, s.result)).unwrap_or_default(),
     }
 }

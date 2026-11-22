@@ -257,7 +257,8 @@ impl SubThreads {
         let style = if self.hover { theme::accent().bg(theme::pal().hover) } else { theme::accent() };
         let what = self.kids.iter().map(|k| line(&k.title, 40)).collect::<Vec<_>>().join(" · ");
         let hint = if self.open { "click: close" } else { "click: details" };
-        f.render_widget(Paragraph::new(format!("{wave} sub-threads ({}) · {what} · {hint}", self.kids.len())).style(style), anchor);
+        // the thread's messages to its agents wait for the end (same checkout): said here, 0 chat row
+        f.render_widget(Paragraph::new(format!("{wave} sub-threads ({}) · {what} · messages wait · {hint}", self.kids.len())).style(style), anchor);
         if !self.open || area.height < 4 {
             return;
         }

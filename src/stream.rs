@@ -43,6 +43,9 @@ pub enum Item {
     /// stopped); a message of the master. SUB: its index in `Thread::subs`; KEY: the fold of a
     /// long report.
     Sub { agent: String, sub: usize, ts: u64, key: usize },
+    /// A sub-thread (`>sub`) ended: a message of AGENT (its agent) tagged `subthread`. STATE
+    /// `done`: TEXT its result (its last message); `failed` / `stopped`: TEXT why. TITLE: its task.
+    Kid { agent: String, title: String, state: String, text: String, ts: u64 },
 }
 
 /// A subagent of an agent on the thread.
@@ -268,15 +271,13 @@ impl Thread {
             // flow lines: 0 chat rows (the agent card shows the step, a click on it the flow box)
             Kind::Flow { .. } => {}
             Kind::Edits { summary } => self.items.push(Item::Edits { agent, text: format!("got the edits since its last turn · {summary}") }),
+            // a running sub-thread: 0 chat rows (the sub-threads row shows it); its end: a message
+            // of its agent
             Kind::SubThread { title, state, text, .. } => {
-                let one = |s: &str| s.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string();
-                let (line, color) = match state.as_str() {
-                    "running" => (format!("↳ “{title}” started · {}", one(text)), theme::pal().accent),
-                    "done" => (format!("✓ “{title}” done · {}", one(text)), theme::pal().ok),
-                    "held" => (format!("⏸ {text}"), theme::pal().warn),
-                    _ => (format!("✗ “{title}” {state} · {}", one(text)), theme::pal().danger),
-                };
-                self.items.push(Item::Note { agent: "sub-thread".into(), text: line, color });
+                if state != "running" && state != "held" {
+                    let agent = if agent.is_empty() { KID.to_string() } else { agent };
+                    self.items.push(Item::Kid { agent, title: title.clone(), state: state.clone(), text: text.clone(), ts: e.ts });
+                }
             }
             Kind::SubStart { id, parent, description, agent_type, background, prompt } => {
                 if !self.subs.iter().any(|s| &s.id == id) {
@@ -932,6 +933,15 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                 }
                 last_agent = None;
             }
+            Item::Kid { agent, title, state, text, ts } => {
+                let c = color_of(colors, agent);
+                blank(&mut d);
+                let mut head = badge(agent, c, *ts);
+                head.splice(1..1, kid_tag(agent, state));
+                d.rows.push(Row::plain(Line::from(head)));
+                d.rows.extend(kid_rows(title, state, text, w, &[Span::styled("│ ", Style::default().fg(c))]));
+                last_agent = None;
+            }
             Item::Shell { command, output, code, ts, dir } => {
                 blank(&mut d);
                 d.rows.extend(shell_rows(command, output, *code, *ts, dir.as_deref(), w));
@@ -1239,6 +1249,40 @@ fn minute_divider(w: usize, border: Style, at: &str) -> Row {
     Row::plain(Line::from(vec![Span::styled(format!("├{}", "─".repeat(fill)), border), Span::styled(format!(" {at} "), theme::muted()), Span::styled("─┤", border)]))
 }
 
+/// The name of a sub-thread's end whose agent is unknown.
+const KID: &str = "subthread";
+
+/// The tag next to AGENT of a sub-thread's end: ` subthread` (0 for agent KID), its state if not
+/// done.
+fn kid_tag(agent: &str, state: &str) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    if agent != KID {
+        out.push(Span::styled(" subthread", theme::muted()));
+    }
+    if state != "done" {
+        out.push(Span::styled(format!(" · {state}"), Style::default().fg(theme::pal().danger)));
+    }
+    out
+}
+
+/// The body of a sub-thread's end at WIDTH: its task (1 muted row), its result (markdown) or why
+/// it ended.
+fn kid_rows(title: &str, state: &str, text: &str, width: usize, bar: &[Span<'static>]) -> Vec<Row> {
+    let mut rows = Vec::new();
+    if !title.trim().is_empty() {
+        let max = width.saturating_sub(bar.iter().map(|s| s.content.width()).sum::<usize>() + 4).max(1);
+        let task = if title.chars().count() > max { title.chars().take(max - 1).collect::<String>() + "…" } else { title.to_string() };
+        rows.extend(render::plain(&format!("↳ “{task}”"), width, theme::muted().add_modifier(Modifier::ITALIC), bar));
+        rows.push(Row::plain(Line::from(bar.to_vec())));
+    }
+    if state == "done" {
+        rows.extend(memo::markdown(text.trim_end(), width, bar));
+    } else {
+        rows.extend(render::plain(text.trim_end(), width, Style::default().fg(theme::pal().danger), bar));
+    }
+    rows
+}
+
 /// Top border of width W: `┌─ ` LEFT ` ─────── ` RIGHT ` ─┐`. Returns the row and the
 /// column after LEFT (where a wave goes).
 fn top_border(w: usize, border: Style, left: Vec<Span<'static>>, wave: bool, right: &str) -> (Row, u16) {
@@ -1449,6 +1493,22 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                     _ => {}
                 }
             }
+            Item::Kid { agent, title, state, text, ts } => {
+                // a box of its own (0 merge with the agent's own messages)
+                close(&mut d, &mut cur);
+                gap(&mut d);
+                let c = color_of(colors, agent);
+                let border = Style::default().fg(theme::desaturate(c, 0.4));
+                let mut name = vec![Span::styled(agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD))];
+                name.extend(kid_tag(agent, state));
+                let (top, _) = top_border(w, border, name, false, &clock(*ts));
+                cur = Some(Open { start: d.rows.len(), border, agent: None, minute: String::new() });
+                d.rows.push(top);
+                let bar = [Span::styled("│ ", border)];
+                d.rows.push(Row::plain(Line::from(bar.to_vec())));
+                d.rows.extend(kid_rows(title, state, text, inner, &bar));
+                close(&mut d, &mut cur);
+            }
             Item::Shell { command, output, code, ts, dir } => {
                 close(&mut d, &mut cur);
                 gap(&mut d);
@@ -1536,6 +1596,37 @@ mod tests {
             }
         }
         panic!("0 {at}: {:?}", rows.iter().map(|r| &r.0).collect::<Vec<_>>());
+    }
+
+    /// A running sub-thread (and its held messages): 0 chat rows. Its end: a message of its agent
+    /// tagged `subthread`, with its result (a box of its own, 0 merge with the agent's messages).
+    #[test]
+    fn a_sub_thread_shows_in_the_chat_only_at_its_end_as_its_agents_message() {
+        let mut t = Thread::default();
+        let sub = |agent: Option<&str>, state: &str, text: &str| Event { ts: 1_795_090_200_000, agent: agent.map(String::from), kind: Kind::SubThread { id: "k1".into(), title: "commit the changes".into(), state: state.into(), text: text.into() } };
+        t.push(&sub(None, "running", "@ada · commit the changes"));
+        t.push(&sub(None, "held", "messages wait"));
+        assert!(t.items.is_empty(), "{:?}", t.items);
+
+        t.push(&Event { ts: 1_795_090_200_000, agent: Some("ada".into()), kind: Kind::Text { text: "own message".into() } });
+        t.push(&sub(Some("ada"), "done", "## Result\n3 commits made"));
+        t.push(&sub(None, "failed", "its host ended before its agents were done"));
+        assert!(matches!(&t.items[1], Item::Kid { agent, state, .. } if agent == "ada" && state == "done"));
+        assert!(matches!(&t.items[2], Item::Kid { agent, .. } if agent == KID));
+
+        let none = HashSet::new();
+        let fold = Fold { runs: &none, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &none, all_thoughts: false };
+        for look in [Look::Bubbles, Look::Lines] {
+            let s = text(&draw(&t, look, 70, &Colors::new(), &[], &fold, &Picker::default()));
+            let rows: Vec<&str> = s.lines().collect();
+            let head = rows.iter().position(|r| r.contains("ada") && r.contains(" subthread") && !r.contains("failed")).unwrap_or_else(|| panic!("{look:?}\n{s}"));
+            assert!(rows[head + 1..].iter().any(|r| r.contains("↳ “commit the changes”")) && rows[head + 1..].iter().any(|r| r.contains("3 commits made")), "{look:?}\n{s}");
+            assert!(rows.iter().any(|r| r.contains("subthread") && r.contains("· failed") && !r.contains("subthread subthread")) && s.contains("host ended"), "{look:?}\n{s}");
+            assert!(!s.contains("started") && !s.contains("messages wait"), "{look:?}\n{s}");
+            if look == Look::Bubbles {
+                assert_eq!(rows.iter().filter(|r| r.starts_with('┌')).count(), 3, "own box per end: {s}");
+            }
+        }
     }
 
     #[test]

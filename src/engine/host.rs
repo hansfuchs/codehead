@@ -116,6 +116,9 @@ struct Kid {
 /// turn within it).
 const KID_DONE: Duration = Duration::from_secs(3);
 
+/// A sub-thread's result to its thread: at most this many chars.
+const KID_TEXT: usize = 20_000;
+
 /// The text an agent gets when its usage window reset.
 pub const RESUME_TEXT: &str = "[codehead: your usage limit window reset. Continue the task where you stopped.]";
 
@@ -517,8 +520,9 @@ impl Host {
                 self.log(None, Kind::SubThread { id, title: s("title"), state: "running".into(), text: s("text") });
                 Ok(json!({}))
             }
-            // a sub-thread ended (its host reports, or the view found it gone): its line, the
-            // waiting messages go once 0 sub-thread runs. An id not running: 0 effect.
+            // a sub-thread ended (its host reports, or the view found it gone): its result as a
+            // message of AGENT (its agent; 0: unknown), the waiting messages go once 0 sub-thread
+            // runs. An id not running: 0 effect.
             "sub_done" => {
                 let id = s("id");
                 let t = self.thread()?;
@@ -528,7 +532,8 @@ impl Host {
                 let k = id.clone();
                 let t = store::update(&self.id, move |t| t.kids.retain(|x| *x != k))?;
                 let state = if s("state").is_empty() { "done".to_string() } else { s("state") };
-                self.log(None, Kind::SubThread { id, title: s("title"), state, text: s("text") });
+                let agent = s("agent");
+                self.log(Some(&agent).filter(|a| !a.is_empty()).map(String::as_str), Kind::SubThread { id, title: s("title"), state, text: s("text") });
                 if t.kids.is_empty() {
                     let held = std::mem::take(&mut self.held);
                     self.later.extend(held);
@@ -883,16 +888,19 @@ impl Host {
             return;
         }
         let events = store::events_tail(&self.id, 1 << 20);
+        // its result: the last message of its agents (the agent that wrote it: the message's)
         let last = events.iter().rev().find_map(|e| match &e.kind {
-            Kind::Text { text } if !text.trim().is_empty() => Some(text.trim().to_string()),
+            Kind::Text { text } if !text.trim().is_empty() => Some((e.agent.clone().unwrap_or_default(), text.trim().to_string())),
             _ => None,
         });
-        let (state, text) = match &self.kid.failed {
-            Some(e) => ("failed", e.clone()),
-            None => ("done", last.unwrap_or_else(|| "0 text from its agents".into())),
+        let lead = t.agents.first().cloned().unwrap_or_default();
+        let (state, agent, text) = match (&self.kid.failed, last) {
+            (Some(e), _) => ("failed", lead, e.clone()),
+            (None, Some((agent, text))) => ("done", agent, text),
+            (None, None) => ("done", lead, "0 text from its agents".into()),
         };
-        let text: String = text.chars().take(600).collect();
-        let _ = super::client::call(&main, &json!({"op": "sub_done", "id": self.id, "title": t.title, "state": state, "text": text}));
+        let text: String = text.chars().take(KID_TEXT).collect();
+        let _ = super::client::call(&main, &json!({"op": "sub_done", "id": self.id, "title": t.title, "agent": agent, "state": state, "text": text}));
         let _ = store::delete(&self.id);
         self.stopping = true;
     }
@@ -908,15 +916,15 @@ impl Host {
         let Ok(t) = self.thread() else { return };
         for id in t.kids {
             let why = match store::load(&id) {
-                None => Some((String::new(), "the sub-thread is gone (deleted before its end)")),
+                None => Some((String::new(), String::new(), "the sub-thread is gone (deleted before its end)")),
                 Some(k) if !super::client::alive(&id) && super::now_ms().saturating_sub(k.created) > KID_LOST => {
                     let _ = store::delete(&id);
-                    Some((k.title, "its host ended before its agents were done"))
+                    Some((k.title, k.agents.first().cloned().unwrap_or_default(), "its host ended before its agents were done"))
                 }
                 Some(_) => None,
             };
-            if let Some((title, text)) = why {
-                let _ = self.cmd(&json!({"op": "sub_done", "id": id, "title": title, "state": "failed", "text": text}));
+            if let Some((title, agent, text)) = why {
+                let _ = self.cmd(&json!({"op": "sub_done", "id": id, "title": title, "agent": agent, "state": "failed", "text": text}));
             }
         }
         self.deliver_later();
@@ -1541,7 +1549,9 @@ mod tests {
         h.cmd(&json!({"op": "sub_done", "id": "other", "state": "done", "text": "x"})).unwrap();
         assert_eq!(h.held.len(), 2);
 
-        h.cmd(&json!({"op": "sub_done", "id": "kid1", "title": "commit it", "state": "done", "text": "3 commits"})).unwrap();
+        h.cmd(&json!({"op": "sub_done", "id": "kid1", "title": "commit it", "agent": "ada", "state": "done", "text": "3 commits"})).unwrap();
+        // its end: a message of its agent
+        assert_eq!(store::events(&t.id).last().and_then(|e| e.agent.clone()).as_deref(), Some("ada"));
         assert!(store::load(&t.id).unwrap().kids.is_empty() && h.held.is_empty());
         assert_eq!(h.later, [("ada".to_string(), "next task".to_string()), ("ada".to_string(), "and more".to_string())]);
         let subs: Vec<(String, String)> = store::events(&t.id).into_iter().filter_map(|e| match e.kind { Kind::SubThread { state, text, .. } => Some((state, text)), _ => None }).collect();

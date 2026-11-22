@@ -1038,7 +1038,7 @@ impl View {
         self.host("sub_start", json!({"op": "sub_start", "id": t.id, "title": title, "text": format!("{who} · {first}")}));
         self.subthreads.started(crate::subthreads::Kid { id: t.id.clone(), title: title.clone(), agents: agents.clone(), start: t.created, busy: false, asking: false, steps: Vec::new() });
         let context = format!(
-            "[codehead: you run in a sub-thread of the thread “{}”: the same checkout ({}), 0 history of it. The message below is your whole task. Do it, then end with 1 short line: the result. The thread waits for you; it gets that line.]",
+            "[codehead: you run in a sub-thread of the thread “{}”: the same checkout ({}), 0 history of it. The message below is your whole task. Do it, then end with your result as your last message: the thread waits for you; it gets that message.]",
             main.title.lines().next().unwrap_or_default(),
             main.work_dir().display()
         );
@@ -1054,9 +1054,9 @@ impl View {
 
     /// Stop sub-thread KID: its host ends, its end reported as stopped, the thread deleted.
     fn stop_sub(&mut self, kid: &str) {
-        let title = self.subthreads.kids.iter().find(|k| k.id == kid).map(|k| k.title.clone()).unwrap_or_default();
+        let (title, agent) = self.subthreads.kids.iter().find(|k| k.id == kid).map(|k| (k.title.clone(), k.agents.first().cloned().unwrap_or_default())).unwrap_or_default();
         let _ = crate::engine::client::send_within(kid, &json!({"op": "stop"}), Duration::from_secs(2));
-        self.host("sub_done", json!({"op": "sub_done", "id": kid, "title": title, "state": "stopped", "text": "stopped by the owner"}));
+        self.host("sub_done", json!({"op": "sub_done", "id": kid, "title": title, "agent": agent, "state": "stopped", "text": "stopped by the owner"}));
         let _ = store::delete(kid);
         self.subthreads.gone(kid);
         self.toast(format!("sub-thread “{title}” stopped"));
