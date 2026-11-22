@@ -24,6 +24,8 @@ pub struct Card {
     pub branch: String,
     /// Main checkout of the thread's git repo (repo filter of the threads tab).
     pub repo: Option<PathBuf>,
+    /// The prompt holds an unsent message (the thread view's draft on disk).
+    pub draft: bool,
 }
 
 impl Card {
@@ -83,6 +85,17 @@ fn mark_seen_at(id: &str, force: bool) {
     write_seen(&seen);
 }
 
+/// Thread ID has an unsent message: its prompt draft (`prompt.json`, written by the thread view
+/// after each key, gone once empty) has text, or a send the host has not taken yet.
+pub fn has_draft(id: &str) -> bool {
+    let Ok(raw) = std::fs::read_to_string(crate::engine::store::thread_dir(id).join("prompt.json")) else { return false };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { return false };
+
+    let text = v["text"].as_str().is_some_and(|t| !t.trim().is_empty());
+    let unsent = v["unsent"].as_array().is_some_and(|u| !u.is_empty());
+    text || unsent
+}
+
 /// Time of the last agent event of thread ID (its text, error, question), unix ms. Reads
 /// only the tail of the log.
 fn last_item(id: &str) -> Option<u64> {
@@ -127,6 +140,7 @@ pub fn load() -> Vec<Card> {
                 activity: last.unwrap_or(0).max(t.updated * 1000),
                 dir,
                 branch: t.branch.clone().unwrap_or_default(),
+                draft: has_draft(&t.id),
                 id: t.id,
                 title: t.title,
                 state: t.state,
@@ -232,6 +246,14 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
         let dot = ratatui::layout::Rect { x: r.right().saturating_sub(3), y: r.y, width: 1, height: 1 };
         Paragraph::new(Span::styled("●", Style::default().fg(theme::pal().accent).add_modifier(Modifier::BOLD))).render(dot, buf);
     }
+
+    // an unsent message in the prompt: on the bottom border, right
+    let tag = " ✎ unsent ";
+    if c.draft && r.width >= tag.chars().count() as u16 + 8 {
+        let w = tag.chars().count() as u16;
+        let at = ratatui::layout::Rect { x: r.right() - w - 3, y: r.bottom() - 1, width: w, height: 1 };
+        Paragraph::new(Span::styled(tag, Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD))).render(at, buf);
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +272,31 @@ mod tests {
         draw_card(&mut buf, area, &c, false, false, false, 0);
         let text: String = (0..CARD_H).flat_map(|y| (0..40).map(move |x| (x, y))).map(|p| buf[p].symbol().to_string()).collect();
         assert!(text.contains("? blocked") && !text.contains("working"), "{text}");
+    }
+
+    /// An unsent message in the thread's prompt: the card says so (bottom border).
+    #[test]
+    fn a_card_with_an_unsent_prompt_shows_it() {
+        let id = "drafttest-0000";
+        let dir = crate::engine::store::thread_dir(id);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!has_draft(id));
+
+        crate::view::save_prompt_draft(id, "   ");
+        assert!(!has_draft(id), "only spaces: 0 message");
+
+        crate::view::save_prompt_draft(id, "fix the deploy");
+        assert!(has_draft(id));
+
+        let c = Card { draft: true, live: 1, ..card(id, "open", 0) };
+        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, CARD_H));
+        let area = buf.area;
+        draw_card(&mut buf, area, &c, false, false, false, 0);
+        let bottom: String = (0..40).map(|x| buf[(x, CARD_H - 1)].symbol().to_string()).collect();
+        assert!(bottom.contains("✎ unsent"), "{bottom}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
