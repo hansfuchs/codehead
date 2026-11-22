@@ -66,6 +66,7 @@ mod skills;
 mod sprites;
 mod stream;
 mod subagents;
+mod subthreads;
 mod dissolve;
 mod styles;
 mod tabgroup;

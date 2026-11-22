@@ -40,6 +40,13 @@ pub struct Thread {
     /// The thread this one continues (`> handoff`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// A sub-thread (`>sub`): the thread it runs for. 0 history of it, same checkout; it reports
+    /// to it and goes when its agents are done. Thread lists leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub of: Option<String>,
+    /// The running sub-threads of this thread (ids): its agents' messages wait while any runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kids: Vec<String>,
     /// `open` or `done`.
     #[serde(default = "open")]
     pub state: String,
@@ -190,8 +197,10 @@ pub fn update(id: &str, f: impl FnOnce(&mut Thread)) -> Result<Thread, String> {
 /// The thread updated last, by its thread.json's time (1 parse, not 1 per thread).
 pub fn latest() -> Option<Thread> {
     let rd = std::fs::read_dir(threads_dir()).ok()?;
-    let newest = rd.flatten().map(|e| e.path().join("thread.json")).filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p))).max_by_key(|(t, _)| *t)?;
-    serde_json::from_slice(&std::fs::read(newest.1).ok()?).ok()
+    let mut by_time: Vec<(std::time::SystemTime, PathBuf)> = rd.flatten().map(|e| e.path().join("thread.json")).filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p))).collect();
+    by_time.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+    // the newest that is no sub-thread (a running sub-thread writes its thread.json often)
+    by_time.iter().filter_map(|(_, p)| serde_json::from_slice::<Thread>(&std::fs::read(p).ok()?).ok()).find(|t| t.of.is_none())
 }
 
 pub fn all() -> Vec<Thread> {
@@ -199,6 +208,8 @@ pub fn all() -> Vec<Thread> {
     let mut v: Vec<Thread> = rd
         .flatten()
         .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path().join("thread.json")).ok()?).ok())
+        // sub-threads: shown in the thread they run for, 0 row of their own
+        .filter(|t: &Thread| t.of.is_none())
         .collect();
     v.sort_by_key(|t: &Thread| std::cmp::Reverse(t.updated));
     v
@@ -330,6 +341,9 @@ pub enum Kind {
     SubInfo { id: String, transcript: String, task: String },
     /// Subagent ID ended: STATE `done`, `failed`, `stopped` or `lost`; RESULT its report (or why).
     SubEnd { id: String, state: String, result: String },
+    /// A sub-thread of this thread (`>sub`): STATE `running` (started, TEXT: its task), `done` /
+    /// `failed` (TEXT: its result), `held` (a message waits for the sub-threads to end).
+    SubThread { id: String, title: String, state: String, text: String },
 }
 
 impl Event {

@@ -59,8 +59,9 @@ const SKILLS: usize = 2;
 const HANDOFF: usize = 3;
 const RELOAD: usize = 4;
 const FLOW: usize = 5;
+const SUB: usize = 6;
 /// 1st level: name, what it does.
-const COMMANDS: [(&str, &str); 6] = [("mention", "path · name · url"), ("branch", "copy of this thread"), ("skills", "of the harnesses"), ("handoff", "new thread from a summary of this one"), ("reload", "new harness sessions: MCP servers, settings"), ("flow", "set / change the thread's flow")];
+const COMMANDS: [(&str, &str); 7] = [("mention", "path · name · url"), ("branch", "copy of this thread"), ("skills", "of the harnesses"), ("handoff", "new thread from a summary of this one"), ("reload", "new harness sessions: MCP servers, settings"), ("flow", "set / change the thread's flow"), ("sub", "sub-thread: 0 history, same checkout, reports here")];
 /// 2nd level of `mention`: kind, name, what goes into the text.
 const KINDS: [(Kind, &str, &str); 4] =
     [(Kind::Files, "files", "relative path"), (Kind::Notes, "notes", "path"), (Kind::Threads, "threads", "name"), (Kind::Artifacts, "artifacts", "url")];
@@ -474,7 +475,7 @@ impl Command {
     /// COMMANDS / KINDS. `branch`: only with a thread.
     fn menu(&self, level: Level, q: &str) -> Vec<usize> {
         let names: Vec<(usize, &str)> = match level {
-            Level::Commands => COMMANDS.iter().enumerate().filter(|(i, _)| !matches!(*i, BRANCH | HANDOFF | RELOAD | FLOW) || self.can_branch).map(|(i, c)| (i, c.0)).collect(),
+            Level::Commands => COMMANDS.iter().enumerate().filter(|(i, _)| !matches!(*i, BRANCH | HANDOFF | RELOAD | FLOW | SUB) || self.can_branch).map(|(i, c)| (i, c.0)).collect(),
             _ => KINDS.iter().enumerate().map(|(i, k)| (i, k.1)).collect(),
         };
         let q = q.to_lowercase();
@@ -626,6 +627,13 @@ impl Command {
                         ta.replace_to_cursor(at, "");
                         self.reset();
                         self.action = Some(Action::Flow);
+                        return;
+                    }
+                    SUB => {
+                        // `>sub ` stays in the text: the task follows (@agent, #shortcut, any
+                        // text); the send starts the sub-thread
+                        ta.replace_to_cursor(at, ">sub ");
+                        self.reset();
                         return;
                     }
                     SKILLS => {
@@ -816,7 +824,7 @@ impl Command {
                     cur_y = row.y;
                 }
                 let (text, detail, submenu) = match level {
-                    Level::Commands => (COMMANDS[menu[idx]].0.to_string(), COMMANDS[menu[idx]].1.to_string(), !matches!(menu[idx], BRANCH | HANDOFF | RELOAD | FLOW)),
+                    Level::Commands => (COMMANDS[menu[idx]].0.to_string(), COMMANDS[menu[idx]].1.to_string(), !matches!(menu[idx], BRANCH | HANDOFF | RELOAD | FLOW | SUB)),
                     Level::Kinds => (KINDS[menu[idx]].1.to_string(), KINDS[menu[idx]].2.to_string(), true),
                     Level::Items(_) => {
                         let it = &self.items[self.matched.1[idx]];
@@ -997,7 +1005,12 @@ mod tests {
         // 0 thread (task screen): 0 branch
         assert_eq!(c.menu(Level::Commands, ""), [MENTION, SKILLS]);
         c.can_branch = true;
-        assert_eq!(c.menu(Level::Commands, ""), [MENTION, BRANCH, SKILLS, HANDOFF, RELOAD, FLOW]);
+        assert_eq!(c.menu(Level::Commands, ""), [MENTION, BRANCH, SKILLS, HANDOFF, RELOAD, FLOW, SUB]);
+        // `>su` enter: `>sub ` stays, 0 action (the send starts the sub-thread)
+        ta.set_text(">su");
+        ta.move_end();
+        assert!(key(&mut c, &mut ta, KeyCode::Enter));
+        assert_eq!((ta.text().as_str(), c.action.take()), (">sub ", None));
         // `>rel` enter: the reload action
         ta.set_text(">rel");
         ta.move_end();

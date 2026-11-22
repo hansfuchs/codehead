@@ -261,6 +261,8 @@ struct View {
     // chrome
     monitors: crate::monitors::Monitors,
     subagents: crate::subagents::Subagents,
+    /// The running sub-threads of this thread (`>sub`): their row, their box.
+    subthreads: crate::subthreads::SubThreads,
     /// The flow row + its box (ctrl+f, `> flow`).
     flowbar: crate::flowbar::FlowBar,
     menu: Option<crate::menu::Menu>,
@@ -397,6 +399,7 @@ impl View {
             // tests: 0 shared state between parallel views
             monitors: crate::monitors::Monitors::new(id),
             subagents: Default::default(),
+            subthreads: Default::default(),
             flowbar: Default::default(),
             menu: None,
             cost: None,
@@ -898,11 +901,23 @@ impl View {
         if !files.is_empty() {
             text = format!("{text}\n\n{}\n{}", stream::ATTACHMENTS, files.join("\n"));
         }
+        // `>sub task`: a sub-thread does the task, this thread waits
+        if let Some(task) = crate::subthreads::task_of(&text) {
+            if task.is_empty() {
+                self.toast(">sub: the task goes after it (@agent, #shortcut, any text)".to_string());
+                return;
+            }
+            self.attachments.clear();
+            self.input.set_text("");
+            self.hist_at = None;
+            self.back = 0;
+            return self.start_sub(task);
+        }
         self.attachments.clear();
         self.input.set_text("");
         self.hist_at = None;
         self.back = 0;
-        let replacing = self.replace.take().filter(|(new, old)| text.contains(&format!("@{new}{}", crate::mention::replaces_note(old))));
+        let replacing =self.replace.take().filter(|(new, old)| text.contains(&format!("@{new}{}", crate::mention::replaces_note(old))));
         // the `(replaces @old)` note: for the owner only
         let text = crate::mention::strip_replaces(&text);
         if let Some((new, old)) = replacing {
@@ -936,6 +951,57 @@ impl View {
         } else {
             self.host("send", json!({"op": "prompt", "text": text, "context": context}));
         }
+    }
+
+    /// `>sub TASK`: a new thread for TASK in this thread's checkout (same dir, worktree, branch,
+    /// port), 0 history of this one, TASK's @agents (else the agents of the last message). This
+    /// thread's host holds its agents' messages until the sub-thread reports its end.
+    fn start_sub(&mut self, task: String) {
+        let Some(main) = store::load(&self.id) else { return };
+        let names: Vec<String> = self.names.iter().map(|n| n.0.clone()).chain(self.members.iter().cloned()).collect();
+        let named = crate::engine::host::mentions(&task, &names);
+        let agents = if named.is_empty() { self.default_to() } else { named };
+        if agents.is_empty() {
+            self.toast(">sub: 0 agent · @name one".to_string());
+            return;
+        }
+        let first: String = task.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string();
+        let title: String = first.chars().take(60).collect();
+        let mut t = store::Thread::new(&title, &task, Path::new(&main.dir), agents.clone());
+        t.worktree = main.worktree.clone();
+        t.branch = main.branch.clone();
+        t.port = main.port;
+        t.of = Some(main.id.clone());
+        if let Err(e) = t.save() {
+            self.toast(format!(">sub: {e}"));
+            return;
+        }
+        let who = format!("@{}", agents.join(" @"));
+        self.host("sub_start", json!({"op": "sub_start", "id": t.id, "title": title, "text": format!("{who} · {first}")}));
+        self.subthreads.started(crate::subthreads::Kid { id: t.id.clone(), title: title.clone(), agents: agents.clone(), start: t.created, busy: false, asking: false, steps: Vec::new() });
+        let context = format!(
+            "[codehead: you run in a sub-thread of the thread “{}”: the same checkout ({}), 0 history of it. The message below is your whole task. Do it, then end with 1 short line: the result. The thread waits for you; it gets that line.]",
+            main.title.lines().next().unwrap_or_default(),
+            main.work_dir().display()
+        );
+        // its host starts in the background: the view never waits for a harness (tests: 0 host)
+        let id = t.id.clone();
+        if !cfg!(test) {
+            std::thread::spawn(move || {
+                let _ = crate::engine::client::call(&id, &json!({"op": "prompt", "to": agents, "text": task, "context": context}));
+            });
+        }
+        self.toast(format!("sub-thread “{title}” started · {who}"));
+    }
+
+    /// Stop sub-thread KID: its host ends, its end reported as stopped, the thread deleted.
+    fn stop_sub(&mut self, kid: &str) {
+        let title = self.subthreads.kids.iter().find(|k| k.id == kid).map(|k| k.title.clone()).unwrap_or_default();
+        let _ = crate::engine::client::send_within(kid, &json!({"op": "stop"}), Duration::from_secs(2));
+        self.host("sub_done", json!({"op": "sub_done", "id": kid, "title": title, "state": "stopped", "text": "stopped by the owner"}));
+        let _ = store::delete(kid);
+        self.subthreads.gone(kid);
+        self.toast(format!("sub-thread “{title}” stopped"));
     }
 
     /// Lost subagent I: its master picks up its work (its transcript, its task), as a message of
@@ -1035,7 +1101,7 @@ impl View {
     /// Something on screen moves: an agent at work (wave), monitors, the threads row, a toast.
     fn animating(&self) -> bool {
         // the avatars of the agents box move
-        !self.members.is_empty() || !self.thread.busy.is_empty() || self.monitors.active() || crate::subagents::Subagents::active(&self.thread.subs) || self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(4))
+        !self.members.is_empty() || !self.thread.busy.is_empty() || self.monitors.active() || crate::subagents::Subagents::active(&self.thread.subs) || self.subthreads.active() || self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(4))
     }
 
     /// Fire an interrupt armed by a single Esc once DOUBLE_ESC ends. True: state changed.
@@ -1271,6 +1337,20 @@ impl View {
             self.flow_act(act);
             self.dirty = true;
             return edit;
+        }
+        // the open sub-threads box: its keys (d: stop the selected one, enter: open it)
+        if let Some(act) = self.subthreads.key(k) {
+            match act {
+                crate::subthreads::Act::Stop(kid) => self.stop_sub(&kid),
+                crate::subthreads::Act::Open(kid) => {
+                    if let Some(t) = store::load(&kid) {
+                        self.exit = Exit::Open { id: t.id.clone(), dir: t.work_dir(), title: t.title.clone(), note: "sub-thread · esc esc: back to its thread".into() };
+                        return true;
+                    }
+                }
+                crate::subthreads::Act::None => {}
+            }
+            return false;
         }
         // the open subagents box: its keys (d: stop the selected one)
         if let Some(act) = self.subagents.key(k, &self.thread.subs) {
@@ -2104,6 +2184,7 @@ impl View {
             return;
         }
         if self.flowbar.mouse(m)
+            || self.subthreads.mouse(m)
             || self.subagents.mouse(m)
             || self.monitors.mouse(m)
             || self.mention.mouse(m, &mut self.input, &self.roster)
@@ -2635,7 +2716,10 @@ impl View {
         // the subagents row (its open box) above the monitors row
         let sub_h = self.subagents.rows(&self.thread.subs, area.width, area.height / 3);
         let sub = Rect { y: mon.y.saturating_sub(sub_h), height: sub_h, ..area };
-        let st = Rect { x: area.x, y: area.y, width: area.width, height: sub.y.saturating_sub(area.y) };
+        // the sub-threads row (its open box) above the subagents row
+        let kid_h = self.subthreads.rows(area.width, area.height / 3);
+        let kid = Rect { y: sub.y.saturating_sub(kid_h), height: kid_h, ..area };
+        let st = Rect { x: area.x, y: area.y, width: area.width, height: kid.y.saturating_sub(area.y) };
         self.stream_rect = st;
         self.view_rect = st;
 
@@ -2710,6 +2794,10 @@ impl View {
         if sub_h > 0 {
             let tick = self.tick();
             self.subagents.render(f, sub, tick, &self.thread.subs);
+        }
+        if kid_h > 0 {
+            let tick = self.tick();
+            self.subthreads.render(f, kid, tick);
         }
 
         // the view bar on row 0 (views of the thread, the thread title); the title row above the
@@ -3147,6 +3235,15 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     run_with(term, id, cwd, title, note, first, None).map(|e| e.unwrap_or(Exit::Back))
 }
 
+/// EXIT of a sub-thread's view (MAIN: the thread it runs for): back (esc esc) goes to MAIN, not
+/// to the start screen.
+fn to_main(exit: Exit, main: Option<&str>) -> Exit {
+    match (exit, main.and_then(store::load)) {
+        (Exit::Back, Some(t)) => Exit::Open { id: t.id.clone(), dir: t.work_dir(), title: t.title.clone(), note: String::new() },
+        (e, _) => e,
+    }
+}
+
 /// What a hook of `run_with` sees each loop: the open pane, the menu open.
 pub struct Peek {
     pub pane: Pane,
@@ -3156,9 +3253,11 @@ pub struct Peek {
 /// `run` with HOOK: called each loop (the setup tutorial's coach watches the view); true from
 /// it: the view ends at once, Ok(None) (the tutorial lays its screen out again on a resize).
 pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str, note: Option<&str>, _first: &str, mut hook: Option<&mut dyn FnMut(&Peek) -> bool>) -> Result<Option<Exit>, String> {
-    if store::load(id).is_none() {
+    let Some(me) = store::load(id) else {
         return Err(format!("no thread {id}"));
-    }
+    };
+    // a sub-thread: esc esc and its end go back to the thread it runs for
+    let of = me.of;
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
     let _sub = subscribe(id, tx.clone());
     crate::engine::trace("view new …");
@@ -3249,7 +3348,7 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
             v.save_prompt();
             if done {
                 crate::nav::mark_seen_now(id);
-                return Ok(Some(std::mem::replace(&mut v.exit, Exit::Back)));
+                return Ok(Some(to_main(std::mem::replace(&mut v.exit, Exit::Back), of.as_deref())));
             }
         }
         // yazi: full screen, codehead suspended; its pick into the prompt
@@ -3269,9 +3368,16 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
             }
             dirty = true;
         }
+        // a sub-thread that ended while in view (it deletes itself): its thread, the end there
+        if let Some(main) = of.as_deref()
+            && !store::thread_dir(id).join("thread.json").is_file()
+            && let Some(t) = store::load(main)
+        {
+            return Ok(Some(Exit::Open { id: t.id.clone(), dir: t.work_dir(), title: t.title.clone(), note: "the sub-thread ended: its result is in the stream".into() }));
+        }
         if v.handoff_due() {
             crate::nav::mark_seen_now(id);
-            return Ok(Some(std::mem::replace(&mut v.exit, Exit::Back)));
+            return Ok(Some(to_main(std::mem::replace(&mut v.exit, Exit::Back), of.as_deref())));
         }
         let pane = v.pane;
         let _w = crate::engine::watch(move || format!("view: tick {pane:?}"));
@@ -3354,6 +3460,7 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
         }
         dirty |= v.monitors.tick(id);
         dirty |= v.subagents.tick(&v.thread.subs);
+        dirty |= v.subthreads.tick(id);
         if v.flowbar.tick(id, false) {
             v.dirty = true;
             dirty = true;
@@ -3562,6 +3669,43 @@ mod ask_tests {
         let (x, y) = (0..20u16).find_map(|y| (0..60u16).find(|&x| b[(x, y)].symbol() == "@" && b[(x + 1, y)].symbol() == "a").map(|x| (x, y))).expect("0 @ada on screen");
         assert!((x..x + 4).all(|x| b[(x, y)].fg == Color::Rgb(200, 10, 10)));
         assert_ne!(b[(x + 5, y)].fg, Color::Rgb(200, 10, 10));
+    }
+
+    /// `>sub @agent task` + ctrl+enter: a sub-thread in the same checkout, 0 message to this
+    /// thread's agents, its row at once; `>sub` alone: a hint, the text stays.
+    #[test]
+    fn sub_starts_a_sub_thread_of_this_thread() {
+        let mut t = store::Thread::new("main", "task", Path::new("/tmp"), vec!["ada".into(), "bob".into()]);
+        t.worktree = Some("/tmp/wt".into());
+        t.branch = Some("task/x".into());
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(&t.id, Path::new("/tmp"), "main", tx);
+        v.members = vec!["ada".into(), "bob".into()];
+
+        v.input.set_text(">sub");
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(v.ops.borrow().is_empty() && v.input.text() == ">sub", "0 task: 0 sub-thread");
+
+        v.input.set_text(">sub @bob split the diff into commits");
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        let ops = v.ops.borrow().clone();
+        assert_eq!(ops.len(), 1, "only the sub_start to this thread's host: {ops:?}");
+        assert_eq!(ops[0]["op"], "sub_start");
+        let kid = ops[0]["id"].as_str().unwrap().to_string();
+        let k = store::load(&kid).unwrap();
+        assert_eq!((k.of.as_deref(), k.agents.as_slice(), k.worktree.as_deref(), k.branch.as_deref()), (Some(t.id.as_str()), &["bob".to_string()][..], Some("/tmp/wt"), Some("task/x")));
+        assert!(v.input.is_empty());
+        assert!(v.subthreads.active() && v.subthreads.kids[0].title.contains("split the diff"));
+        // the thread lists leave it out
+        assert!(!store::all().iter().any(|x| x.id == kid));
+        // its view: esc esc goes back to this thread, not to the start screen
+        assert!(matches!(to_main(Exit::Back, k.of.as_deref()), Exit::Open { id, .. } if id == t.id));
+        assert!(matches!(to_main(Exit::Back, None), Exit::Back));
+        assert!(matches!(to_main(Exit::Quit, k.of.as_deref()), Exit::Quit));
+        let _ = std::fs::remove_dir_all(store::thread_dir(&kid));
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
     }
 
     #[test]

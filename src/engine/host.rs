@@ -91,7 +91,30 @@ struct Host {
     sub_scan: Instant,
     /// Agents stopped on a usage limit: when each gets `continue` (unix ms; thread.json keeps it).
     resume: HashMap<String, u64>,
+    /// Messages to this thread's agents while a sub-thread of it runs (same checkout): they go
+    /// at its `sub_done`.
+    held: Vec<(String, String)>,
+    /// This thread as a sub-thread: its end.
+    kid: Kid,
+    /// The last look at this thread's running sub-threads (`kids_check`).
+    kids_at: Instant,
 }
+
+/// A sub-thread whose host is down this long after its start: lost.
+const KID_LOST: u64 = 20_000;
+
+/// A sub-thread's run: turns ended, the error that failed it, idle since (its end: idle a while
+/// after 1+ turns).
+#[derive(Default)]
+struct Kid {
+    turns: usize,
+    failed: Option<String>,
+    idle_at: Option<Instant>,
+}
+
+/// A sub-thread idle this long after its last turn: done (an agent's `send` starts the next
+/// turn within it).
+const KID_DONE: Duration = Duration::from_secs(3);
 
 /// The text an agent gets when its usage window reset.
 pub const RESUME_TEXT: &str = "[codehead: your usage limit window reset. Continue the task where you stopped.]";
@@ -238,6 +261,14 @@ impl Host {
         // the worktree setup runs: the message waits for its end
         if self.setup_running {
             self.queue.push((agent.to_string(), text.to_string()));
+            return Ok(());
+        }
+        // a sub-thread works in the same checkout: the message waits for its end (`sub_done`)
+        if self.thread().is_ok_and(|t| !t.kids.is_empty()) {
+            if self.held.is_empty() {
+                self.log(None, Kind::SubThread { id: String::new(), title: String::new(), state: "held".into(), text: "messages wait until the sub-thread ends (same checkout)".into() });
+            }
+            self.held.push((agent.to_string(), text.to_string()));
             return Ok(());
         }
         self.ensure(agent)?;
@@ -456,6 +487,39 @@ impl Host {
                 self.stopping = true;
                 Ok(json!({}))
             }
+            // a sub-thread of this thread started (the view made it): its agents' messages wait
+            "sub_start" => {
+                let id = s("id");
+                if id.is_empty() {
+                    return Err("sub_start: id required".into());
+                }
+                let k = id.clone();
+                store::update(&self.id, move |t| {
+                    if !t.kids.contains(&k) {
+                        t.kids.push(k);
+                    }
+                })?;
+                self.log(None, Kind::SubThread { id, title: s("title"), state: "running".into(), text: s("text") });
+                Ok(json!({}))
+            }
+            // a sub-thread ended (its host reports, or the view found it gone): its line, the
+            // waiting messages go once 0 sub-thread runs. An id not running: 0 effect.
+            "sub_done" => {
+                let id = s("id");
+                let t = self.thread()?;
+                if !t.kids.contains(&id) {
+                    return Ok(json!({}));
+                }
+                let k = id.clone();
+                let t = store::update(&self.id, move |t| t.kids.retain(|x| *x != k))?;
+                let state = if s("state").is_empty() { "done".to_string() } else { s("state") };
+                self.log(None, Kind::SubThread { id, title: s("title"), state, text: s("text") });
+                if t.kids.is_empty() {
+                    let held = std::mem::take(&mut self.held);
+                    self.later.extend(held);
+                }
+                Ok(json!({}))
+            }
             op if op.starts_with("flow_") => self.flow_cmd(op, c),
             op => Err(format!("unknown op {op:?}")),
         }
@@ -509,6 +573,11 @@ impl Host {
                         self.turn_use.remove(&agent);
                         if let Some(l) = self.sessions.get_mut(&agent) {
                             l.busy = false;
+                        }
+                        // a sub-thread: its turns count towards its end; an error fails it
+                        self.kid.turns += 1;
+                        if error.is_some() {
+                            self.kid.failed = error.clone();
                         }
                         if let Some(e) = error.as_deref().filter(|e| crate::stream::usage_limit(e)) {
                             pending_resume = Some(e.to_string());
@@ -669,6 +738,14 @@ impl Host {
         self.release_queue(note);
     }
 
+    /// A message to AGENT did not go (its harness did not start, …): the error in the log; a
+    /// sub-thread fails with it (its end comes, 0 turn ever will).
+    fn undelivered(&mut self, agent: &str, e: String) {
+        self.kid.failed = Some(e.clone());
+        self.kid.turns += 1;
+        self.log(Some(agent), Kind::Error { message: e });
+    }
+
     /// The waiting messages go out, each with NOTE on top.
     fn release_queue(&mut self, note: Option<&str>) {
         for (agent, text) in std::mem::take(&mut self.queue) {
@@ -677,7 +754,7 @@ impl Host {
                 None => text,
             };
             if let Err(e) = self.deliver(&agent, &text) {
-                self.log(Some(&agent), Kind::Error { message: e });
+                self.undelivered(&agent, e);
             }
         }
     }
@@ -686,7 +763,7 @@ impl Host {
     fn deliver_later(&mut self) {
         for (agent, text) in std::mem::take(&mut self.later) {
             if let Err(e) = self.deliver(&agent, &text) {
-                self.log(Some(&agent), Kind::Error { message: e });
+                self.undelivered(&agent, e);
             }
         }
     }
@@ -761,6 +838,66 @@ impl Host {
 
     /// A flow line in the log. Steps and waits name their flow after the mark (`▶ chore · step
     /// 1/3 implement · @ADA`): the line stands alone in the stream.
+    /// A sub-thread whose agents are done (1+ turns, 0 busy, 0 waiting message or ask, idle for
+    /// KID_DONE): its result (the last agent text) to the thread it runs for, then it goes (thread
+    /// deleted, host ends).
+    fn kid_check(&mut self) {
+        let Ok(t) = self.thread() else { return };
+        let Some(main) = t.of.clone() else { return };
+        let idle = self.kid.turns > 0 && !self.sessions.values().any(|l| l.busy) && self.later.is_empty() && self.queue.is_empty() && self.asks.is_empty() && !self.subagents.any() && !self.setup_running;
+        if !idle {
+            self.kid.idle_at = None;
+            return;
+        }
+        let since = *self.kid.idle_at.get_or_insert_with(Instant::now);
+        if since.elapsed() < KID_DONE {
+            return;
+        }
+        let events = store::events_tail(&self.id, 1 << 20);
+        let last = events.iter().rev().find_map(|e| match &e.kind {
+            Kind::Text { text } if !text.trim().is_empty() => Some(text.trim().to_string()),
+            _ => None,
+        });
+        let (state, text) = match &self.kid.failed {
+            Some(e) => ("failed", e.clone()),
+            None => ("done", last.unwrap_or_else(|| "0 text from its agents".into())),
+        };
+        let text: String = text.chars().take(600).collect();
+        let _ = super::client::call(&main, &json!({"op": "sub_done", "id": self.id, "title": t.title, "state": state, "text": text}));
+        let _ = store::delete(&self.id);
+        self.stopping = true;
+    }
+
+    /// Every 5 s, while sub-threads of this thread run: one that is gone (its thread deleted
+    /// without its end) or whose host is down KID_LOST after its start ends as failed (thread
+    /// deleted); the held messages go once 0 runs. With or without an open view.
+    fn kids_check(&mut self) {
+        if self.kids_at.elapsed() < Duration::from_secs(5) {
+            return;
+        }
+        self.kids_at = Instant::now();
+        let Ok(t) = self.thread() else { return };
+        for id in t.kids {
+            let why = match store::load(&id) {
+                None => Some((String::new(), "the sub-thread is gone (deleted before its end)")),
+                Some(k) if !super::client::alive(&id) && super::now_ms().saturating_sub(k.created) > KID_LOST => {
+                    let _ = store::delete(&id);
+                    Some((k.title, "its host ended before its agents were done"))
+                }
+                Some(_) => None,
+            };
+            if let Some((title, text)) = why {
+                let _ = self.cmd(&json!({"op": "sub_done", "id": id, "title": title, "state": "failed", "text": text}));
+            }
+        }
+        self.deliver_later();
+    }
+
+    /// Sub-threads of this thread run: the host stays (it holds messages, it watches them).
+    fn has_kids(&self) -> bool {
+        self.thread().is_ok_and(|t| !t.kids.is_empty())
+    }
+
     fn flow_log(&self, op: &str, text: String) {
         let name = self.thread().ok().and_then(|t| t.flow).map(|f| f.title).filter(|n| !n.is_empty());
         let text = match (op, name, text.split_once(' ')) {
@@ -1133,7 +1270,7 @@ pub fn run(id: &str) -> ! {
         }
     });
     let exe = super::exe();
-    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
+    let mut h = Host { id: t.id.clone(), exe, sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), held: Vec::new(), kid: Default::default(), kids_at: Instant::now(), resume: t.resume.clone().into_iter().collect() };
     catch_signals();
     h.close_open_turns();
     // subagents the log has open ran in a process that is gone
@@ -1175,9 +1312,11 @@ pub fn run(id: &str) -> ! {
             h.scan_subs();
         }
         h.run_resumes();
+        h.kid_check();
+        h.kids_check();
         let busy = h.sessions.values().any(|l| l.busy);
         // running subagents keep the host (and their harness process) alive; a resume waits too
-        if !busy && !h.subagents.any() && !h.setup_running && h.asks.is_empty() && h.resume.is_empty() && h.last.elapsed() >= IDLE {
+        if !busy && !h.subagents.any() && !h.setup_running && h.asks.is_empty() && h.resume.is_empty() && h.last.elapsed() >= IDLE && !h.has_kids() {
             break;
         }
         // the thread was deleted: end with it
@@ -1200,7 +1339,7 @@ mod tests {
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: HashMap::new() };
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), held: Vec::new(), kid: Default::default(), kids_at: Instant::now(), resume: HashMap::new() };
         let flow = || store::load(&t.id).unwrap().flow.unwrap();
         // set before the 1st message: the step waits for the task
         h.cmd(&json!({"op": "flow_set", "flow": "chore"})).unwrap();
@@ -1242,6 +1381,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
     }
 
+    /// The thread's host watches its sub-threads (0 view needed): one deleted without its end and
+    /// one whose host is down 20 s after its start end as failed; the held messages go.
+    #[test]
+    fn the_host_ends_gone_and_lost_sub_threads() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lost = store::Thread::new("lost one", "x", Path::new("/tmp"), vec!["ada".into()]);
+        lost.created = super::super::now_ms() - 60_000;
+        std::fs::create_dir_all(store::thread_dir(&lost.id)).unwrap();
+        lost.save().unwrap();
+        let mut young = store::Thread::new("young one", "x", Path::new("/tmp"), vec!["ada".into()]);
+        young.of = Some("x".into());
+        std::fs::create_dir_all(store::thread_dir(&young.id)).unwrap();
+        young.save().unwrap();
+        let mut t = store::Thread::new("main", "task", Path::new("/tmp"), vec!["ada".into()]);
+        t.kids = vec!["gone-kid".into(), lost.id.clone(), young.id.clone()];
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (htx, _hrx) = mpsc::channel();
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), held: Vec::new(), kid: Default::default(), kids_at: Instant::now(), resume: HashMap::new() };
+        assert!(h.has_kids());
+
+        // 5 s between looks
+        h.kids_check();
+        assert_eq!(store::load(&t.id).unwrap().kids.len(), 3);
+        h.kids_at = Instant::now() - Duration::from_secs(6);
+        h.kids_check();
+
+        // the gone one and the lost one end; the young one (host not up yet) runs on
+        assert_eq!(store::load(&t.id).unwrap().kids, [young.id.clone()]);
+        assert!(store::load(&lost.id).is_none(), "the lost one's thread goes");
+        let ends: Vec<(String, String)> = store::events(&t.id).into_iter().filter_map(|e| match e.kind { Kind::SubThread { state, text, .. } => Some((state, text)), _ => None }).collect();
+        assert_eq!(ends.len(), 2, "{ends:?}");
+        assert!(ends.iter().all(|(s, _)| s == "failed") && ends[1].1.contains("host ended"), "{ends:?}");
+        for id in [&t.id, &young.id] {
+            let _ = std::fs::remove_dir_all(store::thread_dir(id));
+        }
+    }
+
+    /// A running sub-thread holds the thread's messages (same checkout); its end logs its result
+    /// and lets them go; an end of a sub-thread not running: 0 effect.
+    #[test]
+    fn a_sub_thread_holds_messages_until_it_reports_its_end() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t = store::Thread::new("main", "task", Path::new("/tmp"), vec!["ada".into()]);
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (htx, _hrx) = mpsc::channel();
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), held: Vec::new(), kid: Default::default(), kids_at: Instant::now(), resume: HashMap::new() };
+
+        h.cmd(&json!({"op": "sub_start", "id": "kid1", "title": "commit it", "text": "@ada · commit it"})).unwrap();
+        assert_eq!(store::load(&t.id).unwrap().kids, ["kid1"]);
+
+        // 0 harness spawned: the message waits
+        h.deliver("ada", "next task").unwrap();
+        h.deliver("ada", "and more").unwrap();
+        assert_eq!(h.held.len(), 2);
+
+        // an unknown end: 0 log, still held
+        h.cmd(&json!({"op": "sub_done", "id": "other", "state": "done", "text": "x"})).unwrap();
+        assert_eq!(h.held.len(), 2);
+
+        h.cmd(&json!({"op": "sub_done", "id": "kid1", "title": "commit it", "state": "done", "text": "3 commits"})).unwrap();
+        assert!(store::load(&t.id).unwrap().kids.is_empty() && h.held.is_empty());
+        assert_eq!(h.later, [("ada".to_string(), "next task".to_string()), ("ada".to_string(), "and more".to_string())]);
+        let subs: Vec<(String, String)> = store::events(&t.id).into_iter().filter_map(|e| match e.kind { Kind::SubThread { state, text, .. } => Some((state, text)), _ => None }).collect();
+        assert_eq!(subs.iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["running", "held", "done"], "1 held line, not 1 per message: {subs:?}");
+        assert_eq!(subs[2].1, "3 commits");
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+    }
+
     #[test]
     fn a_prompt_replies_first_and_a_pending_pull_holds_the_first_turn() {
         let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1258,7 +1467,7 @@ mod tests {
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: HashMap::new() };
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), held: Vec::new(), kid: Default::default(), kids_at: Instant::now(), resume: HashMap::new() };
         let (tx, rx) = mpsc::channel();
         h.start_pull(&t, tx);
         // the reply comes before any delivery: the message waits in LATER
@@ -1294,7 +1503,7 @@ mod tests {
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), held: Vec::new(), kid: Default::default(), kids_at: Instant::now(), resume: t.resume.clone().into_iter().collect() };
         let (tx, rx) = mpsc::channel();
         h.start_setup(&t, tx);
         assert!(h.setup_running);
@@ -1319,7 +1528,7 @@ mod tests {
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: t.resume.clone().into_iter().collect() };
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), held: Vec::new(), kid: Default::default(), kids_at: Instant::now(), resume: t.resume.clone().into_iter().collect() };
         h.harness("ada".into(), Out::Event(Kind::Tool { id: "t1".into(), name: "Agent".into(), input: json!({"description": "scan", "run_in_background": true, "prompt": "scan it"}) }));
         h.harness("ada".into(), Out::Event(Kind::ToolResult { id: "t1".into(), ok: true, output: "Async agent launched\nagentId: a1".into() }));
         // the master's turn ended: the subagent keeps the host alive, the master counts as busy
@@ -1344,7 +1553,7 @@ mod tests {
         writeln!(w, "{}", json!({"op": "subscribe"})).unwrap();
         let Ok(Input::Subscribe(s)) = rx.recv() else { panic!("0 subscribe") };
         let (htx, _hrx) = mpsc::channel();
-        let mut h = Host { id: "t".into(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), resume: HashMap::new() };
+        let mut h = Host { id: "t".into(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), held: Vec::new(), kid: Default::default(), kids_at: Instant::now(), resume: HashMap::new() };
         h.live.insert("ada".into(), "Hel".into());
         h.subscribe(s);
         h.harness("ada".into(), Out::Delta("lo".into()));

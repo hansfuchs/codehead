@@ -268,6 +268,16 @@ impl Thread {
                 self.items.push(Item::Note { agent: "flow".into(), text: text.clone(), color });
             }
             Kind::Edits { summary } => self.items.push(Item::Note { agent, text: format!("got the edits since its last turn · {summary}"), color: theme::pal().muted }),
+            Kind::SubThread { title, state, text, .. } => {
+                let one = |s: &str| s.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string();
+                let (line, color) = match state.as_str() {
+                    "running" => (format!("↳ “{title}” started · {}", one(text)), theme::pal().accent),
+                    "done" => (format!("✓ “{title}” done · {}", one(text)), theme::pal().ok),
+                    "held" => (format!("⏸ {text}"), theme::pal().warn),
+                    _ => (format!("✗ “{title}” {state} · {}", one(text)), theme::pal().danger),
+                };
+                self.items.push(Item::Note { agent: "sub-thread".into(), text: line, color });
+            }
             Kind::SubStart { id, parent, description, agent_type, background, prompt } => {
                 if !self.subs.iter().any(|s| &s.id == id) {
                     self.subs.push(Sub { id: id.clone(), master: agent, parent: parent.clone(), description: description.clone(), agent_type: agent_type.clone(), background: *background, prompt: prompt.clone(), start: e.ts, ..Default::default() });
