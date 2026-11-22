@@ -74,7 +74,8 @@ pub enum Outcome {
     /// AGENTS: first starts the thread, the others join it.
     /// CLONE: a home repo to clone first (url, path).
     /// FLOW: the slug of the flow the thread follows, the step it starts at.
-    New { message: String, target: Target, agents: Vec<String>, clone: Option<(String, PathBuf)>, flow: Option<(String, usize)> },
+    /// FLOWS: (agent, flow slug, start step) per agent with a flow.
+    New { message: String, target: Target, agents: Vec<String>, clone: Option<(String, PathBuf)>, flows: Vec<(String, String, usize)> },
     Resume(Box<Worktree>),
 }
 
@@ -149,10 +150,11 @@ struct WhereMenu {
     query: String,
 }
 
-/// The open flow dropdown: the flows (0: 0 flow, I: the I-th flow), the 2nd dropdown of the
-/// flow under the cursor: its steps (the step the thread starts at).
+/// The open flow dropdown of AGENT's card: the flows (0: 0 flow, I: the I-th flow), the 2nd
+/// dropdown of the flow under the cursor: its steps (the step the agent starts at).
 #[derive(Default)]
 struct FlowMenu {
+    agent: String,
     cursor: usize,
     offset: usize,
     /// The steps dropdown: cursor, 1st row in view.
@@ -211,8 +213,6 @@ enum Field {
     Where,
     /// Checkboxes below the where row: checkout, stash.
     Opts,
-    /// The flow of the new thread (←→: the flows).
-    Flow,
     Agents,
     Notes,
     Prompt,
@@ -555,8 +555,6 @@ struct Regions {
     repo_row: Rect,
     repo_chip: Rect,
     repo_pick: Rect,
-    /// The flow chip of the task.
-    flow_row: Rect,
     /// The open flow dropdown: its area, rows (area, 0 = 0 flow / I = flow); the steps dropdown:
     /// its rows (area, step).
     flow_menu: Rect,
@@ -691,10 +689,11 @@ pub struct App {
     checkout: bool,
     stash: bool,
     opt_i: usize,
-    /// The flow row: 0 = 0 flow, I = the I-th flow of FLOW_LIB.
-    flow_i: usize,
-    /// The step of the flow the thread starts at (index of its resolved nodes).
-    flow_start: usize,
+    /// The flow per agent of the new thread (`f` on its card): agent → (flow slug, start step);
+    /// "" = 0 flow picked. 0 entry: the repo's last flow for the lead, else 0 flow.
+    agent_flows: std::collections::BTreeMap<String, (String, usize)>,
+    /// The repo's last flow: the lead's until a pick.
+    flow_default: Option<String>,
     flow_menu: Option<FlowMenu>,
     flow_lib: crate::engine::flows::Library,
     /// Prompt pastes: images, long texts (files, listed in the message).
@@ -922,8 +921,8 @@ impl App {
             checkout: true,
             stash: false,
             opt_i: 0,
-            flow_i: 0,
-            flow_start: 0,
+            agent_flows: Default::default(),
+            flow_default: None,
             flow_menu: None,
             flow_lib: crate::engine::flows::Library::default(),
             paster,
@@ -1578,7 +1577,7 @@ impl App {
         self.where_i = if start { 0 } else { self.wheres.iter().position(|w| *w == Where::NewWorktree).unwrap_or(0) };
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.repo = Some(crate::home::Repo { name, path: root, url: e.clone });
-        self.flow_i = 0;
+        self.flow_default = None;
         self.load_task_flows();
     }
 
@@ -1812,12 +1811,15 @@ impl App {
                 self.toast("pick 1+ agents (space)", true);
             }
             Ok(target) => {
-                let agents = self.agents.iter().filter(|a| self.picks.contains(&a.name)).map(|a| a.name.clone()).collect();
-                let flow = self.flow_slug().map(|s| (s, self.flow_start));
-                if let Some(f) = &flow {
-                    flow_default_set(&self.flow_key(), &f.0);
+                let agents: Vec<String> = self.agents.iter().filter(|a| self.picks.contains(&a.name)).map(|a| a.name.clone()).collect();
+                // each agent's flow (its start step); the lead's: the repo's next default
+                let flows: Vec<(String, String, usize)> = agents.iter().map(|a| (a.clone(), self.flow_of(a))).filter(|(_, (s, _))| !s.is_empty()).map(|(a, (s, st))| (a, s, st)).collect();
+                if let Some(lead) = agents.first()
+                    && let Some((_, slug, _)) = flows.iter().find(|(a, _, _)| a == lead)
+                {
+                    flow_default_set(&self.flow_key(), slug);
                 }
-                self.outcome = Some(Outcome::New { message: self.message(), target, agents, clone: self.clone_first(), flow })
+                self.outcome = Some(Outcome::New { message: self.message(), target, agents, clone: self.clone_first(), flows })
             }
             Err(e) => {
                 self.field = Field::Title;
@@ -3381,17 +3383,42 @@ impl App {
         self.repo.as_ref().map(|r| r.path.display().to_string()).unwrap_or_else(|| self.cfg.cwd.display().to_string())
     }
 
-    /// The flows of the task's repo read again; the row on the repo's last flow.
+    /// The flows of the task's repo read again; the lead's default: the repo's last flow. A pick
+    /// of a flow the repo lacks: 0 flow.
     pub fn load_task_flows(&mut self) {
         let dir = self.repo.as_ref().map(|r| r.path.clone()).unwrap_or_else(|| self.cfg.cwd.clone());
-        let keep = self.flow_slug();
         self.flow_lib = crate::engine::flows::Library::load(Some(&dir));
-        let want = keep.clone().or_else(|| flow_default_get(&self.flow_key()));
-        self.flow_i = want.and_then(|w| self.flow_lib.flows.iter().position(|f| f.slug == w)).map_or(0, |i| i + 1);
-        if self.flow_slug() != keep {
-            self.flow_start = 0;
-        }
+        let lib = &self.flow_lib;
+        self.flow_default = flow_default_get(&self.flow_key()).filter(|s| lib.flows.iter().any(|f| f.slug == *s));
+        self.agent_flows.retain(|_, (s, _)| s.is_empty() || lib.flows.iter().any(|f| f.slug == *s));
         self.flow_menu = None;
+    }
+
+    /// The new thread's lead: the 1st picked agent in the cards' order.
+    fn task_lead(&self) -> Option<String> {
+        self.agents.iter().find(|a| self.picks.contains(&a.name)).map(|a| a.name.clone())
+    }
+
+    /// AGENT's flow for the new thread: (slug, start step); "" = 0 flow. The lead with 0 pick: the
+    /// repo's last flow.
+    fn flow_of(&self, agent: &str) -> (String, usize) {
+        if let Some(f) = self.agent_flows.get(agent) {
+            return f.clone();
+        }
+
+        match &self.flow_default {
+            Some(d) if self.task_lead().as_deref() == Some(agent) => (d.clone(), 0),
+            _ => (String::new(), 0),
+        }
+    }
+
+    /// AGENT's flow as the dropdown's row (0: 0 flow, I: the I-th flow) and its start step.
+    fn flow_at(&self, agent: &str) -> (usize, usize) {
+        let (slug, start) = self.flow_of(agent);
+        match self.flow_lib.flows.iter().position(|f| f.slug == slug) {
+            Some(i) => (i + 1, start),
+            None => (0, 0),
+        }
     }
 
     /// The resolved steps of flow I (1-based; 0: 0 flow → 0 steps).
@@ -3402,20 +3429,28 @@ impl App {
     /// The flow field for the setup tutorial's coach: (the flow dropdown open, the picked flow's
     /// slug; None: 0 flow).
     pub fn flow_peek(&self) -> (bool, Option<String>) {
-        let slug = self.flow_i.checked_sub(1).and_then(|i| self.flow_lib.flows.get(i)).map(|f| f.slug.clone());
+        let lead = self.task_lead().map(|l| self.flow_of(&l).0);
+        let slug = lead.into_iter().chain(self.agent_flows.values().map(|f| f.0.clone())).find(|s| !s.is_empty());
         (self.flow_menu.is_some(), slug)
     }
 
-    /// The flow dropdown opens on the current flow (its steps dropdown closed).
+    /// The flow dropdown of the card under the cursor (`f`), on its flow (steps closed).
     fn open_flow_menu(&mut self) {
-        self.flow_menu = Some(FlowMenu { cursor: self.flow_i, offset: 0, sub: None });
+        let Some(agent) = self.agents.get(self.pick_cursor).map(|a| a.name.clone()) else { return };
+        let (cursor, _) = self.flow_at(&agent);
+        self.flow_menu = Some(FlowMenu { agent, cursor, offset: 0, sub: None });
     }
 
-    /// Flow I picked, from step START: the dropdown closes.
+    /// Flow I picked for the dropdown's agent, from step START: the dropdown closes. A flow for an
+    /// unpicked agent picks it.
     fn pick_flow(&mut self, i: usize, start: usize) {
-        self.flow_i = i;
-        self.flow_start = if i == 0 { 0 } else { start.min(self.flow_steps(i).len().saturating_sub(1)) };
-        self.flow_menu = None;
+        let Some(agent) = self.flow_menu.take().map(|m| m.agent) else { return };
+        let slug = i.checked_sub(1).and_then(|i| self.flow_lib.flows.get(i)).map(|f| f.slug.clone()).unwrap_or_default();
+        let start = if slug.is_empty() { 0 } else { start.min(self.flow_steps(i).len().saturating_sub(1)) };
+        if !slug.is_empty() && !self.picks.contains(&agent) {
+            self.picks.push(agent.clone());
+        }
+        self.agent_flows.insert(agent, (slug, start));
     }
 
     /// Keys of the open flow dropdown: ↑↓ move, enter / → the flow's steps (0 flow: picked),
@@ -3423,6 +3458,8 @@ impl App {
     fn flow_menu_key(&mut self, k: KeyEvent) {
         let Some(m) = self.flow_menu.as_ref() else { return };
         let (cur, sub) = (m.cursor, m.sub);
+        let agent = m.agent.clone();
+        let (fi, fs) = self.flow_at(&agent);
         let n = self.flow_lib.flows.len() + 1;
         if let Some((s, _)) = sub {
             let steps = self.flow_steps(cur).len().max(1);
@@ -3458,7 +3495,7 @@ impl App {
                     self.pick_flow(0, 0);
                 } else if let Some(m) = self.flow_menu.as_mut() {
                     // the steps: on the picked start when it is this flow
-                    m.sub = Some((if cur == self.flow_i { self.flow_start } else { 0 }, 0));
+                    m.sub = Some((if cur == fi { fs } else { 0 }, 0));
                 }
             }
             KeyCode::Char('0') => self.pick_flow(0, 0),
@@ -3484,28 +3521,32 @@ impl App {
             if i == 0 {
                 return self.pick_flow(0, 0);
             }
-            let start = if i == self.flow_i { self.flow_start } else { 0 };
-            self.flow_menu = Some(FlowMenu { cursor: i, offset: self.flow_menu.as_ref().map_or(0, |m| m.offset), sub: Some((start, 0)) });
+            let agent = self.flow_menu.as_ref().map(|m| m.agent.clone()).unwrap_or_default();
+            let (fi, fs) = self.flow_at(&agent);
+            let start = if i == fi { fs } else { 0 };
+            self.flow_menu = Some(FlowMenu { agent, cursor: i, offset: self.flow_menu.as_ref().map_or(0, |m| m.offset), sub: Some((start, 0)) });
             return;
         }
         self.flow_menu = None;
     }
 
-    /// The open flow dropdown below the flow chip (above it with more room there), the steps
-    /// dropdown of the flow under the cursor beside it.
+    /// The open flow dropdown at its agent's card, the steps dropdown of the flow under the cursor
+    /// beside it.
     fn draw_flow_menu(&mut self, f: &mut Frame, bounds: Rect) {
-        let Some((cur, off, sub)) = self.flow_menu.as_ref().map(|m| (m.cursor, m.offset, m.sub)) else { return };
-        let mut items = vec![dropdown::Row { text: "0 flow".into(), detail: "free-form".into(), now: self.flow_i == 0, marks: Vec::new() }];
+        let Some((agent, cur, off, sub)) = self.flow_menu.as_ref().map(|m| (m.agent.clone(), m.cursor, m.offset, m.sub)) else { return };
+        let (fi, fs) = self.flow_at(&agent);
+        let mut items = vec![dropdown::Row { text: "0 flow".into(), detail: "free-form".into(), now: fi == 0, marks: Vec::new() }];
         for (i, fl) in self.flow_lib.flows.iter().enumerate() {
             let n = crate::engine::flows::resolve(fl, &self.flow_lib).len();
-            items.push(dropdown::Row { text: format!("◆ {}", fl.name), detail: format!("{n} steps ›"), now: self.flow_i == i + 1, marks: Vec::new() });
+            items.push(dropdown::Row { text: format!("◆ {}", fl.name), detail: format!("{n} steps ›"), now: fi == i + 1, marks: Vec::new() });
         }
         let n = items.len();
         let w = items.iter().map(|r| r.text.width() + r.detail.width() + 8).max().unwrap_or(0).clamp(30, 60) as u16;
-        let Some(r) = dropdown::place(self.regions.flow_row, w, n, bounds, false) else { return };
+        let anchor = self.regions.menu_rows.iter().find(|(_, i)| self.agents.get(*i).is_some_and(|a| a.name == agent)).map_or(Rect::default(), |(r, _)| *r);
+        let Some(r) = dropdown::place(anchor, w, n, bounds, false) else { return };
         let note = if sub.is_some() { "← back".to_string() } else { "→ start step".to_string() };
         // the parent: gray while the steps have the keys
-        let (off, drawn) = dropdown::list_in(f, r, "flow", &note, &items, cur, off, "0 flows", sub.is_none());
+        let (off, drawn) = dropdown::list_in(f, r, &format!("flow of {agent}"), &note, &items, cur, off, "0 flows", sub.is_none());
         self.regions.flow_menu = r;
         self.regions.flow_rows = drawn.clone();
         if let Some(m) = self.flow_menu.as_mut() {
@@ -3544,7 +3585,7 @@ impl App {
         let rail = Rect { y: inner.y + 3, height: inner.height.saturating_sub(3), ..inner };
         let cursor = match sub {
             Some((s, _)) => Some(s),
-            None => (cur == self.flow_i).then_some(self.flow_start),
+            None => (cur == fi).then_some(fs),
         };
         let off = sub.map_or(0, |(s, soff)| crate::dropdown::fit(soff, s, rows.len(), usize::from(rail.height)));
         self.regions.flow_steps = crate::flowrail::draw(f.buffer_mut(), rail, &rows, &arcs, cursor, sub.is_some(), off);
@@ -3552,35 +3593,6 @@ impl App {
             && let Some((s, _)) = m.sub
         {
             m.sub = Some((s, off));
-        }
-    }
-
-    fn flow_slug(&self) -> Option<String> {
-        self.flow_i.checked_sub(1).and_then(|i| self.flow_lib.flows.get(i)).map(|f| f.slug.clone())
-    }
-
-    /// The flow row: enter the dropdown (flows, then the steps of 1), ←→ step, a letter: the
-    /// next flow with it.
-    fn flow_key_press(&mut self, k: KeyEvent) {
-        let n = self.flow_lib.flows.len() + 1;
-        let was = self.flow_i;
-        match k.code {
-            KeyCode::Enter => return self.open_flow_menu(),
-            KeyCode::Right | KeyCode::Char(' ') => self.flow_i = (self.flow_i + 1) % n,
-            KeyCode::Left => self.flow_i = (self.flow_i + n - 1) % n,
-            KeyCode::Char('0') | KeyCode::Backspace => self.flow_i = 0,
-            KeyCode::Char(c) if c.is_alphanumeric() => {
-                let c = c.to_ascii_lowercase();
-                let hits: Vec<usize> = (0..self.flow_lib.flows.len()).filter(|&i| self.flow_lib.flows[i].name.to_lowercase().starts_with(c)).map(|i| i + 1).collect();
-                if let Some(&next) = hits.iter().find(|&&i| i > self.flow_i).or(hits.first()) {
-                    self.flow_i = next;
-                }
-            }
-            _ => {}
-        }
-        // another flow: from its 1st step
-        if self.flow_i != was {
-            self.flow_start = 0;
         }
     }
 
@@ -3593,7 +3605,7 @@ impl App {
         if !self.wheres.is_empty() {
             v.extend([Field::Where, Field::Opts]);
         }
-        v.extend([Field::Flow, Field::Agents, Field::Notes]);
+        v.extend([Field::Agents, Field::Notes]);
         v
     }
 
@@ -3675,14 +3687,6 @@ impl App {
             }
             return;
         }
-        if self.field == Field::Flow {
-            match k.code {
-                KeyCode::Up => self.go_field(-1),
-                KeyCode::Down => self.go_field(1),
-                _ => self.flow_key_press(k),
-            }
-            return;
-        }
         // opts: 1 box per row, ↑↓ go through them
         if self.field == Field::Opts {
             match k.code {
@@ -3718,6 +3722,8 @@ impl App {
                 KeyCode::Left | KeyCode::Char('h') => { step(self, -1, 0); }
                 KeyCode::Right | KeyCode::Char('l') => { step(self, 1, 0); }
                 KeyCode::Char(' ') => self.toggle_pick(),
+                // f: the card's flow (a flow picks the agent)
+                KeyCode::Char('f') => self.open_flow_menu(),
                 KeyCode::Up | KeyCode::Char('k') => if !step(self, 0, -1) { self.go_field(-1); },
                 KeyCode::Down | KeyCode::Char('j') => if !step(self, 0, 1) { self.go_field(1); },
                 KeyCode::Enter => self.go_field(1),
@@ -4074,9 +4080,6 @@ impl App {
                 } else if self.regions.where_row.contains(at) {
                     self.field = Field::Where;
                     return self.open_where();
-                } else if self.regions.flow_row.contains(at) {
-                    self.field = Field::Flow;
-                    return self.open_flow_menu();
                 } else if self.regions.notes_label.contains(at) {
                     self.field = Field::Notes;
                     return self.open_notes();
@@ -4855,7 +4858,7 @@ impl App {
         // prompt first and largest (the rest of the height), then title, where (repo, branch,
         // opts), agents, notes, a
         // blank row below the notes (above the footer)
-        let [r_drafts, l_prompt, i_prompt, _, l_title, i_title, _, l_where, repo_row, info, opts, flow_row, _, l_agents, r_agents, _, l_notes, notes, _] = Layout::vertical([
+        let [r_drafts, l_prompt, i_prompt, _, l_title, i_title, _, l_where, repo_row, info, opts, _, l_agents, r_agents, _, l_notes, notes, _] = Layout::vertical([
             Constraint::Length(drafts_h),
             Constraint::Length(1),
             Constraint::Min(3),
@@ -4867,7 +4870,6 @@ impl App {
             Constraint::Length(1),
             Constraint::Length(branch_h),
             Constraint::Length(opts_h),
-            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(agents_h),
@@ -4935,26 +4937,6 @@ impl App {
         if !self.wheres.is_empty() {
             self.regions.where_chip = row(f, info, "branch", self.field == Field::Where, self.where_chip(), self.where_text());
             self.regions.where_row = info;
-        }
-        // flow: the chip, its steps and gates
-        {
-            let on = self.field == Field::Flow;
-            let (value, text) = match self.flow_i.checked_sub(1).and_then(|i| self.flow_lib.flows.get(i)) {
-                Some(fl) => {
-                    let nodes = crate::engine::flows::resolve(fl, &self.flow_lib);
-                    let gates = nodes.iter().filter(|n| n.gate).count();
-                    let loops = nodes.iter().filter(|n| n.loops.is_some()).count();
-                    // a later start step: in the chip
-                    let value = match nodes.get(self.flow_start).filter(|_| self.flow_start > 0) {
-                        Some(n) => format!("◆ {} › {}. {}", fl.name, self.flow_start + 1, n.title),
-                        None => format!("◆ {}", fl.name),
-                    };
-                    (value, format!("{} steps · {gates} gates · {loops} loops · {}", nodes.len(), fl.description))
-                }
-                None => ("0 flow".to_string(), "free-form: the agents follow the task only".to_string()),
-            };
-            let text = if on { format!("enter: flows + steps · ←→ flows · {text}") } else { text };
-            self.regions.flow_row = row(f, flow_row, "flow", on, value, text);
         }
         // opts: ◼ checkout, ◻ stash below it, in the column of the sub-labels
         if opts_h > 0 {
@@ -5036,7 +5018,19 @@ impl App {
         };
         let title = Span::styled(mark, if order.is_some() { Style::default().fg(color).add_modifier(Modifier::BOLD) } else { theme::muted() });
         let look = crate::cards::Look { cur, lit: order.is_some(), border: Some(crate::cards::border(cur, order.is_some(), color)), title: Some(title), bg: None };
-        crate::cards::draw(f, r, a, &self.card_text(a), look);
+        crate::cards::draw(f, r, a, &self.task_card_text(a), look);
+    }
+
+    /// New-thread card rows: name, harness · model, effort, the agent's flow.
+    fn task_card_text(&self, a: &Agent) -> [String; 4] {
+        let [name, tech, effort] = self.card_text(a);
+        let (slug, start) = self.flow_of(&a.name);
+        let flow = match self.flow_lib.flow(&slug).filter(|_| !slug.is_empty()) {
+            Some(fl) if start > 0 => format!("◆ {} › {}", fl.name, start + 1),
+            Some(fl) => format!("◆ {}", fl.name),
+            None => "0 flow".into(),
+        };
+        [name, tech, effort, flow]
     }
 
     fn draw_footer(&mut self, f: &mut Frame, area: Rect) {
@@ -5048,14 +5042,13 @@ impl App {
         let hints: &[(&str, &str)] = match self.screen {
             _ if !self.tabs_focus && self.screen == Screen::Pick && self.tab == Tab::Merge => &[],
             _ if self.tabs_focus => &[("←→", "tab"), ("↓ / esc", "back"), ("q", "quit")],
-            Screen::Compose if self.field == Field::Agents => &[("↑↓←→", "move"), ("space", "pick"), ("enter", "notes"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
+            Screen::Compose if self.field == Field::Agents => &[("↑↓←→", "move"), ("space", "pick"), ("f", "flow"), ("enter", "notes"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
             Screen::Compose if self.where_menu.is_some() => &[("↑↓", "move"), ("type", "filter"), ("enter", "pick"), ("esc", "close")],
             Screen::Compose if self.flow_menu.as_ref().is_some_and(|m| m.sub.is_some()) => &[("↑↓", "step"), ("enter", "start here"), ("← esc", "flows")],
             Screen::Compose if self.flow_menu.is_some() => &[("↑↓", "flow"), ("enter →", "its steps"), ("a-z", "jump"), ("0", "0 flow"), ("esc", "close")],
             Screen::Compose if self.repo_pick.is_some() => &[("↑↓", "dir"), ("←→", "out · in"), ("type", "filter"), ("~", "home"), ("enter", "pick"), ("esc", "close")],
             Screen::Compose if self.field == Field::Repo => &[("enter", "pick repo"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.field == Field::Where => &[("enter", "choices"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
-            Screen::Compose if self.field == Field::Flow => &[("enter", "flows + steps"), ("←→", "flow"), ("a-z", "jump"), ("0", "0 flow"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.field == Field::Opts => &[("space", "check / uncheck"), ("↑↓", "box · field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.drafts_menu.is_some() => &[("↑↓", "move"), ("enter", "load"), ("d", "delete"), ("esc", "back")],
             Screen::Compose if self.field == Field::Drafts => &[("←→", "button"), ("enter", "press"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("F1-F6", "tabs")],
@@ -5526,8 +5519,6 @@ mod render_tests {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Repo);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        assert!(a.field == Field::Flow);
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Agents);
         let s = dump(&mut a, 120, 40);
         assert!(s.contains("0 git repo") && s.contains("enter: pick a repo"), "{s}");
@@ -5619,10 +5610,7 @@ mod render_tests {
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Opts && a.opt_i == 1);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        assert!(a.field == Field::Flow);
-        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Agents);
-        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
         assert!(a.field == Field::Opts && a.opt_i == 1);
         a.screen = Screen::Compose;
@@ -6130,7 +6118,7 @@ mod render_tests {
         assert_eq!(a.agents[a.pick_cursor].name, "lilith");
         a.pick_cursor = 4;
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
-        assert!(a.field == Field::Flow);
+        assert!(a.field == Field::Opts || a.field == Field::Repo, "↑ on the top row of cards: the field above");
         a.agents.clear();
         narrow.draw(|f| a.draw(f)).unwrap();
         assert!(a.pick_places.is_empty() && a.regions.menu_rows.is_empty());
@@ -6665,8 +6653,8 @@ mod render_tests {
         // the agents tab loaded the machine's agents: 1 card again (↓ leaves the cards)
         a.agents.truncate(1);
         a.field = Field::Prompt;
-        // tab: prompt → title → repo → flow → agents → notes → prompt; shift+tab back
-        for f in [Field::Title, Field::Repo, Field::Flow, Field::Agents, Field::Notes, Field::Prompt] {
+        // tab: prompt → title → repo → agents → notes → prompt; shift+tab back
+        for f in [Field::Title, Field::Repo, Field::Agents, Field::Notes, Field::Prompt] {
             key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
             assert!(a.field == f && a.screen == Screen::Compose);
         }
@@ -6675,7 +6663,7 @@ mod render_tests {
         // ↑↓ walk the fields: ↓ on the last stays, ↑ on the prompt's 1st row: the tabs
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Notes);
-        for f in [Field::Agents, Field::Flow, Field::Repo, Field::Title, Field::Prompt, Field::Drafts] {
+        for f in [Field::Agents, Field::Repo, Field::Title, Field::Prompt, Field::Drafts] {
             key(&mut a, KeyCode::Up, KeyModifiers::NONE);
             assert!(a.field == f);
         }
@@ -7053,71 +7041,82 @@ mod flow_menu_tests {
         (0..50).map(|y| (0..140).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
     }
 
+    /// `f` on an agent card: that agent's flows, a flow its steps (the start step); the card shows
+    /// the flow under its effort row; each agent keeps its own flow.
     #[test]
-    fn enter_opens_the_flows_and_a_flow_its_steps() {
+    fn f_on_a_card_opens_its_flows_and_a_flow_its_steps() {
         let mut a = app_with(None);
         a.flow_lib = crate::engine::flows::Library::load(None);
-        assert!(a.flow_lib.flows.len() > 1);
+        a.agents.push(Agent { name: "zed".into(), harness: "claude".into(), ..Default::default() });
+        a.flow_default = None;
+        assert!(a.flow_lib.flows.len() > 1 && a.agents.len() > 1);
         a.screen = Screen::Compose;
         a.tabs_focus = false;
-        a.field = Field::Flow;
-        a.flow_i = 0;
-        // enter: the flows (0 step move of the row)
-        press(&mut a, KeyCode::Enter);
-        assert!(a.flow_menu.as_ref().is_some_and(|m| m.sub.is_none() && m.cursor == 0));
-        assert_eq!(a.flow_i, 0);
+        a.field = Field::Agents;
+        let _ = screen(&mut a);
+        a.pick_cursor = 1;
+        let (agent, other) = (a.agents[1].name.clone(), a.agents[0].name.clone());
+        // f: the flows of the card under the cursor
+        press(&mut a, KeyCode::Char('f'));
+        assert!(a.flow_menu.as_ref().is_some_and(|m| m.sub.is_none() && m.cursor == 0 && m.agent == agent));
         let s = screen(&mut a);
         let first = a.flow_lib.flows[0].name.clone();
-        assert!(s.contains(&format!("◆ {first}")) && s.contains("0 flow"), "{s}");
-        // ↓ to the 1st flow: its preview beside the flows at once (head, rail of every step)
+        assert!(s.contains(&format!("flow of {agent}")) && s.contains(&format!("◆ {first}")) && s.contains("0 flow"), "{s}");
+        // ↓ to the 1st flow: its preview beside the flows at once
         press(&mut a, KeyCode::Down);
         let steps = a.flow_steps(1);
-        assert!(steps.len() > 1);
         let s = screen(&mut a);
-        let head = format!("{first} · {} steps", steps.len());
-        assert!(s.contains("preview") && s.contains(&head) && s.contains(&steps[steps.len() - 1].title), "every step in view: {s}");
-        assert!(a.flow_menu.as_ref().is_some_and(|m| m.sub.is_none()), "a highlight only: the list keeps the keys");
-        // enter: the rail takes the keys (the start step)
+        assert!(s.contains("preview") && s.contains(&format!("{first} · {} steps", steps.len())), "{s}");
+        // enter: the rail takes the keys; ← back, → in, ↓ enter: flow 1 from step 2
         press(&mut a, KeyCode::Enter);
         assert_eq!(a.flow_menu.as_ref().and_then(|m| m.sub).map(|s| s.0), Some(0));
-        let s = screen(&mut a);
-        println!("--- flows + preview\n{s}");
-        assert!(s.contains("↑↓ start · enter: pick"), "{s}");
-        // ← back to the flows, → into the steps again, ↓ enter: flow 1 from step 2
         press(&mut a, KeyCode::Left);
         assert!(a.flow_menu.as_ref().is_some_and(|m| m.sub.is_none()));
         press(&mut a, KeyCode::Right);
         press(&mut a, KeyCode::Down);
         press(&mut a, KeyCode::Enter);
         assert!(a.flow_menu.is_none());
-        assert_eq!((a.flow_i, a.flow_start), (1, 1));
+        assert_eq!(a.flow_at(&agent), (1, 1));
+        assert!(a.picks.contains(&agent), "a flow picks the agent");
+        assert_eq!(a.flow_at(&other), (0, 0), "the other card keeps 0 flow");
         let s = screen(&mut a);
-        assert!(s.contains(&format!("◆ {first} › 2. {}", steps[1].title)), "{s}");
-        // esc in the dropdown closes it only (0 quit, 0 double esc)
-        press(&mut a, KeyCode::Enter);
+        println!("--- cards with flows\n{s}");
+        assert!(s.contains(&format!("◆ {first} › 2")) && s.contains("0 flow"), "{s}");
+        // esc in the dropdown closes it only
+        press(&mut a, KeyCode::Char('f'));
         press(&mut a, KeyCode::Esc);
         assert!(a.flow_menu.is_none() && a.outcome.is_none());
-        // ←→ on the row: another flow, from its 1st step
-        press(&mut a, KeyCode::Right);
-        assert_eq!((a.flow_i, a.flow_start), (2, 0));
-        // a click on the row opens the dropdown, a click on a flow its steps, a click on a step picks
+        // a click on a flow opens its steps, a click on a step picks it
+        press(&mut a, KeyCode::Char('f'));
         let _ = screen(&mut a);
-        let chip = a.regions.flow_row;
-        a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: chip.x + 1, row: chip.y, modifiers: KeyModifiers::NONE });
-        assert!(a.flow_menu.is_some());
-        let _ = screen(&mut a);
-        let (r, _) = *a.regions.flow_rows.iter().find(|(_, i)| *i == 1).unwrap();
+        let (r, _) = *a.regions.flow_rows.iter().find(|(_, i)| *i == 2).unwrap();
         a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
-        assert!(a.flow_menu.as_ref().is_some_and(|m| m.cursor == 1 && m.sub.is_some()));
+        assert!(a.flow_menu.as_ref().is_some_and(|m| m.cursor == 2 && m.sub.is_some()));
         let _ = screen(&mut a);
-        let (r, _) = *a.regions.flow_steps.iter().find(|(_, i)| *i == 2).unwrap();
+        let (r, _) = *a.regions.flow_steps.iter().find(|(_, i)| *i == 0).unwrap();
         a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
-        assert!(a.flow_menu.is_none());
-        assert_eq!((a.flow_i, a.flow_start), (1, 2));
-        // 0 flow: enter on it picks it at once
-        press(&mut a, KeyCode::Enter);
+        assert_eq!((a.flow_at(&agent), a.flow_menu.is_none()), ((2, 0), true));
+        // 0: 0 flow at once
+        press(&mut a, KeyCode::Char('f'));
         press(&mut a, KeyCode::Char('0'));
-        assert_eq!((a.flow_i, a.flow_start, a.flow_menu.is_none()), (0, 0, true));
+        assert_eq!(a.flow_at(&agent), (0, 0));
+    }
+
+    /// The lead's default: the repo's last flow, until a pick; other agents: 0 flow.
+    #[test]
+    fn the_repos_last_flow_is_the_leads_default_only() {
+        let mut a = app_with(None);
+        a.flow_lib = crate::engine::flows::Library::load(None);
+        a.agents.push(Agent { name: "zed".into(), harness: "claude".into(), ..Default::default() });
+        let slug = a.flow_lib.flows[0].slug.clone();
+        a.flow_default = Some(slug.clone());
+        a.picks = vec![a.agents[1].name.clone(), a.agents[0].name.clone()];
+        let (lead, other) = (a.agents[0].name.clone(), a.agents[1].name.clone());
+        assert_eq!(a.task_lead().as_deref(), Some(lead.as_str()), "the 1st pick in the cards' order");
+        assert_eq!(a.flow_of(&lead).0, slug);
+        assert!(a.flow_of(&other).0.is_empty());
+        a.agent_flows.insert(lead.clone(), (String::new(), 0));
+        assert!(a.flow_of(&lead).0.is_empty(), "0 flow picked: 0 default");
     }
 }
 

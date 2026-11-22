@@ -184,7 +184,7 @@ inputs:  all text fields (title, prompt, agent form, filters, thread prompt): ct
          Markdown lists (`- `, `* `, `1. `, 2 spaces per layer): enter starts the next item at the same
          layer; enter / backspace on an empty item: 1 layer out (1st layer: the marker goes), space: 1 layer in.
 start:   the new tab: the prompt first (its 1st line: the thread title, unless the title field has one),
-         then title, repo, where, opts, flow, agents, notes. type, ctrl+enter. notes: tab to the notes field, enter.
+         then title, repo, where, opts, agents (f on a card: its flow), notes. type, ctrl+enter. notes: tab to the notes field, enter.
 threads: worktrees, then recent Claude Code sessions. enter on a session:
          new thread in its dir, its last response as context.
 thread view: the thread's agents on top (sprite, model, working / idle / waits on you; ★ the lead),
@@ -759,7 +759,7 @@ fn start(args: Args) {
             }
             break 'screens;
         }
-        Outcome::New { message, target, agents: picked, clone, flow } => {
+        Outcome::New { message, target, agents: picked, clone, flows } => {
             engine::trace("start: submit");
             // a home repo not on disk yet: clone it first
             if let Some((url, path)) = &clone {
@@ -870,14 +870,14 @@ fn start(args: Args) {
             } else if !label.is_empty() && repo.join(".git").exists() {
                 t.branch = Some(threads::current_branch(&dir)).filter(|b| !b.is_empty());
             }
-            // the flow: its start step (the 1st, else the owner's pick) goes to its agent with the
-            // task (the host's `prompt`)
-            if let Some((slug, start)) = &flow {
+            // each agent's flow: its start step (the 1st, else the owner's pick) goes to the agent
+            // with the task (the host's `prompt`)
+            if !flows.is_empty() {
                 let lib = engine::flows::Library::load(Some(&t.work_dir()));
-                if let Some(fl) = lib.flow(slug)
-                    && let Some(lead) = t.lead().map(String::from)
-                {
-                    t.set_flow(&lead, Some(engine::flows::run::FlowState::new(fl, &lib, *start, engine::now_ms())));
+                for (agent, slug, start) in &flows {
+                    if let Some(fl) = lib.flow(slug) {
+                        t.set_flow(agent, Some(engine::flows::run::FlowState::new(fl, &lib, *start, engine::now_ms())));
+                    }
                 }
             }
             if let Err(e) = t.save() {

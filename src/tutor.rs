@@ -186,7 +186,7 @@ impl Coach {
             (Task::Switch, _) => (format!("open the thread \"{SEEDED}\""), "↑↓ · enter"),
             (Task::Menu2, _) => ("open the menu again".into(), "ctrl+p"),
             (Task::New, _) => ("start a new thread".into(), "n"),
-            (Task::Flow, _) => ("pick the flow \"chore\"".into(), "↑↓ to flow · enter"),
+            (Task::Flow, _) => ("pick the flow \"chore\" on an agent card".into(), "f on a card · enter"),
             (Task::Start, _) => ("start the thread".into(), "ctrl+enter"),
             (Task::FlowRun, _) => ("watch the flow bar: 3 steps".into(), "wait"),
             (Task::Leave, _) => ("done. leave the tutorial".into(), "esc esc"),
@@ -604,7 +604,7 @@ fn new_thread(top: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>
         }
         if let Some(o) = app.outcome.take() {
             return Some(match o {
-                crate::app::Outcome::New { message, agents, flow, .. } => start_thread(coach, repo, &message, agents, flow, &spec.crew[0].name).map_or(Form::Back, Form::Started),
+                crate::app::Outcome::New { message, agents, flows, .. } => start_thread(coach, repo, &message, agents, flows, &spec.crew[0].name).map_or(Form::Back, Form::Started),
                 _ => Form::Back,
             });
         }
@@ -638,18 +638,18 @@ fn new_thread(top: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>
     }
 }
 
-/// The new thread of the form: in the sandbox repo, its flow (0 picked: chore), the message to
-/// its agents. Its id.
-fn start_thread(coach: &mut Coach, repo: &Path, message: &str, agents: Vec<String>, flow: Option<(String, usize)>, lead: &str) -> Option<String> {
+/// The new thread of the form: in the sandbox repo, each agent's flow (0 picked: chore for the
+/// lead), the message to its agents. Its id.
+fn start_thread(coach: &mut Coach, repo: &Path, message: &str, agents: Vec<String>, flows: Vec<(String, String, usize)>, lead: &str) -> Option<String> {
     let agents = if agents.is_empty() { vec![lead.to_string()] } else { agents };
     let title: String = message.lines().next().unwrap_or("flows").chars().take(60).collect();
     let mut t = store::Thread::new(&title, message, repo, agents.clone());
-    let (slug, at) = flow.unwrap_or(("chore".into(), 0));
+    let flows = if flows.is_empty() { t.lead().map(|l| vec![(l.to_string(), "chore".to_string(), 0)]).unwrap_or_default() } else { flows };
     let lib = crate::engine::flows::Library::load(Some(repo));
-    if let Some(fl) = lib.flow(&slug)
-        && let Some(lead) = t.lead().map(String::from)
-    {
-        t.set_flow(&lead, Some(crate::engine::flows::run::FlowState::new(fl, &lib, at, crate::engine::now_ms())));
+    for (agent, slug, at) in flows {
+        if let Some(fl) = lib.flow(&slug) {
+            t.set_flow(&agent, Some(crate::engine::flows::run::FlowState::new(fl, &lib, at, crate::engine::now_ms())));
+        }
     }
     t.save().ok()?;
     let _ = crate::engine::client::call(&t.id, &json!({"op": "prompt", "to": agents, "text": message}));
@@ -709,7 +709,7 @@ fn headless(id: &str, repo: &Path, spec: &Spec) -> i32 {
 
     // quest 3's thread: chore, run by the lead's steps
     coach.reach(Task::Flow);
-    let Some(fid) = start_thread(&mut coach, repo, FLOW_TASK, Vec::new(), None, &lead) else {
+    let Some(fid) = start_thread(&mut coach, repo, FLOW_TASK, Vec::new(), Vec::new(), &lead) else {
         println!("flow thread: 0 start");
         return 1;
     };
