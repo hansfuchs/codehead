@@ -175,6 +175,9 @@ struct View {
     /// The thread's checkouts (its work dir 1st), the one the changes view shows.
     checkouts: Vec<PathBuf>,
     checkout: usize,
+    /// The owner picked the checkout (a tab, ctrl+w): it stays; else the view follows the
+    /// thread's newest worktree.
+    checkout_picked: bool,
     /// The repo tabs on top of the changes view (shift+←→, ctrl+w, a click): 1 per checkout.
     checkout_tabs: crate::tabgroup::TabGroup,
     checkout_labels: Vec<String>,
@@ -347,6 +350,7 @@ impl View {
             mention: Mention::default(),
             checkouts: Vec::new(),
             checkout: 0,
+            checkout_picked: false,
             checkout_tabs: crate::tabgroup::TabGroup::default(),
             checkout_labels: Vec::new(),
             spots: Vec::new(),
@@ -1790,8 +1794,26 @@ impl View {
                     _ => n.clone(),
                 })
                 .collect();
+
+            // an agent moved the work to a worktree of the work dir's repo (`git worktree add`):
+            // the newest such worktree is the thread's work, unless the owner picked a checkout
+            // only from the main checkout to a linked worktree: a thread in its own worktree stays
+            // there when an agent edits the main checkout (git writes a worktree's gitdir as a
+            // real path: /var → /private/var on macOS)
+            let work = t.work_dir();
+            let canon = |d: &Path| std::fs::canonicalize(d).ok();
+            let real = |d: &Path| crate::threads::repo_root(d).and_then(|r| canon(&r));
+            let main = |d: &Path| real(d).is_some_and(|r| Some(r) == canon(d));
+            let repo = real(&work);
+            // (a submodule's root follows to the superproject too: linked worktrees only)
+            let moved = main(&work).then(|| all.iter().rposition(|c| crate::threads::linked_worktree(Path::new(&c.dir)) && real(Path::new(&c.dir)) == repo)).flatten();
+            if !self.checkout_picked {
+                self.checkout = moved.unwrap_or(0);
+            }
+
             self.checkouts = all.into_iter().map(|c| PathBuf::from(c.dir)).collect();
         }
+
         self.checkout = self.checkout.min(self.checkouts.len().saturating_sub(1));
         // the changes view on the checkout picked (the view opened on another dir: a work dir
         // without git, the dir of the thread before)
@@ -1807,7 +1829,9 @@ impl View {
         if i == self.checkout || i >= self.checkouts.len() {
             return;
         }
+
         self.checkout = i;
+        self.checkout_picked = true;
         let dir = self.checkouts[i].clone();
         self.changes = crate::changes::View::new(&self.id, &dir);
         self.changes.refresh(true);
@@ -3619,6 +3643,49 @@ mod ask_tests {
         v.load_checkouts();
         assert_eq!(v.checkouts, std::slice::from_ref(&repo));
         assert_eq!(v.changes.dir(), repo.as_path());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn changes_follow_the_worktree_an_agent_moved_the_work_to_until_the_owner_picks() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("codehead-moved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (repo, wt) = (root.join("app"), root.join("app-feat"));
+        std::fs::create_dir_all(&repo).unwrap();
+        let sh = |c: &str| assert!(std::process::Command::new("sh").arg("-c").arg(c).current_dir(&repo).output().unwrap().status.success(), "{c}");
+        sh("git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init && git worktree add -q -b feat ../app-feat");
+        // the thread's work dir: the main checkout; its agent moved to the worktree
+        let mut t = store::Thread::new("moved", "task", &repo, vec!["ada".into()]);
+        t.checkouts.push(store::Checkout { dir: wt.display().to_string(), branch: Some("feat".into()) });
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(&t.id, &repo, "moved", tx);
+
+        v.load_checkouts();
+
+        assert_eq!(v.checkouts, vec![repo.clone(), wt.clone()]);
+        assert_eq!(v.changes.dir(), wt.as_path(), "the worktree, not the main checkout");
+
+        // the owner picks the main checkout: it stays over a reload
+        v.pick_checkout(0);
+        v.load_checkouts();
+
+        assert_eq!(v.changes.dir(), repo.as_path());
+
+        // a thread in its own worktree, an agent edit in the main checkout: the worktree stays
+        let mut t = store::Thread::new("own worktree", "task", &repo, vec!["ada".into()]);
+        t.worktree = Some(wt.display().to_string());
+        t.checkouts.push(store::Checkout { dir: repo.display().to_string(), branch: None });
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(&t.id, &wt, "own worktree", tx);
+
+        v.load_checkouts();
+
+        assert_eq!(v.changes.dir(), wt.as_path(), "the thread's own worktree");
         let _ = std::fs::remove_dir_all(&root);
     }
 
