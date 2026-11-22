@@ -9,6 +9,7 @@ mod ask;
 mod attach;
 mod cards;
 mod changes;
+mod chatsearch;
 mod background;
 mod claude;
 mod clip;
@@ -216,7 +217,9 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          rebase: the agents resolve, continue, abort); outward steps: enter enter.
          ↑ on the 1st row of a PR's diff: its views row.
          flow waits (gate, loop max, role with 0 agent): a question in the picker under the stream,
-         after the agents' ones; text in the prompt goes along as the note. ctrl+f: the flow's steps.
+         after the agents' ones; text in the prompt goes along as the note. > flow: the flow's steps.
+         ctrl+f: the search bar above the prompt (the chat's messages, notes, shell, tool calls);
+         tab / enter / ↑ the next older match, shift+tab / ↓ the next newer one, esc closes.
          tool runs (▸): click opens / closes the calls (input + output); ctrl+o: all.
          thoughts (setting thoughts = hidden | folded | open): ∴ rows, a click opens 1, ctrl+t: all.
          ctrl+v pastes a clipboard image as [Image #n], a dropped image path too. pasted text over

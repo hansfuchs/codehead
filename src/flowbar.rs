@@ -1,6 +1,6 @@
 //! The flow row of the thread view (above the subagents row): the thread's flow, its current
-//! step, a wait (gate, loop max, open role), a pending / queued switch, warnings. ctrl+f (or a
-//! click, or `> flow`) opens its box:
+//! step, a wait (gate, loop max, open role), a pending / queued switch, warnings. A click (or
+//! `> flow`) opens its box:
 //! - steps: the rail (marks, arcs), enter: the step's text; s skip, j jump, a answer the wait,
 //!   @ the role of a step, c change the flow, e edit it in the flows screen, x x remove it.
 //! - change flow: the flows (typed text filters) → `switch now` / `after current flow` / cancel
@@ -209,8 +209,8 @@ impl FlowBar {
         }
     }
 
-    pub fn is_open(&self) -> bool {
-        self.open
+    pub fn close(&mut self) {
+        self.open = false;
     }
 
     /// Open on the steps (the current one under the cursor), or on the wait's choices.
@@ -291,10 +291,6 @@ impl FlowBar {
                     Mode::How(_) | Mode::Start(_) => self.pick(),
                     _ => self.open = false,
                 }
-                return Some(Act::None);
-            }
-            KeyCode::Char('f') if ctrl => {
-                self.open = false;
                 return Some(Act::None);
             }
             KeyCode::Up => {
@@ -461,7 +457,7 @@ impl FlowBar {
 
     /// The row's text and style.
     fn bar_line(&self) -> (Vec<Span<'static>>, Style) {
-        let Some(st) = &self.state else { return (vec![Span::raw("◆ 0 flow · ctrl+f: pick one")], theme::muted()) };
+        let Some(st) = &self.state else { return (vec![Span::raw("◆ 0 flow · > flow: pick one")], theme::muted()) };
         let mut spans = Vec::new();
         let mut style = theme::accent();
         let total = self.nodes.len();

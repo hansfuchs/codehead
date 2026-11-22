@@ -76,6 +76,16 @@ fn word_score(w: &str, m: &Msg) -> Option<i64> {
     m.lower.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-').filter(|t| !t.is_empty() && t.len() <= 32).filter_map(|t| crate::fuzzy::word(w, t).map(|(s, _)| s)).filter(|&s| s >= 60).max()
 }
 
+/// The query words of QUERY, lowercased.
+pub fn words(query: &str) -> Vec<String> {
+    query.split_whitespace().map(lower).collect()
+}
+
+/// M matches every word of WORDS (from [`words`]): a substring, else fuzzy inside 1 word.
+pub fn hit(m: &Msg, words: &[String]) -> bool {
+    !words.is_empty() && words.iter().all(|w| word_score(w, m).is_some())
+}
+
 /// Indexes of MSGS that match QUERY: best first, then oldest first. Max. MAX.
 pub fn find(msgs: &[Msg], query: &str) -> Vec<usize> {
     let words: Vec<String> = query.split_whitespace().map(lower).collect();

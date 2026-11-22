@@ -14,7 +14,7 @@ Rules on every screen:
 - `esc` goes 1 level back. It never saves. Edited text goes only on a 2nd `esc` within 2 s.
 - Outward or destructive keys ask first: a 2nd press (`d d`, `S S`, `ctrl+d ctrl+d`, `enter enter`)
   or a yes / no box.
-- `/` filters a list, `r` reads it again, `ctrl+d` puts a thing back to its default.
+- `ctrl+f` filters a list (the only key to a filter; in the chat: the search bar), `r` reads it again, `ctrl+d` puts a thing back to its default.
 - `q` never quits.
 
 ## Everywhere
@@ -47,7 +47,7 @@ Rules on every screen:
 | `esc` | settings: undo the field's edit (0 apply); agent form with edits: asks first |
 | `enter` on **+ add** (menu: add path alias) / `d`, `ctrl+d` | settings: add / remove an alias |
 | `ctrl+d`, click `↺` | settings: the field back to its default |
-| `/` | settings → mcp servers: filter |
+| `ctrl+f` | settings → mcp servers, notes, threads, agents, flows: filter |
 
 ## Thread view
 
@@ -74,7 +74,8 @@ Rules on every screen:
 | `pgup` `pgdn`, `shift+↑↓`, wheel | scroll the stream |
 | `F1`-`F4`, `ctrl+1`-`ctrl+4`, `alt+1`-`alt+4` | chat / changes / merge / files view (the view bar on the top row) |
 | `alt+\` | changes view: the chat on its right on / off (from 160 columns; on by default) |
-| `ctrl+f` | the flow box: the steps (`s` skip, `j` jump, `@` role, `c` change, `e` edit, `x x` remove) |
+| `ctrl+f` | the search bar above the prompt: the chat's messages, notes, shell, tool calls; `tab` / `enter` / `↑` the next older match, `shift+tab` / `↓` the next newer one (both wrap), `esc` closes. Another view: its filter |
+| `> flow` | the flow box: the steps (`s` skip, `j` jump, `@` role, `c` change, `e` edit, `x x` remove) |
 | a flow wait | a gate (approve or an outcome), a loop at its max (1 more round, move on), a role with 0 agent (the agents): a question in the picker under the stream, after the agents' questions; `1`-`9` / `↑↓` `enter`; text in the prompt goes along as your note |
 | menu → yazi, files view `y` | yazi (full screen) on the worktree; a picked file goes into the prompt as its path |
 | `d d` | subagents / monitors box: stop the subagent / end the watch; another key closes the box and acts as usual |
@@ -138,7 +139,7 @@ The old HEAD stays at `refs/codehead/uncommit/<thread>` (with a reflog: older un
 | `p` | stash the selected lines (out of the worktree, into the panel's stash) |
 | `v` | reviewed on / off (the cursor goes to the next box) |
 | `←` / `→`, `enter` | fold / open, toggle the box |
-| `f`, `/`, click | the filter: type, `enter` jumps to the 1st hit, `esc` clears |
+| `ctrl+f`, click | the filter: type, `enter` jumps to the 1st hit, `esc` clears |
 | `e`, `o` | edit in the IDE (setting `editor`): at the 1st selected line, else at the line under the cursor (a removed line: where it was); the window that has the worktree open, else a new one (VS Code family, Zed, JetBrains); `flow` (flow-control.dev): a running instance with the worktree as a project gets the file (`--connect`), else a new GUI window (`--gui`); `terminal`: full screen in codehead's terminal, back on quit |
 | `w` | side by side / unified |
 | `r` (`ctrl+r`) | read git again (it also does every 4 s) |
@@ -188,7 +189,7 @@ rendered, code in syntax colors).
 | Key | Action |
 | --- | --- |
 | `j` / `k`, `↑` `↓` | pick a file |
-| `f`, `/` | filter (fuzzy, names and content) |
+| `ctrl+f` | filter (fuzzy, names and content) |
 | `space`, `pgup` `pgdn`, wheel, `g` | scroll the preview (`g`: its top) |
 | `e`, `o` | edit the file in the IDE (its 1st changed line) |
 | `y` | yazi on the file (0 files: on the worktree; full screen; codehead's own yazi config, themed from the palette) |

@@ -266,8 +266,12 @@ struct View {
     subagents: crate::subagents::Subagents,
     /// The running sub-threads of this thread (`>sub`): their row, their box.
     subthreads: crate::subthreads::SubThreads,
-    /// The flow row + its box (ctrl+f, `> flow`).
+    /// The flow row + its box (`> flow`, a click).
     flowbar: crate::flowbar::FlowBar,
+    /// ctrl+f in the chat: the search bar above the prompt.
+    find: crate::chatsearch::ChatSearch,
+    /// The search match to scroll to at the next draw (item index).
+    find_to: Option<usize>,
     menu: Option<crate::menu::Menu>,
     cost: Option<crate::cost::Snap>,
     cost_at: Instant,
@@ -407,6 +411,8 @@ impl View {
             subagents: Default::default(),
             subthreads: Default::default(),
             flowbar: Default::default(),
+            find: Default::default(),
+            find_to: None,
             menu: None,
             cost: None,
             cost_at: Instant::now() - Duration::from_secs(60),
@@ -1347,13 +1353,39 @@ impl View {
             self.dirty = true;
             return false;
         }
-        // the flow box: ctrl+f opens / closes it; its keys while open. Another view with the
-        // focus: ctrl+f is its filter
-        if crate::textarea::is_filter_key(&k) && (self.pane == Pane::Chat || self.prompt_focus) && !self.flowbar.is_open() {
-            self.flowbar.open();
-            self.dirty = true;
-            return false;
+        // ctrl+f: the chat's search bar (open: the keys back to it); another view: its filter
+        if crate::textarea::is_filter_key(&k) {
+            if self.pane == Pane::Chat || (self.wide_split && self.prompt_focus) {
+                self.flowbar.close();
+                self.find.open();
+                self.find_to = self.find.current();
+                self.dirty = true;
+                return false;
+            }
+
+            // the prompt of another view: the view takes the keys, ctrl+f opens its filter
+            self.prompt_focus = false;
         }
+
+        // the open search bar: its keys (text, tab / ↑↓: the matches, esc: close)
+        if self.find.focus {
+            match self.find.key(k, &self.thread) {
+                crate::chatsearch::Act::Pass => {}
+                crate::chatsearch::Act::None => {
+                    self.dirty = true;
+                    return false;
+                }
+                crate::chatsearch::Act::Show(i) => {
+                    self.find_show(i);
+                    return false;
+                }
+                crate::chatsearch::Act::Close => {
+                    self.dirty = true;
+                    return false;
+                }
+            }
+        }
+
         if let Some(act) = self.flowbar.key(k) {
             let edit = matches!(act, crate::flowbar::Act::Edit(_));
             self.flow_act(act);
@@ -2113,6 +2145,16 @@ impl View {
         }
     }
 
+    /// Search match I (item index): its tool run open, the stream scrolls to it at the next draw.
+    fn find_show(&mut self, i: usize) {
+        if let Some(stream::Item::Run { key, .. }) = self.thread.items.get(i) {
+            self.open.insert(*key);
+        }
+
+        self.find_to = Some(i);
+        self.dirty = true;
+    }
+
     fn scroll(&mut self, delta: isize) {
         let max = self.drawn.rows.len().saturating_sub(usize::from(self.stream_rect.height));
         self.back = (self.back as isize + delta).clamp(0, max as isize) as usize;
@@ -2597,6 +2639,8 @@ impl View {
             let anchor = (self.back > 0).then(|| top_anchor(&self.drawn.starts, self.drawn.rows.len(), self.back, h)).flatten();
             self.width = st.width;
             let fold = stream::Fold { runs: &self.open, all_runs: self.all_runs, thoughts: self.thoughts, open_thoughts: &self.open_thoughts, all_thoughts: self.all_thoughts };
+            // the search bar: matches in new items (the shown match stays)
+            self.find.refresh(&self.thread);
             // live text: messages at the end for this draw only (the log brings the final ones)
             let logged = self.thread.items.len();
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
@@ -2621,6 +2665,12 @@ impl View {
                     }
                     None => self.toast("search: the message is gone from the stream"),
                 }
+            }
+
+            // the search bar's match: a third of the stream below the top
+            if let Some(i) = self.find_to.take().filter(|&i| i < self.drawn.starts.len()) {
+                let total = self.drawn.rows.len();
+                self.back = back_for(&self.drawn.starts, total, (i, 0), h).saturating_add(h / 3).min(total.saturating_sub(h));
             }
         }
         // seen: the newest message on screen (at the bottom: every event) for 1 s
@@ -2667,6 +2717,10 @@ impl View {
         self.back = self.back.min(total.saturating_sub(h));
         let end = total - self.back;
         let start = end.saturating_sub(h);
+        // the search bar open: its shown match has the marker
+        if self.find.open {
+            self.flash = self.find.current();
+        }
         let flash = self.flash.and_then(|i| Some((*self.drawn.starts.get(i)?, self.drawn.starts.get(i + 1).copied().unwrap_or(total))));
         let mut lines: Vec<Line> = self.drawn.rows[start..end]
             .iter()
@@ -2686,6 +2740,17 @@ impl View {
                 _ => r.line.clone(),
             })
             .collect();
+        // the search bar's words: marked in the rows of matching items
+        let words = self.find.words();
+        if !words.is_empty() {
+            for (n, l) in lines.iter_mut().enumerate() {
+                let item = self.drawn.starts.partition_point(|&s| s <= start + n).checked_sub(1);
+                if item.is_some_and(|i| self.find.is_hit(i)) {
+                    *l = crate::chatsearch::mark(l, &words);
+                }
+            }
+        }
+
         let mut cut = 0;
         if self.back == 0 && !extra.is_empty() {
             lines.extend(extra);
@@ -2808,10 +2873,13 @@ impl View {
         let head_rows = header_rows(self.members.len());
         // the agents box + cost box: chat only (the changes view takes the room)
         let head_h = if area.height >= MIN_HEADER_SCREEN && !self.members.is_empty() && (self.pane == Pane::Chat || wide) { head_rows + 1 } else { 0 };
-        // the bubble's top border: the header's bottom line (shared), else a row of its own
+        // the bubble's top border: the header's bottom line (shared), else a row of its own. The
+        // search bar (ctrl+f): 1 row right above the bubble, the header keeps its own bottom line
         let bubble_top = in_top.saturating_sub(1);
-        let header = Rect { y: (bubble_top + 1).saturating_sub(head_h), height: head_h, ..area };
-        let title = Rect { y: if head_h > 0 { header.y } else { bubble_top }.saturating_sub(1), height: 1, ..area };
+        let find_h = u16::from(self.find.open && (self.pane == Pane::Chat || wide));
+        let find_rect = Rect { x: area.x + 1, y: bubble_top.saturating_sub(find_h), width: area.width.saturating_sub(2), height: find_h };
+        let header = Rect { y: (bubble_top + 1).saturating_sub(head_h + 2 * find_h), height: head_h, ..area };
+        let title = Rect { y: if head_h > 0 { header.y } else { find_rect.y }.saturating_sub(1), height: 1, ..area };
         // the flow row (its open box) right above the title row
         let flow_h = self.flowbar.rows(area.height / 2);
         let flow = Rect { y: title.y.saturating_sub(flow_h), height: flow_h, ..area };
@@ -3040,7 +3108,10 @@ impl View {
         // an open ask with the focus: 0 cursor in the prompt (its keys go to the ask)
         let ask_keys = !self.thread.asks.is_empty() && self.ask.focus && !self.ask.sent;
         let prompt_keys = self.pane == Pane::Chat || self.prompt_focus;
-        self.input.render(f, self.input_rect, !menu_open && !ask_keys && prompt_keys);
+        self.input.render(f, self.input_rect, !menu_open && !ask_keys && prompt_keys && !self.find.focus);
+        if find_h > 0 {
+            self.find.render(f, find_rect);
+        }
         let comp_cmds = if self.comp_on() { Some(self.shell_cmds()) } else { None };
         if let Some(cmds) = &comp_cmds {
             self.comp.render_suggestion(f, &self.input, cmds, self.input_rect);
@@ -3786,7 +3857,8 @@ mod ask_tests {
         assert!(v.thread.asks.is_empty(), "answered: the flow's ask goes");
         assert!(!v.ops.borrow().iter().any(|o| o["op"] == "answer"), "0 host ask answer");
         // change the flow: the box asks now / after at once, then the start step
-        v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        v.flowbar.open();
+        v.dirty = true;
         let s = screen(&mut v).join("\n");
         println!("{s}");
         assert!(s.contains("roles @lead ada  @reviewer ?") && s.contains("◀"), "{s}");
@@ -5005,5 +5077,99 @@ mod key_fix_tests {
 
         key(&mut v, KeyCode::Char('z'), KeyModifiers::CONTROL);
         assert_eq!(v.input.text(), "looks good", "the note: back with ctrl+z");
+    }
+}
+
+/// ctrl+f in the chat: the search bar above the prompt, its matches, the prompt's draft kept.
+#[cfg(test)]
+mod chat_search_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn view(id: &str) -> View {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(id, Path::new("/tmp"), "t", tx);
+        for i in 0..40u64 {
+            let text = if i % 10 == 3 { format!("message {i}: the needle is here") } else { format!("message {i}: filler text") };
+            v.thread.push(&store::Event { ts: i + 1, agent: Some("ada".into()), kind: store::Kind::Text { text } });
+        }
+        v.dirty = true;
+        v
+    }
+
+    fn key(v: &mut View, c: KeyCode, m: KeyModifiers) {
+        v.key(KeyEvent::new(c, m));
+    }
+
+    fn typed(v: &mut View, s: &str) {
+        for c in s.chars() {
+            key(v, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+    }
+
+    fn screen(v: &mut View) -> Vec<String> {
+        let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        t.draw(|f| v.draw(f)).unwrap();
+        let b = t.backend().buffer().clone();
+        (0..30).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect()
+    }
+
+    #[test]
+    fn ctrl_f_searches_the_chat_tab_cycles_esc_closes_the_draft_stays() {
+        let mut v = view("chatsearch-0000");
+        typed(&mut v, "draft");
+        screen(&mut v);
+        key(&mut v, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert!(v.find.open && v.find.focus);
+
+        typed(&mut v, "needle");
+        assert_eq!(v.input.text(), "draft", "the query goes to the bar, not to the prompt");
+        let s = screen(&mut v);
+        let bar = s.iter().position(|l| l.contains(" find ")).unwrap_or_else(|| panic!("{s:#?}"));
+        println!("--- chat search\n{}", s.join("\n"));
+        assert!(s[bar].contains("needle") && s[bar].contains("4/4"), "{}", s[bar]);
+        assert!(s.iter().any(|l| l.contains("message 33: the needle")), "the newest match in view: {s:#?}");
+
+        // tab: the next older match, scrolled into view with the marker
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        let s = screen(&mut v);
+        assert!(s.iter().any(|l| l.contains("message 23: the needle")), "{s:#?}");
+        assert!(s.iter().any(|l| l.contains("3/4")), "{s:#?}");
+        assert!(s.iter().any(|l| l.starts_with('▌') && l.contains("message 23")), "the marker: {s:#?}");
+
+        // shift+tab: newer again; wraps past the newest to the oldest
+        key(&mut v, KeyCode::BackTab, KeyModifiers::SHIFT);
+        key(&mut v, KeyCode::BackTab, KeyModifiers::SHIFT);
+        let s = screen(&mut v);
+        assert!(s.iter().any(|l| l.contains("1/4")) && s.iter().any(|l| l.contains("message 3: the needle")), "{s:#?}");
+
+        // esc: the bar goes, the stream stays, the keys go to the prompt
+        let back = v.back;
+        key(&mut v, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!v.find.open && v.back == back);
+        let s = screen(&mut v);
+        assert!(!s.iter().any(|l| l.contains(" find ")), "{s:#?}");
+        typed(&mut v, "!");
+        assert_eq!(v.input.text(), "draft!");
+    }
+
+    #[test]
+    fn a_query_with_0_matches_says_so_and_keeps_the_stream() {
+        let mut v = view("chatsearch-0001");
+        screen(&mut v);
+        key(&mut v, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        typed(&mut v, "zzqq");
+        let s = screen(&mut v);
+        assert!(s.iter().any(|l| l.contains("0 matches")), "{s:#?}");
+        assert_eq!(v.back, 0);
+    }
+
+    #[test]
+    fn ctrl_f_in_another_view_is_its_filter_not_the_chat_search() {
+        let mut v = view("chatsearch-0002");
+        key(&mut v, KeyCode::F(4), KeyModifiers::NONE);
+        assert_eq!(v.pane, Pane::Files);
+        key(&mut v, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert!(v.files.typing() && !v.find.open);
     }
 }
