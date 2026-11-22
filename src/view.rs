@@ -109,6 +109,20 @@ enum Msg {
     Head(Vec<store::Event>),
 }
 
+/// ctrl+q: the agents box above the prompt has the keys. AT: the highlighted agent (index in
+/// the box order), CUR: its menu row (flow, remove, replace with), ARMED: remove asks a 2nd enter,
+/// REPLACE: the agents to replace it with (cursor, 1st row in view).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct AgentsFocus {
+    at: usize,
+    cur: usize,
+    armed: bool,
+    replace: Option<(usize, usize)>,
+}
+
+/// The rows of the agents box's menu.
+const AGENT_MENU: [&str; 3] = ["flow", "remove", "replace with"];
+
 struct View {
     id: String,
     title: String,
@@ -133,6 +147,8 @@ struct View {
     spawns: HashMap<String, crate::avatar::Spawn>,
     /// The sprite slots of the last draw (agent, its 7x4 rect): who is in view, where a spawn goes.
     slots: std::cell::RefCell<Vec<(String, Rect)>>,
+    /// ctrl+q: the agents box has the keys (None: the prompt or a view).
+    agents_focus: Option<AgentsFocus>,
     // stream
     drawn: stream::Drawn,
     dirty: bool,
@@ -327,6 +343,7 @@ impl View {
             front: Vec::new(),
             spawns: HashMap::new(),
             slots: std::cell::RefCell::new(Vec::new()),
+            agents_focus: None,
             drawn: stream::Drawn::default(),
             dirty: true,
             width: 0,
@@ -1064,7 +1081,7 @@ impl View {
         let prompt = format!("{body}\n\n(You take over this thread from {old}. Read {} first: the task, the recent messages, the changed files.)", file.display());
         let (id, tx) = (self.id.clone(), self.tx.clone());
         std::thread::spawn(move || {
-            let r = client::call(&id, &json!({"op": "leave", "agent": old})).and_then(|_| client::call(&id, &json!({"op": "prompt", "to": [new], "text": prompt})));
+            let r = client::call(&id, &json!({"op": "leave", "agent": old, "to": new})).and_then(|_| client::call(&id, &json!({"op": "prompt", "to": [new], "text": prompt})));
             let _ = tx.send(Msg::Done("replace", r));
         });
         self.toast("replacing…");
@@ -1351,6 +1368,14 @@ impl View {
         if self.menu.is_none() && self.flash.take().is_some() {
             self.dirty = true;
         }
+
+        // ctrl+m: the prompt, from every pane, box, filter, dropdown and the menu (kitty protocol;
+        // a legacy terminal sends ctrl+m as enter)
+        if k.code == KeyCode::Char('m') && k.modifiers == KeyModifiers::CONTROL {
+            self.focus_prompt();
+            return false;
+        }
+
         // notifications (ctrl+n): over everything, the menu too
         if let Some(p) = self.notes_panel.as_mut() {
             let pick = p.key(k);
@@ -1371,6 +1396,19 @@ impl View {
             self.open_menu();
             return false;
         }
+
+        // ctrl+q: the agents box above the prompt (←→ an agent, its menu: flow, remove, replace)
+        if k.code == KeyCode::Char('q') && k.modifiers == KeyModifiers::CONTROL {
+            self.focus_agents(None);
+            return false;
+        }
+
+        if self.agents_focus.is_some() {
+            self.agents_key(k);
+            self.dirty = true;
+            return false;
+        }
+
         // the IDE's repo picker: its keys first
         if self.ide_pick.is_some() {
             self.ide_pick_key(k);
@@ -2201,6 +2239,155 @@ impl View {
         }
     }
 
+    /// ctrl+m: the keys to the prompt; every box, filter and dropdown that holds them lets go.
+    fn focus_prompt(&mut self) {
+        self.menu = None;
+        self.notes_panel = None;
+        self.ide_pick = None;
+        self.agents_focus = None;
+        self.find.focus = false;
+        self.flowbars.iter_mut().for_each(crate::flowbar::FlowBar::close);
+        self.ask.focus = false;
+        self.prompt_focus = self.pane != Pane::Chat;
+        self.dirty = true;
+    }
+
+    /// The agents box has the keys, AGENT highlighted (None: the one a message goes to now).
+    fn focus_agents(&mut self, agent: Option<&str>) {
+        if self.order.is_empty() {
+            self.toast("0 agents on the thread · @name in the prompt brings one in");
+            return;
+        }
+
+        let want = agent.map(String::from).or_else(|| self.default_to().into_iter().next());
+        let at = want.and_then(|w| self.order.iter().position(|a| *a == w)).unwrap_or(0);
+        self.agents_focus = Some(AgentsFocus { at, ..Default::default() });
+        self.find.focus = false;
+        self.flowbars.iter_mut().for_each(crate::flowbar::FlowBar::close);
+        // the box shows in the chat (and next to a wide changes view)
+        if self.pane != Pane::Chat && !self.wide_split {
+            self.set_pane(Pane::Chat);
+        }
+        self.dirty = true;
+    }
+
+    /// Agents of the roster that can replace AGENT: 0 on the thread.
+    fn replace_candidates(&self) -> Vec<crate::agents::Agent> {
+        self.roster.iter().filter(|a| !self.members.contains(&a.name)).cloned().collect()
+    }
+
+    /// A key while the agents box has the keys.
+    fn agents_key(&mut self, k: KeyEvent) {
+        let Some(mut fo) = self.agents_focus.take() else { return };
+        let n = self.order.len();
+        if n == 0 {
+            return;
+        }
+
+        fo.at = fo.at.min(n - 1);
+        let agent = self.order[fo.at].clone();
+        // the replace picker: the agents to take over
+        if let Some((cur, off)) = fo.replace {
+            let cands = self.replace_candidates();
+            match k.code {
+                KeyCode::Esc | KeyCode::Left => fo.replace = None,
+                KeyCode::Up | KeyCode::Char('k') => fo.replace = Some((cur.saturating_sub(1), off)),
+                KeyCode::Down | KeyCode::Char('j') => fo.replace = Some(((cur + 1).min(cands.len().saturating_sub(1)), off)),
+                KeyCode::Enter => {
+                    if let Some(new) = cands.get(cur) {
+                        self.replace_agent(new.name.clone(), agent);
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            self.agents_focus = Some(fo);
+            return;
+        }
+
+        if k.code != KeyCode::Enter {
+            fo.armed = false;
+        }
+        match k.code {
+            // esc: back to the prompt
+            KeyCode::Esc => return,
+            KeyCode::Left | KeyCode::Char('h') => {
+                fo.at = (fo.at + n - 1) % n;
+                fo.cur = 0;
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                fo.at = (fo.at + 1) % n;
+                fo.cur = 0;
+            }
+            KeyCode::Up | KeyCode::Char('k') => fo.cur = fo.cur.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => fo.cur = (fo.cur + 1).min(AGENT_MENU.len() - 1),
+            KeyCode::Char(c @ '1'..='3') => {
+                fo.cur = usize::from(c as u8 - b'1');
+                self.agents_focus = Some(fo);
+                return self.agents_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
+            KeyCode::Enter => match fo.cur {
+                0 => {
+                    self.open_flow(&agent, false);
+                    return;
+                }
+                1 if self.members.len() < 2 => self.toast("the thread's last agent: replace it instead"),
+                1 if fo.armed => {
+                    self.host("leave", json!({"op": "leave", "agent": agent}));
+                    self.toast(format!("{agent} leaves the thread"));
+                    return;
+                }
+                1 => fo.armed = true,
+                _ if self.replace_candidates().is_empty() => self.toast("0 other agents · menu → new agent"),
+                _ => fo.replace = Some((0, 0)),
+            },
+            _ => {}
+        }
+        self.agents_focus = Some(fo);
+    }
+
+    /// NEW takes over from OLD: OLD leaves, NEW gets the handoff (and OLD's flow). OLD mid-turn:
+    /// after its turn.
+    fn replace_agent(&mut self, new: String, old: String) {
+        let text = format!("@{new}");
+        if self.thread.busy.contains(&old) {
+            self.toast(format!("{new} replaces {old} after {old}'s turn · esc: interrupt {old}"));
+            self.queued = Some((new, old, text));
+        } else {
+            self.run_replace(new, old, text);
+        }
+    }
+
+    /// The agents box's menu above the highlighted agent (or its replace picker).
+    fn draw_agents_menu(&mut self, f: &mut Frame, bounds: Rect) {
+        let Some(fo) = self.agents_focus.clone() else { return };
+        let Some(agent) = self.order.get(fo.at).cloned() else { return };
+        let Some(anchor) = self.slots.borrow().iter().find(|(a, _)| *a == agent).map(|(_, r)| *r) else { return };
+        if let Some((cur, off)) = fo.replace {
+            let rows: Vec<crate::dropdown::Row> = self
+                .replace_candidates()
+                .iter()
+                .map(|a| crate::dropdown::Row { text: a.name.clone(), detail: crate::cards::tech(a), now: false, marks: Vec::new() })
+                .collect();
+            let Some(r) = crate::dropdown::place(anchor, 44, rows.len(), bounds, true) else { return };
+            let (off, _) = crate::dropdown::list(f, r, &format!("replace @{agent} with"), "↑↓ · enter · esc: back", &rows, cur, off, "0 other agents");
+            if let Some(fo) = self.agents_focus.as_mut() {
+                fo.replace = Some((cur, off));
+            }
+            return;
+        }
+
+        let flow = self.flowbars.iter().find(|b| b.agent == agent).and_then(|b| b.state.as_ref()).map(|st| if st.finished { format!("{} · finished", st.title) } else { format!("{} · step {}", st.title, st.node + 1) });
+        let details = [
+            flow.unwrap_or_else(|| "0 flow: pick one".into()),
+            if fo.armed { format!("enter again: remove @{agent}") } else { "leaves the thread".into() },
+            "a new agent, the flow goes along".into(),
+        ];
+        let rows: Vec<crate::dropdown::Row> = AGENT_MENU.iter().zip(details).map(|(t, d)| crate::dropdown::Row { text: (*t).into(), detail: d, now: false, marks: Vec::new() }).collect();
+        let Some(r) = crate::dropdown::place(anchor, 50, rows.len(), bounds, true) else { return };
+        crate::dropdown::list(f, r, &format!("@{agent}"), "←→ agent · ↑↓ · enter · esc", &rows, fo.cur, 0, "");
+    }
+
     /// Search match I (item index): its tool run open, the stream scrolls to it at the next draw.
     fn find_show(&mut self, i: usize) {
         if let Some(stream::Item::Run { key, .. }) = self.thread.items.get(i) {
@@ -2624,7 +2811,11 @@ impl View {
         last.extend(status);
         let mut side = vec![
             vec![],
-            vec![Span::styled(format!("  {name}"), Style::default().fg(color).add_modifier(Modifier::BOLD))],
+            if self.agents_focus.as_ref().is_some_and(|fo| self.order.get(fo.at).is_some_and(|a| a == name)) {
+                vec![Span::raw(" "), Span::styled(format!(" {name} "), theme::pill().add_modifier(Modifier::BOLD))]
+            } else {
+                vec![Span::styled(format!("  {name}"), Style::default().fg(color).add_modifier(Modifier::BOLD))]
+            },
             vec![Span::styled(format!("  {tech}"), theme::muted())],
             last,
         ];
@@ -3224,11 +3415,12 @@ impl View {
         // footer: keys or toast right
         let right = match &self.toast {
             Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Span::styled(format!("{m} "), theme::accent()),
+            _ if self.agents_focus.is_some() => Span::styled("←→ agent · ↑↓ · enter · 1-3 · esc / ctrl+m: prompt ", theme::muted()),
             _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled(self.changes.hints(), theme::muted()),
             _ if self.pane == Pane::Merge && !self.prompt_focus => Span::styled(self.merge.hints(), theme::muted()),
             _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · ctrl+f filter · pgup pgdn: scroll · o e: IDE · y: yazi · c: copy path · S S: share · i: prompt ", theme::muted()),
             _ if self.pane != Pane::Chat => Span::styled("tab / esc: back to the view · F1-F4: views ", theme::muted()),
-            _ => Span::styled(format!("{}: menu · ctrl+i: IDE · F1-F4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label), theme::muted()),
+            _ => Span::styled(format!("{}: menu · ctrl+q: agents · ctrl+f: search · F1-F4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label), theme::muted()),
         };
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), foot);
 
@@ -3237,6 +3429,7 @@ impl View {
 
         // dropdowns over everything, then the menu
         if !menu_open {
+            self.draw_agents_menu(f, area);
             self.mention.render(f, &self.input, &self.roster, area);
             self.hist.render(f, area, self.input_rect);
             self.command.render(f, &self.input, area, self.input_rect);
@@ -5290,5 +5483,117 @@ mod chat_search_tests {
         assert_eq!(v.pane, Pane::Files);
         key(&mut v, KeyCode::Char('f'), KeyModifiers::CONTROL);
         assert!(v.files.typing() && !v.find.open);
+    }
+}
+
+/// ctrl+q: the agents box above the prompt has the keys: ←→ an agent, its menu above it (flow,
+/// remove, replace with); ctrl+m and esc give the keys back to the prompt (its draft kept).
+#[cfg(test)]
+mod agents_box_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn view(id: &str) -> View {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(id, Path::new("/tmp"), "t", tx);
+        v.members = vec!["ada".into(), "zed".into()];
+        v.roster = ["ada", "zed", "nova"].iter().map(|n| crate::agents::Agent { name: (*n).into(), harness: "claude".into(), ..Default::default() }).collect();
+        v.sync_order();
+        v.spawns.clear();
+        v.sync_flowbars();
+        v
+    }
+
+    fn key(v: &mut View, c: KeyCode, m: KeyModifiers) {
+        v.key(KeyEvent::new(c, m));
+    }
+
+    fn screen(v: &mut View) -> String {
+        let mut t = Terminal::new(TestBackend::new(110, 34)).unwrap();
+        t.draw(|f| v.draw(f)).unwrap();
+        let b = t.backend().buffer().clone();
+        (0..34).map(|y| (0..110).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn ctrl_q_highlights_an_agent_and_its_menu_opens_above_it() {
+        let mut v = view("agentsbox-0000");
+        v.input.set_text("draft");
+        key(&mut v, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert_eq!(v.agents_focus.as_ref().map(|f| f.at), Some(0), "the lead first");
+        let s = screen(&mut v);
+        println!("--- agents box\n{s}");
+        assert!(s.contains("@ada") && s.contains("flow") && s.contains("remove") && s.contains("replace with") && s.contains("0 flow: pick one"), "{s}");
+
+        // →: the next agent; letters and digits never reach the prompt
+        key(&mut v, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(v.agents_focus.as_ref().map(|f| f.at), Some(1));
+        key(&mut v, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(v.input.text(), "draft");
+        assert!(screen(&mut v).contains("@zed"));
+
+        // ctrl+m: the prompt again
+        key(&mut v, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        assert!(v.agents_focus.is_none());
+        key(&mut v, KeyCode::Char('!'), KeyModifiers::NONE);
+        assert_eq!(v.input.text(), "draft!");
+    }
+
+    #[test]
+    fn flow_opens_that_agents_flow_picker_and_sets_it_for_that_agent() {
+        let mut v = view("agentsbox-0001");
+        key(&mut v, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        key(&mut v, KeyCode::Right, KeyModifiers::NONE);
+        key(&mut v, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(v.agents_focus.is_none(), "the flow box has the keys");
+        let s = screen(&mut v);
+        assert!(s.contains("pick a flow for @zed"), "{s}");
+        // a flow, then its start step: flow_set for zed
+        for c in "chore".chars() {
+            key(&mut v, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        key(&mut v, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut v, KeyCode::Enter, KeyModifiers::NONE);
+        let op = v.ops.borrow().iter().find(|o| o["op"] == "flow_set").cloned().unwrap();
+        assert_eq!((op["flow"].as_str(), op["agent"].as_str()), (Some("chore"), Some("zed")));
+    }
+
+    #[test]
+    fn remove_asks_a_2nd_enter_and_replace_picks_an_agent_off_the_thread() {
+        let mut v = view("agentsbox-0002");
+        key(&mut v, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        key(&mut v, KeyCode::Right, KeyModifiers::NONE);
+        key(&mut v, KeyCode::Char('2'), KeyModifiers::NONE);
+        assert!(screen(&mut v).contains("enter again: remove @zed"));
+        assert!(!v.ops.borrow().iter().any(|o| o["op"] == "leave"));
+        key(&mut v, KeyCode::Enter, KeyModifiers::NONE);
+        let op = v.ops.borrow().iter().find(|o| o["op"] == "leave").cloned().unwrap();
+        assert_eq!(op["agent"].as_str(), Some("zed"));
+        assert!(v.agents_focus.is_none());
+
+        // replace with: the agents 0 on the thread (nova)
+        key(&mut v, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        key(&mut v, KeyCode::Char('3'), KeyModifiers::NONE);
+        let s = screen(&mut v);
+        assert!(s.contains("replace @ada with") && s.contains("nova") && !s.contains("│ zed"), "{s}");
+        key(&mut v, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(v.agents_focus.as_ref().is_some_and(|f| f.replace.is_none()), "esc: back to the menu");
+        key(&mut v, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(v.agents_focus.is_none(), "esc: the prompt");
+    }
+
+    #[test]
+    fn ctrl_m_gives_the_prompt_back_from_the_search_bar_and_another_view() {
+        let mut v = view("agentsbox-0003");
+        key(&mut v, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert!(v.find.focus);
+        key(&mut v, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        assert!(!v.find.focus && v.find.open, "the bar stays, the prompt has the keys");
+        key(&mut v, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(v.input.text(), "a");
+        key(&mut v, KeyCode::F(4), KeyModifiers::NONE);
+        assert!(!v.prompt_focus);
+        key(&mut v, KeyCode::Char('m'), KeyModifiers::CONTROL);
+        assert!(v.prompt_focus);
     }
 }

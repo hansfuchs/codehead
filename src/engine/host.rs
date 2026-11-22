@@ -448,13 +448,28 @@ impl Host {
                 }
                 Ok(json!({}))
             }
+            // AGENT leaves; its flow goes, or (TO: the agent that replaces it) goes to TO: the
+            // current step again with TO's 1st message
             "leave" => {
-                let agent = s("agent");
+                let (agent, to) = (s("agent"), s("to"));
                 if let Some(mut l) = self.sessions.remove(&agent) {
                     l.session.kill();
                 }
                 self.asks.retain(|_, (a, _)| *a != agent);
-                store::update(&self.id, |t| t.agents.retain(|a| *a != agent))?;
+                let flow = self.thread()?.flow_of(&agent);
+                if let Some(f) = &flow {
+                    let line = if to.is_empty() { format!("flow {} of @{agent} ended: it left", f.title) } else { format!("flow {} of @{agent} → @{to}", f.title) };
+                    self.flow_log(&agent, "clear", line);
+                }
+                store::update(&self.id, |t| {
+                    t.set_flow(&agent, None);
+                    t.agents.retain(|a| *a != agent);
+                    if let Some(mut f) = flow.filter(|_| !to.is_empty()) {
+                        f.sent = false;
+                        f.pending = None;
+                        t.set_flow(&to, Some(f));
+                    }
+                })?;
                 self.log(Some(&agent), Kind::Leave);
                 Ok(json!({}))
             }
@@ -1421,6 +1436,18 @@ mod tests {
         // zed's flow goes, ada's stays
         h.cmd(&json!({"op": "flow_clear", "agent": "zed"})).unwrap();
         assert!(flow("zed").is_none() && flow("ada").is_some());
+
+        // bob replaces ada: ada's flow goes to bob, its step again with bob's 1st message
+        h.later.clear();
+        h.cmd(&json!({"op": "leave", "agent": "ada", "to": "bob"})).unwrap();
+        assert!(flow("ada").is_none() && flow("bob").is_some_and(|f| !f.sent && f.node == 1));
+        h.cmd(&json!({"op": "prompt", "to": ["bob"], "text": "take over"})).unwrap();
+        let bob = h.later.iter().find(|(a, _)| a == "bob").map(|(_, m)| m.clone()).unwrap();
+        assert!(bob.starts_with("[codehead flow: chore · step 2/3") && bob.ends_with("take over"), "{bob}");
+
+        // zed leaves (0 replacement): 0 flow left
+        h.cmd(&json!({"op": "leave", "agent": "zed"})).unwrap();
+        assert!(flow("zed").is_none());
         let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
     }
 

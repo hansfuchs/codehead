@@ -394,7 +394,7 @@ pub fn validate(key: String, v: &str) -> Result<(), String> {
         "ports" if crate::portless::Mode::parse(v).is_none() => Err(format!("ports: auto, portless or block, not {v}")),
         "rank" | "review" if v != "off" && !v.strip_prefix("claude:").is_some_and(|m| !m.is_empty()) => Err(format!("{key}: off or claude:<model>, not {v}")),
         "classify" if !v.is_empty() && v != "off" && !crate::engine::roster::valid_name(v) => Err(format!("classify: an agent's name or off, not {v}")),
-        "keys.menu" => menu_bind(v).map(|_| ()).ok_or_else(|| format!("keys.menu: F7-F12, ctrl+<letter> or alt+<letter> codehead binds to nothing else (free: ctrl+l, ctrl+p, ctrl+q …), not {v}")),
+        "keys.menu" => menu_bind(v).map(|_| ()).ok_or_else(|| format!("keys.menu: F7-F12, ctrl+<letter> or alt+<letter> codehead binds to nothing else (free: ctrl+l, ctrl+p …), not {v}")),
         "keys.command" => command_char(v).map(|_| ()).ok_or_else(|| format!("keys.command: 1 symbol (not a letter, digit, space, @ ! # / ~), not {v}")),
         "colors.scheme" if crate::theme::Palette::preset(v).is_none() => {
             Err(format!("colors.scheme: {}, not {v}", crate::theme::PRESETS.iter().map(|p| p.0).collect::<Vec<_>>().join(" or ")))
@@ -476,8 +476,8 @@ fn command_char(s: &str) -> Option<char> {
 }
 
 /// Keys codehead binds itself: a menu key on 1 of them never fires or hides a built-in.
-const TAKEN: [&str; 27] = [
-    "ctrl+a", "ctrl+b", "ctrl+c", "ctrl+d", "ctrl+e", "ctrl+f", "ctrl+g", "ctrl+h", "ctrl+i", "ctrl+k", "ctrl+n", "ctrl+o", "ctrl+r", "ctrl+s", "ctrl+t", "ctrl+u", "ctrl+v", "ctrl+w", "ctrl+x",
+const TAKEN: [&str; 29] = [
+    "ctrl+a", "ctrl+b", "ctrl+c", "ctrl+d", "ctrl+e", "ctrl+f", "ctrl+g", "ctrl+h", "ctrl+i", "ctrl+k", "ctrl+m", "ctrl+n", "ctrl+o", "ctrl+q", "ctrl+r", "ctrl+s", "ctrl+t", "ctrl+u", "ctrl+v", "ctrl+w", "ctrl+x",
     "ctrl+y", "ctrl+z", "F1", "F2", "F3", "F4", "F5", "F6",
 ];
 
