@@ -142,6 +142,22 @@ mod cases {
         }
     }
 
+    /// ctrl+f in a long chat: 1 key of the query runs the match over every message (cold: the
+    /// texts of the items built once).
+    #[test]
+    #[ignore = "perf: just perf"]
+    fn chat_search_1k_turns() {
+        let t = thread(1000);
+        let mut s = crate::chatsearch::ChatSearch::default();
+        s.open();
+        let mut n = 0u32;
+        bench(&format!("chat search {} items (1 key)", t.items.len()), || {
+            n += 1;
+            s.ta.set_text(if n.is_multiple_of(2) { "deploy fix" } else { "deploy fi" });
+            s.refresh(&t)
+        });
+    }
+
     #[test]
     #[ignore = "perf: just perf"]
     fn frame_paint_200x60() {
