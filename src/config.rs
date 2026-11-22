@@ -1,5 +1,7 @@
-//! Device config: ~/.config/codehead.toml ($CODEHEAD_CONFIG overrides the path).
-//! Per key: env var first, then the file, then the built-in default.
+//! Settings: ~/.config/codehead.toml ($CODEHEAD_CONFIG overrides the path); with a home repo that
+//! has its codehead dir also `<home>/codehead/settings.toml` (shared) and
+//! `<home>/codehead/devices/<device>.toml` (this device). Per key: env var first, then the files
+//! (device, shared, codehead.toml), then the built-in default.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -11,6 +13,8 @@ pub struct File {
     pub notes: Option<String>,
     /// Home repo: a git repo with AGENTS.md (steering, notes, other repos) every agent reads.
     pub home: Option<String>,
+    /// This device's name: its file in the home repo (`codehead/devices/<device>.toml`). Unset: the host name.
+    pub device: Option<String>,
     /// Repo of the new tab's where row; unset: the repo of the dir codehead starts in.
     pub repo: Option<String>,
     pub styles: Option<String>,
@@ -53,7 +57,7 @@ pub const HARNESS_FIELDS: [&str; 4] = ["model", "effort", "command", "args"];
 
 /// Field FIELD of `[harness.NAME]`, read from the file now (a long-lived host sees edits).
 pub fn harness_opt(name: &str, field: &str) -> Option<String> {
-    let f = read_file(&path()).map(|(_, f)| f).unwrap_or_default();
+    let f = read_layers(&path()).map(|l| l.merged()).unwrap_or_default();
     f.harness.get(name)?.get(field).cloned().filter(|v| !v.trim().is_empty())
 }
 
@@ -71,7 +75,7 @@ pub fn path() -> PathBuf {
 }
 
 /// `~` and `~/x` → $HOME; relative paths resolve against $HOME.
-fn expand(p: &str) -> PathBuf {
+pub(crate) fn expand(p: &str) -> PathBuf {
     let rest = p
         .strip_prefix("~/")
         .or(if p == "~" { Some("") } else { None });
@@ -140,6 +144,7 @@ fn parse(text: &str) -> Result<File, String> {
         match k.as_str() {
             "notes" => f.notes = Some(s),
             "home" => f.home = Some(s),
+            "device" => f.device = Some(s),
             "repo" => f.repo = Some(s),
             "styles" => f.styles = Some(s),
             "agent" => f.agent = Some(s),
@@ -185,12 +190,7 @@ pub fn load() -> Result<File, String> {
     if let Some(c) = CFG.get() {
         return c.read().map(|c| c.clone()).map_err(|e| e.to_string());
     }
-    let p = path();
-    let f = match std::fs::read_to_string(&p) {
-        Ok(text) => parse(&text).map_err(|e| format!("{}: {e}", p.display()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => File::default(),
-        Err(e) => return Err(format!("{}: {e}", p.display())),
-    };
+    let f = read_layers(&path())?.merged();
     crate::theme::set_palette(palette_of(&f));
     CFG.get_or_init(|| RwLock::new(f))
         .read()
@@ -200,6 +200,188 @@ pub fn load() -> Result<File, String> {
 
 fn get() -> File {
     load().unwrap_or_else(|e| crate::fail(&e, 2))
+}
+
+/// The plain keys of a settings file (the tables: colors, aliases, harness).
+const PLAIN_KEYS: [&str; 19] = [
+    "notes", "home", "device", "repo", "styles", "agent", "prefix", "models", "messages", "thoughts", "edits", "rank", "classify", "review", "editor", "ports", "keys.menu", "keys.command",
+    "colors.scheme",
+];
+
+/// Where setting KEY lives once the home repo has its codehead dir: codehead.toml of this
+/// machine (the pointer to home), this device's file in home, or home's shared settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Local,
+    Device,
+    Shared,
+}
+
+pub fn scope(key: &str) -> Scope {
+    match key {
+        "home" | "device" => Scope::Local,
+        // paths and programs of this machine
+        "notes" | "styles" | "repo" | "editor" | "ports" => Scope::Device,
+        k if k.starts_with("aliases.") => Scope::Device,
+        k if k.starts_with("harness.") && k.ends_with(".command") => Scope::Device,
+        _ => Scope::Shared,
+    }
+}
+
+/// 1 settings file: its path, its text as read (the base of a save), its values.
+#[derive(Clone, Debug)]
+pub struct Layer {
+    pub path: PathBuf,
+    pub text: String,
+    pub file: File,
+}
+
+impl Layer {
+    fn read(path: PathBuf) -> Result<Layer, String> {
+        let (text, file) = read_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Layer { path, text, file })
+    }
+}
+
+/// The settings files of this machine: codehead.toml; with the home repo's codehead dir also
+/// home's shared settings (`codehead/settings.toml`) and this device's file
+/// (`codehead/devices/<device>.toml`). Per key: device, then shared, then codehead.toml.
+#[derive(Clone, Debug)]
+pub struct Layers {
+    pub local: Layer,
+    pub shared: Option<Layer>,
+    pub device: Option<Layer>,
+}
+
+impl Layers {
+    /// The values of all files, 1 per key.
+    pub fn merged(&self) -> File {
+        let mut f = self.local.file.clone();
+        for l in [&self.shared, &self.device].into_iter().flatten() {
+            overlay(&mut f, &l.file);
+        }
+        // the pointer is this machine's alone
+        f.home = self.local.file.home.clone();
+        f.device = self.local.file.device.clone();
+        f
+    }
+}
+
+/// The values of TOP over BASE.
+fn overlay(base: &mut File, top: &File) {
+    for k in PLAIN_KEYS {
+        if let Some(v) = top.get(k) {
+            base.set(k, Some(v));
+        }
+    }
+    base.colors.extend(top.colors.clone());
+    base.aliases.extend(top.aliases.clone());
+    for (h, t) in &top.harness {
+        base.harness.entry(h.clone()).or_default().extend(t.clone());
+    }
+}
+
+/// F split by scope: [codehead.toml, shared, device].
+fn split(f: &File) -> [File; 3] {
+    let mut out = [File::default(), File::default(), File::default()];
+    let at = |k: &str| match scope(k) {
+        Scope::Local => 0,
+        Scope::Shared => 1,
+        Scope::Device => 2,
+    };
+    for k in PLAIN_KEYS {
+        if let Some(v) = f.get(k) {
+            out[at(k)].set(k, Some(v));
+        }
+    }
+    out[1].colors = f.colors.clone();
+    out[2].aliases = f.aliases.clone();
+    for (h, t) in &f.harness {
+        for (field, v) in t {
+            let k = format!("harness.{h}.{field}");
+            out[at(&k)].set(&k, Some(v.clone()));
+        }
+    }
+    out
+}
+
+/// The codehead dir of home repo HOME (`<home>/codehead`), when it exists.
+pub fn layout_of(home: &std::path::Path) -> Option<PathBuf> {
+    let d = home.join("codehead");
+    d.is_dir().then_some(d)
+}
+
+/// The home repo's codehead dir: agents, flows, mcp.toml, settings live there. None: 0 home
+/// repo or 0 codehead dir in it (tests: always None, never the owner's home).
+pub fn layout() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    home_repo().and_then(|h| layout_of(&h))
+}
+
+/// S as a device name: lower case, letters, digits and `-`; the host name's 1st label.
+pub fn slug(s: &str) -> String {
+    let first = s.trim().split('.').next().unwrap_or_default().to_lowercase();
+    let mut out = String::new();
+    for c in first.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_end_matches('-').to_string();
+    if out.is_empty() { "device".into() } else { out }
+}
+
+/// The host name as a device name.
+pub fn host_device() -> String {
+    let mut buf = [0u8; 256];
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    slug(if ok { std::str::from_utf8(&buf[..end]).unwrap_or_default() } else { "" })
+}
+
+/// The device name of F: `device`, else the host name.
+pub fn device_of(f: &File) -> String {
+    f.device.as_deref().filter(|d| !d.trim().is_empty()).map(slug).unwrap_or_else(host_device)
+}
+
+/// The settings files of codehead.toml LOCAL (its `home` names the home repo; env never: a
+/// test inside a codehead thread must not reach the owner's home).
+pub fn read_layers(local: &std::path::Path) -> Result<Layers, String> {
+    let local = Layer::read(local.to_path_buf())?;
+    let Some(dir) = local.file.home.as_deref().filter(|s| !s.trim().is_empty()).map(expand).and_then(|h| layout_of(&h)) else {
+        return Ok(Layers { local, shared: None, device: None });
+    };
+    let shared = Layer::read(dir.join("settings.toml"))?;
+    let device = Layer::read(dir.join("devices").join(format!("{}.toml", device_of(&local.file))))?;
+    Ok(Layers { local, shared: Some(shared), device: Some(device) })
+}
+
+/// Save F (all values, as `merged` gives them) into the files of LAYERS, each key into the file
+/// of its scope; only changed files are written. A new `home` or `device`: only the pointer in
+/// codehead.toml changes (the files of the new place stay). Ok: the files read again.
+pub fn save_layers(layers: &Layers, f: &File) -> Result<Layers, String> {
+    let (Some(shared), Some(device)) = (&layers.shared, &layers.device) else {
+        save_file(&layers.local.path, &layers.local.text, f)?;
+        return read_layers(&layers.local.path);
+    };
+    if f.home != layers.local.file.home || f.device != layers.local.file.device {
+        let mut local = layers.local.file.clone();
+        local.home = f.home.clone();
+        local.device = f.device.clone();
+        save_file(&layers.local.path, &layers.local.text, &local)?;
+        return read_layers(&layers.local.path);
+    }
+    let [local, sh, dev] = split(f);
+    for (layer, new) in [(&layers.local, local), (shared, sh), (device, dev)] {
+        if layer.file != new {
+            save_file(&layer.path, &layer.text, &new)?;
+        }
+    }
+    read_layers(&layers.local.path)
 }
 
 /// Value V of setting KEY (a settings field: `messages`, `keys.menu`, `colors.accent` …): Err(why).
@@ -324,6 +506,7 @@ fn document(base: &str, file: &File) -> Result<String, String> {
     for (key, value) in [
         ("notes", &file.notes),
         ("home", &file.home),
+        ("device", &file.device),
         ("repo", &file.repo),
         ("styles", &file.styles),
         ("agent", &file.agent),
@@ -407,7 +590,10 @@ fn document(base: &str, file: &File) -> Result<String, String> {
             }
         }
     }
-    if !file.aliases.is_empty() || doc.contains_key("aliases") {
+    // 0 aliases: 0 table (a moved table leaves 0 empty [aliases] behind)
+    if file.aliases.is_empty() {
+        doc.remove("aliases");
+    } else {
         if !doc.contains_key("aliases") {
             doc["aliases"] = toml_edit::Item::Table(toml_edit::Table::new());
         }
@@ -486,6 +672,7 @@ impl File {
         match key {
             "notes" => self.notes.clone(),
             "home" => self.home.clone(),
+            "device" => self.device.clone(),
             "repo" => self.repo.clone(),
             "styles" => self.styles.clone(),
             "agent" => self.agent.clone(),
@@ -514,6 +701,7 @@ impl File {
         match key {
             "notes" => self.notes = v,
             "home" => self.home = v,
+            "device" => self.device = v,
             "repo" => self.repo = v,
             "styles" => self.styles = v,
             "agent" => self.agent = v,
@@ -653,11 +841,13 @@ pub fn defaults() -> File {
     }
 }
 
-/// $CODEHEAD_NOTES, else `notes`, else notes/ of the app dir.
+/// $CODEHEAD_NOTES, else `notes`, else notes/ of the home repo (with its codehead dir), else
+/// notes/ of the app dir.
 pub fn notes() -> PathBuf {
     env("CODEHEAD_NOTES")
         .map(PathBuf::from)
         .or_else(|| get().notes.as_deref().map(expand))
+        .or_else(|| layout().and_then(|d| Some(d.parent()?.join("notes"))))
         .unwrap_or_else(|| app_dir().join("notes"))
 }
 
@@ -677,11 +867,13 @@ pub fn default_repo() -> Option<PathBuf> {
         .filter(|p| p.is_dir())
 }
 
-/// $CODEHEAD_STYLES, else `styles`, else output-styles/ of the app dir.
+/// $CODEHEAD_STYLES, else `styles`, else styles/ of home's codehead dir (when there), else
+/// output-styles/ of the app dir.
 pub fn styles() -> PathBuf {
     env("CODEHEAD_STYLES")
         .map(PathBuf::from)
         .or_else(|| get().styles.as_deref().map(expand))
+        .or_else(|| layout().map(|d| d.join("styles")).filter(|d| d.is_dir()))
         .unwrap_or_else(|| app_dir().join("output-styles"))
 }
 
@@ -847,6 +1039,89 @@ mod tests {
         ] {
             assert!(parse(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn device_names_are_slugs() {
+        assert_eq!(slug("Hanss-MacBook-Pro.local"), "hanss-macbook-pro");
+        assert_eq!(slug(" My Mini_2 "), "my-mini-2");
+        assert_eq!(slug("..."), "device");
+        assert!(!host_device().is_empty());
+    }
+
+    #[test]
+    fn scopes_route_paths_to_the_device_and_the_rest_to_shared() {
+        assert_eq!(scope("home"), Scope::Local);
+        assert_eq!(scope("editor"), Scope::Device);
+        assert_eq!(scope("harness.codex.command"), Scope::Device);
+        assert_eq!(scope("harness.claude.model"), Scope::Shared);
+        assert_eq!(scope("colors.accent"), Scope::Shared);
+        let mut f = parse("agent = 'REGI'\neditor = 'zed'\nhome = '/h'\n[harness.codex]\ncommand = 'x'\nmodel = 'm'\n[aliases]\na = '/tmp'\n").unwrap();
+        f.scheme = Some("amber".into());
+        let [l, s, d] = split(&f);
+        assert_eq!((l.home.as_deref(), l.agent.as_deref()), (Some("/h"), None));
+        assert_eq!((s.agent.as_deref(), s.scheme.as_deref(), s.get("harness.codex.model").as_deref()), (Some("REGI"), Some("amber"), Some("m")));
+        assert_eq!((d.editor.as_deref(), d.get("harness.codex.command").as_deref(), d.aliases.len()), (Some("zed"), Some("x"), 1));
+        // split, then merged: the same values
+        let mut back = l.clone();
+        overlay(&mut back, &s);
+        overlay(&mut back, &d);
+        assert_eq!(back, f);
+    }
+
+    #[test]
+    fn layers_merge_device_over_shared_and_save_each_key_to_its_file() {
+        let root = std::env::temp_dir().join(format!("codehead-layers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join("codehead/devices")).unwrap();
+        let local = root.join("codehead.toml");
+        std::fs::write(&local, format!("home = '{}'\ndevice = 'mbp'\nprefix = 'old'\n", home.display())).unwrap();
+        std::fs::write(home.join("codehead/settings.toml"), "prefix = 'task'\neditor = 'code'\n").unwrap();
+        std::fs::write(home.join("codehead/devices/mbp.toml"), "# this mac\neditor = 'zed'\n").unwrap();
+        let layers = read_layers(&local).unwrap();
+        let f = layers.merged();
+        assert_eq!((f.prefix.as_deref(), f.editor.as_deref(), f.device.as_deref()), (Some("task"), Some("zed"), Some("mbp")));
+
+        let mut g = f.clone();
+        g.editor = Some("cursor".into());
+        g.messages = Some("lines".into());
+        let after = save_layers(&layers, &g).unwrap();
+        assert_eq!(after.merged(), g);
+        let dev = std::fs::read_to_string(home.join("codehead/devices/mbp.toml")).unwrap();
+        assert!(dev.contains("# this mac") && dev.contains("cursor"), "{dev}");
+        let shared = std::fs::read_to_string(home.join("codehead/settings.toml")).unwrap();
+        assert!(shared.contains("lines") && !shared.contains("editor"), "{shared}");
+        // codehead.toml: the pointer only (its old prefix: now in shared)
+        assert_eq!(after.local.file.prefix, None);
+
+        // a new device: only the pointer changes, the new device's file starts empty
+        let mut h = after.merged();
+        h.device = Some("mini".into());
+        h.editor = Some("idea".into());
+        let moved = save_layers(&after, &h).unwrap();
+        assert_eq!(moved.local.file.device.as_deref(), Some("mini"));
+        let m = moved.merged();
+        // editor: a device key (the save took it out of shared), mini: 0 file yet
+        assert_eq!((m.editor.as_deref(), m.messages.as_deref()), (None, Some("lines")));
+        assert!(!home.join("codehead/devices/mini.toml").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn layers_without_the_codehead_dir_are_codehead_toml_alone() {
+        let root = std::env::temp_dir().join(format!("codehead-layers-0-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let local = root.join("codehead.toml");
+        std::fs::write(&local, format!("home = '{}'\nprefix = 'x'\n", root.display())).unwrap();
+        let layers = read_layers(&local).unwrap();
+        assert!(layers.shared.is_none() && layers.device.is_none());
+        let mut f = layers.merged();
+        f.editor = Some("zed".into());
+        save_layers(&layers, &f).unwrap();
+        assert!(std::fs::read_to_string(&local).unwrap().contains("zed"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

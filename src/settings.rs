@@ -110,7 +110,8 @@ pub struct Form {
     aliases_on: bool,
     /// Fields 0..N: directory paths (path suggestions).
     path_fields: usize,
-    base: Option<String>,
+    /// The files as read: the base of the next save.
+    base: Option<config::Layers>,
     saved: config::File,
     /// 6 plain fields, then 2 per alias (name, target).
     pub(crate) fields: Vec<TextArea>,
@@ -203,8 +204,10 @@ impl Form {
     }
 
     fn reload(&mut self) -> Option<config::File> {
-        match config::read_file(&self.path) {
-            Ok((text, file)) => {
+        match config::read_layers(&self.path) {
+            Ok(layers) => {
+                let file = layers.merged();
+                let text = layers;
                 self.fields = self.specs.iter().map(|sp| Self::input(&file.get(sp.key).unwrap_or_default(), &format!("default: {}", Self::default_of(&file, sp.key)))).collect();
                 if self.aliases_on {
                     for (name, path) in &file.aliases {
@@ -308,17 +311,22 @@ impl Form {
         }
         let result = (|| {
             let file = self.values()?;
-            let base = self.base.as_deref().ok_or("reload config before save")?;
-            let text = config::save_file(&self.path, base, &file)?;
-            Ok::<_, String>((text, file))
+            let base = self.base.as_ref().ok_or("reload config before save")?;
+            let layers = config::save_layers(base, &file)?;
+            Ok::<_, String>((layers, file))
         })();
         match result {
-            Ok((text, file)) => {
-                self.base = Some(text);
+            Ok((layers, file)) => {
+                // a new home or device: other files, other values → the fields from them
+                let moved = layers.merged() != file;
+                self.base = Some(layers);
                 self.saved = file.clone();
                 self.status = "settings applied".into();
                 self.error = false;
                 self.applied = Some(file);
+                if moved && let Some(f) = self.reload() {
+                    self.applied = Some(f);
+                }
             }
             Err(e) => {
                 self.status = format!("not applied: {e}");

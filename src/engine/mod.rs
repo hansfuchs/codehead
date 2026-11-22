@@ -58,6 +58,12 @@ pub fn config_dir() -> PathBuf {
         .join("codehead")
 }
 
+/// Agents, flows, steps, mcp.toml, shortcuts.toml: the home repo's codehead dir (synced to
+/// every device), else the config dir.
+pub fn shared_dir() -> PathBuf {
+    crate::config::layout().unwrap_or_else(config_dir)
+}
+
 /// Logs of hosts and the thread view.
 pub fn logs_dir() -> PathBuf {
     data_dir().join("logs")

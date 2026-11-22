@@ -1,4 +1,4 @@
-//! Agents: 1 TOML file per agent in `<config>/agents/<name>.toml`. A file a person edits by
+//! Agents: 1 TOML file per agent in `<shared>/agents/<name>.toml` (engine::shared_dir). A file a person edits by
 //! hand is the same file codehead writes.
 //!
 //! ```toml
@@ -17,7 +17,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::config_dir;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Agent {
@@ -78,7 +77,7 @@ fn autopilot() -> String {
 }
 
 pub fn agents_dir() -> PathBuf {
-    config_dir().join("agents")
+    super::shared_dir().join("agents")
 }
 
 /// Agent names: a letter, then letters, digits, `-` or `_`; max. 32 chars.

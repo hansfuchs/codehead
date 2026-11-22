@@ -274,12 +274,12 @@ const BUILTIN_FLOWS: &[(&str, &str)] = &[
     ("chore", include_str!("builtin/flows/chore.toml")),
 ];
 
-/// User layer dir: `<config>/flows` or `<config>/steps` (tests: the test data dir).
+/// User layer dir: `<shared>/flows` or `<shared>/steps` (tests: the test data dir).
 pub fn user_dir(kind: &str) -> PathBuf {
     if cfg!(test) {
         return super::data_dir().join("flowcfg").join(kind);
     }
-    super::config_dir().join(kind)
+    super::shared_dir().join(kind)
 }
 
 /// Repo root of DIR: the nearest dir with `.git` above it.

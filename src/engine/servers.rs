@@ -1,4 +1,4 @@
-//! MCP servers codehead owns: `<config>/mcp.toml`, 1 table per server. codehead connects each
+//! MCP servers codehead owns: `<shared>/mcp.toml` (engine::shared_dir), 1 table per server. codehead connects each
 //! server to every agent whose profile lists it (`mcp = ["linear"]`), in any harness: Claude Code
 //! through `--mcp-config`, ACP agents through `mcpServers` of `session/new`. The servers of a
 //! harness's own config stay with the harness (union).
@@ -75,7 +75,7 @@ pub fn path() -> PathBuf {
     if cfg!(test) {
         return super::data_dir().join("mcp.toml");
     }
-    super::config_dir().join("mcp.toml")
+    super::shared_dir().join("mcp.toml")
 }
 
 /// Server names: a letter, then letters, digits, `-` or `_`; max. 40 chars (tool names:

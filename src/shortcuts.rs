@@ -39,7 +39,7 @@ pub fn path() -> PathBuf {
     if cfg!(test) {
         return crate::engine::data_dir().join("shortcuts.toml");
     }
-    crate::engine::config_dir().join("shortcuts.toml")
+    crate::engine::shared_dir().join("shortcuts.toml")
 }
 
 /// The last read: the file's time, the shortcuts.
