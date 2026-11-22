@@ -273,9 +273,14 @@ impl Bind {
     pub fn matches(&self, k: &ratatui::crossterm::event::KeyEvent) -> bool {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
         let core = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        // ⌘ (kitty protocol: super) = ctrl: cmd+p as ctrl+p
+        let mut mods = k.modifiers;
+        if mods.contains(KeyModifiers::SUPER) {
+            mods.insert(KeyModifiers::CONTROL);
+        }
         match (self.code, k.code) {
-            (KeyCode::Char(a), KeyCode::Char(b)) => a == b.to_ascii_lowercase() && k.modifiers.intersection(core) == self.mods,
-            (a, b) => a == b && k.modifiers.intersection(core) == self.mods,
+            (KeyCode::Char(a), KeyCode::Char(b)) => a == b.to_ascii_lowercase() && mods.intersection(core) == self.mods,
+            (a, b) => a == b && mods.intersection(core) == self.mods,
         }
     }
 }
@@ -783,6 +788,8 @@ mod tests {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         assert!(b.matches(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
         assert!(!b.matches(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+        // cmd+p (super) = ctrl+p
+        assert!(b.matches(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::SUPER)));
         assert!(Bind::parse("F2").unwrap().matches(&KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)));
     }
 
