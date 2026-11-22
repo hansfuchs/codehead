@@ -41,6 +41,9 @@ pub enum Item {
     /// stopped); a message of the master. SUB: its index in `Thread::subs`; KEY: the fold of a
     /// long report.
     Sub { agent: String, sub: usize, ts: u64, key: usize },
+    /// Flow lines of AGENT's flow in a row (step started, done, a wait, a switch): a section with
+    /// a border inside the agent's messages. LINES: (text, color).
+    Flow { agent: String, ts: u64, lines: Vec<(String, Color)> },
 }
 
 /// A subagent of an agent on the thread.
@@ -269,7 +272,15 @@ impl Thread {
                     "finished" => theme::pal().ok,
                     _ => theme::pal().accent,
                 };
-                self.items.push(Item::Note { agent: "flow".into(), text: text.clone(), color });
+                match e.agent.clone() {
+                    // an agent's flow: its lines in a row are 1 section of its messages
+                    Some(a) => match self.items.last_mut() {
+                        Some(Item::Flow { agent, lines, .. }) if *agent == a => lines.push((text.clone(), color)),
+                        _ => self.items.push(Item::Flow { agent: a, ts: e.ts, lines: vec![(text.clone(), color)] }),
+                    },
+                    // an older log's thread flow: a note
+                    None => self.items.push(Item::Note { agent: "flow".into(), text: text.clone(), color }),
+                }
             }
             Kind::Edits { summary } => self.items.push(Item::Note { agent, text: format!("got the edits since its last turn · {summary}"), color: theme::pal().muted }),
             Kind::SubThread { title, state, text, .. } => {
@@ -864,6 +875,17 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                 }
                 last_agent = Some(agent.clone());
             }
+            Item::Flow { agent, ts, lines } => {
+                let c = color_of(colors, agent);
+                blank(&mut d);
+                if last_agent.as_deref() != Some(agent) {
+                    d.rows.push(Row::plain(Line::from(badge(agent, c, *ts))));
+                }
+                minute = clock(*ts);
+                let bar = [Span::styled("│ ", Style::default().fg(c))];
+                d.rows.extend(flow_rows(lines, w.saturating_sub(2), &bar));
+                last_agent = Some(agent.clone());
+            }
             Item::Run { agent, key, calls, start, end, thoughts } => {
                 let c = color_of(colors, agent);
                 if last_agent.as_deref() != Some(agent) {
@@ -1221,6 +1243,32 @@ struct Open {
 
 /// A divider in an agent's box: `├──────── 13:42 ─┤`, joined to both borders (the time where
 /// the top border has it). Full width W: the close adds 0 right border to it.
+/// A flow section W wide after PREFIX: `┌─ flow ───┐`, 1 row per line (wrapped, its color),
+/// `└───┘`.
+fn flow_rows(lines: &[(String, Color)], w: usize, prefix: &[Span<'static>]) -> Vec<Row> {
+    let w = w.max(12);
+    let edge = theme::line();
+    let pw: usize = prefix.iter().map(|s| s.content.width()).sum();
+    let row = |spans: Vec<Span<'static>>| {
+        let mut v = prefix.to_vec();
+        v.extend(spans);
+        Row::plain(Line::from(v))
+    };
+    let mut out = vec![row(vec![Span::styled("┌─ ", edge), Span::styled("flow", theme::muted()), Span::styled(format!(" {}┐", "─".repeat(w.saturating_sub(9))), edge)])];
+    let mut pre = prefix.to_vec();
+    pre.push(Span::styled("│ ", edge));
+    for (text, color) in lines {
+        for mut r in render::plain(text, w.saturating_sub(4), Style::default().fg(*color), &pre) {
+            let used = r.line.width();
+            r.line.spans.push(Span::raw(" ".repeat((pw + w).saturating_sub(used + 1))));
+            r.line.spans.push(Span::styled("│", edge));
+            out.push(r);
+        }
+    }
+    out.push(row(vec![Span::styled(format!("└{}┘", "─".repeat(w.saturating_sub(2))), edge)]));
+    out
+}
+
 fn minute_divider(w: usize, border: Style, at: &str) -> Row {
     let fill = w.saturating_sub(1 + at.width() + 2 + 2);
     Row::plain(Line::from(vec![Span::styled(format!("├{}", "─".repeat(fill)), border), Span::styled(format!(" {at} "), theme::muted()), Span::styled("─┤", border)]))
@@ -1283,7 +1331,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
     // last item of each agent at work: its box gets the wave, unless a message or an answer came
     // after it (a new turn: 0 output yet, the wave goes into a box of its own at the end)
     let last_of: HashMap<&str, usize> = t.items.iter().enumerate().filter_map(|(i, it)| match it {
-        Item::Text { agent, .. } | Item::Run { agent, .. } | Item::Sub { agent, .. } => Some((agent.as_str(), i)),
+        Item::Text { agent, .. } | Item::Run { agent, .. } | Item::Sub { agent, .. } | Item::Flow { agent, .. } => Some((agent.as_str(), i)),
         _ => None,
     }).collect();
     let turn_at = t.items.iter().rposition(|it| matches!(it, Item::Prompt { .. } | Item::Settled { .. }));
@@ -1339,7 +1387,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
             }
             // only thoughts, hidden: 0 rows
             Item::Text { text, thoughts, .. } if text.trim().is_empty() && (thoughts.is_empty() || fold.thoughts == Thoughts::Hidden) => {}
-            Item::Text { agent, ts, .. } | Item::Run { agent, start: ts, .. } | Item::Sub { agent, ts, .. } => {
+            Item::Text { agent, ts, .. } | Item::Run { agent, start: ts, .. } | Item::Sub { agent, ts, .. } | Item::Flow { agent, ts, .. } => {
                 let c = color_of(colors, agent);
                 let border = Style::default().fg(theme::desaturate(c, 0.4));
                 let bar = [Span::styled("│ ", border)];
@@ -1347,7 +1395,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                     close(&mut d, &mut cur);
                     gap(&mut d);
                     // the box's time: its 1st item's (a later minute: a divider with its time)
-                    let busy = t.working(agent) && last_of.get(agent.as_str()).is_some_and(|&l| l >= idx && t.items[idx..=l].iter().all(|it| matches!(it, Item::Text { agent: a, .. } | Item::Run { agent: a, .. } | Item::Sub { agent: a, .. } if a == agent)));
+                    let busy = t.working(agent) && last_of.get(agent.as_str()).is_some_and(|&l| l >= idx && t.items[idx..=l].iter().all(|it| matches!(it, Item::Text { agent: a, .. } | Item::Run { agent: a, .. } | Item::Sub { agent: a, .. } | Item::Flow { agent: a, .. } if a == agent)));
                     let name = vec![Span::styled(agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD))];
                     let (top, wave_at) = top_border(w, border, name, busy, &clock(*ts));
                     if busy {
@@ -1433,6 +1481,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                             sub_rows(&mut d, s, *sub, *key, fold, inner, &bar);
                         }
                     }
+                    Item::Flow { lines, .. } => d.rows.extend(flow_rows(lines, inner.saturating_sub(2), &bar)),
                     _ => {}
                 }
             }
@@ -1518,6 +1567,39 @@ mod tests {
             }
         }
         panic!("0 {at}: {:?}", rows.iter().map(|r| &r.0).collect::<Vec<_>>());
+    }
+
+    /// An agent's flow lines sit inside its messages: 1 bordered section per run of lines (bubbles:
+    /// inside its box), 0 note rows; an older log's line (0 agent) stays a note.
+    #[test]
+    fn flow_lines_are_a_section_inside_the_agents_messages() {
+        let mut t = Thread::default();
+        let base = 1_795_090_200_000;
+        let at = |kind: Kind| Event { ts: base, agent: Some("ada".into()), kind };
+        t.push(&at(Kind::Text { text: "plan written".into() }));
+        t.push(&at(Kind::Flow { op: "step".into(), text: "✓ plan · 9 steps".into() }));
+        t.push(&at(Kind::Flow { op: "step".into(), text: "▶ refactor · step 3/8 plan approval · @ada".into() }));
+        t.push(&at(Kind::Text { text: "waiting for the owner".into() }));
+        t.push(&Event { ts: base, agent: None, kind: Kind::Flow { op: "set".into(), text: "flow: chore".into() } });
+        assert!(matches!(&t.items[1], Item::Flow { lines, .. } if lines.len() == 2), "2 lines in a row: 1 section");
+        let none = HashSet::new();
+        let fold = Fold { runs: &none, all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &none, all_thoughts: false };
+        for look in [Look::Bubbles, Look::Lines] {
+            let s = text(&draw(&t, look, 60, &Colors::new(), &[], &fold, &Picker::default()));
+            let rows: Vec<&str> = s.lines().collect();
+            let top = rows.iter().position(|r| r.contains("┌─ flow")).unwrap_or_else(|| panic!("{look:?}\n{s}"));
+            let bottom = rows.iter().position(|r| r.contains("└─") && r.starts_with("│")).unwrap_or_else(|| panic!("{look:?}\n{s}"));
+            let plan = rows.iter().position(|r| r.contains("plan written")).unwrap();
+            let wait = rows.iter().position(|r| r.contains("waiting for the owner")).unwrap();
+            assert!(plan < top && top < bottom && bottom < wait, "{look:?}\n{s}");
+            assert!(rows[top + 1].contains("✓ plan") && rows[top + 2].contains("step 3/8"), "{look:?}\n{s}");
+            assert!(rows[top + 1].trim_end().ends_with('│'), "the section's right border: {look:?}\n{s}");
+            assert!(!rows.iter().any(|r| r.contains("● flow ✓")), "0 note rows: {look:?}\n{s}");
+            assert!(rows.iter().any(|r| r.contains("● flow flow: chore")), "an older log's line: a note\n{s}");
+            if look == Look::Bubbles {
+                assert_eq!(rows.iter().filter(|r| r.starts_with('┌')).count(), 1, "1 box for the agent: {s}");
+            }
+        }
     }
 
     #[test]

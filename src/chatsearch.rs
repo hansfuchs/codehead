@@ -1,6 +1,6 @@
 //! ctrl+f in the chat: a search bar above the prompt. Each query word must match a message (the
 //! rule of the menu's search, `search.rs`): a substring, else fuzzy inside 1 word. Searched: the
-//! owner's and the agents' messages, notes, shell commands + output, answered asks, the tool calls
+//! owner's and the agents' messages, notes, flow lines, shell commands + output, answered asks, the tool calls
 //! of a run (their 1-line summary), subagent reports. The matches go in stream order; the bar
 //! starts on the newest one. tab / enter / ↑: the next older match, shift+tab / ↓: the next newer
 //! one (both wrap). esc: the bar closes, the stream stays where it is.
@@ -177,6 +177,7 @@ fn item_text(t: &stream::Thread, it: &Item) -> String {
         Item::Shell { command, output, .. } => format!("{command}\n{output}"),
         Item::Settled { question, answer, .. } => format!("{question}\n{answer}"),
         Item::Sub { sub, .. } => t.subs.get(*sub).map(|s| format!("{}\n{}", s.description, s.result)).unwrap_or_default(),
+        Item::Flow { lines, .. } => lines.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join("\n"),
     }
 }
 
