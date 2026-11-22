@@ -2810,17 +2810,7 @@ impl App {
                 if self.tabs_focus {
                     self.tabs_key(k);
                 } else {
-                    match self.tab {
-                        Tab::Notes => self.notes_key(k),
-                        Tab::Threads => self.threads_key(k),
-                        Tab::Merge => {
-                            let o = self.merge_tab.key(k);
-                            self.merge_out(o);
-                        }
-                        Tab::Agents | Tab::New => self.agents_key(k),
-                        Tab::Settings => self.settings_key(k),
-                        Tab::Flows => {}
-                    }
+                    self.pick_content_key(k);
                 }
             }
         }
@@ -3038,7 +3028,37 @@ impl App {
                     && let Some(settings) = &mut self.settings { settings.focus_input(); }
             }
             KeyCode::Char('q') => self.outcome = Some(Outcome::Quit),
+            KeyCode::Up | KeyCode::BackTab => {}
+            // any other key: the tab's own (its hotkeys, e.g. f: filter), focus to the content.
+            // Settings: 0 (a letter there would edit a field)
+            _ if self.screen == Screen::Compose => {
+                self.tabs_focus = false;
+                self.field = self.fields()[0];
+                self.compose_key(k);
+            }
+            _ if self.tab != Tab::Settings => {
+                self.tabs_focus = false;
+                self.pick_content_key(k);
+            }
             _ => {}
+        }
+    }
+
+    /// A key for the content of the current tab of the pick screen (0 tabs row focus).
+    fn pick_content_key(&mut self, k: KeyEvent) {
+        match self.tab {
+            Tab::Notes => self.notes_key(k),
+            Tab::Threads => self.threads_key(k),
+            Tab::Merge => {
+                let o = self.merge_tab.key(k);
+                self.merge_out(o);
+            }
+            Tab::Agents | Tab::New => self.agents_key(k),
+            Tab::Settings => self.settings_key(k),
+            Tab::Flows => {
+                let o = self.flows_tab.key(k);
+                self.flows_out(o);
+            }
         }
     }
 
@@ -5055,7 +5075,7 @@ mod render_tests {
     }
 
     /// DRAFTS: the drafts dir of another test app (its drafts show here). None: a new, empty dir.
-    fn app_with(drafts: Option<PathBuf>) -> App {
+    pub(super) fn app_with(drafts: Option<PathBuf>) -> App {
         let dir = std::env::temp_dir().join(format!("ch-render-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("infra")).unwrap();
         std::fs::write(dir.join("infra/deploy.md"), "# Deploy\n\nuse `kubectl rollout`\n").unwrap();
@@ -6638,3 +6658,33 @@ mod render_tests {
     }
 }
 
+
+#[cfg(test)]
+mod nav_keys {
+    use super::*;
+    use super::render_tests::app_with;
+
+    fn press(a: &mut App, code: KeyCode) {
+        a.key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    /// The tabs row in focus: a hotkey of the tab works (f: filter), the focus goes to the content.
+    #[test]
+    fn a_tab_hotkey_works_with_the_tabs_row_in_focus() {
+        let mut a = app_with(None);
+        a.switch_tab(Tab::Threads);
+        a.tabs_focus = true;
+        press(&mut a, KeyCode::Char('f'));
+        assert!(a.tfilter_editing && !a.tabs_focus);
+        press(&mut a, KeyCode::Esc);
+        a.switch_tab(Tab::Agents);
+        a.tabs_focus = true;
+        press(&mut a, KeyCode::Char('f'));
+        assert!(a.afilter_editing && !a.tabs_focus);
+        // the tabs row keys stay: ←→ tabs, ↑ 0 effect, q quits
+        a.afilter_editing = false;
+        a.tabs_focus = true;
+        press(&mut a, KeyCode::Up);
+        assert!(a.tabs_focus && a.tab == Tab::Agents);
+    }
+}
