@@ -70,6 +70,13 @@ fn agent_id_in(output: &str) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
+/// OUTPUT is the launch of a background subagent (Claude Code: `Async agent launched
+/// successfully … agentId: …`), not its report.
+fn async_launch(output: &str) -> bool {
+    let head: String = output.chars().take(400).collect();
+    head.contains("Async agent launched") || (agent_id_in(&head).is_some() && head.contains("in the background"))
+}
+
 /// The tail of FILE (MAX bytes, a cut 1st line left out), parsed lines.
 fn tail_lines(file: &Path, max: u64) -> Vec<Value> {
     use std::io::{Read, Seek, SeekFrom};
@@ -194,6 +201,11 @@ impl Tracker {
             }
             Kind::ToolResult { id, ok, output } if self.running.get(id).is_some_and(|r| r.agent == agent) => {
                 let r = self.running.get_mut(id).expect("checked");
+                // Claude Code starts subagents in the background by default (0 `run_in_background`
+                // in the input): the result is the launch, not the end
+                if *ok && !r.background && async_launch(output) {
+                    r.background = true;
+                }
                 if r.background && *ok {
                     if let Some(task) = agent_id_in(output).filter(|t| *t != r.task) {
                         r.task = task.clone();
@@ -360,6 +372,23 @@ mod tests {
         assert!(logs.iter().any(|(_, k)| matches!(k, Kind::SubEnd { id, .. } if id == "t3")), "{logs:?}");
         assert!(!t.any());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Claude Code's default: a background subagent without `run_in_background` in the input.
+    /// Its launch result keeps it running (its master stays busy); its meta file ends it.
+    #[test]
+    fn a_launch_result_without_run_in_background_keeps_it_running() {
+        let (mut t, _) = Tracker::from_log(&[]);
+        t.event("ada", &tool("t1", json!({"description": "map keys", "prompt": "read"})));
+        let out = "Async agent launched successfully. (This tool result is internal metadata.)\nagentId: abb626af5fcd5a2af (internal ID)\nThe agent is working in the background.";
+        let logs = t.event("ada", &Kind::ToolResult { id: "t1".into(), ok: true, output: out.into() });
+        assert!(matches!(&logs[0].1, Kind::SubInfo { task, .. } if task == "abb626af5fcd5a2af"), "{logs:?}");
+        assert!(t.any() && t.masters().contains("ada"), "still running: the master is busy");
+        assert!(t.running["t1"].background);
+        // a report that names an agent id (0 launch): the end
+        t.event("ada", &tool("t2", json!({"description": "x"})));
+        let logs = t.event("ada", &Kind::ToolResult { id: "t2".into(), ok: true, output: "done: see agentId: x1 notes".into() });
+        assert!(matches!(&logs[0].1, Kind::SubEnd { state, .. } if state == "done"));
     }
 
     #[test]
