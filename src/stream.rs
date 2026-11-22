@@ -1208,8 +1208,9 @@ fn owner_bubble(d: &mut Drawn, w: usize, text: &str, to_note: &str, ts: u64) {
     let (top, _) = top_border(bw, border, lead, false, &stamp);
     d.rows.push(Row { line: Line::from([vec![pad.clone()], top.line.spans].concat()), ..Default::default() });
     let bar = [pad.clone(), Span::styled("│ ", border)];
-    let mut rows = vec![Row::plain(Line::from(bar.to_vec()))];
-    rows.extend(memo::markdown(body, left + bw - 2, &bar));
+    // 0 blank row below the top border, 1 above the bottom border
+    let mut rows = memo::markdown(body, left + bw - 2, &bar);
+    rows.push(Row::plain(Line::from(bar.to_vec())));
     for mut r in rows {
         let rw = r.line.width();
         r.line.spans.push(Span::raw(" ".repeat((left + bw - 1).saturating_sub(rw))));
@@ -1372,6 +1373,8 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
     let mut cur: Option<Open> = None;
     let close = |d: &mut Drawn, cur: &mut Option<Open>| {
         let Some(o) = cur.take() else { return };
+        // 1 blank row above the bottom border (0 below the top border)
+        d.rows.push(Row::plain(Line::from(vec![Span::styled("│ ", o.border)])));
         for r in &mut d.rows[o.start + 1..] {
             let rw = r.line.width();
             // a full row (a minute divider): its own right end
@@ -1430,7 +1433,6 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                 cur = Some(Open { start: d.rows.len(), border, agent: None, minute: String::new(), name, wave: None });
                 d.rows.push(top);
                 let bar = [Span::styled("│ ", border)];
-                d.rows.push(Row::plain(Line::from(bar.to_vec())));
                 d.rows.extend(render::plain(question, inner, theme::bold(), &bar));
                 if !allow {
                     let st = if *permission { "denied" } else { "declined" };
@@ -1454,7 +1456,6 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                 cur = Some(Open { start: d.rows.len(), border, agent: None, minute: String::new(), name, wave: None });
                 d.rows.push(top);
                 let bar = [Span::styled("│ ", border)];
-                d.rows.push(Row::plain(Line::from(bar.to_vec())));
                 d.rows.extend(render::plain(text.trim_end(), inner, theme::muted(), &bar));
                 close(&mut d, &mut cur);
             }
@@ -1480,8 +1481,11 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                     o.minute = clock(*ts);
                     d.rows.push(Row::plain(Line::from(bar.to_vec())));
                     d.rows.push(minute_divider(w, border, &o.minute));
+                    d.rows.push(Row::plain(Line::from(bar.to_vec())));
+                } else {
+                    // the next item of the box: 1 blank row between (0 below the top border)
+                    d.rows.push(Row::plain(Line::from(bar.to_vec())));
                 }
-                d.rows.push(Row::plain(Line::from(bar.to_vec())));
                 match item {
                     Item::Text { text, thoughts, key, .. } => {
                         // the thoughts before the message: a folded line on its top
@@ -1566,7 +1570,6 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                 cur = Some(Open { start: d.rows.len(), border, agent: None, minute: String::new(), name, wave: None });
                 d.rows.push(top);
                 let bar = [Span::styled("│ ", border)];
-                d.rows.push(Row::plain(Line::from(bar.to_vec())));
                 d.rows.extend(kid_rows(title, state, text, inner, &bar));
                 close(&mut d, &mut cur);
             }
@@ -1609,7 +1612,6 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
         cur = Some(Open { start: d.rows.len(), border, agent: None, minute: String::new(), name: Vec::new(), wave: None });
         d.rows.push(top);
         let bar = [Span::styled("│ ", border)];
-        d.rows.push(Row::plain(Line::from(bar.to_vec())));
         ask_rows(&mut d, a, inner, &bar, ask);
         close(&mut d, &mut cur);
     }
@@ -1916,7 +1918,7 @@ mod tests {
         let s = text(&draw(&t, Look::Bubbles, 50, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, &Picker::default()));
         let rows: Vec<&str> = s.lines().collect();
         let q = rows.iter().position(|r| r.starts_with("└─ ada asked")).expect(&s);
-        assert!(rows[q - 1].starts_with("│ color?") && rows[q - 3].starts_with('┌'), "{s}");
+        assert!(rows[q - 2].starts_with("│ color?") && rows[q - 3].starts_with('┌'), "{s}");
         assert!(rows[q + 1..].iter().any(|r| r.trim_end().ends_with("│ red    │") || (r.contains("│ red") && r.ends_with('│') && r.starts_with(' '))), "{s}");
         // declined: 0 answer bubble
         t.push(&ev(Some("ada"), Kind::Ask { id: "p".into(), tool: "Bash".into(), input: json!({"command": "rm x"}) }));
@@ -1951,7 +1953,7 @@ mod tests {
         let s = text(&d);
         let rows: Vec<&str> = s.lines().collect();
         assert_eq!(d.waves.len(), 1, "{s}");
-        assert!(rows[d.waves[0].0 - 1].contains("second") && rows[d.waves[0].0].starts_with("└─ ada"), "{s}");
+        assert!(rows[d.waves[0].0 - 2].contains("second") && rows[d.waves[0].0].starts_with("└─ ada"), "{s}");
     }
 
     /// An agent's name: in the bottom border of its box (agent → agent too), cut to fit; the
@@ -1961,6 +1963,7 @@ mod tests {
         let mut t = Thread::default();
         t.push(&ev(Some("ada"), Kind::Text { text: "one".into() }));
         t.push(&ev(None, Kind::Prompt { from: "ada".into(), to: vec!["bob".into()], text: "take it".into() }));
+        t.push(&ev(None, Kind::Prompt { from: "owner".into(), to: vec!["bob".into()], text: "go".into() }));
         t.push(&ev(Some("bob"), Kind::Ask { id: "q".into(), tool: "AskUserQuestion".into(), input: json!({"questions": [{"question": "color?", "header": "Color", "options": [{"label": "red", "description": ""}], "multiSelect": false}]}) }));
         let fold = Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false };
         let d = draw(&t, Look::Bubbles, 40, &Colors::new(), &[], &fold, &Picker::default());
@@ -1968,7 +1971,18 @@ mod tests {
         let rows: Vec<&str> = s.lines().collect();
 
         let ada = rows.iter().position(|r| r.starts_with("└─ ada ─")).expect(&s);
-        assert!(rows[ada - 1].starts_with("│ one") && !rows[..ada].iter().any(|r| r.contains("ada")), "{s}");
+        assert!(rows[ada - 2].starts_with("│ one") && !rows[..ada].iter().any(|r| r.contains("ada")), "{s}");
+
+        // padding: 0 blank row below a top border, 1 above a bottom border (owner bubbles too)
+        let blank = |r: &str| r.trim().trim_matches('│').trim().is_empty();
+        for (i, r) in rows.iter().enumerate() {
+            if r.trim_start().starts_with('┌') {
+                assert!(!blank(rows[i + 1]), "row {}: {s}", i + 1);
+            }
+            if r.trim_start().starts_with('└') {
+                assert!(blank(rows[i - 1]) && rows[i - 1].contains('│'), "row {}: {s}", i - 1);
+            }
+        }
         assert!(rows.iter().any(|r| r.starts_with("└─ ada → bob ─")) && !rows.iter().any(|r| r.starts_with("┌─ ada")), "{s}");
         assert!(rows.iter().any(|r| r.starts_with("┌─ bob asks ")), "{s}");
         assert!(rows.iter().all(|r| r.chars().count() <= 40), "{s}");
