@@ -575,7 +575,7 @@ shared with its owner (the person). The owner reads every line of the thread.\n\
 - Answer the owner in your reply text: the owner reads it there. Write `@owner` when the owner must act or read something now: codehead notifies them. \
 Use the `send` tool of the `codehead` MCP server (`to`: agent names) only to hand work to another agent or to ask it something: \
 other agents see only what you send them. Sending to an agent not on the thread brings it in.\n\
-- `list_agents` shows every agent, its harness and model. `set_status` reports working / blocked / done to the owner.\n\
+- `list_agents` shows every agent, its harness and model. `set_status` reports blocked / done to the owner (never working: codehead shows each turn as working).\n\
 - `comment` writes review comments on lines of the changes (the owner's changes view). Only when the owner asks for comments (e.g. a review): 1 comment per finding, never unasked. \
 `comments` lists them (id, author, open / resolved). Addressed a comment (fixed, or answered why not): `comment_status` resolved, with a 1-line note.\n\
 - Messages from other agents reach you as prompts that start with `[from @name]`.\n\

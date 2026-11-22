@@ -253,6 +253,11 @@ impl Thread {
             }
             Kind::Status { state, note } => {
                 self.status.insert(agent.clone(), (state.clone(), note.clone()));
+                // `working`: 0 chat row (the agent card shows a turn as working…; the note says
+                // what its next messages say anyway)
+                if state == "working" {
+                    return;
+                }
                 let text = if note.is_empty() { state.clone() } else { format!("{state} · {note}") };
                 let color = match state.as_str() {
                     "blocked" => theme::pal().warn,
@@ -1696,6 +1701,17 @@ mod tests {
             let bold = d.rows.iter().flat_map(|r| r.line.spans.iter()).find(|sp| sp.content.contains("deploy")).unwrap();
             assert!(bold.style.add_modifier.contains(Modifier::BOLD), "{look:?} bold span");
         }
+    }
+
+    /// A `working` status: 0 chat row (state kept for the card); blocked / done: 1 row each.
+    #[test]
+    fn a_working_status_adds_0_chat_rows() {
+        let mut t = Thread::default();
+        t.push(&ev(Some("ada"), Kind::Status { state: "working".into(), note: "subthread display: chat → status line".into() }));
+        assert!(t.items.is_empty() && t.status["ada"].0 == "working", "{:?}", t.items);
+        t.push(&ev(Some("ada"), Kind::Status { state: "blocked".into(), note: "waits on @bob".into() }));
+        t.push(&ev(Some("ada"), Kind::Status { state: "done".into(), note: String::new() }));
+        assert_eq!(t.items.len(), 2);
     }
 
     #[test]

@@ -8,7 +8,7 @@ Every agent session gets codehead's MCP server (`codehead mcp`) with 3 tools:
 | Tool | Input | Effect |
 | --- | --- | --- |
 | `send` | `to` (name or names), `message` | a message to other agents on the thread |
-| `set_status` | `state` (`working`, `blocked`, `done`), `note?` | a status row in the thread |
+| `set_status` | `state` (`blocked`, `done`), `note?` | a status row in the thread (`working` from older sessions: 0 row, the agent card shows a turn as working) |
 | `list_agents` |  | every agent: harness, model, mode, on the thread or not |
 
 An agent sees only what is sent to it. A message reaches the other agent as a prompt that

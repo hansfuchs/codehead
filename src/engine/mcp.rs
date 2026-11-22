@@ -19,9 +19,9 @@ fn tools() -> Value {
         },
         {
             "name": "set_status",
-            "description": "Report your state to the owner: working, blocked (say on what in note) or done.",
+            "description": "Report to the owner: blocked (say on what in note) or done. Never for working: codehead shows each turn as working.",
             "inputSchema": {"type": "object", "properties": {
-                "state": {"type": "string", "enum": ["working", "blocked", "done"]},
+                "state": {"type": "string", "enum": ["blocked", "done"]},
                 "note": {"type": "string"}
             }, "required": ["state"]}
         },
