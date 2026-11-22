@@ -1839,7 +1839,7 @@ pub mod tests {
         // the PR diff's filter takes [ ] < > as text, 0 PR switch
         key(&mut m, KeyCode::Char('>'));
         m.tab().unwrap().focus = None;
-        key(&mut m, KeyCode::Char('f'));
+        m.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         for c in "[a]<>".chars() {
             key(&mut m, KeyCode::Char(c));
         }

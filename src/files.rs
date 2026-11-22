@@ -491,7 +491,7 @@ impl View {
             return;
         };
         self.scroll = self.scroll.min(lines.len().saturating_sub(1));
-        let head = Line::from(vec![Span::styled(format!(" {} ", self.shown(&p)), theme::accent_bold()), Span::styled(format!("{} lines · o: IDE · y: yazi · c: copy path · f: filter", lines.len()), theme::muted())]);
+        let head = Line::from(vec![Span::styled(format!(" {} ", self.shown(&p)), theme::accent_bold()), Span::styled(format!("{} lines · o: IDE · y: yazi · c: copy path · ctrl+f: filter", lines.len()), theme::muted())]);
         f.render_widget(Paragraph::new(head), Rect { height: 1, ..preview });
         let body: Vec<Line> = lines.into_iter().skip(self.scroll).take(usize::from(preview.height.saturating_sub(2))).collect();
         f.render_widget(Paragraph::new(body), Rect { x: preview.x + 1, y: preview.y + 2, height: preview.height.saturating_sub(2), width: preview.width.saturating_sub(1) });
@@ -531,6 +531,12 @@ impl View {
             }
             return Act::None;
         }
+        // ctrl+f: the filter (the only key to it, in every list)
+        if crate::textarea::is_filter_key(&k) {
+            self.filtering = true;
+            return Act::None;
+        }
+
         // a letter with ctrl / alt / ⌘: 0 view key (alt+S never shares)
         if matches!(k.code, KeyCode::Char(_)) && k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) {
             return Act::None;
@@ -539,7 +545,6 @@ impl View {
         let armed = self.share_armed.take().filter(|t| t.elapsed() < std::time::Duration::from_secs(3));
         let page = usize::from(self.preview.height.saturating_sub(3)).max(1);
         match k.code {
-            KeyCode::Char('f') | KeyCode::Char('/') => self.filtering = true,
             KeyCode::Down | KeyCode::Char('j') => self.step(1),
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
             KeyCode::PageDown | KeyCode::Char(' ') => self.scroll += page,
@@ -763,8 +768,14 @@ mod view_tests {
     fn letters_with_a_modifier_do_nothing_and_y_opens_yazi_on_the_dir_without_files() {
         let mut v = View::new("fileskeys-0000", Path::new("/tmp/fileskeys"));
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::ALT | KeyModifiers::SHIFT)), Act::None);
+        for c in ['f', '/'] {
+            assert_eq!(v.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)), Act::None);
+            assert!(!v.filtering, "{c}: 0 filter (ctrl+f is)");
+        }
+
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)), Act::None);
-        assert!(!v.filtering, "ctrl+f: 0 filter (f, / are)");
+        assert!(v.filtering, "ctrl+f: the filter");
+        v.filtering = false;
 
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)), Act::Yazi(PathBuf::from("/tmp/fileskeys")));
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)), Act::None, "0 file: 0 IDE");
@@ -793,8 +804,8 @@ mod view_tests {
         let (repo, others) = (at(&s, "repo changes"), at(&s, "other files"));
         assert!(at(&s, "src/view.rs") > repo && at(&s, "src/app.rs") > repo && at(&s, "scratch.txt") > others, "{s:#?}");
         assert_eq!(s[others - 1], "", "a blank row between sections: {s:#?}");
-        // f: the filter; `view`: the name match first, the content match after, 0 headings
-        press(&mut v, "f");
+        // ctrl+f: the filter; `view`: the name match first, the content match after, 0 headings
+        v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         assert!(v.typing());
         press(&mut v, "view");
         let (s, b) = screen(&mut v);

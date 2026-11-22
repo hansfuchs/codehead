@@ -234,6 +234,12 @@ pub fn line_mod(m: KeyModifiers) -> bool {
     m.contains(KeyModifiers::SUPER) || (!cfg!(target_os = "macos") && m.contains(KeyModifiers::ALT))
 }
 
+/// ctrl+f (⌘f with the kitty protocol): the only key that focuses a filter, in every list; in the
+/// chat: the search bar.
+pub fn is_filter_key(k: &KeyEvent) -> bool {
+    k.code == KeyCode::Char('f') && k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) && !k.modifiers.contains(KeyModifiers::ALT)
+}
+
 /// Esc on unsaved edits (esc never drops edits unasked): DIRTY and 0 esc within 2 s before → false
 /// (the caller warns: "esc again: drop"); a 2nd esc in time or 0 edits → true (drop / close now).
 /// AT: the caller's last esc.

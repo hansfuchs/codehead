@@ -7,7 +7,7 @@
 //! - steps: the step library: usage count, n new, enter edit, R rename (flows follow), D
 //!   duplicate, d d delete (each flow keeps the text as a one-off), ctrl+d ctrl+d resets an edited built-in, r reads the files again.
 //!
-//! ←→ on a list: the other sub-tab. / filters the list.
+//! ←→ on a list: the other sub-tab. ctrl+f filters the list.
 
 use std::path::PathBuf;
 
@@ -313,6 +313,7 @@ impl FlowsTab {
     fn list_key(&mut self, k: KeyEvent) -> Out {
         let n = self.list().len();
         match k.code {
+            _ if crate::textarea::is_filter_key(&k) => self.filtering = true,
             KeyCode::Up | KeyCode::Char('k') if self.at == 0 => return Out::Up,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.at -= 1;
@@ -328,7 +329,6 @@ impl FlowsTab {
                 self.filter.clear();
                 self.reload();
             }
-            KeyCode::Char('/') | KeyCode::Char('f') => self.filtering = true,
             KeyCode::Enter => match self.sub {
                 Sub::Flows if self.flow.is_some() => {
                     self.focus = Focus::Rail;
@@ -1058,8 +1058,8 @@ impl FlowsTab {
         }
         match self.focus {
             Focus::List if self.armed => &[("d", "again: delete"), ("any key", "keep")],
-            Focus::List if self.sub == Sub::Flows => &[("↑↓", "move"), ("enter", "rail"), ("←→", "steps"), ("n", "new"), ("D", "duplicate"), ("R", "rename"), ("d d", "delete"), ("r", "read again"), ("ctrl+d", "reset"), ("m", "user ↔ repo"), ("/", "filter")],
-            Focus::List => &[("↑↓", "move"), ("enter", "edit"), ("←→", "flows"), ("n", "new"), ("D", "duplicate"), ("R", "rename"), ("d d", "delete"), ("r", "read again"), ("ctrl+d", "reset"), ("/", "filter")],
+            Focus::List if self.sub == Sub::Flows => &[("↑↓", "move"), ("enter", "rail"), ("←→", "steps"), ("n", "new"), ("D", "duplicate"), ("R", "rename"), ("d d", "delete"), ("r", "read again"), ("ctrl+d", "reset"), ("m", "user ↔ repo"), ("ctrl+f", "filter")],
+            Focus::List => &[("↑↓", "move"), ("enter", "edit"), ("←→", "flows"), ("n", "new"), ("D", "duplicate"), ("R", "rename"), ("d d", "delete"), ("r", "read again"), ("ctrl+d", "reset"), ("ctrl+f", "filter")],
             Focus::Rail if self.armed => &[("d", "again: remove the step"), ("any key", "keep")],
             Focus::Rail => &[("a", "add"), ("enter", "edit"), ("J K", "move"), ("d d", "remove"), ("g", "gate"), ("o / O", "outcome / clear"), ("L", "loop"), ("+ -", "max"), ("@", "role"), ("s", "save as step"), ("esc", "list")],
             Focus::Editor => &[("tab", "next field"), ("ctrl+g", "gate"), ("ctrl+f", "fork shared → one-off"), ("#", "shortcuts"), ("ctrl+s", "save"), ("esc", "close")],

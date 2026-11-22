@@ -1347,8 +1347,9 @@ impl View {
             self.dirty = true;
             return false;
         }
-        // the flow box: ctrl+f opens / closes it; its keys while open
-        if k.code == KeyCode::Char('f') && k.modifiers.contains(KeyModifiers::CONTROL) && !self.flowbar.is_open() {
+        // the flow box: ctrl+f opens / closes it; its keys while open. Another view with the
+        // focus: ctrl+f is its filter
+        if crate::textarea::is_filter_key(&k) && (self.pane == Pane::Chat || self.prompt_focus) && !self.flowbar.is_open() {
             self.flowbar.open();
             self.dirty = true;
             return false;
@@ -1524,7 +1525,7 @@ impl View {
         if self.shortcuts.key(k, &mut self.input) || self.paths.key(k, &mut self.input) {
             return false;
         }
-        // shell mode: the completions, then the history's suggestion (→ / End / ctrl+f)
+        // shell mode: the completions, then the history's suggestion (→ / End)
         if self.comp_on() {
             let cmds = self.shell_cmds();
             if self.comp.key(k, &mut self.input, &self.shell_cwd, &cmds) || self.comp.accept(k, &mut self.input, &cmds) {
@@ -3092,7 +3093,7 @@ impl View {
             Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Span::styled(format!("{m} "), theme::accent()),
             _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled(self.changes.hints(), theme::muted()),
             _ if self.pane == Pane::Merge && !self.prompt_focus => Span::styled(self.merge.hints(), theme::muted()),
-            _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · / filter · pgup pgdn: scroll · o e: IDE · y: yazi · c: copy path · S S: share · i: prompt ", theme::muted()),
+            _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · ctrl+f filter · pgup pgdn: scroll · o e: IDE · y: yazi · c: copy path · S S: share · i: prompt ", theme::muted()),
             _ if self.pane != Pane::Chat => Span::styled("tab / esc: back to the view · F1-F4: views ", theme::muted()),
             _ => Span::styled(format!("{}: menu · ctrl+i: IDE · F1-F4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label), theme::muted()),
         };
@@ -4081,8 +4082,8 @@ mod pane_tests {
         assert_eq!(v.changes.comment_count(), 1);
         let s = screen(&mut v);
         assert!(s.contains("2 · removed 2 · you: n"), "{s}");
-        // f: the filter takes letters, i too; esc leaves it (0 interrupt timer)
-        press(&mut v, KeyCode::Char('f'), KeyModifiers::NONE);
+        // ctrl+f: the filter takes letters, i too; esc leaves it (0 interrupt timer)
+        press(&mut v, KeyCode::Char('f'), KeyModifiers::CONTROL);
         press(&mut v, KeyCode::Char('i'), KeyModifiers::NONE);
         assert!(!v.prompt_focus && v.input.text().is_empty());
         assert!(screen(&mut v).contains(" f  i "));
@@ -4370,7 +4371,8 @@ mod files_pane_tests {
         let mut v = View::new("filesfilter-0000", Path::new("/tmp"), "t", tx);
         v.key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::ALT));
         assert_eq!(v.pane, Pane::Files);
-        for c in "fix".chars() {
+        v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        for c in "ix".chars() {
             v.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         // `i` went to the filter, not to the prompt focus

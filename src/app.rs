@@ -2302,7 +2302,7 @@ impl App {
             ),
             (Screen::Pick, Tab::Notes) => (
                 vec![
-                    c("f", "filter by name + content", Act::Filter),
+                    c("ctrl+f", "filter by name + content", Act::Filter),
                     c("d", "delete the note / folder under the cursor", Act::DeleteNote),
                     c("e", "edit the note in $EDITOR", Act::EditNote),
                     c("y", "copy the picked note paths", Act::CopyPaths),
@@ -2324,7 +2324,7 @@ impl App {
             ),
             (Screen::Pick, Tab::Threads) => (
                 vec![
-                    c("f", "filter thread names (fuzzy)", Act::ThreadFilter),
+                    c("ctrl+f", "filter thread names (fuzzy)", Act::ThreadFilter),
                     c("←→", "filter by repo (dropdown; ←→: the previous / next repo at once)", Act::RepoFilter),
                     c("d", "delete thread + worktree (+ branch, if pushed)", Act::DeleteThreads),
                     c("r", "reload", Act::Reload),
@@ -2334,7 +2334,7 @@ impl App {
                     ("↑↓", "move · ↑ on top row: tabs"),
                     ("space", "select thread / worktree"),
                     ("enter", "open thread (new task if none)"),
-                    ("f", "filter: enter / esc back to the list"),
+                    ("ctrl+f", "filter: enter / esc back to the list"),
                     ("←→", "previous / next repo (menu: the repo dropdown, type: filter)"),
                     ("enter on claude", "new thread, last response as context"),
                     ("c", "thread / claude session: last response in / out of the task context"),
@@ -2345,7 +2345,7 @@ impl App {
             ),
             (Screen::Pick, Tab::Agents | Tab::New) => (
                 vec![
-                    c("f", "filter agents (fuzzy: name, harness, model)", Act::AgentFilter),
+                    c("ctrl+f", "filter agents (fuzzy: name, harness, model)", Act::AgentFilter),
                     c("n", "new agent", Act::NewAgent),
                     c("e", "edit agent (also enter)", Act::EditAgent),
                     c("d", "delete agent: its threads move to the default agent", Act::DeleteAgent),
@@ -2355,7 +2355,7 @@ impl App {
                 vec![
                     ("↑↓←→", "move in the card grid · ↑ on top row: tabs"),
                     ("enter", "edit agent"),
-                    ("f", "filter: enter / esc back to the cards"),
+                    ("ctrl+f", "filter: enter / esc back to the cards"),
                     ("F1-F6 · alt+1-6", "switch tab"),
                     ("pgup pgdn", "scroll preview"),
                     ("esc", "clear the filter"),
@@ -3089,7 +3089,7 @@ impl App {
             }
             // esc: the top level already (esc esc quits); q: 0 quit (menu → quit codehead)
             KeyCode::Up | KeyCode::BackTab | KeyCode::Esc => {}
-            // any other key: the tab's own (its hotkeys, e.g. f: filter), focus to the content.
+            // any other key: the tab's own (its hotkeys, e.g. ctrl+f: filter), focus to the content.
             // Settings: 0 (a letter there would edit a field)
             _ if self.screen == Screen::Compose => {
                 self.tabs_focus = false;
@@ -3205,7 +3205,6 @@ impl App {
                 self.move_cursor(1);
             }
             KeyCode::Enter => self.confirm_notes(),
-            KeyCode::Char('/') => self.run(Act::Filter),
             KeyCode::Esc if self.filter.is_some() => {
                 self.filter = None;
                 self.rebuild();
@@ -5067,11 +5066,11 @@ impl App {
             Screen::Pick if self.filter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter", "done"), ("esc", "clear")],
             Screen::Pick if self.tab == Tab::Notes && self.cfg.copy_mode => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "copy"), ("esc", "quit")],
             Screen::Pick if self.tab == Tab::Notes => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "confirm"), ("esc", "new"), ("tab", "back")],
-            Screen::Pick if self.tab == Tab::Threads => &[("↑↓", "move"), ("f", "filter"), ("space", "select"), ("c", "context"), ("enter", "open"), ("F1-F6", "tabs")],
+            Screen::Pick if self.tab == Tab::Threads => &[("↑↓", "move"), ("ctrl+f", "filter"), ("space", "select"), ("c", "context"), ("enter", "open"), ("F1-F6", "tabs")],
             Screen::Pick if self.tab == Tab::Settings => self.settings.as_ref().map_or(&[], |s| s.help()),
             Screen::Pick if self.tab == Tab::Flows => self.flows_tab.help(),
             Screen::Pick if self.afilter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to cards")],
-            Screen::Pick => &[("↑↓←→", "move"), ("f", "filter"), ("enter", "edit"), ("F1-F6", "tabs")],
+            Screen::Pick => &[("↑↓←→", "move"), ("ctrl+f", "filter"), ("enter", "edit"), ("F1-F6", "tabs")],
         };
         for (k, l) in hints {
             spans.extend(hint(k, l));
@@ -5872,7 +5871,7 @@ mod render_tests {
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         assert!(a.outcome.is_none() && a.tab == Tab::Agents);
         a.switch_tab(Tab::Threads);
-        key(&mut a, KeyCode::Char('f'), KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('f'), KeyModifiers::CONTROL);
         a.paste("thread filter");
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!a.tfilter_editing && a.tab == Tab::Threads);
@@ -6184,7 +6183,7 @@ mod render_tests {
         let claude: Vec<_> = a.aplace.iter().filter(|(i, _, _)| a.agents[*i].harness == "claude").map(|p| p.1).collect();
         assert!(claude.iter().all(|&x| x == 0), "{claude:?}");
         // the filter: f, type, enter; esc clears it
-        key(&mut a, KeyCode::Char('f'), KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('f'), KeyModifiers::CONTROL);
         assert!(a.afilter_editing);
         a.paste("lil");
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -6269,10 +6268,10 @@ mod render_tests {
         a.modal = None;
         a.worktrees = Some(Vec::new());
         a.switch_tab(Tab::Threads);
-        key(&mut a, KeyCode::Char('f'), KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('f'), KeyModifiers::CONTROL);
         undo_redo(&mut a, |a| a.tfilter.clone().unwrap_or_default());
         a.switch_tab(Tab::Notes);
-        key(&mut a, KeyCode::Char('/'), KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('f'), KeyModifiers::CONTROL);
         undo_redo(&mut a, |a| a.filter.clone().unwrap_or_default());
         assert_eq!(a.rows.len(), 0, "filter \"hi\" matches 0 notes");
         key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
@@ -6462,7 +6461,12 @@ mod render_tests {
             Session { title: "Ampcode ideas".into(), cwd: "/p".into(), last: "x".into(), ..Default::default() },
         ];
         a.switch_tab(Tab::Threads);
+        // f and /: 0 filter; ctrl+f: the only key to it
         key(&mut a, KeyCode::Char('f'), KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('/'), KeyModifiers::NONE);
+        assert!(!a.tfilter_editing);
+
+        key(&mut a, KeyCode::Char('f'), KeyModifiers::CONTROL);
         assert!(a.tfilter_editing);
         for c in "amp".chars() {
             key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
@@ -6471,7 +6475,7 @@ mod render_tests {
         assert_eq!(a.current_session().unwrap().title, "Ampcode ideas");
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert!(!a.tfilter_editing && a.tfilter.as_deref() == Some("amp"));
-        key(&mut a, KeyCode::Char('f'), KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('f'), KeyModifiers::CONTROL);
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!a.tfilter_editing);
         println!("--- thread filter\n{}", dump(&mut a, 110, 10));
@@ -6567,8 +6571,8 @@ mod render_tests {
         let screen = dump(&mut a, 100, 30);
         assert!(!screen.contains("add MCP server"), "{screen}");
         assert_eq!(crate::engine::servers::load().unwrap().len(), 1);
-        // the filter: / then text, a miss shows 0 rows
-        key(&mut a, KeyCode::Char('/'), KeyModifiers::NONE);
+        // the filter: ctrl+f then text, a miss shows 0 rows
+        key(&mut a, KeyCode::Char('f'), KeyModifiers::CONTROL);
         a.paste("zzqq");
         let screen = dump(&mut a, 100, 30);
         assert!(screen.contains("0 servers match the filter"), "{screen}");
@@ -6967,18 +6971,18 @@ mod nav_keys {
         a.key(KeyEvent::new(code, KeyModifiers::NONE));
     }
 
-    /// The tabs row in focus: a hotkey of the tab works (f: filter), the focus goes to the content.
+    /// The tabs row in focus: a hotkey of the tab works (ctrl+f: filter), the focus goes to the content.
     #[test]
     fn a_tab_hotkey_works_with_the_tabs_row_in_focus() {
         let mut a = app_with(None);
         a.switch_tab(Tab::Threads);
         a.tabs_focus = true;
-        press(&mut a, KeyCode::Char('f'));
+        a.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         assert!(a.tfilter_editing && !a.tabs_focus);
         press(&mut a, KeyCode::Esc);
         a.switch_tab(Tab::Agents);
         a.tabs_focus = true;
-        press(&mut a, KeyCode::Char('f'));
+        a.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         assert!(a.afilter_editing && !a.tabs_focus);
         // the tabs row keys stay: ←→ tabs, ↑ 0 effect, q quits
         a.afilter_editing = false;

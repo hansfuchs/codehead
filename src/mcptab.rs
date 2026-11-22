@@ -356,10 +356,8 @@ impl McpTab {
         }
         let n = self.items().0.len();
         match k.code {
-            KeyCode::Char('/') => self.filtering = true,
-            KeyCode::Up if self.cursor == 0 => {
-                self.filtering = true;
-            }
+            _ if crate::textarea::is_filter_key(&k) => self.filtering = true,
+            KeyCode::Up if self.cursor == 0 => return false,
             KeyCode::Up => self.cursor -= 1,
             KeyCode::Down => self.cursor = (self.cursor + 1).min(n.saturating_sub(1)),
             KeyCode::PageUp => self.cursor = self.cursor.saturating_sub(10),
@@ -853,7 +851,7 @@ impl McpTab {
             Some(Modal::Confirm { .. }) => &[("y enter", "yes"), ("n esc", "no")],
             Some(Modal::Info { .. }) => &[("l", "sign in"), ("enter esc", "close")],
             None if self.filtering => &[("type", "filter"), ("enter ↓", "list"), ("esc", "clear")],
-            None => &[("/", "filter"), ("a", "add"), ("enter", "edit / details"), ("g", "agents"), ("l", "sign in"), ("i", "import"), ("t", "auto-allow"), ("d", "delete"), ("r", "refresh")],
+            None => &[("ctrl+f", "filter"), ("a", "add"), ("enter", "edit / details"), ("g", "agents"), ("l", "sign in"), ("i", "import"), ("t", "auto-allow"), ("d", "delete"), ("r", "refresh")],
         }
     }
 

@@ -3153,7 +3153,7 @@ impl View {
             return;
         }
         let line = if filtered {
-            Line::from(vec![Span::styled(" f ", theme::muted()), Span::styled(format!(" {}", self.filter), theme::accent()), Span::styled("  f: edit · esc: clear", theme::muted())])
+            Line::from(vec![Span::styled(" f ", theme::muted()), Span::styled(format!(" {}", self.filter), theme::accent()), Span::styled("  ctrl+f: edit · esc: clear", theme::muted())])
         } else {
             Line::styled(" f  filter by name or content", theme::muted())
         };
@@ -3433,6 +3433,14 @@ impl View {
             return Act::None;
         }
 
+        // ctrl+f: the filter (the only key to it); the commit message keeps its keys
+        if !self.scm.msg_focus && crate::textarea::is_filter_key(&k) {
+            self.filtering = true;
+            self.scm.focus = false;
+            self.filter_ta.move_end();
+            return Act::None;
+        }
+
         // a letter with ctrl / alt / ⌘: 0 review or panel key (alt+P never pushes); ctrl+r reads
         // again, ctrl+x deletes, as their plain letters; the commit message takes its own
         if !self.scm.msg_focus
@@ -3520,7 +3528,6 @@ impl View {
             KeyCode::Char('v') => return self.toggle_reviewed(),
             KeyCode::Left => self.fold(true),
             KeyCode::Right => self.fold(false),
-            KeyCode::Char('f' | '/') => self.filtering = true,
             KeyCode::Char('t') => return Act::ToggleChat,
             KeyCode::Esc => {
                 if !self.filter.is_empty() {
@@ -4427,7 +4434,7 @@ Binary files a/img.png and b/img.png differ
     fn f_filters_by_name_and_content_with_marks_esc_clears_enter_jumps() {
         let mut v = view(parse(DIFF));
         screen(&mut v, 100, 30);
-        press(&mut v, KeyCode::Char('f'));
+        v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         assert!(v.typing() && v.takes_esc());
         // `fn t()`: content of the test file (the low tab) only: a hit across the tabs
         for c in "fn t()".chars() {
@@ -4440,7 +4447,7 @@ Binary files a/img.png and b/img.png differ
         press(&mut v, KeyCode::Esc);
         assert!(!v.typing() && v.filter.is_empty());
         // a name hit: its chars marked
-        press(&mut v, KeyCode::Char('f'));
+        v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         for c in "test".chars() {
             press(&mut v, KeyCode::Char(c));
         }
@@ -4920,7 +4927,7 @@ Binary files a/img.png and b/img.png differ
         }
         let reviewed = t0.elapsed() / 20;
         let t0 = Instant::now();
-        v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         for c in "compute".chars() {
             v.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
             t.draw(|f| v.draw(f, f.area())).unwrap();

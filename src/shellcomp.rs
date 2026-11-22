@@ -6,8 +6,8 @@
 //! - commands and their arguments: fish's own completions (`fish --no-config -c 'complete -C …'`,
 //!   in the background, descriptions included), commands ranked by their use in the history.
 //!   0 fish on PATH: the commands on PATH (1st word only).
-//! - a suggestion from the history after the cursor (gray, fish's autosuggestion): → / End /
-//!   ctrl+f take it, alt+→ its next word.
+//! - a suggestion from the history after the cursor (gray, fish's autosuggestion): → / End
+//!   take it, alt+→ its next word (ctrl+f: the chat search).
 //!
 //! The dropdown opens by itself once a word is typed (after a runner: at once), tab opens it for
 //! any word. ↑↓ move (the row's text into the prompt at once), tab takes the row, enter only after
@@ -543,10 +543,10 @@ impl ShellComp {
         rest
     }
 
-    /// → / End / ctrl+f: the suggestion into TA; alt+→: its next word. True: used.
+    /// → / End: the suggestion into TA; alt+→: its next word. True: used.
     pub fn accept(&mut self, k: KeyEvent, ta: &mut TextArea, thread: &[String]) -> bool {
         let alt = k.modifiers == KeyModifiers::ALT;
-        let all = matches!((k.code, k.modifiers), (KeyCode::Right | KeyCode::End, KeyModifiers::NONE)) || (k.code == KeyCode::Char('f') && k.modifiers == KeyModifiers::CONTROL);
+        let all = matches!((k.code, k.modifiers), (KeyCode::Right | KeyCode::End, KeyModifiers::NONE));
         if !(all || alt && k.code == KeyCode::Right) {
             return false;
         }
