@@ -23,6 +23,8 @@ mod gh;
 mod histsearch;
 mod home;
 mod homeinit;
+mod tutor;
+mod wizard;
 mod editor;
 mod files;
 mod flowbar;
@@ -99,6 +101,7 @@ usage: codehead                    the thread updated last (0 threads: the start
        codehead --cost <thread>   cost box of a thread, full screen
        codehead --version         print the version
        codehead home [init]       what codehead keeps in the home repo; init: move agents, flows, servers, settings there
+       codehead setup [--dry]     the setup wizard; --dry: every screen, 0 writes, then the list of what a real run does
        codehead --update          install the latest release (curl -fsSL https://codehead.sh/install | sh)
   -a  agents preselected for the new thread (default: the default agent)
   -b  branch for the new worktree (default: <prefix>/<title slug>, prefix \"task\")
@@ -516,6 +519,9 @@ fn sub() {
         Some("host") => engine::host::run(&arg(1)),
         Some("mcp") => engine::mcp::run(),
         Some("home") => homeinit::run(argv.get(1).map(String::as_str)),
+        Some("setup") => wizard::run(argv.iter().any(|a| a == "--dry")),
+        Some("tutorial") => tutor::run(&argv[1..]),
+        Some("tutor-agent") => tutor::agent(&argv[1..]),
         Some("ctl") => {
             // codehead ctl <thread> '<json command>': 1 command to the thread's host
             let c: serde_json::Value = serde_json::from_str(&arg(2)).unwrap_or_else(|e| fail(&format!("ctl: {e}"), 2));

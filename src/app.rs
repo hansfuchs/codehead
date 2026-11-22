@@ -3372,6 +3372,13 @@ impl App {
         i.checked_sub(1).and_then(|i| self.flow_lib.flows.get(i)).map(|f| crate::engine::flows::resolve(f, &self.flow_lib)).unwrap_or_default()
     }
 
+    /// The flow field for the setup tutorial's coach: (the flow dropdown open, the picked flow's
+    /// slug; None: 0 flow).
+    pub fn flow_peek(&self) -> (bool, Option<String>) {
+        let slug = self.flow_i.checked_sub(1).and_then(|i| self.flow_lib.flows.get(i)).map(|f| f.slug.clone());
+        (self.flow_menu.is_some(), slug)
+    }
+
     /// The flow dropdown opens on the current flow (its steps dropdown closed).
     fn open_flow_menu(&mut self) {
         self.flow_menu = Some(FlowMenu { cursor: self.flow_i, offset: 0, sub: None });

@@ -3143,7 +3143,19 @@ pub fn save_prompt_draft(id: &str, text: &str) {
     let _ = crate::engine::write_atomic(&prompt_path(id), json!({"text": text, "attachments": []}).to_string().as_bytes());
 }
 
-pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str, note: Option<&str>, _first: &str) -> Result<Exit, String> {
+pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str, note: Option<&str>, first: &str) -> Result<Exit, String> {
+    run_with(term, id, cwd, title, note, first, None).map(|e| e.unwrap_or(Exit::Back))
+}
+
+/// What a hook of `run_with` sees each loop: the open pane, the menu open.
+pub struct Peek {
+    pub pane: Pane,
+    pub menu: bool,
+}
+
+/// `run` with HOOK: called each loop (the setup tutorial's coach watches the view); true from
+/// it: the view ends at once, Ok(None) (the tutorial lays its screen out again on a resize).
+pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str, note: Option<&str>, _first: &str, mut hook: Option<&mut dyn FnMut(&Peek) -> bool>) -> Result<Option<Exit>, String> {
     if store::load(id).is_none() {
         return Err(format!("no thread {id}"));
     }
@@ -3209,6 +3221,11 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
             }
         }
         crate::all_keys(v.all_keys());
+        if let Some(h) = hook.as_mut()
+            && h(&Peek { pane: v.pane, menu: v.menu.is_some() })
+        {
+            return Ok(None);
+        }
         for (ev, at) in crate::read_ready(Duration::from_millis(50))? {
             let tag = if crate::engine::trace_on() { format!("view {:?}{}: {ev:?}", v.pane, if v.menu.is_some() { " + menu" } else { "" }) } else { String::new() };
             let _w = crate::engine::watch(move || tag);
@@ -3232,7 +3249,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
             v.save_prompt();
             if done {
                 crate::nav::mark_seen_now(id);
-                return Ok(std::mem::replace(&mut v.exit, Exit::Back));
+                return Ok(Some(std::mem::replace(&mut v.exit, Exit::Back)));
             }
         }
         // yazi: full screen, codehead suspended; its pick into the prompt
@@ -3254,7 +3271,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
         }
         if v.handoff_due() {
             crate::nav::mark_seen_now(id);
-            return Ok(std::mem::replace(&mut v.exit, Exit::Back));
+            return Ok(Some(std::mem::replace(&mut v.exit, Exit::Back)));
         }
         let pane = v.pane;
         let _w = crate::engine::watch(move || format!("view: tick {pane:?}"));
