@@ -1248,6 +1248,8 @@ pub struct View {
     counts: [(usize, usize); 4],
     /// The filter: its text, it has the keys, its hits (file index, name marks; by `build`).
     filter: String,
+    /// The filter's input (cursor, selection); FILTER: its text.
+    filter_ta: crate::textarea::TextArea,
     filtering: bool,
     hits: HashMap<usize, Vec<usize>>,
     /// The selected diff lines per path (space, a mouse drag): a comment goes on them.
@@ -1422,6 +1424,7 @@ impl View {
             lv: Vec::new(),
             counts: [(0, 0); 4],
             filter: String::new(),
+            filter_ta: crate::textarea::TextArea::new(true, ""),
             filtering: false,
             hits: HashMap::new(),
             sel: HashMap::new(),
@@ -2593,12 +2596,20 @@ impl View {
         }
     }
 
+    /// The filter's text (the input along).
+    fn set_filter(&mut self, t: &str) {
+        self.filter = t.to_string();
+        if self.filter_ta.text() != t {
+            self.filter_ta.set_text(t);
+        }
+    }
+
     /// A key while the filter has the focus.
     fn filter_key(&mut self, k: KeyEvent) -> Act {
         match k.code {
             KeyCode::Esc => {
                 self.filtering = false;
-                self.filter.clear();
+                self.set_filter("");
             }
             KeyCode::Enter => {
                 self.filtering = false;
@@ -2609,12 +2620,17 @@ impl View {
                 }
                 return Act::None;
             }
-            KeyCode::Backspace => {
-                self.filter.pop();
+            // the input: cursor, words, selection, undo (a text input as the others)
+            _ => {
+                if !matches!(self.filter_ta.key(k), crate::textarea::Outcome::Handled) {
+                    return Act::None;
+                }
+                let t = self.filter_ta.text();
+                if t == self.filter {
+                    return Act::None;
+                }
+                self.filter = t;
             }
-            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => self.filter.clear(),
-            KeyCode::Char(c) if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => self.filter.push(c),
-            _ => return Act::None,
         }
         self.built = None;
         self.at = 0;
@@ -2626,9 +2642,18 @@ impl View {
     fn draw_bars(&mut self, f: &mut Frame) {
         f.render_widget(Paragraph::new(self.summary()), self.summary_rect);
         let filtered = !self.filter.trim().is_empty();
-        let line = if self.filtering {
-            Line::from(vec![Span::styled(" f ", theme::pill()), Span::styled(format!(" {}", self.filter), theme::text()), Span::styled("▏", theme::accent()), Span::styled("  enter: 1st hit · esc: clear", theme::muted())])
-        } else if filtered {
+        if self.filtering {
+            // pill, the input, the hint at the right
+            let r = self.filter_rect;
+            let hint = "  enter: 1st hit · esc: clear";
+            let hw = (hint.chars().count() as u16).min(r.width.saturating_sub(16));
+            f.render_widget(Paragraph::new(Line::from(vec![Span::styled(" f ", theme::pill()), Span::raw(" ")])), r);
+            let input = Rect { x: r.x + 4, width: r.width.saturating_sub(4 + hw), ..r };
+            self.filter_ta.render(f, input, true);
+            f.render_widget(Paragraph::new(Span::styled(hint, theme::muted())), Rect { x: input.right(), width: hw, ..r });
+            return;
+        }
+        let line = if filtered {
             Line::from(vec![Span::styled(" f ", theme::muted()), Span::styled(format!(" {}", self.filter), theme::accent()), Span::styled("  f: edit · esc: clear", theme::muted())])
         } else {
             Line::styled(" f  filter by name or content", theme::muted())
@@ -2922,7 +2947,7 @@ impl View {
             KeyCode::Char('t') => return Act::ToggleChat,
             KeyCode::Esc => {
                 if !self.filter.is_empty() {
-                    self.filter.clear();
+                    self.set_filter("");
                     self.built = None;
                 } else {
                     self.sel.clear();
@@ -3139,9 +3164,15 @@ impl View {
             return self.panel_mouse(m);
         }
         let click = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
+        // the filter input: its own mouse (cursor, selection + copy); a click on the row opens it
+        if self.filtering && self.filter_ta.mouse(m) {
+            self.filter_ta.copied = None;
+            return Act::None;
+        }
         if click && self.filter_rect.contains(at) {
             self.filtering = true;
             self.scm.focus = false;
+            self.filter_ta.move_end();
             return Act::None;
         }
         let last = self.rows.len().saturating_sub(1);
@@ -3794,7 +3825,7 @@ Binary files a/img.png and b/img.png differ
             press(&mut v, KeyCode::Char(c));
         }
         let s = screen(&mut v, 100, 30);
-        assert!(s[1].contains("fn t()▏"), "{}", s[1]);
+        assert!(s[1].contains(" f  fn t()"), "{}", s[1]);
         assert!(s.iter().any(|l| l.contains("1 files match")), "{s:#?}");
         assert!(s.iter().any(|l| l.contains("tests/a_test.rs")) && !s.iter().any(|l| l.contains("src/a.rs")), "content hit across tabs: {s:#?}");
         press(&mut v, KeyCode::Esc);

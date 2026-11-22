@@ -3875,6 +3875,21 @@ impl App {
         let list = self.regions.list;
         let in_list = list.contains(at);
         let in_preview = self.regions.preview.contains(at);
+        // a filter input in edit: its own mouse (cursor, selection + copy)
+        let mut copied = None;
+        let mut took = false;
+        for (on, ta) in [(self.filter_editing, &mut self.filter_ta), (self.tfilter_editing, &mut self.tfilter_ta), (self.afilter_editing, &mut self.afilter_ta)] {
+            if on && ta.mouse(m) {
+                took = true;
+                copied = ta.copied.take();
+            }
+        }
+        if let Some(n) = copied {
+            self.toast(format!("copied {n} chars"), false);
+        }
+        if took {
+            return;
+        }
         // the preview: text selection (drag, 2 clicks: word, 3: row), copied at the release
         let wheel = matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp);
         if (in_preview && !wheel) || self.psel.is_dragging() {

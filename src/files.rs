@@ -561,6 +561,14 @@ impl View {
 
     pub fn mouse(&mut self, m: MouseEvent) {
         let at = ratatui::layout::Position { x: m.column, y: m.row };
+        // the filter input: its own mouse (cursor, selection + copy)
+        if !self.files.is_empty() && self.filter.mouse(m) {
+            self.filter.copied = None;
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                self.filtering = true;
+            }
+            return;
+        }
         match m.kind {
             MouseEventKind::ScrollDown if self.preview.contains(at) => self.scroll += 3,
             MouseEventKind::ScrollUp if self.preview.contains(at) => self.scroll = self.scroll.saturating_sub(3),

@@ -771,6 +771,24 @@ impl McpTab {
 
     pub fn mouse(&mut self, m: MouseEvent) {
         let at = Position { x: m.column, y: m.row };
+        // the edit form: a click on a text field focuses it; the field takes its mouse
+        // (cursor, selection + copy)
+        if let Some(Modal::Edit(e)) = &mut self.modal {
+            let down = matches!(m.kind, MouseEventKind::Down(_));
+            for (i, ta) in [(0, &mut e.name), (2, &mut e.target), (3, &mut e.secrets)] {
+                if (e.field == i || (down && ta.area().contains(at))) && ta.mouse(m) {
+                    ta.copied = None;
+                    e.field = i;
+                    return;
+                }
+            }
+            return;
+        }
+        // the filter: its mouse while it has the keys or a drag runs in it
+        if self.modal.is_none() && self.filtering && !matches!(m.kind, MouseEventKind::Down(_)) && self.filter.mouse(m) {
+            self.filter.copied = None;
+            return;
+        }
         match m.kind {
             MouseEventKind::ScrollUp => self.cursor = self.cursor.saturating_sub(3),
             MouseEventKind::ScrollDown => self.cursor = (self.cursor + 3).min(self.items().0.len().saturating_sub(1)),

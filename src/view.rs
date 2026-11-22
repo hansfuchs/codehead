@@ -3529,7 +3529,7 @@ mod pane_tests {
         press(&mut v, KeyCode::Char('f'), KeyModifiers::NONE);
         press(&mut v, KeyCode::Char('i'), KeyModifiers::NONE);
         assert!(!v.prompt_focus && v.input.text().is_empty());
-        assert!(screen(&mut v).contains(" f  i▏"));
+        assert!(screen(&mut v).contains(" f  i "));
         press(&mut v, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!v.changes.typing() && v.last_esc.is_none());
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("panetest-0000"));

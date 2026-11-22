@@ -649,6 +649,19 @@ impl Menu {
     pub fn mouse(&mut self, m: MouseEvent) -> Action {
         self.poll();
         let at = Position { x: m.column, y: m.row };
+        // the filter / search input: its own mouse (cursor, selection + copy)
+        let input = match self.tab {
+            Tab::Threads => Some(&mut self.filter),
+            Tab::Search => Some(&mut self.search),
+            _ => None,
+        };
+        if let Some(ta) = input
+            && ta.mouse(m)
+        {
+            ta.copied = None;
+            self.level = Level::Body;
+            return Action::None;
+        }
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // a repo tab of the threads tab
