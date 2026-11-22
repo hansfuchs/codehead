@@ -1,6 +1,5 @@
 name = "bug investigation"
 description = "reproduce, root cause, options: 0 fix yet"
-roles = ["lead"]
 
 [[step]]
 use = "reproduce"

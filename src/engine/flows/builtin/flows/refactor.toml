@@ -1,6 +1,5 @@
 name = "refactor"
 description = "invariants first, 0 behavior change, review"
-roles = ["lead", "reviewer"]
 
 [[step]]
 use = "scrutinize-task"

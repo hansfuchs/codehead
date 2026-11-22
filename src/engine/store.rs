@@ -69,7 +69,12 @@ pub struct Thread {
     /// there add them. The 1st checkout: DIR / WORKTREE / BRANCH.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkouts: Vec<Checkout>,
-    /// The flow the thread follows (`flows::run`).
+    /// The flow of each agent (`flows::run`): agent → its flow. Read it with `flow_map` /
+    /// `flow_of`, write it with `set_flow`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub flows: BTreeMap<String, super::flows::run::FlowState>,
+    /// The thread's 1 flow of older codehead versions: the lead's. `set_flow` keeps it equal to
+    /// the lead's entry of FLOWS (an older version reads it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<super::flows::run::FlowState>,
 }
@@ -124,6 +129,30 @@ impl Thread {
 
     pub fn lead(&self) -> Option<&str> {
         self.agents.first().map(String::as_str)
+    }
+
+    /// The flow of each agent: FLOWS, + an older version's thread flow as the lead's.
+    pub fn flow_map(&self) -> BTreeMap<String, super::flows::run::FlowState> {
+        let mut m = self.flows.clone();
+        if let (Some(f), Some(l)) = (&self.flow, self.lead()) {
+            m.entry(l.to_string()).or_insert_with(|| f.clone());
+        }
+        m
+    }
+
+    /// The flow of AGENT.
+    pub fn flow_of(&self, agent: &str) -> Option<super::flows::run::FlowState> {
+        self.flow_map().remove(agent)
+    }
+
+    /// AGENT's flow is ST (None: 0 flow). The old thread flow moves into FLOWS first.
+    pub fn set_flow(&mut self, agent: &str, st: Option<super::flows::run::FlowState>) {
+        self.flows = self.flow_map();
+        match st {
+            Some(s) => self.flows.insert(agent.to_string(), s),
+            None => self.flows.remove(agent),
+        };
+        self.flow = self.lead().and_then(|l| self.flows.get(l)).cloned();
     }
 
     /// Where the agents work: the worktree, else the dir.

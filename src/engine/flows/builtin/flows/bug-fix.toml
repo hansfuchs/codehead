@@ -1,6 +1,5 @@
 name = "bug fix"
 description = "reproduce, root cause, fix, regression test"
-roles = ["lead"]
 
 [[step]]
 use = "reproduce"

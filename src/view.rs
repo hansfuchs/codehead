@@ -266,8 +266,9 @@ struct View {
     subagents: crate::subagents::Subagents,
     /// The running sub-threads of this thread (`>sub`): their row, their box.
     subthreads: crate::subthreads::SubThreads,
-    /// The flow row + its box (`> flow`, a click).
-    flowbar: crate::flowbar::FlowBar,
+    /// The flow rows + their boxes, 1 per agent of the thread (members' order; `> flow`, the
+    /// agents box, a click).
+    flowbars: Vec<crate::flowbar::FlowBar>,
     /// ctrl+f in the chat: the search bar above the prompt.
     find: crate::chatsearch::ChatSearch,
     /// The search match to scroll to at the next draw (item index).
@@ -410,7 +411,7 @@ impl View {
             monitors: crate::monitors::Monitors::new(id),
             subagents: Default::default(),
             subthreads: Default::default(),
-            flowbar: Default::default(),
+            flowbars: Vec::new(),
             find: Default::default(),
             find_to: None,
             menu: None,
@@ -516,6 +517,7 @@ impl View {
         self.members = store::load(&self.id).map(|t| t.agents).unwrap_or_default();
         self.mention.replaceable = self.members.clone();
         self.sync_order();
+        self.sync_flowbars();
     }
 
     /// The box order after a change of the members: gone ones out, new ones in (at the front
@@ -665,6 +667,7 @@ impl View {
                 self.members = store::load(&self.id).map(|t| t.agents).unwrap_or_default();
                 self.mention.replaceable = self.members.clone();
                 self.sync_order();
+                self.sync_flowbars();
             }
         }
         self.place_flow_ask();
@@ -1166,15 +1169,18 @@ impl View {
                 }
 
                 // a gate's outcome back to a step: 0 send without the owner's words what to change
-                if empty && option != "approve" && self.flowbar.waits_gate() {
+                let id = c["id"].as_str().unwrap_or_default().to_string();
+                let Some(b) = self.flowbars.iter().position(|b| b.wait_ask().is_some_and(|a| a.id == id)) else { return true };
+                if empty && option != "approve" && self.flowbars[b].waits_gate() {
                     self.ask.focus = false;
                     self.toast(format!("{option}: type what to change in the prompt first, then pick it again"));
                     self.dirty = true;
                     return true;
                 }
 
-                if let Some(act) = self.flowbar.wait_answer(&option) {
-                    self.flow_act(act);
+                if let Some(act) = self.flowbars[b].wait_answer(&option) {
+                    let agent = self.flowbars[b].agent.clone();
+                    self.flow_act(&agent, act);
                 }
                 self.sync_flow_ask();
                 self.dirty = true;
@@ -1191,17 +1197,20 @@ impl View {
 
     /// `> branch`: a copy of the thread, its view next.
     /// A key of the flow box asks for ACT.
-    fn flow_act(&mut self, act: crate::flowbar::Act) {
+    fn flow_act(&mut self, agent: &str, act: crate::flowbar::Act) {
         match act {
             crate::flowbar::Act::None => {}
-            crate::flowbar::Act::Host(op, c) => self.host(op, c),
+            crate::flowbar::Act::Host(op, mut c) => {
+                c["agent"] = json!(agent);
+                self.host(op, c);
+            }
             crate::flowbar::Act::Answer(choice) => {
                 // the prompt's text: the owner's note to the agent
                 let note = self.input.text().trim().to_string();
                 if !note.is_empty() {
                     self.input.load_text("");
                 }
-                self.host("flow_answer", json!({"op": "flow_answer", "choice": choice, "note": note}));
+                self.host("flow_answer", json!({"op": "flow_answer", "agent": agent, "choice": choice, "note": note}));
                 self.toast(format!("flow: {choice}"));
             }
             crate::flowbar::Act::Edit(slug) => self.exit = Exit::Home(crate::menu::Home::Flows(Some(slug))),
@@ -1377,7 +1386,7 @@ impl View {
         // ctrl+f: the chat's search bar (open: the keys back to it); another view: its filter
         if crate::textarea::is_filter_key(&k) {
             if self.pane == Pane::Chat || (self.wide_split && self.prompt_focus) {
-                self.flowbar.close();
+                self.flowbars.iter_mut().for_each(crate::flowbar::FlowBar::close);
                 self.find.open();
                 self.find_to = self.find.current();
                 self.dirty = true;
@@ -1407,9 +1416,9 @@ impl View {
             }
         }
 
-        if let Some(act) = self.flowbar.key(k) {
+        if let Some((agent, act)) = self.flowbars.iter_mut().find_map(|b| b.key(k).map(|a| (b.agent.clone(), a))) {
             let edit = matches!(act, crate::flowbar::Act::Edit(_));
-            self.flow_act(act);
+            self.flow_act(&agent, act);
             self.dirty = true;
             return edit;
         }
@@ -1568,8 +1577,8 @@ impl View {
                 Some(crate::command::Action::Handoff) => self.handoff(),
                 Some(crate::command::Action::Reload) => self.reload_sessions(),
                 Some(crate::command::Action::Flow) => {
-                    self.flowbar.pick();
-                    self.dirty = true;
+                    let agent = self.default_to().into_iter().next().unwrap_or_default();
+                    self.open_flow(&agent, true);
                 }
                 None => {}
             }
@@ -2019,27 +2028,52 @@ impl View {
         self.ask.sync_with(self.thread.asks.first(), focus);
     }
 
-    /// The flow's wait (gate, loop max, role) as the last open ask: the agents' asks first, the
-    /// question picker answers it. True: the asks changed.
+    /// The flows' waits (gate, loop max), 1 per agent, as the last open asks: the agents' asks
+    /// first, the question picker answers them. True: the asks changed.
     fn place_flow_ask(&mut self) -> bool {
-        let want = self.flowbar.wait_ask();
+        let want: Vec<stream::Ask> = self.flowbars.iter().filter_map(crate::flowbar::FlowBar::wait_ask).collect();
         let asks = &mut self.thread.asks;
-        let have = asks.iter().position(|a| a.tool == crate::flowbar::WAIT_TOOL);
-        if let (Some(i), Some(w)) = (have, want.as_ref())
-            && asks[i].id == w.id
-            && i + 1 == asks.len()
-        {
+        let n = asks.len();
+        let have: Vec<usize> = (0..n).filter(|&i| asks[i].tool == crate::flowbar::WAIT_TOOL).collect();
+        let at_end = have.iter().enumerate().all(|(k, &i)| i == n - have.len() + k);
+        if at_end && have.len() == want.len() && have.iter().zip(&want).all(|(&i, w)| asks[i].id == w.id) {
             return false;
         }
 
-        if have.is_none() && want.is_none() {
-            return false;
-        }
-        if let Some(i) = have {
-            asks.remove(i);
-        }
+        asks.retain(|a| a.tool != crate::flowbar::WAIT_TOOL);
         asks.extend(want);
         true
+    }
+
+    /// A flow row per member, in the members' order (a new member: its row, a gone one: 0 row).
+    fn sync_flowbars(&mut self) {
+        let mut bars = std::mem::take(&mut self.flowbars);
+        for m in &self.members {
+            match bars.iter().position(|b| &b.agent == m) {
+                Some(i) => self.flowbars.push(bars.remove(i)),
+                None => {
+                    let mut b = crate::flowbar::FlowBar::new(m);
+                    b.tick(&self.id, true);
+                    self.flowbars.push(b);
+                }
+            }
+        }
+    }
+
+    /// The flow box of AGENT open (PICK: on the flows to switch to); every other box closed.
+    fn open_flow(&mut self, agent: &str, pick: bool) {
+        if !self.flowbars.iter().any(|b| b.agent == agent) {
+            self.sync_flowbars();
+        }
+        for b in &mut self.flowbars {
+            if b.agent != agent {
+                b.close();
+                continue;
+            }
+
+            if pick { b.pick() } else { b.open() }
+        }
+        self.dirty = true;
     }
 
     /// `place_flow_ask`, then the picker on the 1st ask.
@@ -2351,7 +2385,7 @@ impl View {
             }
             return;
         }
-        if self.flowbar.mouse(m)
+        if self.flowbars.iter_mut().any(|b| b.mouse(m))
             || self.subthreads.mouse(m)
             || self.subagents.mouse(m)
             || self.monitors.mouse(m)
@@ -2902,8 +2936,9 @@ impl View {
         let find_rect = Rect { x: area.x + 1, y: bubble_top.saturating_sub(find_h), width: area.width.saturating_sub(2), height: find_h };
         let header = Rect { y: (bubble_top + 1).saturating_sub(head_h + 2 * find_h), height: head_h, ..area };
         let title = Rect { y: if head_h > 0 { header.y } else { find_rect.y }.saturating_sub(1), height: 1, ..area };
-        // the flow row (its open box) right above the title row
-        let flow_h = self.flowbar.rows(area.height / 2);
+        // the flow rows (an open box) right above the title row: 1 per agent with a flow
+        let flow_rows: Vec<u16> = self.flowbars.iter().map(|b| b.rows(area.height / 2)).collect();
+        let flow_h = flow_rows.iter().sum::<u16>().min(area.height / 2);
         let flow = Rect { y: title.y.saturating_sub(flow_h), height: flow_h, ..area };
         let mon_h = self.monitors.rows(area.width, area.height / 3);
         let mon = Rect { y: flow.y.saturating_sub(mon_h), height: mon_h, ..area };
@@ -2983,7 +3018,12 @@ impl View {
             self.monitors.render(f, mon, self.tick());
         }
         if flow_h > 0 {
-            self.flowbar.render(f, flow, true);
+            let mut y = flow.y;
+            for (b, h) in self.flowbars.iter_mut().zip(&flow_rows) {
+                let h = (*h).min(flow.bottom().saturating_sub(y));
+                b.render(f, Rect { y, height: h, ..flow }, true);
+                y += h;
+            }
         }
         if sub_h > 0 {
             let tick = self.tick();
@@ -3659,7 +3699,11 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
         dirty |= v.monitors.tick(id);
         dirty |= v.subagents.tick(&v.thread.subs);
         dirty |= v.subthreads.tick(id);
-        if v.flowbar.tick(id, false) {
+        let mut flows_changed = false;
+        for b in &mut v.flowbars {
+            flows_changed |= b.tick(id, false);
+        }
+        if flows_changed {
             // a wait came / went: the question picker's ask too
             v.sync_flow_ask();
             v.dirty = true;
@@ -3753,14 +3797,15 @@ mod ask_tests {
         let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut t = store::Thread::new("gate input", "task", Path::new("/tmp"), vec!["ada".into()]);
         let lib = crate::engine::flows::Library::load(None);
-        let mut st = crate::engine::flows::run::FlowState::new(lib.flow("new-feature").unwrap(), &lib, 3, &t.agents, &[], 0);
+        let mut st = crate::engine::flows::run::FlowState::new(lib.flow("new-feature").unwrap(), &lib, 3, 0);
         st.wait = Some(crate::engine::flows::run::Wait::Gate);
         t.flow = Some(st);
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (tx, _rx) = mpsc::channel();
         let mut v = View::new(&t.id, Path::new("/tmp"), "gate input", tx);
-        v.flowbar.tick(&t.id, true);
+        v.members = t.agents.clone();
+        v.sync_flowbars();
         v.sync_flow_ask();
         let sends = |v: &View| v.ops.borrow().iter().filter(|o| o["op"] == "prompt").count();
         let answers = |v: &View| v.ops.borrow().iter().filter(|o| o["op"] == "flow_answer").count();
@@ -3902,14 +3947,15 @@ mod ask_tests {
         let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut t = store::Thread::new("flow view", "task", Path::new("/tmp"), vec!["ada".into()]);
         let lib = crate::engine::flows::Library::load(None);
-        let mut st = crate::engine::flows::run::FlowState::new(lib.flow("new-feature").unwrap(), &lib, 3, &t.agents, &[], 0);
+        let mut st = crate::engine::flows::run::FlowState::new(lib.flow("new-feature").unwrap(), &lib, 3, 0);
         st.wait = Some(crate::engine::flows::run::Wait::Gate);
         t.flow = Some(st);
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (tx, _rx) = mpsc::channel();
         let mut v = View::new(&t.id, Path::new("/tmp"), "flow view", tx);
-        v.flowbar.tick(&t.id, true);
+        v.members = t.agents.clone();
+        v.sync_flowbars();
         let s = screen(&mut v).join("\n");
         assert!(s.contains("◆ new feature · 4/9 plan approval · @ada") && s.contains("⏸ gate plan approval: answer below"), "{s}");
         // the gate: a question in the picker under the stream; it never takes the keys (the owner
@@ -3929,11 +3975,11 @@ mod ask_tests {
         assert!(v.thread.asks.is_empty(), "answered: the flow's ask goes");
         assert!(!v.ops.borrow().iter().any(|o| o["op"] == "answer"), "0 host ask answer");
         // change the flow: the box asks now / after at once, then the start step
-        v.flowbar.open();
+        v.open_flow("ada", false);
         v.dirty = true;
         let s = screen(&mut v).join("\n");
         println!("{s}");
-        assert!(s.contains("roles @lead ada  @reviewer ?") && s.contains("◀"), "{s}");
+        assert!(s.contains("every step runs on @ada") && s.contains("◀"), "{s}");
         press(&mut v, &[KeyCode::Char('c'), KeyCode::Char('r'), KeyCode::Char('e'), KeyCode::Char('f'), KeyCode::Enter]);
         let s = screen(&mut v).join("\n");
         println!("{s}");
@@ -5127,7 +5173,8 @@ mod key_fix_tests {
     fn a_flow_gate_waits_in_the_picker_behind_the_agents_asks() {
         let mut v = view("keyfix-gate-0000");
         typed(&mut v, "looks good");
-        v.flowbar.state = Some(crate::engine::flows::run::FlowState { flow: "chore".into(), wait: Some(crate::engine::flows::run::Wait::Gate), ..Default::default() });
+        v.flowbars = vec![crate::flowbar::FlowBar::new("ada")];
+        v.flowbars[0].state = Some(crate::engine::flows::run::FlowState { flow: "chore".into(), wait: Some(crate::engine::flows::run::Wait::Gate), ..Default::default() });
         v.sync_flow_ask();
         assert_eq!(v.thread.asks.len(), 1);
         assert!(!v.ask.focus, "the owner types: the gate waits for tab");

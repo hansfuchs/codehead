@@ -1,6 +1,5 @@
 name = "migration / upgrade"
 description = "breaking changes first, plan, gate, migrate, review"
-roles = ["lead", "reviewer"]
 
 [[step]]
 use = "investigate"

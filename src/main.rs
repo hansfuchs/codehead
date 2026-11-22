@@ -874,8 +874,10 @@ fn start(args: Args) {
             // task (the host's `prompt`)
             if let Some((slug, start)) = &flow {
                 let lib = engine::flows::Library::load(Some(&t.work_dir()));
-                if let Some(fl) = lib.flow(slug) {
-                    t.flow = Some(engine::flows::run::FlowState::new(fl, &lib, *start, &t.agents, &engine::roster::active(), engine::now_ms()));
+                if let Some(fl) = lib.flow(slug)
+                    && let Some(lead) = t.lead().map(String::from)
+                {
+                    t.set_flow(&lead, Some(engine::flows::run::FlowState::new(fl, &lib, *start, engine::now_ms())));
                 }
             }
             if let Err(e) = t.save() {

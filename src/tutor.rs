@@ -646,8 +646,10 @@ fn start_thread(coach: &mut Coach, repo: &Path, message: &str, agents: Vec<Strin
     let mut t = store::Thread::new(&title, message, repo, agents.clone());
     let (slug, at) = flow.unwrap_or(("chore".into(), 0));
     let lib = crate::engine::flows::Library::load(Some(repo));
-    if let Some(fl) = lib.flow(&slug) {
-        t.flow = Some(crate::engine::flows::run::FlowState::new(fl, &lib, at, &t.agents, &crate::engine::roster::active(), crate::engine::now_ms()));
+    if let Some(fl) = lib.flow(&slug)
+        && let Some(lead) = t.lead().map(String::from)
+    {
+        t.set_flow(&lead, Some(crate::engine::flows::run::FlowState::new(fl, &lib, at, crate::engine::now_ms())));
     }
     t.save().ok()?;
     let _ = crate::engine::client::call(&t.id, &json!({"op": "prompt", "to": agents, "text": message}));

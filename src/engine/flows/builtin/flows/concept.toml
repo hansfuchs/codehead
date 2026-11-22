@@ -1,6 +1,5 @@
 name = "concept"
 description = "scrutinize, options, decision, write-up: 0 code"
-roles = ["lead"]
 
 [[step]]
 use = "scrutinize-task"

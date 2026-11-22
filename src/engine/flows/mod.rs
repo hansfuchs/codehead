@@ -1,15 +1,16 @@
 //! Flows: the steps an agent takes for a kind of task (new feature, bug fix, refactor, ...).
 //!
-//! - step: 1 Markdown file, front matter (`description`, `role`, `gate`, `done`, `needs`) + the
+//! - step: 1 Markdown file, front matter (`description`, `gate`, `done`, `needs`) + the
 //!   instruction text. Its file stem is its name. Flows share steps: an edit reaches each flow.
 //! - flow: 1 TOML file, `[[step]]` nodes in order. A node uses a step (`use`) or holds a one-off
-//!   text (`text`); `gate`, `loop`, `role`, `label`, `note` per node.
+//!   text (`text`); `gate`, `loop`, `label`, `note` per node. Every step runs on the agent the
+//!   flow belongs to (roles are gone: an old `role` key gives a warning, 0 effect).
 //! - layers, the last wins per name: built-in (in the binary) → user (`<config>/flows`,
 //!   `<config>/steps`) → repo (`<repo>/.codehead/flows`, `.codehead/steps`). An edit of a built-in
 //!   writes a user file over it; reset removes that file.
-//! - a thread's flow (`FlowState` in `thread.json`): the current node, loop rounds, the role →
-//!   agent map, a wait (gate, loop max, open role), a queued switch. The host moves it: agents
-//!   report a step done (`flow_step`), the owner answers gates, skips, jumps, switches.
+//! - an agent's flow (`FlowState` in `thread.json`, 1 per agent of a thread): the current node,
+//!   loop rounds, a wait (gate, loop max), a queued switch. The host moves it: the agent reports
+//!   a step done (`flow_step`), the owner answers gates, skips, jumps, switches.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -43,7 +44,8 @@ pub struct Step {
     /// File stem: letters, digits, `-`, `_`.
     pub name: String,
     pub description: String,
-    pub role: Option<String>,
+    /// A `role:` line of an old step file: 0 effect (the step runs on the flow's agent), a warning.
+    pub old_role: Option<String>,
     pub gate: bool,
     /// Exit criteria.
     pub done: String,
@@ -93,7 +95,8 @@ pub struct Node {
     /// Flow-specific text after the step's text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// An old flow file's node role: 0 effect, a warning; never written again.
+    #[serde(default, skip_serializing)]
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done: Option<String>,
@@ -111,7 +114,8 @@ pub struct Flow {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// An old flow file's roles: 0 effect, never written again.
+    #[serde(default, skip_serializing)]
     pub roles: Vec<String>,
     #[serde(default, rename = "step")]
     pub steps: Vec<Node>,
@@ -131,7 +135,6 @@ pub struct Resolved {
     pub step: Option<String>,
     pub text: String,
     pub done: String,
-    pub role: String,
     pub gate: bool,
     /// Gate outcomes besides approve → next: (outcome, node index).
     pub edges: Vec<(String, usize)>,
@@ -142,9 +145,7 @@ pub struct Resolved {
     pub errors: Vec<String>,
 }
 
-pub const LEAD: &str = "lead";
-
-/// A valid step / flow / role / node id name.
+/// A valid step / flow / node id name.
 pub fn valid_name(n: &str) -> bool {
     !n.is_empty() && n.len() <= 64 && n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
@@ -177,7 +178,7 @@ pub fn parse_step(name: &str, text: &str) -> Step {
                     let v = unquote(v.trim());
                     match k.trim() {
                         "description" => s.description = v.to_string(),
-                        "role" => s.role = Some(v.to_string()).filter(|r| !r.is_empty()),
+                        "role" => s.old_role = Some(v.to_string()).filter(|r| !r.is_empty()),
                         "gate" => s.gate = v == "true" || v == "yes",
                         "done" => s.done = v.to_string(),
                         "needs" => s.needs = list(v),
@@ -210,9 +211,6 @@ pub fn render_step(s: &Step) -> String {
     let mut out = String::from("---\n");
     if !s.description.is_empty() {
         out.push_str(&format!("description: {}\n", one(&s.description)));
-    }
-    if let Some(r) = &s.role {
-        out.push_str(&format!("role: {r}\n"));
     }
     if s.gate {
         out.push_str("gate: true\n");
@@ -255,6 +253,7 @@ const BUILTIN_STEPS: &[(&str, &str)] = &[
     ("implement", include_str!("builtin/steps/implement.md")),
     ("verify", include_str!("builtin/steps/verify.md")),
     ("peer-review", include_str!("builtin/steps/peer-review.md")),
+    ("review-diff", include_str!("builtin/steps/review-diff.md")),
     ("address-review", include_str!("builtin/steps/address-review.md")),
     ("measure", include_str!("builtin/steps/measure.md")),
     ("write-up", include_str!("builtin/steps/write-up.md")),
@@ -509,7 +508,7 @@ pub fn inline(n: &Node, s: &Step) -> Node {
         text: Some(s.text.clone()),
         label: n.label.clone().or_else(|| Some(s.name.clone())),
         note: n.note.clone(),
-        role: n.role.clone().or_else(|| s.role.clone()),
+        role: None,
         done: n.done.clone().or_else(|| Some(s.done.clone()).filter(|d| !d.is_empty())),
         gate: n.gate.clone().or(if s.gate { Some(Gate::Flag(true)) } else { None }),
         loops: n.loops.clone(),
@@ -521,7 +520,7 @@ pub fn promote(n: &Node, name: &str) -> (Step, Node) {
     let s = Step {
         name: name.to_string(),
         description: n.label.clone().unwrap_or_default(),
-        role: n.role.clone(),
+        old_role: None,
         gate: matches!(n.gate, Some(Gate::Flag(true)) | Some(Gate::Edges(_))),
         done: n.done.clone().unwrap_or_default(),
         needs: Vec::new(),
@@ -573,6 +572,11 @@ pub fn resolve(f: &Flow, lib: &Library) -> Vec<Resolved> {
             if let (Some(u), None) = (&n.uses, step) {
                 errors.push(format!("step {u} not found"));
             }
+
+            // an old file's role: gone, the step runs on the flow's agent
+            if let Some(r) = n.role.as_ref().or_else(|| step.and_then(|s| s.old_role.as_ref())).filter(|r| r.as_str() != "lead") {
+                errors.push(format!("role {r}: roles are gone, the step runs on the flow's agent"));
+            }
             let mut text = match (step, &n.text) {
                 (Some(s), _) => s.text.clone(),
                 (None, Some(t)) => t.clone(),
@@ -617,7 +621,6 @@ pub fn resolve(f: &Flow, lib: &Library) -> Vec<Resolved> {
                 step: n.uses.clone(),
                 text,
                 done: n.done.clone().or_else(|| step.map(|s| s.done.clone())).unwrap_or_default(),
-                role: n.role.clone().or_else(|| step.and_then(|s| s.role.clone())).unwrap_or_else(|| LEAD.into()),
                 gate,
                 edges,
                 loops,
@@ -626,17 +629,6 @@ pub fn resolve(f: &Flow, lib: &Library) -> Vec<Resolved> {
             }
         })
         .collect()
-}
-
-/// Roles of F: its `roles`, + each role a node names, `lead` first.
-pub fn roles(f: &Flow, nodes: &[Resolved]) -> Vec<String> {
-    let mut v = vec![LEAD.to_string()];
-    for r in f.roles.iter().chain(nodes.iter().map(|n| &n.role)) {
-        if !v.contains(r) {
-            v.push(r.clone());
-        }
-    }
-    v
 }
 
 /// `#name`s in TEXT that name 0 shortcut.
@@ -663,10 +655,25 @@ mod tests {
 
     #[test]
     fn steps_round_trip_through_front_matter() {
-        let s = Step { name: "x".into(), description: "d".into(), role: Some("reviewer".into()), gate: true, done: "it is done".into(), needs: vec!["skill:code-review".into(), "mcp:gh".into()], text: "line 1\n\nline 2".into(), ..Default::default() };
+        let s = Step { name: "x".into(), description: "d".into(), gate: true, done: "it is done".into(), needs: vec!["skill:code-review".into(), "mcp:gh".into()], text: "line 1\n\nline 2".into(), ..Default::default() };
         assert_eq!(parse_step("x", &render_step(&s)), s);
         // 0 front matter: all body
         assert_eq!(parse_step("y", "just text").text, "just text");
+    }
+
+    /// Roles are gone: an old step / flow file with roles parses, its role gives a warning (the
+    /// step runs on the flow's agent), a save drops it.
+    #[test]
+    fn old_roles_parse_warn_and_go_on_save() {
+        let s = parse_step("rev", "---\nrole: reviewer\ngate: true\n---\nreview it");
+        assert_eq!(s.old_role.as_deref(), Some("reviewer"));
+        assert!(!render_step(&s).contains("role"), "{}", render_step(&s));
+        let f = parse_flow("t", "name = \"t\"\nroles = [\"lead\", \"tester\"]\n[[step]]\ntext = \"a\"\nrole = \"tester\"\n[[step]]\ntext = \"b\"\nrole = \"lead\"\n").unwrap();
+        let r = resolve(&f, &Library::default());
+        assert_eq!(r[0].errors, vec!["role tester: roles are gone, the step runs on the flow's agent".to_string()]);
+        assert!(r[1].errors.is_empty(), "role lead: 0 warning");
+        let text = render_flow(&f).unwrap();
+        assert!(!text.contains("role"), "{text}");
     }
 
     #[test]
@@ -687,8 +694,6 @@ mod tests {
         assert_eq!(r[gate].edges, vec![("changes".to_string(), r.iter().position(|n| n.id == "plan").unwrap())]);
         let ar = r.iter().find(|n| n.id == "address-review").unwrap();
         assert_eq!(ar.loops.as_ref().unwrap().0, r.iter().position(|n| n.id == "review").unwrap());
-        assert_eq!(r.iter().find(|n| n.id == "review").unwrap().role, "reviewer");
-        assert_eq!(roles(nf, &r), vec!["lead".to_string(), "reviewer".to_string()]);
     }
 
     #[test]

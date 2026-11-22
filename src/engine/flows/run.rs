@@ -1,11 +1,11 @@
-//! A thread's flow at run time: the state in `thread.json` and its moves. Pure: the host does
-//! the I/O (log, delivery, interrupts).
+//! An agent's flow at run time: the state in `thread.json` (1 per agent of the thread) and its
+//! moves. Pure: the host does the I/O (log, delivery, interrupts).
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Flow, Library, Resolved, resolve, roles};
+use super::{Flow, Library, Resolved, resolve};
 
 /// Why the flow waits on the owner.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,8 +15,12 @@ pub enum Wait {
     Gate,
     /// A loop reached its max: 1 more round, or move on.
     LoopMax,
-    /// Role ROLE has 0 agent: the owner picks one to bring in.
-    Role { role: String },
+}
+
+/// A wait of `thread.json`; an old kind (`role`: roles are gone) reads as 0 wait.
+fn lenient_wait<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Wait>, D::Error> {
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// A switch to flow FLOW at node START.
@@ -48,10 +52,7 @@ pub struct FlowState {
     /// Loop rounds per node id (the node that holds the loop).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub rounds: BTreeMap<String, u32>,
-    /// Role → agent.
-    #[serde(default)]
-    pub roles: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "lenient_wait", skip_serializing_if = "Option::is_none")]
     pub wait: Option<Wait>,
     /// `after`: the switch once this flow ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,12 +82,10 @@ pub enum Moved {
 }
 
 impl FlowState {
-    /// A new state for flow F at node START: roles mapped from the thread's agents.
-    pub fn new(f: &Flow, lib: &Library, start: usize, agents: &[String], roster: &[crate::engine::roster::Agent], now: u64) -> FlowState {
+    /// A new state for flow F at node START.
+    pub fn new(f: &Flow, lib: &Library, start: usize, now: u64) -> FlowState {
         let nodes = resolve(f, lib);
-        let mut st = FlowState { flow: f.slug.clone(), title: f.name.clone(), node: start.min(nodes.len().saturating_sub(1)), node_started: now, ..Default::default() };
-        st.roles = auto_roles(&roles(f, &nodes), agents, roster, &BTreeMap::new());
-        st
+        FlowState { flow: f.slug.clone(), title: f.name.clone(), node: start.min(nodes.len().saturating_sub(1)), node_started: now, ..Default::default() }
     }
 
     pub fn round(&self, id: &str) -> u32 {
@@ -177,7 +176,6 @@ impl FlowState {
                     c => Err(format!("loop: 0 choice {c} (again, next)")),
                 }
             }
-            Some(Wait::Role { .. }) => Err("the flow waits for an agent: pick one".into()),
             None => Err("the flow waits on 0 answer".into()),
         }
     }
@@ -195,33 +193,6 @@ impl FlowState {
         self.leave(nodes, "left", now);
         Ok(self.enter(to, now))
     }
-
-    /// The agent of node N (None: its role has 0 agent).
-    pub fn agent_of(&self, n: &Resolved, lead: Option<&str>) -> Option<String> {
-        self.roles.get(&n.role).cloned().or_else(|| (n.role == super::LEAD).then(|| lead.map(String::from)).flatten())
-    }
-}
-
-/// Map ROLES to agents: KEEP first (still on the thread), `lead` → the thread's lead, else an agent
-/// on the thread whose `roles` has the role, else 0 (an open role).
-pub fn auto_roles(roles: &[String], agents: &[String], roster: &[crate::engine::roster::Agent], keep: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    let mut m = BTreeMap::new();
-    for r in roles {
-        if let Some(a) = keep.get(r).filter(|a| agents.contains(a)) {
-            m.insert(r.clone(), a.clone());
-            continue;
-        }
-        if r == super::LEAD {
-            if let Some(l) = agents.first() {
-                m.insert(r.clone(), l.clone());
-            }
-            continue;
-        }
-        if let Some(a) = agents.iter().find(|a| roster.iter().any(|x| &x.name == *a && x.roles.contains(r))) {
-            m.insert(r.clone(), a.clone());
-        }
-    }
-    m
 }
 
 /// The message an agent gets at the start of node I.
@@ -243,7 +214,7 @@ pub fn step_message(title: &str, nodes: &[Resolved], i: usize, st: &FlowState, t
     if n.gate {
         s.push_str("\n\nGate: after this step, the owner approves before the flow goes on. Call `flow_step` when the step is done; then wait for the owner.");
     }
-    s.push_str("\n\nWhen the step is done: call `flow_step` (codehead MCP). Do not start the next step before it: codehead gives you the next step, or hands it to another agent.");
+    s.push_str("\n\nWhen the step is done: call `flow_step` (codehead MCP). Do not start the next step before it: codehead gives you the next step.");
     // the 1st step of a flow: the whole flow, so the agent knows what comes later
     if st.history.is_empty() && i == st.node {
         s.push_str(&format!("\n\nThe flow (▶ = this step; later steps come one at a time):\n{}", outline(nodes, st)));
@@ -261,7 +232,7 @@ pub fn outline(nodes: &[Resolved], st: &FlowState) -> String {
         .enumerate()
         .map(|(i, n)| {
             let mark = if i == st.node && !st.finished { "▶" } else if st.history.iter().any(|p| p.node == i) { "✓" } else { " " };
-            let mut l = format!("{mark} {}. {} (@{})", i + 1, n.title, st.roles.get(&n.role).map(String::as_str).unwrap_or(&n.role));
+            let mut l = format!("{mark} {}. {}", i + 1, n.title);
             if n.gate {
                 l.push_str(" [gate]");
             }
@@ -274,20 +245,17 @@ pub fn outline(nodes: &[Resolved], st: &FlowState) -> String {
         .join("\n")
 }
 
-/// Problems of the nodes for the thread: open roles, needs the role's agent lacks, node errors.
-/// (node index, text). DIR: the work dir (skills of the project).
-pub fn warnings(nodes: &[Resolved], st: &FlowState, lead: Option<&str>, roster: &[crate::engine::roster::Agent], dir: &std::path::Path) -> Vec<(usize, String)> {
+/// Problems of the nodes for AGENT (the flow's agent): needs it lacks, node errors. (node index,
+/// text). DIR: the work dir (skills of the project).
+pub fn warnings(nodes: &[Resolved], agent: &str, roster: &[crate::engine::roster::Agent], dir: &std::path::Path) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut skills: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let a = roster.iter().find(|a| a.name == agent);
     for (i, n) in nodes.iter().enumerate() {
         for e in &n.errors {
             out.push((i, e.clone()));
         }
-        let Some(agent) = st.agent_of(n, lead) else {
-            out.push((i, format!("@{}: 0 agent", n.role)));
-            continue;
-        };
-        let Some(a) = roster.iter().find(|a| a.name == agent) else { continue };
+        let Some(a) = a else { continue };
         for need in &n.needs {
             let (k, v) = need.split_once(':').unwrap_or(("skill", need));
             let ok = match k {
@@ -305,7 +273,7 @@ pub fn warnings(nodes: &[Resolved], st: &FlowState, lead: Option<&str>, roster: 
                 _ => true,
             };
             if !ok {
-                out.push((i, format!("@{} ({agent}, {}): 0 {k} {v}", n.role, a.harness)));
+                out.push((i, format!("@{agent} ({}): 0 {k} {v}", a.harness)));
             }
         }
     }
@@ -321,7 +289,6 @@ mod tests {
         let f = parse_flow(
             "t",
             r#"name = "t"
-roles = ["lead", "reviewer"]
 [[step]]
 id = "plan"
 text = "plan it"
@@ -331,7 +298,6 @@ gate = { changes = "plan" }
 [[step]]
 id = "review"
 text = "review"
-role = "reviewer"
 [[step]]
 text = "address"
 loop = { to = "review", until = "0 findings", max = 2 }
@@ -347,9 +313,7 @@ text = "report"
     #[test]
     fn gates_wait_and_outcomes_pick_the_edge() {
         let (f, n) = flow();
-        let mut st = FlowState::new(&f, &Library::default(), 0, &["ada".into()], &[], 0);
-        assert_eq!(st.roles.get("lead").map(String::as_str), Some("ada"));
-        assert!(!st.roles.contains_key("reviewer"), "0 reviewer agent: open role");
+        let mut st = FlowState::new(&f, &Library::default(), 0, 0);
         assert_eq!(st.step_done(&n, false, false, 1), Moved::To(1));
         assert_eq!(st.step_done(&n, false, false, 2), Moved::Wait(Wait::Gate));
         // a 2nd report while waiting: still waiting
@@ -369,7 +333,7 @@ text = "report"
     #[test]
     fn loops_go_back_until_max_then_wait() {
         let (f, n) = flow();
-        let mut st = FlowState::new(&f, &Library::default(), 3, &["ada".into()], &[], 0);
+        let mut st = FlowState::new(&f, &Library::default(), 3, 0);
         // round 1 → back to review
         assert_eq!(st.step_done(&n, true, false, 1), Moved::To(2));
         st.step_done(&n, false, false, 2);
@@ -386,11 +350,19 @@ text = "report"
     #[test]
     fn step_messages_say_how_to_report() {
         let (f, n) = flow();
-        let st = FlowState::new(&f, &Library::default(), 3, &["ada".into()], &[], 0);
+        let st = FlowState::new(&f, &Library::default(), 3, 0);
         let m = step_message("t", &n, 3, &st, Some("the task"));
         assert!(m.starts_with("[codehead flow: t · step 4/5: address]"));
         assert!(m.contains("round 1/2") && m.contains("`again: true`") && m.ends_with("the task"));
-        let w = warnings(&n, &st, Some("ada"), &[], std::path::Path::new("/tmp"));
-        assert_eq!(w, vec![(2, "@reviewer: 0 agent".to_string())]);
+        assert!(warnings(&n, "ada", &[], std::path::Path::new("/tmp")).is_empty());
+    }
+
+    /// An old `thread.json` flow: its role map is ignored, a `role` wait reads as 0 wait.
+    #[test]
+    fn an_old_state_with_roles_and_a_role_wait_loads() {
+        let st: FlowState = serde_json::from_str(r#"{"flow":"chore","title":"chore","node":1,"roles":{"lead":"ada","reviewer":"zed"},"wait":{"kind":"role","role":"reviewer"}}"#).unwrap();
+        assert_eq!((st.node, st.wait), (1, None));
+        let st: FlowState = serde_json::from_str(r#"{"flow":"chore","title":"chore","node":1,"wait":{"kind":"gate"}}"#).unwrap();
+        assert_eq!(st.wait, Some(Wait::Gate));
     }
 }

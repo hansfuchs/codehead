@@ -337,10 +337,10 @@ impl Host {
                 let ctx = s("context");
                 let full = if ctx.trim().is_empty() { text.clone() } else { format!("{text}\n\n{ctx}") };
                 // a flow whose current step went to 0 agent yet: the step goes with this message
-                let step = self.flow_unsent(&t, &to, &full);
-                self.later.extend(to.iter().map(|a| match &step {
-                    Some((sa, m)) if sa == a => (a.clone(), m.clone()),
-                    _ => (a.clone(), full.clone()),
+                let steps = self.flow_unsent(&t, &to, &full);
+                self.later.extend(to.iter().map(|a| match steps.iter().find(|(sa, _)| sa == a) {
+                    Some((_, m)) => (a.clone(), m.clone()),
+                    None => (a.clone(), full.clone()),
                 }));
                 Ok(json!({"to": to}))
             }
@@ -601,7 +601,7 @@ impl Host {
                 let boundary = matches!(kind, Kind::ToolResult { .. } | Kind::TurnEnd { .. });
                 self.log(Some(&agent), kind);
                 if boundary {
-                    self.flow_boundary();
+                    self.flow_boundary(&agent);
                 }
                 for (a, k) in subs {
                     self.log(Some(&a), k);
@@ -821,23 +821,37 @@ fn moved_reply(text: Option<String>, handed: Option<String>, wait: Option<&str>)
 }
 
 impl Host {
-    /// The thread, the flow library of its work dir, its flow, the flow's nodes.
-    fn flow_ctx(&self) -> Result<(store::Thread, super::flows::Library, super::flows::Flow, Vec<super::flows::Resolved>), String> {
+    /// AGENT's flow: the thread, the flow's state, the flow, its nodes.
+    fn flow_ctx(&self, agent: &str) -> Result<(store::Thread, super::flows::run::FlowState, super::flows::Flow, Vec<super::flows::Resolved>), String> {
         let t = self.thread()?;
-        let st = t.flow.clone().ok_or("the thread has 0 flow")?;
+        let st = t.flow_of(agent).ok_or_else(|| format!("@{agent} has 0 flow"))?;
         let lib = super::flows::Library::load(Some(&t.work_dir()));
         let f = lib.flow(&st.flow).cloned().ok_or_else(|| format!("flow {} not found", st.flow))?;
         let nodes = super::flows::resolve(&f, &lib);
-        Ok((t, lib, f, nodes))
+        Ok((t, st, f, nodes))
     }
 
-    fn flow_save(&self, st: &super::flows::run::FlowState) -> Result<(), String> {
-        let st = st.clone();
-        store::update(&self.id, move |t| t.flow = Some(st)).map(|_| ())
+    fn flow_save(&self, agent: &str, st: &super::flows::run::FlowState) -> Result<(), String> {
+        let (agent, st) = (agent.to_string(), st.clone());
+        store::update(&self.id, move |t| t.set_flow(&agent, Some(st))).map(|_| ())
     }
 
-    /// A flow line in the log. Steps and waits name their flow after the mark (`▶ chore · step
-    /// 1/3 implement · @ADA`): the line stands alone in the stream.
+    /// The agent whose flow an owner op means: `agent`, else the only agent with a flow, else
+    /// (0 flow) the lead. 2+ flows and 0 `agent`: an error that names them.
+    fn flow_agent(&self, c: &Value) -> Result<String, String> {
+        if let Some(a) = c["agent"].as_str().filter(|a| !a.is_empty()) {
+            return Ok(a.to_string());
+        }
+
+        let t = self.thread()?;
+        let flows = t.flow_map();
+        match flows.len() {
+            0 => t.lead().map(String::from).ok_or_else(|| "the thread has 0 agents".into()),
+            1 => Ok(flows.into_keys().next().unwrap_or_default()),
+            _ => Err(format!("2+ agents have a flow ({}): name 1 with `agent`", flows.keys().map(|a| format!("@{a}")).collect::<Vec<_>>().join(", "))),
+        }
+    }
+
     /// A sub-thread whose agents are done (1+ turns, 0 busy, 0 waiting message or ask, idle for
     /// KID_DONE): its result (the last agent text) to the thread it runs for, then it goes (thread
     /// deleted, host ends).
@@ -898,32 +912,27 @@ impl Host {
         self.thread().is_ok_and(|t| !t.kids.is_empty())
     }
 
-    fn flow_log(&self, op: &str, text: String) {
-        let name = self.thread().ok().and_then(|t| t.flow).map(|f| f.title).filter(|n| !n.is_empty());
+    /// A flow line of AGENT's flow in the log (the event is the agent's). Steps and waits name
+    /// their flow after the mark (`▶ chore · step 1/3 implement · @ADA`).
+    fn flow_log(&self, agent: &str, op: &str, text: String) {
+        let name = self.thread().ok().and_then(|t| t.flow_of(agent)).map(|f| f.title).filter(|n| !n.is_empty());
         let text = match (op, name, text.split_once(' ')) {
             ("step" | "wait", Some(n), Some((mark, rest))) => format!("{mark} {n} · {rest}"),
             _ => text,
         };
-        self.log(None, Kind::Flow { op: op.into(), text });
+        self.log(Some(agent), Kind::Flow { op: op.into(), text });
     }
 
-    /// The current node starts: its agent gets its text. CALLER: the agent whose `flow_step` led
-    /// here (its text goes back in the tool result, not as a message). NOTE: the owner's words on
-    /// top. Returns the reply for the caller.
-    fn flow_enter(&mut self, caller: Option<&str>, note: Option<&str>) -> Result<Value, String> {
-        let (t, _, f, nodes) = self.flow_ctx()?;
-        let mut st = t.flow.clone().unwrap_or_default();
+    /// The current node of AGENT's flow starts: the agent gets its text. CALLER: the agent whose
+    /// `flow_step` led here (its text goes back in the tool result, not as a message). NOTE: the
+    /// owner's words on top. Returns the reply for the caller.
+    fn flow_enter(&mut self, agent: &str, caller: Option<&str>, note: Option<&str>) -> Result<Value, String> {
+        let (t, mut st, f, nodes) = self.flow_ctx(agent)?;
         if st.finished {
-            return self.flow_finished(caller);
+            return self.flow_finished(agent, caller);
         }
         let Some(n) = nodes.get(st.node) else { return Ok(moved_reply(None, None, None)) };
-        let Some(agent) = st.agent_of(n, t.lead()) else {
-            st.wait = Some(super::flows::run::Wait::Role { role: n.role.clone() });
-            self.flow_save(&st)?;
-            self.flow_log("wait", format!("⏸ step {}/{} {}: @{} has 0 agent · pick 1 to bring in", st.node + 1, nodes.len(), n.title, n.role));
-            return Ok(moved_reply(None, None, Some("role")));
-        };
-        self.flow_log("step", format!("▶ step {}/{} {} · @{agent}", st.node + 1, nodes.len(), n.title));
+        self.flow_log(agent, "step", format!("▶ step {}/{} {} · @{agent}", st.node + 1, nodes.len(), n.title));
         let mut msg = super::flows::run::step_message(&f.name, &nodes, st.node, &st, None);
         if let Some(n) = note.filter(|n| !n.trim().is_empty()) {
             msg = format!("[the owner] {}\n\n{msg}", n.trim());
@@ -934,131 +943,141 @@ impl Host {
             return Ok(moved_reply(None, None, None));
         }
         st.sent = true;
-        self.flow_save(&st)?;
-        if caller == Some(agent.as_str()) {
+        self.flow_save(agent, &st)?;
+        if caller == Some(agent) {
             return Ok(moved_reply(Some(msg), None, None));
         }
-        self.later.push((agent.clone(), msg));
-        Ok(moved_reply(None, Some(agent), None))
+        self.later.push((agent.to_string(), msg));
+        Ok(moved_reply(None, Some(agent.to_string()), None))
     }
 
-    /// The flow ended: the queued switch starts, else the end in the log.
-    fn flow_finished(&mut self, caller: Option<&str>) -> Result<Value, String> {
+    /// AGENT's flow ended: the queued switch starts, else the end in the log.
+    fn flow_finished(&mut self, agent: &str, caller: Option<&str>) -> Result<Value, String> {
         let t = self.thread()?;
-        let st = t.flow.clone().unwrap_or_default();
+        let st = t.flow_of(agent).unwrap_or_default();
         if let Some(sw) = st.queued.clone() {
-            return self.flow_apply(&sw, caller);
+            return self.flow_apply(agent, &sw, caller);
         }
-        self.flow_log("finished", format!("✓ flow {} finished", st.title));
+        self.flow_log(agent, "finished", format!("✓ flow {} of @{agent} finished", st.title));
         Ok(json!({"text": null, "handed": null, "wait": null, "finished": true}))
     }
 
-    /// Switch SW: the new flow's state (roles kept where they fit), its start node enters.
-    fn flow_apply(&mut self, sw: &super::flows::run::Switch, caller: Option<&str>) -> Result<Value, String> {
+    /// AGENT's flow switches to SW: the new flow's state, its start node enters.
+    fn flow_apply(&mut self, agent: &str, sw: &super::flows::run::Switch, caller: Option<&str>) -> Result<Value, String> {
         let t = self.thread()?;
+        if !t.agents.iter().any(|a| a == agent) {
+            return Err(format!("@{agent} is not on the thread"));
+        }
         let lib = super::flows::Library::load(Some(&t.work_dir()));
         let f = lib.flow(&sw.flow).cloned().ok_or_else(|| format!("flow {} not found", sw.flow))?;
-        let roster = roster::active();
-        let mut st = super::flows::run::FlowState::new(&f, &lib, sw.start, &t.agents, &roster, super::now_ms());
-        if let Some(old) = &t.flow {
-            let nodes = super::flows::resolve(&f, &lib);
-            st.roles = super::flows::run::auto_roles(&super::flows::roles(&f, &nodes), &t.agents, &roster, &old.roles);
-        }
-        let from = t.flow.as_ref().filter(|o| !o.finished || o.queued.is_some()).map(|o| o.title.clone());
-        self.flow_save(&st)?;
+        let st = super::flows::run::FlowState::new(&f, &lib, sw.start, super::now_ms());
+        let old = t.flow_of(agent);
+        let from = old.as_ref().filter(|o| !o.finished || o.queued.is_some()).map(|o| o.title.clone());
+        self.flow_save(agent, &st)?;
         let nodes = super::flows::resolve(&f, &lib);
         let at = nodes.get(st.node).map(|n| n.title.clone()).unwrap_or_default();
         match from {
-            Some(old) if old != f.name || t.flow.as_ref().is_some_and(|o| o.flow != f.slug) => self.flow_log("switch", format!("flow: {old} → {} (start: {at})", f.name)),
-            _ => self.flow_log("set", format!("flow: {} (start: {at})", f.name)),
+            Some(o) if o != f.name || old.as_ref().is_some_and(|o| o.flow != f.slug) => self.flow_log(agent, "switch", format!("flow of @{agent}: {o} → {} (start: {at})", f.name)),
+            _ => self.flow_log(agent, "set", format!("flow of @{agent}: {} (start: {at})", f.name)),
         }
-        self.flow_enter(caller, None)
+        self.flow_enter(agent, caller, None)
     }
 
-    /// A busy agent reached a tool boundary (or its turn ended): a pending `now` switch stops the
-    /// running turns and applies.
-    fn flow_boundary(&mut self) {
+    /// AGENT reached a tool boundary (or its turn ended): a pending `now` switch of its flow stops
+    /// its running turn and applies.
+    fn flow_boundary(&mut self, agent: &str) {
         let Ok(t) = self.thread() else { return };
-        let Some(sw) = t.flow.as_ref().and_then(|s| s.pending.clone()) else { return };
-        for l in self.sessions.values_mut().filter(|l| l.busy) {
-            if l.session.interrupt().is_ok() {
-                l.interrupted = true;
-            }
+        let Some(sw) = t.flow_of(agent).and_then(|s| s.pending) else { return };
+        if let Some(l) = self.sessions.get_mut(agent).filter(|l| l.busy)
+            && l.session.interrupt().is_ok()
+        {
+            l.interrupted = true;
         }
-        let stopped: Vec<String> = self.sessions.iter().filter(|(_, l)| l.interrupted).map(|(n, _)| n.clone()).collect();
-        self.asks.retain(|_, (a, _)| !stopped.contains(a));
-        if let Err(e) = self.flow_apply(&sw, None) {
-            self.flow_log("warn", format!("switch to {}: {e}", sw.flow));
+        if self.sessions.get(agent).is_some_and(|l| l.interrupted) {
+            self.asks.retain(|_, (a, _)| a != agent);
+        }
+        if let Err(e) = self.flow_apply(agent, &sw, None) {
+            self.flow_log(agent, "warn", format!("switch to {}: {e}", sw.flow));
         }
         self.deliver_later();
     }
 
-    /// Thread T's current step went to 0 agent yet (a flow set with the task): its agent, when in
-    /// TO, gets the step with TEXT under it. Marks the step sent.
-    fn flow_unsent(&mut self, t: &store::Thread, to: &[String], text: &str) -> Option<(String, String)> {
-        let st = t.flow.clone().filter(|s| !s.sent && !s.finished && s.wait.is_none())?;
-        let (_, _, f, nodes) = self.flow_ctx().ok()?;
-        let agent = st.agent_of(nodes.get(st.node)?, t.lead())?;
-        // the step's agent is 0 recipient: the step goes to it on its own
-        let task = to.contains(&agent).then_some(text);
-        let msg = super::flows::run::step_message(&f.name, &nodes, st.node, &st, task);
-        let mut st = st;
-        st.sent = true;
-        self.flow_save(&st).ok()?;
-        self.flow_log("step", format!("▶ step {}/{} {} · @{agent}", st.node + 1, nodes.len(), nodes[st.node].title));
-        if task.is_none() {
-            self.later.push((agent, msg));
-            return None;
+    /// The flows of thread T whose current step went to 0 agent yet (a flow set with the task):
+    /// each step goes with TEXT under it (the agent's 1st message). Agents in TO: (agent, step)
+    /// for the caller to send in place of TEXT; the others get theirs on their own. Marks the steps
+    /// sent.
+    fn flow_unsent(&mut self, t: &store::Thread, to: &[String], text: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (agent, st) in t.flow_map() {
+            if st.sent || st.finished || st.wait.is_some() {
+                continue;
+            }
+
+            let Ok((_, mut st, f, nodes)) = self.flow_ctx(&agent) else { continue };
+            let Some(n) = nodes.get(st.node) else { continue };
+            let msg = super::flows::run::step_message(&f.name, &nodes, st.node, &st, Some(text));
+            self.flow_log(&agent, "step", format!("▶ step {}/{} {} · @{agent}", st.node + 1, nodes.len(), n.title));
+            st.sent = true;
+            if self.flow_save(&agent, &st).is_err() {
+                continue;
+            }
+            if to.contains(&agent) {
+                out.push((agent, msg));
+            } else {
+                self.later.push((agent, msg));
+            }
         }
-        Some((agent, msg))
+        out
     }
 
-    /// The `flow_*` ops.
+    /// The `flow_*` ops. Owner ops name the flow's agent (`agent`; see `flow_agent`).
     fn flow_cmd(&mut self, op: &str, c: &Value) -> Result<Value, String> {
         let s = |k: &str| c[k].as_str().unwrap_or_default().to_string();
         let now = super::now_ms();
         match op {
-            // the owner sets / switches the flow: MODE `now` (at the next tool boundary), `after`
-            // (once the current flow ends); 0 flow running: at once
+            // the owner sets / switches an agent's flow: MODE `now` (at the agent's next tool
+            // boundary), `after` (once its current flow ends); 0 flow running: at once
             "flow_set" => {
+                let agent = self.flow_agent(c)?;
                 let sw = super::flows::run::Switch { flow: s("flow"), start: c["start"].as_u64().unwrap_or(0) as usize };
                 let t = self.thread()?;
                 let lib = super::flows::Library::load(Some(&t.work_dir()));
                 let f = lib.flow(&sw.flow).ok_or_else(|| format!("flow {} not found", sw.flow))?;
                 let sw = super::flows::run::Switch { flow: f.slug.clone(), ..sw };
                 let name = f.name.clone();
-                let running = t.flow.as_ref().is_some_and(|f| !f.finished);
+                let cur = t.flow_of(&agent);
+                let running = cur.as_ref().is_some_and(|f| !f.finished);
                 match (running, s("mode").as_str()) {
                     (true, "after") => {
-                        let mut st = t.flow.clone().unwrap_or_default();
+                        let mut st = cur.unwrap_or_default();
                         st.queued = Some(sw);
-                        self.flow_save(&st)?;
-                        self.flow_log("queued", format!("queued: flow {name} after {}", st.title));
+                        self.flow_save(&agent, &st)?;
+                        self.flow_log(&agent, "queued", format!("queued: flow {name} after {} (@{agent})", st.title));
                         Ok(json!({"queued": name}))
                     }
-                    (true, _) if self.sessions.values().any(|l| l.busy) => {
-                        let mut st = t.flow.clone().unwrap_or_default();
+                    (true, _) if self.sessions.get(&agent).is_some_and(|l| l.busy) => {
+                        let mut st = cur.unwrap_or_default();
                         st.pending = Some(sw);
-                        self.flow_save(&st)?;
-                        self.flow_log("pending", format!("switch to {name}: the running turn stops at its next tool boundary"));
+                        self.flow_save(&agent, &st)?;
+                        self.flow_log(&agent, "pending", format!("switch @{agent} to {name}: its running turn stops at its next tool boundary"));
                         Ok(json!({"pending": name}))
                     }
-                    _ => self.flow_apply(&sw, None),
+                    _ => self.flow_apply(&agent, &sw, None),
                 }
             }
             "flow_cancel" => {
+                let agent = self.flow_agent(c)?;
                 let t = self.thread()?;
-                let mut st = t.flow.clone().ok_or("0 flow")?;
+                let mut st = t.flow_of(&agent).ok_or_else(|| format!("@{agent} has 0 flow"))?;
                 let what = st.pending.take().or(st.queued.take()).ok_or("0 switch to cancel")?;
-                self.flow_save(&st)?;
-                self.flow_log("set", format!("switch to {} canceled", what.flow));
+                self.flow_save(&agent, &st)?;
+                self.flow_log(&agent, "set", format!("switch of @{agent} to {} canceled", what.flow));
                 Ok(json!({}))
             }
-            // an agent reports the current step done (`flow_step` tool)
+            // an agent reports the current step of its flow done (`flow_step` tool)
             "flow_step" => {
                 let agent = s("agent");
-                let (t, _, _, nodes) = self.flow_ctx()?;
-                let mut st = t.flow.clone().unwrap_or_default();
+                let (_, mut st, _, nodes) = self.flow_ctx(&agent).map_err(|_| format!("@{agent} has 0 flow: 0 step to report"))?;
                 if st.finished {
                     return Err("the flow finished: 0 step left".into());
                 }
@@ -1066,17 +1085,13 @@ impl Host {
                     return Err("the owner switches the flow: stop and wait".into());
                 }
                 let n = nodes.get(st.node).cloned().ok_or("0 current step")?;
-                let owner_of = st.agent_of(&n, t.lead());
-                if owner_of.as_deref().is_some_and(|o| o != agent) {
-                    return Err(format!("step {} ({}) is @{}'s: only it reports it done", st.node + 1, n.title, owner_of.unwrap_or_default()));
-                }
                 let pass = c["pass_gate"].as_bool().unwrap_or(false);
                 if pass && roster::get(&agent).is_none_or(|a| a.mode != "autopilot") {
                     return Err("pass_gate: only an agent on autopilot passes a gate; wait for the owner".into());
                 }
                 let note = s("note");
                 let moved = st.step_done(&nodes, c["again"].as_bool().unwrap_or(false), pass, now);
-                self.flow_save(&st)?;
+                self.flow_save(&agent, &st)?;
                 let tail = if note.is_empty() { String::new() } else { format!(" · {note}") };
                 match moved {
                     super::flows::run::Moved::Wait(w) => {
@@ -1086,85 +1101,70 @@ impl Host {
                                 format!("⏸ gate {}: waits for the owner ({}){tail}", n.title, outs.join(" · "))
                             }
                             super::flows::run::Wait::LoopMax => format!("⏸ loop of {}: max rounds reached · 1 more round, or move on{tail}", n.title),
-                            super::flows::run::Wait::Role { role } => format!("⏸ @{role} has 0 agent"),
                         };
-                        self.flow_log("wait", what);
+                        self.flow_log(&agent, "wait", what);
                         Ok(moved_reply(None, None, Some("owner")))
                     }
                     super::flows::run::Moved::Finished => {
-                        self.flow_log("step", format!("✓ step {}/{} {}{tail}", nodes.len(), nodes.len(), n.title));
-                        self.flow_finished(Some(&agent))
+                        self.flow_log(&agent, "step", format!("✓ step {}/{} {}{tail}", nodes.len(), nodes.len(), n.title));
+                        self.flow_finished(&agent, Some(&agent))
                     }
                     super::flows::run::Moved::To(_) => {
                         if pass && n.gate {
-                            self.flow_log("warn", format!("gate {} passed by @{agent} (autopilot){tail}", n.title));
+                            self.flow_log(&agent, "warn", format!("gate {} passed by @{agent} (autopilot){tail}", n.title));
                         } else if !tail.is_empty() {
-                            self.flow_log("step", format!("✓ {}{tail}", n.title));
+                            self.flow_log(&agent, "step", format!("✓ {}{tail}", n.title));
                         }
-                        self.flow_enter(Some(&agent), None)
+                        self.flow_enter(&agent, Some(&agent), None)
                     }
                 }
             }
             // the owner answers the wait: CHOICE `approve` / an outcome (gate), `again` / `next`
             // (loop max); NOTE: the owner's words to the agent
             "flow_answer" => {
-                let (t, _, _, nodes) = self.flow_ctx()?;
-                let mut st = t.flow.clone().unwrap_or_default();
+                let agent = self.flow_agent(c)?;
+                let (_, mut st, _, nodes) = self.flow_ctx(&agent)?;
                 let choice = s("choice");
                 let title = nodes.get(st.node).map(|n| n.title.clone()).unwrap_or_default();
                 st.answer(&nodes, &choice, now)?;
-                self.flow_save(&st)?;
-                self.flow_log("answer", format!("owner: {choice} · {title}"));
+                self.flow_save(&agent, &st)?;
+                self.flow_log(&agent, "answer", format!("owner: {choice} · {title}"));
                 if st.finished {
-                    return self.flow_finished(None);
+                    return self.flow_finished(&agent, None);
                 }
-                self.flow_enter(None, Some(&s("note")))
+                self.flow_enter(&agent, None, Some(&s("note")))
             }
             "flow_skip" | "flow_jump" => {
-                let (t, _, _, nodes) = self.flow_ctx()?;
-                let mut st = t.flow.clone().unwrap_or_default();
+                let agent = self.flow_agent(c)?;
+                let (_, mut st, _, nodes) = self.flow_ctx(&agent)?;
                 let from = nodes.get(st.node).map(|n| n.title.clone()).unwrap_or_default();
                 if op == "flow_skip" {
                     st.skip(&nodes, now);
-                    self.flow_save(&st)?;
-                    self.flow_log("skip", format!("owner skipped {from}"));
+                    self.flow_save(&agent, &st)?;
+                    self.flow_log(&agent, "skip", format!("owner skipped {from}"));
                 } else {
                     let to = c["node"].as_u64().ok_or("flow_jump: `node` required")? as usize;
                     st.jump(&nodes, to, now)?;
-                    self.flow_save(&st)?;
-                    self.flow_log("jump", format!("owner: {from} → {}", nodes[to].title));
+                    self.flow_save(&agent, &st)?;
+                    self.flow_log(&agent, "jump", format!("owner: {from} → {}", nodes[to].title));
                 }
                 if st.finished {
-                    return self.flow_finished(None);
+                    return self.flow_finished(&agent, None);
                 }
-                self.flow_enter(None, None)
-            }
-            // the owner maps ROLE to AGENT (it joins the thread)
-            "flow_role" => {
-                let (role, agent) = (s("role"), s("agent"));
-                self.ensure(&agent)?;
-                let t = self.thread()?;
-                let mut st = t.flow.clone().ok_or("0 flow")?;
-                st.roles.insert(role.clone(), agent.clone());
-                let waited = st.wait == Some(super::flows::run::Wait::Role { role: role.clone() });
-                if waited {
-                    st.wait = None;
-                }
-                self.flow_save(&st)?;
-                self.flow_log("role", format!("@{role} → {agent}"));
-                if waited { self.flow_enter(None, None) } else { Ok(json!({})) }
+                self.flow_enter(&agent, None, None)
             }
             "flow_clear" => {
-                store::update(&self.id, |t| t.flow = None)?;
-                self.flow_log("clear", "flow removed".into());
+                let agent = self.flow_agent(c)?;
+                self.flow_log(&agent, "clear", format!("flow of @{agent} removed"));
+                store::update(&self.id, |t| t.set_flow(&agent, None))?;
                 Ok(json!({}))
             }
-            // an agent proposes another flow: a line for the owner
+            // an agent proposes another flow for itself: a line for the owner
             "flow_suggest" => {
                 let t = self.thread()?;
                 let lib = super::flows::Library::load(Some(&t.work_dir()));
                 let f = lib.flow(&s("flow")).ok_or_else(|| format!("flow {} not found. flows: {}", s("flow"), lib.flows.iter().map(|f| f.slug.as_str()).collect::<Vec<_>>().join(", ")))?;
-                self.flow_log("suggest", format!("@{} suggests flow {} · {} · > flow to switch", s("agent"), f.name, s("reason")));
+                self.flow_log(&s("agent"), "suggest", format!("@{} suggests flow {} · {} · agents box (ctrl+q) → flow to switch", s("agent"), f.name, s("reason")));
                 Ok(json!({}))
             }
             _ => Err(format!("unknown op {op:?}")),
@@ -1340,7 +1340,7 @@ mod tests {
         t.save().unwrap();
         let (htx, _hrx) = mpsc::channel();
         let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), held: Vec::new(), kid: Default::default(), kids_at: Instant::now(), resume: HashMap::new() };
-        let flow = || store::load(&t.id).unwrap().flow.unwrap();
+        let flow = || store::load(&t.id).unwrap().flow_of("ada").unwrap();
         // set before the 1st message: the step waits for the task
         h.cmd(&json!({"op": "flow_set", "flow": "chore"})).unwrap();
         assert!(h.later.is_empty() && !flow().sent);
@@ -1349,7 +1349,7 @@ mod tests {
         assert_eq!(to, "ada");
         assert!(m.starts_with("[codehead flow: chore · step 1/3: implement]") && m.ends_with("do it"), "{m}");
         assert!(flow().sent);
-        // only the step's agent reports it; the reply holds the next step
+        // only the flow's agent reports it (bob has 0 flow); the reply holds the next step
         assert!(h.cmd(&json!({"op": "flow_step", "agent": "bob"})).is_err());
         let r = h.cmd(&json!({"op": "flow_step", "agent": "ada"})).unwrap();
         assert!(r["text"].as_str().unwrap().contains("step 2/3: verify"));
@@ -1370,15 +1370,71 @@ mod tests {
         h.cmd(&json!({"op": "flow_answer", "choice": "changes", "note": "split it"})).unwrap();
         let (_, m) = h.later.pop().unwrap();
         assert!(m.starts_with("[the owner] split it") && m.contains("step 3/9: plan"), "{m}");
-        // a role with 0 agent: the flow waits for the owner's pick
+        // peer review: the flow's own agent asks another agent (roles are gone)
         h.cmd(&json!({"op": "flow_jump", "node": 6})).unwrap();
-        assert_eq!(flow().wait, Some(crate::engine::flows::run::Wait::Role { role: "reviewer".into() }));
-        assert!(h.later.is_empty());
+        let (to, m) = h.later.pop().unwrap();
+        assert!(to == "ada" && m.contains("peer-review") && m.contains("list_agents"), "{m}");
         let log: Vec<String> = store::events(&t.id).into_iter().filter_map(|e| match e.kind { Kind::Flow { text, .. } => Some(text), _ => None }).collect();
         assert!(log.iter().any(|l| l.starts_with("⏸ new feature · gate plan approval: waits for the owner (approve · changes)")), "{log:?}");
         assert!(log.iter().any(|l| l == "▶ chore · step 1/3 implement · @ada"), "steps name their flow: {log:?}");
-        assert!(log.iter().any(|l| l.contains("@reviewer has 0 agent")), "{log:?}");
         let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+    }
+
+    /// 2 agents, 2 flows: each step goes to its flow's agent (with the task at the start), each
+    /// `flow_step` moves only its own flow, owner ops name the agent once 2+ flows run.
+    #[test]
+    fn each_agent_runs_its_own_flow() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t = store::Thread::new("2 flows", "task", Path::new("/tmp"), vec!["ada".into(), "zed".into()]);
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (htx, _hrx) = mpsc::channel();
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), held: Vec::new(), kid: Default::default(), kids_at: Instant::now(), resume: HashMap::new() };
+        let flow = |a: &str| store::load(&t.id).unwrap().flow_of(a);
+        h.cmd(&json!({"op": "flow_set", "flow": "chore", "agent": "ada"})).unwrap();
+        h.cmd(&json!({"op": "flow_set", "flow": "code review", "agent": "zed"})).unwrap();
+        assert!(h.cmd(&json!({"op": "flow_set", "flow": "chore", "agent": "bob"})).is_err(), "bob is not on the thread");
+
+        // the task goes to the lead; each agent gets its step 1 with the task under it
+        h.cmd(&json!({"op": "prompt", "text": "do it"})).unwrap();
+        let ada = h.later.iter().find(|(a, _)| a == "ada").map(|(_, m)| m.clone()).unwrap();
+        let zed = h.later.iter().find(|(a, _)| a == "zed").map(|(_, m)| m.clone()).unwrap();
+        assert!(ada.starts_with("[codehead flow: chore · step 1/3: implement]") && ada.ends_with("do it"), "{ada}");
+        assert!(zed.starts_with("[codehead flow: code review · step 1/2: review-diff]") && zed.ends_with("do it"), "{zed}");
+        assert_eq!(h.later.len(), 2);
+
+        // zed reports its step: only its flow moves
+        let r = h.cmd(&json!({"op": "flow_step", "agent": "zed"})).unwrap();
+        assert!(r["text"].as_str().unwrap().contains("step 2/2: report"), "{r}");
+        assert_eq!((flow("ada").unwrap().node, flow("zed").unwrap().node), (0, 1));
+
+        // owner ops: 2 flows → the agent is named
+        let e = h.cmd(&json!({"op": "flow_skip"})).unwrap_err();
+        assert!(e.contains("@ada") && e.contains("@zed"), "{e}");
+        h.cmd(&json!({"op": "flow_skip", "agent": "ada"})).unwrap();
+        assert_eq!(flow("ada").unwrap().node, 1);
+
+        // the flow lines are the agent's events
+        let flows: Vec<(Option<String>, String)> = store::events(&t.id).into_iter().filter_map(|e| match e.kind { Kind::Flow { text, .. } => Some((e.agent, text)), _ => None }).collect();
+        assert!(flows.iter().any(|(a, l)| a.as_deref() == Some("zed") && l.starts_with("▶ code review · step 1/2")), "{flows:?}");
+
+        // zed's flow goes, ada's stays
+        h.cmd(&json!({"op": "flow_clear", "agent": "zed"})).unwrap();
+        assert!(flow("zed").is_none() && flow("ada").is_some());
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+    }
+
+    /// An older version's thread: its 1 flow is the lead's; a save keeps `flow` = the lead's.
+    #[test]
+    fn an_old_thread_flow_belongs_to_the_lead() {
+        let mut t = store::Thread::new("old", "task", Path::new("/tmp"), vec!["ada".into(), "zed".into()]);
+        t.flow = Some(crate::engine::flows::run::FlowState { flow: "chore".into(), node: 2, ..Default::default() });
+        assert_eq!(t.flow_of("ada").map(|f| f.node), Some(2));
+        assert!(t.flow_of("zed").is_none());
+        t.set_flow("zed", Some(crate::engine::flows::run::FlowState { flow: "code-review".into(), ..Default::default() }));
+        assert_eq!((t.flows.len(), t.flow.as_ref().map(|f| f.flow.as_str())), (2, Some("chore")));
+        t.set_flow("ada", None);
+        assert!(t.flow.is_none() && t.flow_of("ada").is_none() && t.flow_of("zed").is_some());
     }
 
     /// The thread's host watches its sub-threads (0 view needed): one deleted without its end and

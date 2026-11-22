@@ -1,6 +1,5 @@
 name = "new feature"
 description = "scrutinize, plan, gate, build, review, report"
-roles = ["lead", "reviewer"]
 
 [[step]]
 use = "scrutinize-task"

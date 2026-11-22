@@ -71,7 +71,7 @@ fn tools() -> Value {
         },
         {
             "name": "flow_step",
-            "description": "Report the current step of the thread's flow done (a step comes as a message that starts with `[codehead flow: ...]`). codehead returns the next step for you, hands it to another agent, or holds the flow at a gate for the owner. Call it once per step, only when the step's `Done when` holds.",
+            "description": "Report the current step of your flow done (a step comes as a message that starts with `[codehead flow: ...]`). codehead returns your next step, or holds the flow at a gate for the owner. Call it once per step, only when the step's `Done when` holds.",
             "inputSchema": {"type": "object", "properties": {
                 "again": {"type": "boolean", "description": "Loop step: its loop condition is not met yet, go back to the loop's start"},
                 "pass_gate": {"type": "boolean", "description": "Gate step, agents on autopilot only: go on without the owner's approval (the situation makes the wait pointless). Say why in note"},

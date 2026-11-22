@@ -1,7 +1,7 @@
 //! The flows tab of the start screen: 2 sub-tabs, every edit saved at once (0 save buttons).
 //! - flows: the flows left (built-in, user, repo), the rail of the picked flow right. On the
 //!   rail: a add a step (fuzzy picker: a shared step, a new shared step, a one-off), enter edit,
-//!   J K move, d remove, g gate, o gate outcome, L loop, + - loop max, @ role, s save a one-off as
+//!   J K move, d remove, g gate, o gate outcome, L loop, + - loop max, s save a one-off as
 //!   a shared step. A shared step edited from a flow changes every flow that uses it (the editor
 //!   says which); f forks it into a one-off of this flow.
 //! - steps: the step library: usage count, n new, enter edit, R rename (flows follow), D
@@ -46,7 +46,7 @@ pub enum Out {
     Up,
 }
 
-/// A 1-line input for a name, a loop's condition, a gate outcome, a role.
+/// A 1-line input for a name, a loop's condition, a gate outcome.
 #[derive(Clone, Debug, PartialEq)]
 enum Ask {
     NewFlow,
@@ -61,7 +61,6 @@ enum Ask {
     LoopUntil(usize, usize),
     /// A gate outcome of node FROM to TO: its label.
     Outcome(usize, usize),
-    Role(usize),
 }
 
 /// Picking a node on the rail for a loop / gate outcome of node FROM.
@@ -528,10 +527,6 @@ impl FlowsTab {
                 }
                 self.save_flow();
             }
-            KeyCode::Char('@') if n > 0 => {
-                let r = flows::resolve(&f, &self.lib).get(self.node).map(|x| x.role.clone()).unwrap_or_default();
-                self.ask = Some((Ask::Role(self.node), input(true, "role: lead, reviewer, tester, ...", &r)));
-            }
             KeyCode::Char('s') if n > 0 => {
                 if f.steps[self.node].uses.is_some() {
                     return self.fail("a shared step already");
@@ -635,7 +630,7 @@ impl FlowsTab {
                 let slug = self.lib.free_flow_slug(&flows::slug(v));
                 let mut f = match what {
                     Ask::DuplicateFlow => self.flow.clone().unwrap_or_default(),
-                    _ => Flow { roles: vec![flows::LEAD.into()], ..Default::default() },
+                    _ => Flow::default(),
                 };
                 f.slug = slug.clone();
                 f.name = v.to_string();
@@ -718,19 +713,6 @@ impl FlowsTab {
                     };
                     m.insert(v.to_string(), to_id);
                     nd.gate = Some(Gate::Edges(m));
-                }
-                self.save_flow();
-            }
-            Ask::Role(i) => {
-                if !flows::valid_name(v) {
-                    return Err("role: letters, digits, - and _".into());
-                }
-                let lib_role = self.flow.as_ref().and_then(|f| f.steps.get(*i)).and_then(|n| n.uses.as_deref()).and_then(|u| self.lib.step(u)).and_then(|s| s.role.clone()).unwrap_or_else(|| flows::LEAD.into());
-                if let Some(f) = self.flow.as_mut() {
-                    f.steps[*i].role = (v != lib_role).then(|| v.to_string());
-                    if !f.roles.iter().any(|r| r == v) {
-                        f.roles.push(v.to_string());
-                    }
                 }
                 self.save_flow();
             }
@@ -824,7 +806,6 @@ impl FlowsTab {
             what: Edit::Step(s.name.clone()),
             fields: vec![
                 ("description", input(true, "1 line: what the step does", &s.description), false),
-                ("role", input(true, "lead (empty), reviewer, ...", s.role.as_deref().unwrap_or_default()), false),
                 ("done when", input(true, "exit criteria", &s.done), false),
                 ("needs", input(true, "skill:<name>, mcp:<server>, harness:<name>", &s.needs.join(", ")), false),
                 ("text", input(false, "the instruction the agent gets · #shortcuts expand at the step's start", &s.text), false),
@@ -874,7 +855,6 @@ impl FlowsTab {
                 let Some(mut s) = self.lib.step(&name).cloned() else { return true };
                 let new = Step {
                     description: val("description").trim().to_string(),
-                    role: opt(val("role")).filter(|r| r != flows::LEAD),
                     done: val("done when").trim().to_string(),
                     needs: val("needs").split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect(),
                     text: val("text").trim_end().to_string(),
@@ -1061,7 +1041,7 @@ impl FlowsTab {
             Focus::List if self.sub == Sub::Flows => &[("↑↓", "move"), ("enter", "rail"), ("←→", "steps"), ("n", "new"), ("D", "duplicate"), ("R", "rename"), ("d d", "delete"), ("r", "read again"), ("ctrl+d", "reset"), ("m", "user ↔ repo"), ("ctrl+f", "filter")],
             Focus::List => &[("↑↓", "move"), ("enter", "edit"), ("←→", "flows"), ("n", "new"), ("D", "duplicate"), ("R", "rename"), ("d d", "delete"), ("r", "read again"), ("ctrl+d", "reset"), ("ctrl+f", "filter")],
             Focus::Rail if self.armed => &[("d", "again: remove the step"), ("any key", "keep")],
-            Focus::Rail => &[("a", "add"), ("enter", "edit"), ("J K", "move"), ("d d", "remove"), ("g", "gate"), ("o / O", "outcome / clear"), ("L", "loop"), ("+ -", "max"), ("@", "role"), ("s", "save as step"), ("esc", "list")],
+            Focus::Rail => &[("a", "add"), ("enter", "edit"), ("J K", "move"), ("d d", "remove"), ("g", "gate"), ("o / O", "outcome / clear"), ("L", "loop"), ("+ -", "max"), ("s", "save as step"), ("esc", "list")],
             Focus::Editor => &[("tab", "next field"), ("ctrl+g", "gate"), ("ctrl+f", "fork shared → one-off"), ("#", "shortcuts"), ("ctrl+s", "save"), ("esc", "close")],
         }
     }
@@ -1165,10 +1145,9 @@ impl FlowsTab {
             (_, true) => "edited built-in · ctrl+d: reset".to_string(),
             (l, _) => l.label().to_string(),
         };
-        let roles = flows::roles(&fl, &nodes).join(", ");
         let head = Line::from(vec![
             Span::styled(fl.name.clone(), theme::accent_bold()),
-            Span::styled(format!(" · {} steps · {layer} · roles: {roles}", nodes.len()), theme::muted()),
+            Span::styled(format!(" · {} steps · {layer}", nodes.len()), theme::muted()),
         ]);
         f.render_widget(Paragraph::new(head), Rect { height: 1, ..area });
         if !fl.description.is_empty() {
@@ -1233,7 +1212,6 @@ impl FlowsTab {
             Line::raw(""),
         ];
         let kv = |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<10}"), theme::muted()), Span::styled(v, theme::text())]);
-        lines.push(kv("role", s.role.clone().unwrap_or_else(|| flows::LEAD.into())));
         lines.push(kv("done when", s.done.clone()));
         if !s.needs.is_empty() {
             lines.push(kv("needs", s.needs.join(", ")));
@@ -1314,7 +1292,6 @@ impl FlowsTab {
             Ask::Promote(_) => "save as shared step: name".into(),
             Ask::LoopUntil(..) => "loop: until (the condition that ends it)".into(),
             Ask::Outcome(..) => "gate outcome: label".into(),
-            Ask::Role(_) => "role of the step".into(),
         };
         let w = right.width.min(64);
         let r = Rect { x: right.x, y: right.y + 2, width: w, height: 4 };
@@ -1362,17 +1339,14 @@ impl FlowsTab {
     }
 }
 
-/// The rail rows of NODES: ✓ a library step (◇ one-off), the role when not the lead, the gate and
+/// The rail rows of NODES: ✓ a library step (◇ one-off), the gate and
 /// loop tags (flowbar::rail_row). The flows tab and the new thread's flow dropdown draw them.
 pub fn rail_rows(nodes: &[flows::Resolved]) -> Vec<flowrail::Row> {
     nodes
         .iter()
         .map(|n| {
             let (mark, st) = if n.step.is_some() { ("✓", Style::default().fg(theme::pal().ok)) } else { ("◇", theme::accent()) };
-            let mut row = crate::flowbar::rail_row(n, mark, st, None);
-            if n.role != flows::LEAD && !row.tags.iter().any(|(t, _)| t.starts_with('@')) {
-                row.tags.push((format!("@{}", n.role), theme::muted()));
-            }
+            let mut row = crate::flowbar::rail_row(n, mark, st);
             if n.step.is_none() {
                 row.tags.retain(|(t, _)| t != "◇");
                 row.tags.push(("one-off".into(), theme::muted()));
@@ -1382,14 +1356,13 @@ pub fn rail_rows(nodes: &[flows::Resolved]) -> Vec<flowrail::Row> {
         .collect()
 }
 
-/// The head of flow FL (its NODES): name · n steps · layer · roles.
+/// The head of flow FL (its NODES): name · n steps · layer.
 pub fn head_line(fl: &flows::Flow, nodes: &[flows::Resolved]) -> Line<'static> {
     let layer = match (fl.layer, fl.edited) {
         (_, true) => "edited built-in".to_string(),
         (l, _) => l.label().to_string(),
     };
-    let roles = flows::roles(fl, nodes).join(", ");
-    Line::from(vec![Span::styled(fl.name.clone(), theme::accent_bold()), Span::styled(format!(" · {} steps · {layer} · roles: {roles}", nodes.len()), theme::muted())])
+    Line::from(vec![Span::styled(fl.name.clone(), theme::accent_bold()), Span::styled(format!(" · {} steps · {layer}", nodes.len()), theme::muted())])
 }
 
 fn list_names(v: &[String]) -> String {

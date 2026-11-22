@@ -1,6 +1,5 @@
 name = "incident / hotfix"
 description = "stop the damage first, root cause later"
-roles = ["lead"]
 
 [[step]]
 use = "reproduce"

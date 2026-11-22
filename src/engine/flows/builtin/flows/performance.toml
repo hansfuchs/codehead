@@ -1,6 +1,5 @@
 name = "performance"
 description = "baseline, profile, fix, measure again"
-roles = ["lead"]
 
 [[step]]
 use = "measure"

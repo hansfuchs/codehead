@@ -1,10 +1,8 @@
 name = "code review"
 description = "review a diff or a PR, 1 comment per finding"
-roles = ["lead"]
 
 [[step]]
-use = "peer-review"
-role = "lead"
+use = "review-diff"
 note = "The diff is the one the owner names (a branch, a PR, the worktree)."
 
 [[step]]

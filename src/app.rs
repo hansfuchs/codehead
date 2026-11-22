@@ -2385,7 +2385,7 @@ impl App {
                     ("m", "flow: user ↔ repo (.codehead/flows)"),
                     ("rail: a enter J K", "add · edit · move a step"),
                     ("rail: g o L + -", "gate · gate outcome · loop · loop max"),
-                    ("rail: @ s", "role · save a one-off as a shared step"),
+                    ("rail: s", "save a one-off as a shared step"),
                     ("editor: ctrl+g ctrl+f", "gate · fork a shared step into a one-off"),
                 ],
             ),
