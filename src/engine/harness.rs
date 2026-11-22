@@ -577,7 +577,8 @@ Use the `send` tool of the `codehead` MCP server (`to`: agent names) only to han
 other agents see only what you send them. Sending to an agent not on the thread brings it in.\n\
 - `list_agents` shows every agent, its harness and model. `set_status` reports blocked / done to the owner (never working: codehead shows each turn as working).\n\
 - `comment` writes review comments on lines of the changes (the owner's changes view). Only when the owner asks for comments (e.g. a review): 1 comment per finding, never unasked. \
-`comments` lists them (id, author, open / resolved). Addressed a comment (fixed, or answered why not): `comment_status` resolved, with a 1-line note.\n\
+`comments` lists them (id, author, open / resolved, replies). Addressed a comment (fixed, or answered why not): `comment_status` resolved, with a 1-line note. \
+A question or a point on a comment: answer with `comment_reply` (id, text).\n\
 - Messages from other agents reach you as prompts that start with `[from @name]`.\n\
 - A message that starts with `[codehead flow: ...]` is a step of the thread's flow: do that step only, then call `flow_step`. \
 The task changed kind: propose another flow with `flow_suggest`.\n\

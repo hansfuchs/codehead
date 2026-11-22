@@ -4276,6 +4276,9 @@ impl App {
             Pick::Jump(n) => {
                 self.notes_panel = None;
                 crate::search::jump_to(&n.thread, n.ts);
+                if !n.comment.is_empty() {
+                    crate::changes::threads::jump_to(&n.thread, &n.comment);
+                }
                 self.outcome = Some(Outcome::Resume(Box::new(worktree_of(&n.card()))));
             }
         }

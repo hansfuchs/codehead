@@ -550,7 +550,7 @@ impl View {
             KeyCode::PageDown | KeyCode::Char(' ') => self.scroll += page,
             KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(page),
             KeyCode::Char('g') | KeyCode::Home => self.scroll = 0,
-            KeyCode::Char('o' | 'e') => return self.cur().map_or(Act::None, |e| Act::Open(e.path.clone())),
+            KeyCode::Char('o' | 'e' | 'i') => return self.cur().map_or(Act::None, |e| Act::Open(e.path.clone())),
             // y: yazi on the file (0 files: on the work dir)
             KeyCode::Char('y') => return Act::Yazi(self.cur().map_or_else(|| self.dir.clone(), |e| e.path.clone())),
             KeyCode::Char('c') => {

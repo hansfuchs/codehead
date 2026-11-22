@@ -40,6 +40,8 @@ pub enum Kind {
     Review,
     /// An agent wrote `@owner`.
     Mention,
+    /// An agent replied on a review comment (changes view), unseen.
+    Reply,
     /// An agent's context window ≥ 90 %.
     Context,
     /// Every agent on the thread reported done.
@@ -58,6 +60,7 @@ impl Kind {
             Kind::Ci => "✗",
             Kind::Review => "✎",
             Kind::Mention => "@",
+            Kind::Reply => "↳",
             Kind::Context => "◔",
             Kind::Done => "✓",
         }
@@ -74,6 +77,7 @@ impl Kind {
             Kind::Ci => "ci failed",
             Kind::Review => "review",
             Kind::Mention => "mention",
+            Kind::Reply => "reply",
             Kind::Context => "context",
             Kind::Done => "done",
         }
@@ -84,7 +88,7 @@ impl Kind {
         match self {
             Kind::Error | Kind::Conflict | Kind::Ci => p.danger,
             Kind::Ask | Kind::Blocked | Kind::Gate | Kind::Limit | Kind::Context => p.warn,
-            Kind::Review | Kind::Mention => p.accent,
+            Kind::Review | Kind::Mention | Kind::Reply => p.accent,
             Kind::Done => p.ok,
         }
     }
@@ -101,6 +105,8 @@ pub struct Note {
     /// Unix ms of the event: the jump target, the seen check.
     pub ts: u64,
     pub text: String,
+    /// A reply note: the comment (the jump opens the changes view on it).
+    pub comment: String,
 }
 
 impl Note {
@@ -255,6 +261,16 @@ struct Cache {
     prs: HashMap<String, Vec<Note>>,
     /// PR condition key → when codehead saw it first (stable ts across passes and restarts)
     first: HashMap<String, u64>,
+    /// per thread: its comments file's time → its reply notes (unseen agent replies)
+    replies: HashMap<String, (Option<SystemTime>, Vec<Note>)>,
+}
+
+/// The reply notes of thread T: 1 per comment with unseen agent replies (its latest).
+fn reply_notes(t: &store::Thread) -> Vec<Note> {
+    crate::changes::threads::unseen_replies(&t.id)
+        .into_iter()
+        .map(|(comment, ts, by, text)| Note { thread: t.id.clone(), title: t.title.clone(), dir: t.work_dir(), kind: Kind::Reply, agents: vec![by], ts, text, comment })
+        .collect()
 }
 
 static NOTES: Mutex<Vec<Note>> = Mutex::new(Vec::new());
@@ -312,7 +328,8 @@ pub fn mark_all_seen(thread: &str) {
 pub fn unseen(except: Option<&str>) -> Vec<Note> {
     let s = seen().lock().map(|s| s.clone()).unwrap_or_default();
     let mut v: Vec<Note> = NOTES.lock().map(|n| n.clone()).unwrap_or_default();
-    v.retain(|n| Some(n.thread.as_str()) != except && s.get(&n.thread).is_none_or(|&at| n.ts > at));
+    // a reply note: unseen until the owner sees the reply in the changes view (0 seen mark)
+    v.retain(|n| Some(n.thread.as_str()) != except && (n.kind == Kind::Reply || s.get(&n.thread).is_none_or(|&at| n.ts > at)));
     v.sort_by(|a, b| a.kind.cmp(&b.kind).then(b.ts.cmp(&a.ts)));
     v
 }
@@ -320,7 +337,7 @@ pub fn unseen(except: Option<&str>) -> Vec<Note> {
 /// Unseen notes of thread THREAD (the thread view: the marker while scrolled back).
 pub fn unseen_of(thread: &str) -> Vec<Note> {
     let s = seen().lock().ok().and_then(|s| s.get(thread).copied()).unwrap_or(0);
-    NOTES.lock().map(|n| n.iter().filter(|n| n.thread == thread && n.ts > s).cloned().collect()).unwrap_or_default()
+    NOTES.lock().map(|n| n.iter().filter(|n| n.thread == thread && n.kind != Kind::Reply && n.ts > s).cloned().collect()).unwrap_or_default()
 }
 
 /// Start the background poll (once per process).
@@ -330,7 +347,7 @@ pub fn start() {
         return;
     }
     std::thread::spawn(|| {
-        let mut c = Cache { logs: HashMap::new(), prs: HashMap::new(), first: load_map("prs.json") };
+        let mut c = Cache { logs: HashMap::new(), prs: HashMap::new(), first: load_map("prs.json"), replies: HashMap::new() };
         let mut pr_at: Option<Instant> = None;
         loop {
             let threads: Vec<store::Thread> = store::all().into_iter().filter(|t| t.state != "archived" && t.state != "deleted").collect();
@@ -350,9 +367,15 @@ pub fn start() {
                     let ev = store::events_tail(&t.id, 512 << 10);
                     let end = ev.last().map_or(0, |e| e.ts);
                     let dir = t.work_dir();
-                    let notes = derive(&ev, &t.agents).into_iter().map(|(kind, agents, ts, text)| Note { thread: t.id.clone(), title: t.title.clone(), dir: dir.clone(), kind, agents, ts, text }).collect();
+                    let notes = derive(&ev, &t.agents).into_iter().map(|(kind, agents, ts, text)| Note { thread: t.id.clone(), title: t.title.clone(), dir: dir.clone(), kind, agents, ts, text, comment: String::new() }).collect();
                     c.logs.insert(t.id.clone(), (key, notes, end));
                 }
+                // unseen agent replies on comments: read when the comments file changed
+                let at = crate::changes::comments_stamp(&t.id);
+                if c.replies.get(&t.id).is_none_or(|r| r.0 != at) {
+                    c.replies.insert(t.id.clone(), (at, reply_notes(t)));
+                }
+                all.extend(c.replies[&t.id].1.iter().cloned());
                 let (_, notes, end) = &c.logs[&t.id];
                 all.extend(notes.iter().cloned());
                 all.extend(c.prs.get(&t.id).into_iter().flatten().cloned());
@@ -389,7 +412,7 @@ fn pr_pass(threads: &[store::Thread], c: &mut Cache) {
             let mut add = |kind: Kind, key: String, ts: Option<u64>, text: String| {
                 let ts = ts.unwrap_or_else(|| *c.first.entry(key.clone()).or_insert(now));
                 live.insert(key);
-                notes.push(Note { thread: t.id.clone(), title: t.title.clone(), dir: t.work_dir(), kind, agents: Vec::new(), ts, text });
+                notes.push(Note { thread: t.id.clone(), title: t.title.clone(), dir: t.work_dir(), kind, agents: Vec::new(), ts, text, comment: String::new() });
             };
             if p.conflicts() {
                 add(Kind::Conflict, format!("conflict:{}", r.key()), None, format!("{}: merge conflict with {}", r.label(), p.base));
@@ -654,10 +677,38 @@ mod tests {
 
     #[test]
     fn panel_moves_and_jumps() {
-        let n = |t: &str| Note { thread: t.into(), title: t.into(), dir: PathBuf::new(), kind: Kind::Done, agents: vec![], ts: 1, text: String::new() };
+        let n = |t: &str| Note { thread: t.into(), title: t.into(), dir: PathBuf::new(), kind: Kind::Done, agents: vec![], ts: 1, text: String::new(), comment: String::new() };
         let mut p = Panel { notes: vec![n("a"), n("b")], ..Default::default() };
         assert!(matches!(p.key(KeyEvent::from(KeyCode::Down)), Pick::Stay));
         assert!(matches!(p.key(KeyEvent::from(KeyCode::Enter)), Pick::Jump(x) if x.thread == "b"));
         assert!(matches!(p.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL)), Pick::Close));
+    }
+
+    #[test]
+    fn reply_notes_hold_past_the_seen_mark_until_the_reply_is_seen() {
+        let mut t = store::Thread::new("replies", "x", std::path::Path::new("/tmp"), vec!["REV".into()]);
+        t.id = format!("notify-replies-{}", std::process::id());
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        crate::changes::agent_comments(&t.id, "REV", None, &serde_json::json!([{"file": "a.rs", "line": 3, "severity": "low", "text": "nit"}])).unwrap();
+        assert!(reply_notes(&t).is_empty(), "a new comment: 0 reply note");
+        crate::changes::threads::reply(&t.id, "REV", "c1", "done in a.rs:4", false).unwrap();
+
+        let notes = reply_notes(&t);
+        assert_eq!(notes.len(), 1);
+        assert_eq!((notes[0].kind, notes[0].comment.as_str(), notes[0].agents.clone(), notes[0].text.as_str()), (Kind::Reply, "c1", vec!["REV".to_string()], "c1 a.rs: done in a.rs:4"));
+
+        // the chat's seen mark past it: the reply note stays (0 chat row), out of the chat's ↓ count
+        let done = Note { kind: Kind::Done, comment: String::new(), ..notes[0].clone() };
+        *NOTES.lock().unwrap() = vec![notes[0].clone(), done];
+        mark_seen(&t.id, notes[0].ts + 1);
+        let kinds: Vec<Kind> = unseen(None).into_iter().filter(|n| n.thread == t.id).map(|n| n.kind).collect();
+        assert_eq!(kinds, vec![Kind::Reply]);
+        assert!(unseen_of(&t.id).is_empty());
+
+        // seen in the changes view: 0 note
+        assert!(crate::changes::threads::mark_seen(&t.id, "c1"));
+        assert!(reply_notes(&t).is_empty());
+        NOTES.lock().unwrap().clear();
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
     }
 }

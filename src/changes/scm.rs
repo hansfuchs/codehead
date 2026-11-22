@@ -740,10 +740,14 @@ impl View {
                 let Some(c) = self.comments.get(*ci) else { return Line::raw("") };
                 let (mark, st) = if c.open() { ("✎", Style::default().fg(theme::pal().accent)) } else { ("✓", theme::muted()) };
                 let who = if c.open() || c.resolved_by.is_empty() { c.author() } else { format!("{} ✓ @{}", c.author(), c.resolved_by) };
-                let right = vec![Span::styled(format!("{who} "), theme::muted())];
+                // replies: ↳ count; unseen agent replies: ● count (accent)
+                let new = super::threads::unseen(c);
+                let replies = if c.replies.is_empty() { String::new() } else { format!("↳{} ", c.replies.len()) };
+                let fresh = if new > 0 { format!("●{new} ") } else { String::new() };
+                let right = vec![Span::styled(fresh.clone(), theme::accent_bold()), Span::styled(replies.clone(), theme::muted()), Span::styled(format!("{who} "), theme::muted())];
                 let head = format!("     {mark} {}: ", c.at());
                 let text = c.text.lines().next().unwrap_or_default();
-                let room = w.saturating_sub(head.width() + who.width() + 2);
+                let room = w.saturating_sub(head.width() + who.width() + replies.width() + fresh.width() + 2);
                 right_fill(&[Span::styled(head, st.add_modifier(Modifier::BOLD)), Span::styled(crate::nav::fit(text, room), st)], &right)
             }
             PRow::Stash(si) => {
@@ -1056,7 +1060,14 @@ impl View {
                     self.jump_file(i);
                     self.scm.focus = false;
                 }
-                Some(PRow::Comment(ci)) => self.edit_comment(ci),
+                // enter on a comment: its whole thread at its line, the keys there
+                Some(PRow::Comment(ci)) => {
+                    if let Some(id) = self.comments.get(ci).map(|c| c.id.clone()) {
+                        self.unfold_comment(&id);
+                    }
+                    self.jump_comment(ci);
+                    self.scm.focus = false;
+                }
                 // enter on a commit: its files in the review, the keys there
                 Some(PRow::Commit(ci)) => self.open_commit(ci, false),
                 Some(PRow::All) => self.open_all(false),
@@ -1137,8 +1148,14 @@ impl View {
             KeyCode::Char('m') => self.scm.msg_focus = true,
             // S: the ship menu, as in the review
             KeyCode::Char('S') => return self.open_ship(),
-            // o / e: the file in the IDE (its 1st changed line)
-            KeyCode::Char('o') | KeyCode::Char('e') => {
+            // e on a comment: edit it
+            KeyCode::Char('e') if matches!(row, Some(PRow::Comment(_))) => {
+                if let Some(PRow::Comment(ci)) = row {
+                    self.edit_comment(ci, None);
+                }
+            }
+            // o / e / i: the file in the IDE (its 1st changed line)
+            KeyCode::Char('o') | KeyCode::Char('e') | KeyCode::Char('i') => {
                 if let Some(PRow::File(i, _)) = row
                     && let Some(f) = self.changes.files.get(i)
                 {

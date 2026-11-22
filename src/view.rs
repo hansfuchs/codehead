@@ -523,6 +523,12 @@ impl View {
         self.prompt_saved = raw;
     }
 
+    /// The changes view's agents (the comment modal's `@` dropdown, its mentions).
+    fn changes_agents(&mut self) {
+        self.changes.agents = self.roster.clone();
+        self.changes.members = self.members.clone();
+    }
+
     /// The agents (each 5 s, join, leave): the stream redraws only when its inputs changed.
     fn set_roster(&mut self, roster: Vec<crate::agents::Agent>) {
         let colors: stream::Colors = roster.iter().map(|a| (a.name.clone(), crate::agents::color(a.color.as_deref()))).collect();
@@ -545,6 +551,7 @@ impl View {
         self.roster = roster;
         self.members = store::load(&self.id).map(|t| t.agents).unwrap_or_default();
         self.mention.replaceable = self.members.clone();
+        self.changes_agents();
         self.sync_order();
         self.sync_flowbars();
     }
@@ -1439,8 +1446,25 @@ impl View {
             self.dirty = true;
             return false;
         }
-        // ctrl+i / ⌘i: the IDE on the repo root, from every pane and field (several repos: a picker)
+        // ctrl+i / ⌘i: the selected file in the IDE (the changes / files view, 0 prompt focus),
+        // else the IDE on the repo root, from every pane and field (several repos: a picker)
         if k.code == KeyCode::Char('i') && k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) && !k.modifiers.contains(KeyModifiers::ALT) {
+            let open = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
+            if self.pane == Pane::Changes && !self.prompt_focus && !self.changes.typing() {
+                let act = self.changes.key(open);
+                if act != crate::changes::Act::None {
+                    self.changes_act(act);
+                    return false;
+                }
+            }
+
+            if self.pane == Pane::Files && !self.prompt_focus && !self.files.typing() {
+                let act = self.files.key(open);
+                if act != crate::files::Act::None {
+                    self.files_act(act);
+                    return false;
+                }
+            }
             self.ide_key();
             self.dirty = true;
             return false;
@@ -1561,7 +1585,8 @@ impl View {
             let esc_here = k.code == KeyCode::Esc && ((self.pane == Pane::Changes && self.changes.takes_esc()) || (self.pane == Pane::Merge && self.merge.takes_esc()));
             let through = (k.code == KeyCode::Esc && !esc_here) || (ctrl && k.code == KeyCode::Char('c'));
             if !through {
-                if k.code == KeyCode::Char('i') && !ctrl && !alt && !(self.pane == Pane::Changes && self.changes.typing()) && !(self.pane == Pane::Merge && self.merge.typing()) {
+                // i: the prompt (the changes and files views: i opens the file; ctrl+m: the prompt)
+                if k.code == KeyCode::Char('i') && !ctrl && !alt && !matches!(self.pane, Pane::Changes | Pane::Files) && !(self.pane == Pane::Merge && self.merge.typing()) {
                     self.prompt_focus = true;
                     return false;
                 }
@@ -1953,6 +1978,7 @@ impl View {
         // without git, the dir of the thread before)
         if let Some(d) = self.checkouts.get(self.checkout).filter(|d| **d != self.changes.dir()).cloned() {
             self.changes = crate::changes::View::new(&self.id, &d);
+            self.changes_agents();
             self.changes.refresh(true);
             self.dirty = true;
         }
@@ -1968,6 +1994,7 @@ impl View {
         self.checkout_picked = true;
         let dir = self.checkouts[i].clone();
         self.changes = crate::changes::View::new(&self.id, &dir);
+        self.changes_agents();
         self.changes.refresh(true);
         self.dirty = true;
     }
@@ -2018,6 +2045,14 @@ impl View {
                 let to = self.default_to().join(", ");
                 self.send_prompt(text);
                 self.toast(format!("review comments sent to {to}"));
+            }
+            // an @agent in a comment / reply: to that agent now, the comment's thread along
+            crate::changes::Act::Mention { to, text, context } => {
+                self.back = 0;
+                self.bring_front(&to);
+                self.pending.push((text.clone(), Instant::now(), None));
+                self.host("send", json!({"op": "prompt", "text": text, "to": to, "context": context}));
+                self.toast(format!("comment sent to {}", to.join(", ")));
             }
             crate::changes::Act::Checkout(root) => {
                 self.load_checkouts();
@@ -2619,6 +2654,9 @@ impl View {
             }
             Pick::Jump(n) => {
                 self.notes_panel = None;
+                if !n.comment.is_empty() {
+                    crate::changes::threads::jump_to(&n.thread, &n.comment);
+                }
                 self.menu_action(crate::menu::Action::Jump(n.card(), n.ts))
             }
         }
@@ -3188,6 +3226,11 @@ impl View {
     }
 
     fn draw(&mut self, f: &mut Frame) {
+        // a reply note's jump: the changes view on its comment, the thread unfolded
+        if let Some(id) = crate::changes::threads::take_jump(&self.id) {
+            self.set_pane(Pane::Changes);
+            self.changes.show_comment(&id);
+        }
         // members set elsewhere (a reload, tests): the box order follows
         if self.order.len() != self.members.len() || !self.members.iter().all(|m| self.order.contains(m)) {
             self.sync_order();
@@ -3530,7 +3573,7 @@ impl View {
             _ if self.agents_focus.is_some() => Span::styled("←→ agent · ↑↓ · enter · 1-3 · esc / ctrl+m: prompt ", theme::muted()),
             _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled(self.changes.hints(), theme::muted()),
             _ if self.pane == Pane::Merge && !self.prompt_focus => Span::styled(self.merge.hints(), theme::muted()),
-            _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · ctrl+f filter · pgup pgdn: scroll · o e: IDE · y: yazi · c: copy path · S S: share · i: prompt ", theme::muted()),
+            _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · ctrl+f filter · pgup pgdn: scroll · o e i: IDE · y: yazi · c: copy path · S S: share · ctrl+m: prompt ", theme::muted()),
             _ if self.pane != Pane::Chat => Span::styled("tab / esc: back to the view · F1-F4: views ", theme::muted()),
             _ => Span::styled(format!("{}: menu · ctrl+q: agents · ctrl+f: search · F1-F4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label), theme::muted()),
         };
@@ -4529,7 +4572,7 @@ mod pane_tests {
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
         assert_eq!(v.pane, Pane::Changes);
         let s = screen(&mut v);
-        assert!(s.contains("space: select") && s.contains("v: reviewed") && s.contains("i: prompt"), "{s}");
+        assert!(s.contains("space: select") && s.contains("v: reviewed") && s.contains("ctrl+m: prompt"), "{s}");
         press(&mut v, KeyCode::Char('1'), KeyModifiers::ALT);
         assert_eq!(v.pane, Pane::Chat);
     }
@@ -4558,12 +4601,12 @@ mod pane_tests {
     }
 
     #[test]
-    fn changes_view_keeps_letters_from_the_prompt_until_i() {
+    fn changes_view_keeps_letters_from_the_prompt_until_ctrl_m() {
         let mut v = view();
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
         press(&mut v, KeyCode::Char('j'), KeyModifiers::NONE);
         assert_eq!(v.input.text(), "", "j: a view key");
-        press(&mut v, KeyCode::Char('i'), KeyModifiers::NONE);
+        press(&mut v, KeyCode::Char('m'), KeyModifiers::CONTROL);
         assert!(v.prompt_focus);
         press(&mut v, KeyCode::Char('h'), KeyModifiers::NONE);
         assert_eq!(v.input.text(), "h");
@@ -4810,7 +4853,7 @@ mod comment_tests {
             v.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         v.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL));
         v.input.set_text("stage only these");
         v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
         let sent = v.ops.borrow().last().cloned().unwrap();
@@ -4821,6 +4864,37 @@ mod comment_tests {
         let rows: Vec<String> = (0..30).map(|y| (0..100).map(|x| s[(x, y)].symbol().to_string()).collect()).collect();
         assert!(rows.iter().any(|l| l.contains("▾ chat · t: fold")), "{rows:#?}");
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("contexttest-0000"));
+    }
+
+    #[test]
+    fn an_agent_named_in_a_comment_gets_it_at_once_with_its_thread() {
+        let id = "mentiontest-0000";
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(id));
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(id, Path::new("/tmp"), "t", tx);
+        v.members = vec!["REV".into(), "LEAD".into()];
+        v.changes_agents();
+        v.set_pane(Pane::Changes);
+        v.changes.set_files(crate::changes::parse("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n x\n-a\n+b\n y\n"));
+        let mut t = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        t.draw(|f| v.draw(f)).unwrap();
+        // ↓ ↓ ↓ ↓: `+ b`; c: the comment modal; a draft in the prompt stays
+        v.input.set_text("my draft");
+        for _ in 0..4 {
+            v.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        v.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        for ch in "@REV why b?".chars() {
+            v.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+
+        let sent = v.ops.borrow().last().cloned().unwrap();
+        assert_eq!((sent["op"].as_str(), sent["to"].clone()), (Some("prompt"), json!(["REV"])), "{sent}");
+        assert!(sent["text"].as_str().unwrap().starts_with("on comment c1 `src/a.rs:2`: @REV why b?"), "{sent}");
+        assert!(sent["context"].as_str().unwrap().contains("- owner: @REV why b?") && sent["context"].as_str().unwrap().contains("`comment_reply`"), "{sent}");
+        assert_eq!(v.input.text(), "my draft", "the prompt's draft stays");
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(id));
     }
 }
 

@@ -24,6 +24,7 @@ use crate::theme;
 pub mod commits;
 mod patch;
 mod scm;
+pub mod threads;
 pub mod stash;
 
 /// Side by side from this many columns.
@@ -1045,6 +1046,9 @@ pub enum Act {
     ToggleChat,
     /// The view on the checkout at this root (its comments).
     Checkout(PathBuf),
+    /// An `@agent` in a comment / reply of the owner: TEXT to agents TO at once, CONTEXT (the
+    /// comment's thread) for the agents only.
+    Mention { to: Vec<String>, text: String, context: String },
 }
 
 /// Lines of 1 file a comment is on: LINE (new side) shows it; LINES (`11-13, 15 · removed 14`)
@@ -1186,6 +1190,35 @@ pub struct Comment {
     /// The checkout PATH is in (absolute; "": an older comment, see `place`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub root: String,
+    /// When it was written (unix ms; 0: an older comment).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub at: u64,
+    /// The replies, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replies: Vec<Reply>,
+}
+
+/// A reply on a comment: its author (BY "": the owner), time (unix ms), text.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Reply {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub by: String,
+    pub at: u64,
+    pub text: String,
+    /// An agent's reply the owner has not seen yet (a notification while true).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unseen: bool,
+}
+
+impl Reply {
+    /// The author for the owner's eyes: `you`, `@REGI`.
+    pub fn author(&self) -> String {
+        if self.by.is_empty() { "you".into() } else { format!("@{}", self.by) }
+    }
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// The checkout (top dir of a worktree, linked ones included) that PATH is in.
@@ -1238,11 +1271,12 @@ fn uncommitted(root: &Path) -> Option<HashSet<String>> {
 }
 
 /// The ids of the open comments of COMMENTS on a file with 0 uncommitted changes in its
-/// checkout (WORK: the checkout of older relative ones). A checkout git cannot read: 0 ids.
+/// checkout (WORK: the checkout of older relative ones). A checkout git cannot read: 0 ids. A
+/// comment whose last reply (the owner's) names an agent waits on it: 0 id.
 pub(crate) fn committed(comments: &[Comment], work: &Path) -> Vec<String> {
     let mut reads: HashMap<PathBuf, Option<HashSet<String>>> = HashMap::new();
     let mut ids = Vec::new();
-    for c in comments.iter().filter(|c| c.open()) {
+    for c in comments.iter().filter(|c| c.open() && !threads::waits_on_agent(c)) {
         let (root, rel) = place(c);
         let root = root.unwrap_or_else(|| work.to_path_buf());
         let dirty = reads.entry(root.clone()).or_insert_with(|| uncommitted(&root));
@@ -1270,11 +1304,10 @@ pub(crate) fn resolve_committed(comments: &mut [Comment], ids: &[String]) -> boo
 
 /// THREAD's open comments on files with 0 uncommitted changes: resolved (WORK: its work dir).
 pub fn settle_comments(thread: &str, work: &Path) {
-    let mut all = read_comments(thread);
-    let ids = committed(&all, work);
-    if resolve_committed(&mut all, &ids) {
-        write_comments(thread, &all);
-    }
+    update_comments(thread, |all| {
+        let ids = committed(all, work);
+        resolve_committed(all, &ids);
+    });
 }
 
 /// The state of a comment.
@@ -1332,7 +1365,7 @@ fn give_ids(v: &mut [Comment]) {
 }
 
 /// The comments file's time (an agent wrote a comment: the view reads it again).
-fn comments_stamp(id: &str) -> Option<std::time::SystemTime> {
+pub(crate) fn comments_stamp(id: &str) -> Option<std::time::SystemTime> {
     std::fs::metadata(comments_path(id)).and_then(|m| m.modified()).ok()
 }
 
@@ -1340,6 +1373,57 @@ pub(crate) fn write_comments(id: &str, c: &[Comment]) {
     if let Ok(b) = serde_json::to_vec_pretty(c) {
         let _ = crate::engine::write_atomic(&comments_path(id), &b);
     }
+}
+
+/// F on thread ID's comments, read and written under the comments lock: views, hosts and MCP
+/// servers write the same file (0 lost write). New comments get their id. A lock error: 0 lock.
+pub(crate) fn update_comments<T>(id: &str, f: impl FnOnce(&mut Vec<Comment>) -> T) -> T {
+    let _lock = crate::engine::lock(&crate::engine::store::thread_dir(id).join("comments.lock"), true).ok();
+    let mut all = read_comments(id);
+    let before = all.clone();
+    let out = f(&mut all);
+    give_ids(&mut all);
+    if all != before {
+        write_comments(id, &all);
+    }
+    out
+}
+
+/// The view's comments MINE (read as BASE) onto the file's DISK: per comment (by id) and field,
+/// a field the view changed wins, else the file's. Comments the view dropped go, new ones (0 id or
+/// an id BASE lacks) come at the end. Replies: always the file's (the view writes replies only
+/// through `update_comments`).
+fn merge_comments(base: &[Comment], mine: &[Comment], disk: Vec<Comment>) -> Vec<Comment> {
+    let find = |v: &[Comment], id: &str| v.iter().find(|c| !id.is_empty() && c.id == id).cloned();
+    let mut out: Vec<Comment> = Vec::new();
+    for d in disk {
+        let Some(b) = find(base, &d.id) else {
+            // new on disk since the view's read
+            out.push(d);
+            continue;
+        };
+        let Some(m) = find(mine, &d.id) else { continue };
+        if m == b {
+            out.push(d);
+            continue;
+        }
+
+        let (bv, mv, dv) = (serde_json::to_value(&b), serde_json::to_value(&m), serde_json::to_value(&d));
+        let (Ok(serde_json::Value::Object(bv)), Ok(serde_json::Value::Object(mv)), Ok(serde_json::Value::Object(mut dv))) = (bv, mv, dv) else {
+            out.push(m);
+            continue;
+        };
+        let keys: HashSet<String> = bv.keys().chain(mv.keys()).cloned().collect();
+        for k in keys.into_iter().filter(|k| k != "replies" && bv.get(k) != mv.get(k)) {
+            match mv.get(&k) {
+                Some(v) => dv.insert(k, v.clone()),
+                None => dv.remove(&k),
+            };
+        }
+        out.push(serde_json::from_value(serde_json::Value::Object(dv)).unwrap_or(m));
+    }
+    out.extend(mine.iter().filter(|m| m.id.is_empty() || find(base, &m.id).is_none()).cloned());
+    out
 }
 
 /// MCP `comment`: AGENT's comments (`[{file, line, lines?, severity, text}]`) into the comments
@@ -1366,12 +1450,16 @@ pub fn agent_comments(thread: &str, agent: &str, root: Option<&Path>, list: &ser
         add.push(Comment { path: rel, line, text: text.to_string(), lines: c["lines"].as_str().unwrap_or_default().to_string(), level, by: agent.to_string(), root, ..Default::default() });
     }
 
-    let mut all = read_comments(thread);
-    let from = all.len();
-    all.extend(add);
-    give_ids(&mut all);
-    write_comments(thread, &all);
-    Ok(all[from..].iter().map(|c| c.id.clone()).collect())
+    let at = crate::engine::now_ms();
+    for c in &mut add {
+        c.at = at;
+    }
+    Ok(update_comments(thread, |all| {
+        let from = all.len();
+        all.extend(add);
+        give_ids(all);
+        all[from..].iter().map(|c| c.id.clone()).collect()
+    }))
 }
 
 /// MCP `comments`: THREAD's comments in STATE (`open`, `resolved`, `all`) as JSON for an agent.
@@ -1389,6 +1477,8 @@ pub fn list_comments(thread: &str, state: &str) -> String {
                 "author": if c.by.is_empty() { "owner" } else { c.by.as_str() },
                 "state": if c.open() { "open" } else { "resolved" },
                 "resolved_by": c.resolved_by, "note": c.note, "text": c.text,
+                "replies": c.replies.iter().map(|r| serde_json::json!({"author": if r.by.is_empty() { "owner" } else { r.by.as_str() }, "text": r.text})).collect::<Vec<_>>(),
+                "last_by": c.replies.last().map_or(if c.by.is_empty() { "owner" } else { c.by.as_str() }, |r| if r.by.is_empty() { "owner" } else { r.by.as_str() }),
             })
         })
         .collect();
@@ -1403,23 +1493,23 @@ pub fn set_comment_state(thread: &str, agent: &str, ids: &[String], state: &str,
         "open" => CState::Open,
         _ => return Err("state: resolved or open".into()),
     };
-    let mut all = read_comments(thread);
-    let unknown: Vec<&String> = ids.iter().filter(|id| !all.iter().any(|c| &c.id == *id)).collect();
-    if !unknown.is_empty() {
-        return Err(format!("unknown comment ids: {} (the `comments` tool lists them)", unknown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
-    }
-
-    for c in all.iter_mut().filter(|c| ids.contains(&c.id)) {
-        c.state = to;
-        c.resolved_by = if to == CState::Resolved { agent.to_string() } else { String::new() };
-        c.note = note.trim().to_string();
-        // reopened: the next batch takes it again
-        if to == CState::Open {
-            c.sent = false;
+    update_comments(thread, |all| {
+        let unknown: Vec<&String> = ids.iter().filter(|id| !all.iter().any(|c| &c.id == *id)).collect();
+        if !unknown.is_empty() {
+            return Err(format!("unknown comment ids: {} (the `comments` tool lists them)", unknown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
         }
-    }
-    write_comments(thread, &all);
-    Ok(format!("{} comment{} {state}", ids.len(), if ids.len() == 1 { "" } else { "s" }))
+
+        for c in all.iter_mut().filter(|c| ids.contains(&c.id)) {
+            c.state = to;
+            c.resolved_by = if to == CState::Resolved { agent.to_string() } else { String::new() };
+            c.note = note.trim().to_string();
+            // reopened: the next batch takes it again
+            if to == CState::Open {
+                c.sent = false;
+            }
+        }
+        Ok(format!("{} comment{} {state}", ids.len(), if ids.len() == 1 { "" } else { "s" }))
+    })
 }
 
 /// The batch message of COMMENTS (0 comments: None): each with its id, severity, author.
@@ -1430,11 +1520,24 @@ pub fn batch(comments: &[&Comment]) -> Option<String> {
     let mut s = String::from(
         "Review comments on the changes (file:line, new side). Address each one. After a fix, or with a reason not to fix, call the `comment_status` tool (codehead MCP) with its id, state `resolved` and a 1-line note:\n",
     );
+    if comments.iter().any(|c| !c.replies.is_empty()) {
+        s.insert_str(s.len() - 2, ". A question in a thread (↳ replies): answer it with the `comment_reply` tool");
+    }
+    // authors without `@`: the thread view routes a message by its @names
+    let who = |by: &str| if by.is_empty() { "you".to_string() } else { by.to_string() };
     for c in comments {
         let mut lines = c.text.lines();
-        s.push_str(&format!("- {} [{}] `{}:{}` by {}: {}\n", c.id, c.level.label(), c.path, c.at(), c.author(), lines.next().unwrap_or_default()));
+        s.push_str(&format!("- {} [{}] `{}:{}` by {}: {}\n", c.id, c.level.label(), c.path, c.at(), who(&c.by), lines.next().unwrap_or_default()));
         for l in lines {
             s.push_str(&format!("  {l}\n"));
+        }
+
+        for r in &c.replies {
+            let mut lines = r.text.lines();
+            s.push_str(&format!("  ↳ {}: {}\n", who(&r.by), lines.next().unwrap_or_default()));
+            for l in lines {
+                s.push_str(&format!("    {l}\n"));
+            }
         }
     }
     Some(s.trim_end().to_string())
@@ -1459,6 +1562,8 @@ pub struct View {
     /// The rows of the shown files (cheap: a row's line is made when it comes into view).
     rows: Vec<Row>,
     built: Option<(u16, bool)>,
+    /// The width of the last build (a rebuild after `built = None` keeps it).
+    built_w: u16,
     /// Lines of the diff rows, per (file hash, hunk): syntax colors and word marks, made once.
     paints: std::cell::RefCell<HashMap<(u64, usize), std::rc::Rc<Vec<Painted>>>>,
     /// Width of the line numbers per file (by index), for the shown files.
@@ -1516,6 +1621,8 @@ pub struct View {
     /// Review comments, for 1 batch message (`C`).
     comments: Vec<Comment>,
     comments_at: Option<std::time::SystemTime>,
+    /// The comments as last read / written (the base of a save's merge).
+    comments_base: Vec<Comment>,
     /// The reviewer's findings, a review on its way, why 0, the model (None: `off`).
     review: Option<crate::review::Review>,
     reviewing: Option<Receiver<Result<crate::review::Review, String>>>,
@@ -1538,8 +1645,19 @@ pub struct View {
     commit_src: Option<commits::Commit>,
     /// The commit the panel's cursor showed (enter on a commit): it takes the review's place.
     peek: Option<Box<View>>,
-    /// The comments in the file view: 1 row each (C), else their whole text.
+    /// The comments in the file view: 1 row each (C), else their whole text and replies.
     comments_folded: bool,
+    /// Comments (ids) folded the other way than `comments_folded` (enter, C on a comment).
+    comment_flip: HashSet<String>,
+    /// A comment to show (a reply note's jump): once its file is read.
+    want_comment: Option<String>,
+    /// Expanded comments with unseen agent replies on screen: since when (1 s: seen).
+    seen_at: HashMap<String, Instant>,
+    /// The agents (the `@` dropdown of the comment modal), the thread's members.
+    pub agents: Vec<crate::agents::Agent>,
+    pub members: Vec<String>,
+    /// The `@` dropdown of the comment modal.
+    cmention: crate::mention::Mention,
     /// The branch's changes against its merge-base (the panel's "all changes" row): comments and
     /// reviewed marks (own file), 0 git steps. Else the uncommitted changes.
     all: bool,
@@ -1656,6 +1774,7 @@ impl View {
     }
 
     pub fn new(id: &str, dir: &Path) -> View {
+        let comments = read_comments(id);
         View {
             version: 0,
             fx: Default::default(),
@@ -1667,6 +1786,7 @@ impl View {
             side: None,
             rows: Vec::new(),
             built: None,
+            built_w: 0,
             paints: Default::default(),
             num_w: HashMap::new(),
             at: 0,
@@ -1702,7 +1822,8 @@ impl View {
             shown_rows: Vec::new(),
             stash: stash::read(id),
             stash_at: stash::stamp(id),
-            comments: read_comments(id),
+            comments_base: comments.clone(),
+            comments,
             comments_at: comments_stamp(id),
             review: crate::review::cached(id),
             reviewing: None,
@@ -1719,6 +1840,12 @@ impl View {
             commit_src: None,
             peek: None,
             comments_folded: false,
+            comment_flip: HashSet::new(),
+            want_comment: None,
+            seen_at: HashMap::new(),
+            agents: Vec::new(),
+            members: Vec::new(),
+            cmention: crate::mention::Mention::default(),
             all: false,
             marks_id: id.to_string(),
             prefill: None,
@@ -2046,10 +2173,17 @@ impl View {
         true
     }
 
-    /// The comments to their file (the view's own write: 0 read again).
+    /// The view's changes of the comments onto their file (merged with writes of agents since
+    /// the view's read; the view's own write: 0 read again).
     fn save_comments(&mut self) {
-        give_ids(&mut self.comments);
-        write_comments(&self.id, &self.comments);
+        let (base, mine) = (std::mem::take(&mut self.comments_base), std::mem::take(&mut self.comments));
+        let merged = update_comments(&self.id, |all| {
+            *all = merge_comments(&base, &mine, std::mem::take(all));
+            give_ids(all);
+            all.clone()
+        });
+        self.comments_base = merged.clone();
+        self.comments = merged;
         self.comments_at = comments_stamp(&self.id);
     }
 
@@ -2061,6 +2195,7 @@ impl View {
         }
         self.comments_at = at;
         let c = read_comments(&self.id);
+        self.comments_base = c.clone();
         if c != self.comments {
             self.comments = c;
             self.built = None;
@@ -2197,6 +2332,7 @@ impl View {
         if self.built == Some((width, side)) {
             return;
         }
+        self.built_w = width;
         self.fresh_rank = self.rank.as_ref().is_some_and(|r| r.key == crate::rank::key(&self.changes.files));
         // reviewed / all per level
         let levels = self.levels();
@@ -2318,7 +2454,7 @@ impl View {
         // open comments only (resolved: the panel's RESOLVED); C folded: 1 row each
         let here: Vec<usize> = self.comments.iter().enumerate().filter(|(ci, c)| c.open() && self.comment_path(*ci).is_some_and(|p| p == f.path)).map(|(ci, _)| ci).collect();
         for (ci, c) in here.into_iter().map(|ci| (ci, &self.comments[ci])) {
-            let n = if self.comments_folded { 1 } else { c.text.lines().count().max(1) };
+            let n = self.clines(c).len();
             notes.push((c.line, (0..n).map(|k| Row::new(Body::Comment(ci, k), i, Some(c.line))).collect()));
         }
         // PR mode: the GitHub threads on the file's lines
@@ -2330,7 +2466,8 @@ impl View {
         let added = |r: &Row| r.comment.is_some() || r.finding.is_some() || matches!(r.body, Body::Gh(..));
         for (line, new) in notes {
             // the last row of the 1st run on that line (a removed line, then the added one)
-            let hit = |r: &Row| !r.head && !r.hunk && !added(r) && r.at == Some(line);
+            // 0 why / note row (they carry the 1st changed line too)
+            let hit = |r: &Row| !r.head && !r.hunk && !matches!(r.body, Body::Why | Body::Note(_)) && !added(r) && r.at == Some(line);
             let at = rows[start..].iter().position(hit).map_or(rows.len(), |p| {
                 let first = start + p;
                 first + 1 + rows[first + 1..].iter().take_while(|r| hit(r)).count()
@@ -2462,24 +2599,47 @@ impl View {
             Body::Comment(ci, k) => {
                 let Some(c) = self.comments.get(ci) else { return bar(Vec::new()) };
                 let st = Style::default().fg(theme::pal().accent);
-                let l = c.text.lines().nth(k).unwrap_or_default();
-                if k > 0 {
-                    return bar(vec![Span::raw("  "), Span::styled(crate::nav::fit(l, inner.saturating_sub(2)), st)]);
+                let text = |l: &str, indent: usize, st: Style| bar(vec![Span::raw(" ".repeat(indent)), Span::styled(crate::nav::fit(l, inner.saturating_sub(indent)), st)]);
+                match self.clines(c).get(k).copied().unwrap_or(CLine::Head) {
+                    CLine::Text(j) => return text(c.text.lines().nth(j).unwrap_or_default(), 2, st),
+                    CLine::RText(r, j) => return text(c.replies.get(r).and_then(|x| x.text.lines().nth(j)).unwrap_or_default(), 6, theme::text()),
+                    // a reply: ↳ author · time, its 1st line; unseen: a dot
+                    CLine::Reply(r) => {
+                        let Some(x) = c.replies.get(r) else { return bar(Vec::new()) };
+                        let dot = if x.unseen { "● " } else { "" };
+                        let head = format!("  ↳ {dot}{} · {}: ", x.author(), stamp(x.at));
+                        let room = inner.saturating_sub(head.width());
+                        let hs = if x.unseen { theme::accent_bold() } else { theme::bold() };
+                        return bar(vec![Span::styled(head, hs), Span::styled(crate::nav::fit(x.text.lines().next().unwrap_or_default(), room), theme::text())]);
+                    }
+                    CLine::Head => {}
                 }
-                // the 1st row: picked mark, severity, id, lines, author (you / @agent), sent; folded
-                // (C): the count of the lines out of view
+                // the 1st row: picked mark, severity, id, lines, author (you / @agent), sent; folded:
+                // the count of the lines and replies out of view, the unseen replies
                 let pick = if self.scm.comment_picks.contains(&c.id) { "● " } else { "" };
                 let sev = format!("{pick}{} ", c.level.label());
                 let sent = if c.sent { " · sent" } else { "" };
                 let head = format!("✎ {} {} · {}{sent}: ", c.id, c.at(), c.author());
                 let more = c.text.lines().count().saturating_sub(1);
-                let tail = if self.comments_folded && more > 0 { format!(" (+{more} lines)") } else { String::new() };
-                let room = inner.saturating_sub(head.width() + sev.width() + tail.width());
+                let mut hidden = Vec::new();
+                if self.comment_shut(c) && more > 0 {
+                    hidden.push(format!("+{more} lines"));
+                }
+
+                if self.comment_shut(c) && !c.replies.is_empty() {
+                    hidden.push(format!("{} repl{}", c.replies.len(), if c.replies.len() == 1 { "y" } else { "ies" }));
+                }
+
+                let tail = if hidden.is_empty() { String::new() } else { format!(" ({})", hidden.join(" · ")) };
+                let new = threads::unseen(c);
+                let fresh = if new > 0 && self.comment_shut(c) { format!(" ● {new} new") } else { String::new() };
+                let room = inner.saturating_sub(head.width() + sev.width() + tail.width() + fresh.width());
                 bar(vec![
                     Span::styled(sev, Style::default().fg(scm::level_color(c.level)).add_modifier(Modifier::BOLD)),
                     Span::styled(head, st.add_modifier(Modifier::BOLD)),
-                    Span::styled(crate::nav::fit(l, room), st),
+                    Span::styled(crate::nav::fit(c.text.lines().next().unwrap_or_default(), room), st),
                     Span::styled(tail, theme::muted()),
+                    Span::styled(fresh, theme::accent_bold()),
                 ])
             }
         }
@@ -2602,6 +2762,94 @@ impl View {
         out
     }
 
+    /// Comment ID (a reply note's jump): unfolded, the cursor on it, once its file is read.
+    pub fn show_comment(&mut self, id: &str) {
+        self.want_comment = Some(id.to_string());
+        self.scm.focus = false;
+        self.sync_comments();
+        self.show_wanted();
+    }
+
+    /// The wanted comment, its file read: unfolded, the cursor on it.
+    fn show_wanted(&mut self) {
+        let Some(id) = self.want_comment.clone() else { return };
+        let Some(ci) = self.comments.iter().position(|c| c.id == id) else { return };
+        if self.comment_path(ci).is_none_or(|p| !self.changes.files.iter().any(|f| f.path == p)) {
+            return;
+        }
+        self.want_comment = None;
+        self.unfold_comment(&id);
+        self.jump_comment(ci);
+    }
+
+    /// Unfolded comments with unseen agent replies on screen 1 s: seen (their notification goes).
+    fn see_replies(&mut self) {
+        let mut on: HashSet<String> = HashSet::new();
+        for &r in &self.shown_rows {
+            if let Some(Body::Comment(ci, _)) = self.rows.get(r).map(|r| r.body)
+                && let Some(c) = self.comments.get(ci)
+                && threads::unseen(c) > 0
+                && !self.comment_shut(c)
+            {
+                on.insert(c.id.clone());
+            }
+        }
+        self.seen_at.retain(|id, _| on.contains(id));
+        let now = Instant::now();
+        let due: Vec<String> = on.into_iter().filter(|id| now.duration_since(*self.seen_at.entry(id.clone()).or_insert(now)) >= Duration::from_secs(1)).collect();
+        for id in due {
+            self.seen_at.remove(&id);
+            self.write_through(|thread| threads::mark_seen(thread, &id));
+        }
+    }
+
+    /// Comment C shows 1 row (folded): `C` folds all, enter / `C` on it flips it.
+    fn comment_shut(&self, c: &Comment) -> bool {
+        self.comments_folded != self.comment_flip.contains(&c.id)
+    }
+
+    /// Comment ID shows its whole thread.
+    fn unfold_comment(&mut self, id: &str) {
+        let shut = self.comments.iter().find(|c| c.id == id).is_some_and(|c| self.comment_shut(c));
+        if shut && !self.comment_flip.remove(id) {
+            self.comment_flip.insert(id.to_string());
+        }
+        self.built = None;
+    }
+
+    /// Comment ID folded / unfolded (the other way than now).
+    fn flip_comment(&mut self, id: &str) {
+        if !self.comment_flip.remove(id) {
+            self.comment_flip.insert(id.to_string());
+        }
+        self.built = None;
+    }
+
+    /// The rows of comment C in the file view: its head; unfolded: its text, its replies.
+    fn clines(&self, c: &Comment) -> Vec<CLine> {
+        let mut v = vec![CLine::Head];
+        if self.comment_shut(c) {
+            return v;
+        }
+        v.extend((1..c.text.lines().count()).map(CLine::Text));
+        for (r, x) in c.replies.iter().enumerate() {
+            v.push(CLine::Reply(r));
+            v.extend((1..x.text.lines().count()).map(|k| CLine::RText(r, k)));
+        }
+        v
+    }
+
+    /// The comment of row I and its reply (None: the comment's own rows).
+    fn row_comment(&self, i: usize) -> Option<(usize, Option<usize>)> {
+        let r = self.rows.get(i)?;
+        let Body::Comment(ci, k) = r.body else { return None };
+        let c = self.comments.get(ci)?;
+        Some(match self.clines(c).get(k) {
+            Some(CLine::Reply(x) | CLine::RText(x, _)) => (ci, Some(*x)),
+            _ => (ci, None),
+        })
+    }
+
     /// The open comments.
     pub fn comment_count(&self) -> usize {
         self.comments.iter().filter(|c| c.open()).count()
@@ -2684,39 +2932,135 @@ impl View {
             quote.extend(self.quote(s).lines().map(|l| QLine::Code(l.to_string())));
         }
         let title = spots.iter().map(Spot::label).collect::<Vec<_>>().join(", ");
-        self.modal = Some(Modal::Comment { title, quote, scroll: 0, edit: None, spots, text: comment_area(""), level: crate::rank::Level::default(), on_level: true });
+        self.modal = Some(Modal::Comment { title, quote, scroll: 0, target: Target::New, spots, text: comment_area(""), level: crate::rank::Level::default(), on_level: true });
     }
 
-    /// The comment modal on comment CI: its text to edit (0 text: it goes).
-    pub(super) fn edit_comment(&mut self, ci: usize) {
+    /// The comment modal on comment CI (REPLY: on its reply REPLY): its text to edit (0 text:
+    /// it goes).
+    pub(super) fn edit_comment(&mut self, ci: usize, reply: Option<usize>) {
         let Some(c) = self.comments.get(ci) else { return };
         let title = format!("{}:{}", c.path, c.at());
-        let quote = c.quote.lines().map(|l| QLine::Code(l.to_string())).collect();
-        self.modal = Some(Modal::Comment { title, quote, scroll: 0, edit: Some(ci), spots: Vec::new(), text: comment_area(&c.text), level: c.level, on_level: false });
+        let mut quote: Vec<QLine> = c.quote.lines().map(|l| QLine::Code(l.to_string())).collect();
+        let (target, text) = match reply.and_then(|r| c.replies.get(r).map(|x| (r, x))) {
+            Some((r, x)) => {
+                quote.extend(thread_lines(c, Some(r)));
+                (Target::EditReply(c.id.clone(), r), x.text.clone())
+            }
+            None => (Target::Edit(c.id.clone()), c.text.clone()),
+        };
+        self.modal = Some(Modal::Comment { title, quote, scroll: 0, target, spots: Vec::new(), text: comment_area(&text), level: c.level, on_level: false });
     }
 
-    /// The modal's save: a new comment, an edit (0 text: deleted).
+    /// The reply modal on comment CI: its lines and thread above, the reply's text below.
+    pub(super) fn reply_comment(&mut self, ci: usize) {
+        let Some(c) = self.comments.get(ci) else { return };
+        let title = format!("{}:{}", c.path, c.at());
+        let mut quote: Vec<QLine> = c.quote.lines().map(|l| QLine::Code(l.to_string())).collect();
+        quote.extend(thread_lines(c, None));
+        // the newest replies in view (the draw caps the scroll)
+        let scroll = quote.len();
+        self.modal = Some(Modal::Comment { title, quote, scroll, target: Target::Reply(c.id.clone()), spots: Vec::new(), text: reply_area(), level: c.level, on_level: false });
+    }
+
+    /// The agents a text can name: the roster, the thread's members.
+    fn agent_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.agents.iter().map(|a| a.name.clone()).collect();
+        v.extend(self.members.iter().filter(|m| !self.agents.iter().any(|a| &a.name == *m)).cloned());
+        v
+    }
+
+    /// The owner's TEXT on comment ID names agents (0 of OLD, the text before an edit): they get
+    /// it with the comment's thread at once.
+    fn mention(&self, id: &str, text: &str, old: &str) -> Option<Act> {
+        let names = self.agent_names();
+        let before = threads::mentioned(old, &names, "");
+        let to: Vec<String> = threads::mentioned(text, &names, "").into_iter().filter(|n| !before.contains(n)).collect();
+        if to.is_empty() {
+            return None;
+        }
+
+        let c = self.comments.iter().find(|c| c.id == id)?;
+        Some(Act::Mention { to, text: format!("on comment {} `{}:{}`: {text}", c.id, c.path, c.at()), context: threads::context(c) })
+    }
+
+    /// The view's pending changes to the file, then F (a write of `threads` under the lock, on
+    /// the thread's id), then the file read again.
+    fn write_through<T>(&mut self, f: impl FnOnce(&str) -> T) -> T {
+        if self.comments != self.comments_base {
+            self.save_comments();
+        }
+
+        let id = self.id.clone();
+        let out = f(&id);
+        self.comments = read_comments(&id);
+        self.comments_base = self.comments.clone();
+        self.comments_at = comments_stamp(&id);
+        self.built = None;
+        out
+    }
+
+    /// The modal's save: a new comment, a reply, an edit (0 text: deleted). An `@agent` in the
+    /// text: that agent gets the comment at once.
     fn save_comment(&mut self) -> Act {
-        let Some(Modal::Comment { spots, edit, text, level, .. }) = self.modal.take() else { return Act::None };
+        let Some(Modal::Comment { spots, target, text, level, .. }) = self.modal.take() else { return Act::None };
         let t = text.text().trim().to_string();
-        match edit {
-            Some(ci) if ci < self.comments.len() => {
+        match target {
+            Target::Edit(id) => {
+                let Some(ci) = self.comments.iter().position(|c| c.id == id) else { return Act::Toast(format!("{id}: gone")) };
+                let old = self.comments[ci].text.clone();
                 if t.is_empty() {
                     self.comments.remove(ci);
                 } else {
-                    self.comments[ci].text = t;
+                    self.comments[ci].text = t.clone();
                     self.comments[ci].level = level;
                 }
                 self.save_comments();
                 self.rebuild_here();
-                Act::Toast(format!("comment saved · {} in the batch", self.comments.len()))
+                self.mention(&id, &t, &old).unwrap_or_else(|| Act::Toast(format!("comment saved · {} in the batch", self.comments.len())))
             }
-            Some(_) => Act::None,
-            None if t.is_empty() => Act::Toast("0 text: 0 comment".into()),
-            None => {
+            Target::EditReply(id, r) => {
+                let old = self.comments.iter().find(|c| c.id == id).and_then(|c| c.replies.get(r)).map(|x| x.text.clone()).unwrap_or_default();
+                if let Err(e) = self.write_through(|thread| threads::edit(thread, &id, Some(r), &t)) {
+                    return Act::Toast(e);
+                }
+                self.rebuild_here();
+                let done = if t.is_empty() { format!("{id}: reply deleted") } else { format!("{id}: reply saved") };
+                self.mention(&id, &t, &old).unwrap_or(Act::Toast(done))
+            }
+            Target::Reply(_) if t.is_empty() => Act::Toast("0 text: 0 reply".into()),
+            Target::Reply(id) => {
+                let named = !threads::mentioned(&t, &self.agent_names(), "").is_empty();
+                if let Err(e) = self.write_through(|thread| threads::reply(thread, "", &id, &t, named)) {
+                    return Act::Toast(e);
+                }
+                // the thread stays open under its line
+                self.unfold_comment(&id);
+                self.rebuild_here();
+                self.mention(&id, &t, "").unwrap_or_else(|| Act::Toast(format!("reply on {id} · ctrl+enter: in the batch · @agent: at once")))
+            }
+            Target::New if t.is_empty() => Act::Toast("0 text: 0 comment".into()),
+            Target::New => {
+                let n = spots.len();
                 self.add_comment_at(&spots, &t, level);
                 let on = spots.iter().map(Spot::label).collect::<Vec<_>>().join(", ");
-                Act::Toast(format!("comment on {on} · {} in the batch · ctrl+enter: send", self.comments.len()))
+                // an @agent: the new comments go to it now (the batch skips them)
+                let ids: Vec<String> = self.comments.iter().rev().take(n).rev().map(|c| c.id.clone()).collect();
+                let mut acts = ids.iter().filter_map(|id| self.mention(id, &t, ""));
+                let Some(Act::Mention { to, mut text, mut context }) = acts.next() else {
+                    return Act::Toast(format!("comment on {on} · {} in the batch · ctrl+enter: send", self.comments.len()));
+                };
+                for a in acts {
+                    if let Act::Mention { text: t2, context: c2, .. } = a {
+                        text = format!("{text}\n{t2}");
+                        context = format!("{context}\n\n{c2}");
+                    }
+                }
+
+                for c in self.comments.iter_mut().filter(|c| ids.contains(&c.id)) {
+                    c.sent = true;
+                }
+                self.save_comments();
+                Act::Mention { to, text, context }
             }
         }
     }
@@ -2724,6 +3068,14 @@ impl View {
     /// A key while a modal is open.
     fn modal_key(&mut self, k: KeyEvent) -> Act {
         let send = k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+
+        // the `@` dropdown of the text: its keys first (↑↓, tab / enter: insert, esc: close)
+        if let Some(Modal::Comment { text, on_level: false, .. }) = self.modal.as_mut()
+            && !send
+            && self.cmention.key(k, text, &self.agents)
+        {
+            return Act::None;
+        }
 
         // esc: closes; an edited comment only on a 2nd esc (esc never drops edits unasked)
         if k.code == KeyCode::Esc
@@ -2754,12 +3106,12 @@ impl View {
                     text.key(k);
                 }
             },
-            Some(Modal::Comment { text, scroll, on_level, .. }) => match k.code {
+            Some(Modal::Comment { text, scroll, on_level, target, .. }) => match k.code {
                 KeyCode::Esc => self.modal = None,
                 KeyCode::Enter if send => return self.save_comment(),
-                // ↑ on the text's 1st row, shift+tab: the severity row
-                KeyCode::Up if !k.modifiers.contains(KeyModifiers::ALT) && text.on_first_row() => *on_level = true,
-                KeyCode::BackTab => *on_level = true,
+                // ↑ on the text's 1st row, shift+tab: the severity row (a reply: 0 severity)
+                KeyCode::Up if !k.modifiers.contains(KeyModifiers::ALT) && text.on_first_row() && target.has_level() => *on_level = true,
+                KeyCode::BackTab if target.has_level() => *on_level = true,
                 // alt+↑↓: the selected lines scroll
                 KeyCode::Up if k.modifiers.contains(KeyModifiers::ALT) => *scroll = scroll.saturating_sub(1),
                 KeyCode::Down if k.modifiers.contains(KeyModifiers::ALT) => *scroll += 1,
@@ -2956,7 +3308,7 @@ impl View {
         let w = area.width.saturating_sub(4).clamp(20, 110);
         let x = area.x + (area.width.saturating_sub(w)) / 2;
         match modal {
-            Modal::Comment { title, quote, scroll, edit, text, level, on_level, .. } => {
+            Modal::Comment { title, quote, scroll, target, text, level, on_level, .. } => {
                 let tw = w.saturating_sub(4);
                 let th = (text.rows_for(tw) as u16).clamp(3, 8);
                 // the selected lines: at most half the screen (and 24 rows); more: they scroll
@@ -2967,7 +3319,12 @@ impl View {
                 let y = area.y + (area.height.saturating_sub(h)) / 3;
                 let r = Rect { x, y, width: w, height: h };
                 f.render_widget(Clear, r);
-                let head = if edit.is_some() { format!(" edit comment · {title} ") } else { format!(" comment on {title} ") };
+                let head = match target {
+                    Target::New => format!(" comment on {title} "),
+                    Target::Edit(id) => format!(" edit comment {id} · {title} "),
+                    Target::EditReply(id, r) => format!(" edit reply {} on {id} · {title} ", *r + 1),
+                    Target::Reply(id) => format!(" reply on {id} · {title} "),
+                };
                 f.render_widget(Block::bordered().border_style(theme::accent()).title(Span::styled(crate::nav::fit(&head, usize::from(w.saturating_sub(4))), theme::accent_bold())).style(theme::text()), r);
                 let inner = Rect { x: r.x + 2, y: r.y + 1, width: w.saturating_sub(4), height: h.saturating_sub(2) };
                 let bg = code_bg();
@@ -2989,6 +3346,7 @@ impl View {
                             };
                             f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(c, usize::from(cw)), st)).style(Style::default().bg(bg)), row);
                         }
+                        QLine::Note(head, t) => f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(t, usize::from(cw)), if *head { theme::bold() } else { theme::text() })), row),
                     }
                     yy += 1;
                 }
@@ -3019,13 +3377,18 @@ impl View {
                     spans.push(Span::raw(" "));
                 }
                 spans.push(Span::styled(if *on_level { " ←→ · ↓ text" } else { " ↑ on the 1st row: severity" }, theme::muted()));
+                // a reply: 0 severity, the mention hint in its place
+                if !target.has_level() {
+                    spans = vec![Span::styled("@agent: it gets the thread at once · alt+↑↓: scroll the thread", theme::muted())];
+                }
                 f.render_widget(Paragraph::new(Line::from(spans)), Rect { y: yy, height: 1, ..inner });
                 yy += 2;
                 let tr = Rect { y: yy, height: th.min(inner.bottom().saturating_sub(yy + 1)), ..inner };
                 text.render(f, tr, !*on_level);
+                self.cmention.render(f, text, &self.agents, area);
                 let hint = Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner };
                 let (save, cancel) = (" save ", " cancel ");
-                f.render_widget(Paragraph::new(Line::from(vec![Span::styled(save, theme::pill()), Span::raw(" "), Span::styled(cancel, theme::muted()), Span::styled("  ctrl+⏎ save · esc cancel · 0 text: delete", theme::muted())])), hint);
+                f.render_widget(Paragraph::new(Line::from(vec![Span::styled(save, theme::pill()), Span::raw(" "), Span::styled(cancel, theme::muted()), Span::styled(if matches!(target, Target::Reply(_)) { "  ctrl+⏎ save · esc cancel" } else { "  ctrl+⏎ save · esc cancel · 0 text: delete" }, theme::muted())])), hint);
                 self.modal_btns.push((Rect { width: save.len() as u16, ..hint }, true));
                 self.modal_btns.push((Rect { x: hint.x + save.len() as u16 + 1, width: cancel.len() as u16, ..hint }, false));
             }
@@ -3171,7 +3534,7 @@ impl View {
     /// The keys of the footer now.
     pub fn hints(&self) -> &'static str {
         match &self.modal {
-            Some(Modal::Comment { .. }) => return "ctrl+⏎: save · esc: close (edited: esc esc) · alt+↑↓ / wheel: scroll the lines · 0 text: delete ",
+            Some(Modal::Comment { .. }) => return "ctrl+⏎: save · @agent: it gets the comment at once · esc: close (edited: esc esc) · alt+↑↓ / wheel: scroll · 0 text: delete ",
             Some(Modal::Confirm { .. }) => return "y / enter: yes · n / esc: no ",
             Some(Modal::Ship { .. }) => return "↑↓ move · enter: run (outward: enter enter) · esc: close ",
             None => {}
@@ -3196,7 +3559,7 @@ impl View {
             } else if self.filtering {
                 "type to filter · enter: 1st hit · esc: clear "
             } else {
-                "j k: file · space: select · c: comment · v: reviewed · alt: panel · i: prompt "
+                "j k: file · space: select · c: comment · v: reviewed · alt: panel · i: IDE · ctrl+m: prompt "
             };
         }
         if self.scm.focus && self.scm.msg_focus {
@@ -3205,8 +3568,10 @@ impl View {
             "j k · [ ]: sections · space: pick · e: IDE · s: stage / unstage · p: stash · →: open · x: remove · enter: restore · S: ship · ctrl+b: review "
         } else if self.filtering {
             "type to filter · enter: 1st hit · esc: clear "
+        } else if self.row_comment(self.at).is_some() {
+            "comment · enter: unfold · c: reply · e: edit · C: fold · d: resolve · x: delete · ctrl+⏎: send the batch · i: IDE "
         } else {
-            "j k: file · space: select · s: stage · c: comment · v: reviewed · S: ship · ctrl+b: git · i: prompt · d: resolve · C: comments "
+            "j k: file · space: select · s: stage · c: comment · v: reviewed · ctrl+m: prompt · i: IDE · S: ship · ctrl+b: git · d: resolve · C: comments "
         }
     }
 
@@ -3398,6 +3763,8 @@ impl View {
             f.render_widget(Paragraph::new(Line::styled(m, theme::muted())), area);
         } else {
             self.build(width);
+            self.show_wanted();
+            self.build(width);
             if bars {
                 self.draw_bars(f);
             }
@@ -3423,6 +3790,7 @@ impl View {
                 self.draw_row(f, rect, row, area.x, width);
                 self.shown_rows.push(row);
             }
+            self.see_replies();
         }
         if panel {
             self.draw_panel(f, panel_rect);
@@ -3630,8 +3998,17 @@ impl View {
                 }
             }
             // C: every comment 1 row / its whole text
+            // C on a comment: that comment folds / unfolds; elsewhere: all comments
+            KeyCode::Char('C') if self.row_comment(self.at).is_some() => {
+                let Some((ci, _)) = self.row_comment(self.at) else { return Act::None };
+                let id = self.comments[ci].id.clone();
+                self.flip_comment(&id);
+                self.rebuild_on_comment(ci);
+                return Act::None;
+            }
             KeyCode::Char('C') => {
                 self.comments_folded = !self.comments_folded;
+                self.comment_flip.clear();
                 self.rebuild_here();
                 return Act::Toast(if self.comments_folded { "comments: 1 row each".into() } else { "comments: whole text".into() });
             }
@@ -3667,8 +4044,8 @@ impl View {
                 return Act::Send(text);
             }
             KeyCode::Enter => {
-                if let Some(ci) = self.rows.get(self.at).and_then(|r| r.comment) {
-                    self.edit_comment(ci);
+                if self.rows.get(self.at).is_some_and(|r| r.comment.is_some()) {
+                    return self.open_comment_row(self.at, false);
                 } else if let Some(f) = self.file_at() {
                     let on = !self.folded(f);
                     self.fold(on);
@@ -3720,6 +4097,12 @@ impl View {
             // S: the ship menu (push, rebase, PR, merge, CI log; a stopped rebase: its steps)
             KeyCode::Char('S') => return self.open_ship(),
             // c: the comment modal on the selected lines, else on the cursor's line
+            // c on a comment / reply (0 selection): a reply on that comment
+            KeyCode::Char('c') if self.sel.is_empty() && self.row_comment(self.at).is_some() => {
+                if let Some((ci, _)) = self.row_comment(self.at) {
+                    self.reply_comment(ci);
+                }
+            }
             KeyCode::Char('c') => {
                 let spots = self.spots();
                 if !spots.is_empty() {
@@ -3730,6 +4113,15 @@ impl View {
                 }
             }
             KeyCode::Char('x') => {
+                // x on a reply: that reply goes
+                if let Some((ci, Some(r))) = self.row_comment(self.at) {
+                    let id = self.comments[ci].id.clone();
+                    if let Err(e) = self.write_through(|thread| threads::edit(thread, &id, Some(r), "")) {
+                        return Act::Toast(e);
+                    }
+                    self.rebuild_on_comment(ci);
+                    return Act::Toast(format!("{id}: reply deleted"));
+                }
                 if let Some(ci) = self.rows.get(self.at).and_then(|r| r.comment) {
                     self.comments.remove(ci);
                     self.save_comments();
@@ -3757,7 +4149,14 @@ impl View {
             }
             KeyCode::Char('V') => return self.start_review(),
             // o / e: the IDE at the 1st selected line, else at the cursor's line
-            KeyCode::Char('o') | KeyCode::Char('e') => {
+            // e on a comment / reply: edit it
+            KeyCode::Char('e') if self.row_comment(self.at).is_some() => {
+                if let Some((ci, reply)) = self.row_comment(self.at) {
+                    self.edit_comment(ci, reply);
+                }
+            }
+            // o / e / i: the file in the IDE
+            KeyCode::Char('o') | KeyCode::Char('e') | KeyCode::Char('i') => {
                 if let Some((path, line)) = self.open_spot() {
                     return Act::Open(path, line);
                 }
@@ -3769,17 +4168,44 @@ impl View {
 
     /// The rows change (a comment): the cursor stays on its row number.
     fn rebuild_here(&mut self) {
-        let width = self.built.map_or(self.area.width.saturating_sub(1), |b| b.0);
+        let width = self.built.map_or(if self.built_w > 0 { self.built_w } else { self.area.width.saturating_sub(1) }, |b| b.0);
         let at = self.at;
         self.built = None;
         self.build(width);
         self.at = at.min(self.rows.len().saturating_sub(1));
     }
 
+    /// Comment CI folded / unfolded: the cursor on its head row.
+    fn rebuild_on_comment(&mut self, ci: usize) {
+        self.rebuild_here();
+        if let Some(r) = self.rows.iter().position(|r| r.comment == Some(ci)) {
+            self.at = r;
+        }
+    }
+
+    /// Enter / a click on comment row I: a folded comment unfolds (its whole thread), an unfolded
+    /// one names the keys (a click: edits the row's text).
+    fn open_comment_row(&mut self, i: usize, click: bool) -> Act {
+        let Some((ci, reply)) = self.row_comment(i) else { return Act::None };
+        let Some(c) = self.comments.get(ci) else { return Act::None };
+        if self.comment_shut(c) {
+            let id = c.id.clone();
+            self.flip_comment(&id);
+            self.rebuild_on_comment(ci);
+            return Act::None;
+        }
+
+        if click {
+            self.edit_comment(ci, reply);
+            return Act::None;
+        }
+        Act::Toast("c: reply · e: edit · C: fold · d: resolve · ctrl+⏎: send the batch".into())
+    }
+
     /// The rows change (fold, layout): the cursor stays on its file's header.
     fn rebuild_on_file(&mut self) {
         let file = self.rows.get(self.at).map(|r| r.file);
-        let width = self.built.map_or(self.area.width.saturating_sub(1), |b| b.0);
+        let width = self.built.map_or(if self.built_w > 0 { self.built_w } else { self.area.width.saturating_sub(1) }, |b| b.0);
         self.built = None;
         self.build(width);
         if let Some(i) = file
@@ -3899,9 +4325,10 @@ impl View {
                     self.select_row(row, false);
                     return Act::None;
                 }
-                if let Some(ci) = self.rows.get(row).and_then(|r| r.comment) {
-                    self.edit_comment(ci);
-                    return Act::None;
+
+                if self.rows.get(row).is_some_and(|r| r.comment.is_some()) {
+                    self.at = row;
+                    return self.open_comment_row(row, true);
                 }
                 if m.modifiers.contains(KeyModifiers::SHIFT)
                     && let Some(a) = self.anchor
@@ -3934,12 +4361,49 @@ fn read_only_key(k: KeyEvent) -> bool {
     }
 }
 
+/// The thread of comment C for the modal: the comment, then its replies (UPTO: the ones before
+/// that reply, the edited one).
+fn thread_lines(c: &Comment, upto: Option<usize>) -> Vec<QLine> {
+    let mut out = vec![QLine::Gap];
+    let mut add = |head: String, text: &str| {
+        out.push(QLine::Note(true, head));
+        out.extend(text.lines().map(|l| QLine::Note(false, format!("  {l}"))));
+    };
+    add(format!("{} · {}", c.author(), c.id), &c.text);
+    for r in c.replies.iter().take(upto.unwrap_or(usize::MAX)) {
+        add(format!("↳ {} · {}", r.author(), stamp(r.at)), &r.text);
+    }
+    out
+}
+
+/// Unix ms AT as `14:03`; 0: "".
+fn stamp(at: u64) -> String {
+    if at == 0 { String::new() } else { crate::stream::clock(at) }
+}
+
+/// A row of a comment in the file view: its head, a text line, a reply's head, a reply's text
+/// line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CLine {
+    Head,
+    Text(usize),
+    Reply(usize),
+    RText(usize, usize),
+}
+
 fn comment_area(text: &str) -> Box<crate::textarea::TextArea> {
     let mut t = crate::textarea::TextArea::new(false, "the comment · ctrl+⏎ save");
     t.style = Some(theme::panel());
     t.set_text(text);
     t.move_end();
     Box::new(t)
+}
+
+/// The text of a new reply.
+fn reply_area() -> Box<crate::textarea::TextArea> {
+    let mut t = comment_area("");
+    t.placeholder = "the reply · @agent: it gets the thread at once · ctrl+⏎ save".into();
+    t
 }
 
 /// The code's background inside the boxes: the panel color, darker.
@@ -3954,9 +4418,10 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// A modal over the changes view.
 enum Modal {
-    /// A comment: on SPOTS (new) or comment EDIT; the diff lines it is on.
+    /// A comment: on SPOTS (new), an edit, a reply (TARGET); the diff lines it is on (a reply:
+    /// the thread too).
     /// LEVEL: its severity; ON_LEVEL: the keys go to the severity row (←→), else the text.
-    Comment { title: String, quote: Vec<QLine>, scroll: usize, edit: Option<usize>, spots: Vec<Spot>, text: Box<crate::textarea::TextArea>, level: crate::rank::Level, on_level: bool },
+    Comment { title: String, quote: Vec<QLine>, scroll: usize, target: Target, spots: Vec<Spot>, text: Box<crate::textarea::TextArea>, level: crate::rank::Level, on_level: bool },
     /// A yes / no question; THEN runs on yes.
     Confirm { question: String, yes: bool, then: Then },
     /// The ship menu (S): the git / GitHub steps of the branch valid now; CUR: the cursor;
@@ -3994,6 +4459,28 @@ enum QLine {
     Path(String),
     Code(String),
     Gap,
+    /// A row of a comment's thread (a reply modal): its author row (true), a text row.
+    Note(bool, String),
+}
+
+/// What the comment modal writes.
+#[derive(Clone, Debug, PartialEq)]
+enum Target {
+    /// A new comment on the modal's spots.
+    New,
+    /// The text, severity of comment ID.
+    Edit(String),
+    /// The text of reply R of comment ID.
+    EditReply(String, usize),
+    /// A new reply on comment ID.
+    Reply(String),
+}
+
+impl Target {
+    /// The modal has a severity row.
+    fn has_level(&self) -> bool {
+        matches!(self, Target::New | Target::Edit(_))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4899,7 +5386,7 @@ Binary files a/img.png and b/img.png differ
     }
 
     #[test]
-    fn enter_on_a_comment_edits_it_0_text_deletes_it() {
+    fn e_on_a_comment_edits_it_0_text_deletes_it() {
         let mut v = view(parse(DIFF));
         v.id = "changes-edit-0000".into();
         v.comments.clear();
@@ -4907,15 +5394,15 @@ Binary files a/img.png and b/img.png differ
         v.add_comment(&[Spot { path: "src/a.rs".into(), line: 11, lines: String::new() }], "old");
         assert_eq!(v.comments[0].quote, "+ let b = 3;");
         v.at = v.rows.iter().position(|r| r.comment == Some(0)).unwrap();
-        press(&mut v, KeyCode::Enter);
-        let Some(Modal::Comment { edit: Some(0), .. }) = &v.modal else { panic!("edit modal") };
+        press(&mut v, KeyCode::Char('e'));
+        let Some(Modal::Comment { target: Target::Edit(_), .. }) = &v.modal else { panic!("edit modal") };
         v.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         for c in "new".chars() {
             press(&mut v, KeyCode::Char(c));
         }
         v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
         assert!(v.comments[0].text.ends_with("new"), "{:?}", v.comments);
-        press(&mut v, KeyCode::Enter);
+        press(&mut v, KeyCode::Char('e'));
         v.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         if let Some(Modal::Comment { text, .. }) = v.modal.as_mut() {
             text.set_text("");
@@ -5069,5 +5556,220 @@ Binary files a/img.png and b/img.png differ
                 println!("{}", (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>());
             }
         }
+    }
+
+    /// A view on DIFF for comments thread ID (its comments file gone first).
+    fn thread_view(id: &str) -> View {
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(id));
+        let mut v = view(parse(DIFF));
+        v.id = id.into();
+        v.comments.clear();
+        v.comments_base.clear();
+        v.build(100);
+        v
+    }
+
+    fn spot11() -> Vec<Spot> {
+        vec![Spot { path: "src/a.rs".into(), line: 11, lines: String::new() }]
+    }
+
+    /// The view reads the comments file again (an agent wrote it).
+    fn resync(v: &mut View) {
+        v.comments_at = None;
+        v.sync_comments();
+        v.rebuild_here();
+    }
+
+    #[test]
+    fn an_older_comments_file_keeps_its_fields_on_a_write() {
+        let id = "changes-old-file-0000";
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(id));
+        std::fs::create_dir_all(crate::engine::store::thread_dir(id)).unwrap();
+        let old = r#"[{"path":"a.rs","line":3,"text":"t","by":"REV","id":"c1","state":"resolved","resolved_by":"REV","note":"n","sent":true}]"#;
+        std::fs::write(comments_path(id), old).unwrap();
+
+        let c = read_comments(id);
+        write_comments(id, &c);
+
+        let back = std::fs::read_to_string(comments_path(id)).unwrap();
+        assert_eq!(read_comments(id), c);
+        assert!(!back.contains("replies") && !back.contains("\"at\""), "0 new keys: {back}");
+        assert_eq!((c[0].state, c[0].resolved_by.as_str(), c[0].sent, c[0].replies.len()), (CState::Resolved, "REV", true, 0));
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(id));
+    }
+
+    #[test]
+    fn a_save_keeps_comments_and_replies_agents_wrote_since_the_read() {
+        let id = "changes-merge-0000";
+        let mut v = thread_view(id);
+        v.add_comment(&spot11(), "mine");
+        agent_comments(id, "REV", None, &serde_json::json!([{"file": "src/a.rs", "line": 12, "severity": "low", "text": "theirs"}])).unwrap();
+        threads::reply(id, "REV", "c1", "answer", false).unwrap();
+
+        // the view resolves c1 from its list of before the agent's writes
+        v.toggle_resolved(0);
+
+        let all = read_comments(id);
+        assert_eq!(all.len(), 2, "{all:#?}");
+        assert!(!all[0].open() && all[0].replies.len() == 1 && all[1].text == "theirs", "{all:#?}");
+        assert_eq!(v.comments, all, "the view has the merged list");
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(id));
+    }
+
+    #[test]
+    fn comment_writes_from_2_threads_lose_0() {
+        const ID: &str = "changes-lock-0000";
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(ID));
+
+        let hs: Vec<_> = (0..2)
+            .map(|k| {
+                std::thread::spawn(move || {
+                    for i in 0..25 {
+                        agent_comments(ID, &format!("A{k}"), None, &serde_json::json!([{"file": "a.rs", "line": i, "severity": "low", "text": "x"}])).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+
+        let all = read_comments(ID);
+        let ids: HashSet<&str> = all.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!((all.len(), ids.len()), (50, 50));
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(ID));
+    }
+
+    #[test]
+    fn the_batch_carries_replies_and_names_authors_without_at() {
+        let mut c = Comment { path: "a.rs".into(), line: 3, text: "why?".into(), by: "REV".into(), id: "c1".into(), ..Default::default() };
+        let plain = batch(&[&c]).unwrap();
+        assert!(plain.ends_with("- c1 [medium] `a.rs:3` by REV: why?") && !plain.contains("comment_reply"), "{plain}");
+
+        c.replies.push(Reply { by: String::new(), at: 1, text: "@REV sure?\nline 2".into(), unseen: false });
+        let s = batch(&[&c]).unwrap();
+
+        assert!(s.ends_with("by REV: why?\n  ↳ you: @REV sure?\n    line 2") && s.contains("`comment_reply` tool:\n"), "{s}");
+    }
+
+    #[test]
+    fn comment_threads_unfold_reply_edit_fold_by_keys() {
+        let id = "changes-threads-keys-0000";
+        let mut v = thread_view(id);
+        v.add_comment(&spot11(), "why 3?");
+        threads::reply(id, "REV", "c1", "the spec says 3\nsee docs", false).unwrap();
+        resync(&mut v);
+
+        // unfolded: the reply under the comment, its unseen dot
+        let t = text(&v);
+        let at = t.iter().position(|l| l.contains("✎ c1")).unwrap();
+        assert!(t[at + 1].contains("↳ ● @REV") && t[at + 1].contains("the spec says 3") && t[at + 2].contains("see docs"), "{t:#?}");
+
+        // C on the comment: 1 row, the reply count, the unseen count
+        v.at = v.rows.iter().position(|r| r.comment == Some(0)).unwrap();
+        v.key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT));
+        let t = text(&v);
+        let at = t.iter().position(|l| l.contains("✎ c1")).unwrap();
+        assert!(t[at].contains("(1 reply)") && t[at].contains("● 1 new") && !t.iter().any(|l| l.contains("the spec says 3")), "{t:#?}");
+
+        // enter: the whole thread, the cursor on its head; ↓: the reply's row
+        press(&mut v, KeyCode::Enter);
+        assert!(text(&v).iter().any(|l| l.contains("the spec says 3")));
+        assert_eq!(v.row_comment(v.at), Some((0, None)));
+        press(&mut v, KeyCode::Down);
+        assert_eq!(v.row_comment(v.at), Some((0, Some(0))));
+
+        // e on the reply: its edit modal; ctrl+enter saves it
+        press(&mut v, KeyCode::Char('e'));
+        let Some(Modal::Comment { target: Target::EditReply(cid, 0), text: ta, .. }) = &mut v.modal else { panic!("reply edit modal") };
+        assert_eq!(cid, "c1");
+        ta.set_text("the spec says 3, page 2");
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!(read_comments(id)[0].replies[0].text, "the spec says 3, page 2");
+
+        // c on the comment: a reply of the owner, under the agent's
+        press(&mut v, KeyCode::Char('c'));
+        let Some(Modal::Comment { target: Target::Reply(_), .. }) = &v.modal else { panic!("reply modal") };
+        for ch in "ok, keep it".chars() {
+            press(&mut v, KeyCode::Char(ch));
+        }
+        assert_eq!(v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)), Act::Toast("reply on c1 · ctrl+enter: in the batch · @agent: at once".into()));
+        let c = &read_comments(id)[0];
+        assert_eq!((c.replies.len(), c.replies[1].by.as_str(), c.replies[1].text.as_str(), c.sent), (2, "", "ok, keep it", false));
+        assert!(text(&v).iter().any(|l| l.contains("↳ you") && l.contains("ok, keep it")));
+
+        // x on the owner's reply: it goes
+        v.at = (0..v.rows.len()).find(|&i| v.row_comment(i) == Some((0, Some(1)))).unwrap();
+        press(&mut v, KeyCode::Char('x'));
+        assert_eq!(read_comments(id)[0].replies.len(), 1);
+
+        // e / i off a comment: the file in the IDE
+        v.at = v.rows.iter().position(|r| r.head).unwrap();
+        assert!(matches!(press(&mut v, KeyCode::Char('e')), Act::Open(..)));
+        assert!(matches!(press(&mut v, KeyCode::Char('i')), Act::Open(..)));
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(id));
+    }
+
+    #[test]
+    fn an_owner_mention_sends_the_comment_at_once_and_skips_the_batch() {
+        let id = "changes-mention-0000";
+        let mut v = thread_view(id);
+        v.members = vec!["REV".into(), "LEAD".into()];
+        v.add_comment(&spot11(), "why 3?");
+        v.at = v.rows.iter().position(|r| r.comment == Some(0)).unwrap();
+
+        press(&mut v, KeyCode::Char('c'));
+        if let Some(Modal::Comment { text, .. }) = v.modal.as_mut() {
+            text.set_text("@REV is 3 right?");
+        }
+
+        let Act::Mention { to, text, context } = v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)) else { panic!("mention") };
+
+        assert_eq!((to, text.as_str()), (vec!["REV".to_string()], "on comment c1 `src/a.rs:11`: @REV is 3 right?"));
+        assert!(context.contains("- owner: why 3?\n- owner: @REV is 3 right?\n") && context.contains("`comment_reply`"), "{context}");
+        assert!(read_comments(id)[0].sent, "delivered: 0 batch");
+        assert!(matches!(v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)), Act::Toast(_)), "0 new comments");
+
+        // a new comment that names an agent: to it at once too
+        v.open_comment(spot11());
+        if let Some(Modal::Comment { text, .. }) = v.modal.as_mut() {
+            text.set_text("@LEAD take a look");
+        }
+
+        let Act::Mention { to, .. } = v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)) else { panic!("mention") };
+        assert_eq!(to, vec!["LEAD".to_string()]);
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(id));
+    }
+
+    #[test]
+    fn a_commit_leaves_open_a_comment_whose_last_owner_reply_names_an_agent() {
+        let mut waits = Comment { path: "x.txt".into(), id: "c1".into(), ..Default::default() };
+        waits.replies.push(Reply { text: "@REV why?".into(), ..Default::default() });
+        let mut plain = Comment { path: "x.txt".into(), id: "c2".into(), ..Default::default() };
+        plain.replies.push(Reply { text: "thanks".into(), ..Default::default() });
+        let d = std::env::temp_dir().join(format!("codehead-waits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(Command::new("git").arg("-C").arg(&d).args(["init", "-q"]).status().unwrap().success());
+
+        assert_eq!(committed(&[waits, plain], &d), vec!["c2".to_string()]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_comment_on_the_1st_changed_line_sits_under_it_not_under_the_why() {
+        use crate::rank::{Group, RFile, Rank};
+        let mut v = thread_view("changes-why-0000");
+        let key = crate::rank::key(&v.changes.files);
+        v.rank = Some(Rank { key, model: "haiku".into(), groups: vec![Group { title: "Core".into(), why: "b becomes 3".into(), files: vec![RFile { path: "src/a.rs".into(), why: "changes b".into(), level: "high".into() }] }] });
+        v.apply_rank(false);
+        v.add_comment(&spot11(), "why 3?");
+        v.built = None;
+        v.build(100);
+
+        let t = text(&v);
+        let at = t.iter().position(|l| l.contains("+ let b = 3;")).unwrap();
+        assert!(t[at + 1].contains("✎ c1"), "under its line: {t:#?}");
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-why-0000"));
     }
 }

@@ -55,7 +55,7 @@ fn tools() -> Value {
         },
         {
             "name": "comments",
-            "description": "List the review comments of the changes view (the owner's and the agents'): id, file, line, severity, author, state (open / resolved), text. Read them when you address review comments, or when the owner asks you to.",
+            "description": "List the review comments of the changes view (the owner's and the agents'): id, file, line, severity, author, state (open / resolved), text, replies, last_by (who wrote last). Read them when you address review comments, or when the owner asks you to.",
             "inputSchema": {"type": "object", "properties": {
                 "state": {"type": "string", "enum": ["open", "resolved", "all"], "description": "Default: open"}
             }}
@@ -68,6 +68,14 @@ fn tools() -> Value {
                 "state": {"type": "string", "enum": ["resolved", "open"]},
                 "note": {"type": "string", "description": "1 line: the fix (file:line), or why not"}
             }, "required": ["ids", "state", "note"]}
+        },
+        {
+            "name": "comment_reply",
+            "description": "Reply on a review comment of the changes view (its thread): answer a question on it, argue a finding, say what you did. The owner gets a notification. `@name` in the text: that agent gets the comment's thread at once.",
+            "inputSchema": {"type": "object", "properties": {
+                "id": {"type": "string", "description": "The comment id, e.g. \"c3\""},
+                "text": {"type": "string", "description": "The reply"}
+            }, "required": ["id", "text"]}
         },
         {
             "name": "flow_step",
@@ -124,6 +132,21 @@ fn call(thread: &str, agent: &str, name: &str, args: &Value) -> Result<String, S
                 return Err("ids: 1 comment id or more (the `comments` tool lists them)".into());
             }
             crate::changes::set_comment_state(thread, agent, &ids, args["state"].as_str().unwrap_or("resolved"), args["note"].as_str().unwrap_or_default())
+        }
+        "comment_reply" => {
+            let id = args["id"].as_str().unwrap_or_default();
+            let text = args["text"].as_str().unwrap_or_default();
+            let c = crate::changes::threads::reply(thread, agent, id, text, false)?;
+            // `@name`: that agent gets the thread at once (as a message of this agent)
+            let names: Vec<String> = roster::active().into_iter().map(|a| a.name).collect();
+            let to = crate::changes::threads::mentioned(text, &names, agent);
+            if to.is_empty() {
+                return Ok(format!("reply added to {id}"));
+            }
+
+            let msg = format!("on comment {id} `{}`: {}\n\n{}", c.path, text.trim(), crate::changes::threads::context(&c));
+            client::send(thread, &json!({"op": "send", "from": agent, "to": to, "text": msg}))?;
+            Ok(format!("reply added to {id}, sent to {}", to.join(", ")))
         }
         "flow_step" => {
             let r = client::send(thread, &json!({"op": "flow_step", "agent": agent, "again": args["again"], "pass_gate": args["pass_gate"], "note": args["note"]}))?;
@@ -208,7 +231,21 @@ mod tests {
         let r = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})).unwrap();
         assert_eq!(r["result"]["protocolVersion"], "2025-03-26");
         let r = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
-        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 10);
+        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 11);
         assert!(handle("t", "a", &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none());
+    }
+
+    #[test]
+    fn comment_reply_adds_a_reply_and_lists_it() {
+        let thread = format!("mcp-reply-{}", std::process::id());
+        let _ = std::fs::remove_dir_all(super::super::store::thread_dir(&thread));
+        call(&thread, "REV", "comment", &json!({"comments": [{"file": "a.rs", "line": 3, "severity": "low", "text": "nit"}]})).unwrap();
+
+        assert_eq!(call(&thread, "REV", "comment_reply", &json!({"id": "c1", "text": "fixed in a.rs:4"})).unwrap(), "reply added to c1");
+        assert!(call(&thread, "REV", "comment_reply", &json!({"id": "c9", "text": "x"})).unwrap_err().contains("c9"));
+
+        let rows: Value = serde_json::from_str(&call(&thread, "LEAD", "comments", &json!({"state": "open"})).unwrap()).unwrap();
+        assert_eq!((rows[0]["replies"][0]["author"].as_str(), rows[0]["replies"][0]["text"].as_str(), rows[0]["last_by"].as_str()), (Some("REV"), Some("fixed in a.rs:4"), Some("REV")));
+        let _ = std::fs::remove_dir_all(super::super::store::thread_dir(&thread));
     }
 }
