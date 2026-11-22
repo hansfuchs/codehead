@@ -1,5 +1,6 @@
 //! The source control panel left of the review (ctrl+b): the commit message on top, then
-//! sections as VS Code has them: staged, changes (by level), comments (by severity, then file), stash. Section
+//! sections as VS Code has them: staged, changes (by level), comments (by severity, then file), stash,
+//! commits (unpushed, pushed; enter: the commit in the review's place, read only). Section
 //! and level labels stick to the top / bottom edge while their rows are out of view; a click
 //! on a stuck label scrolls to it.
 
@@ -25,6 +26,7 @@ pub(super) enum Sec {
     Changes,
     Comments,
     Stash,
+    Commits,
 }
 
 impl Sec {
@@ -34,6 +36,7 @@ impl Sec {
             Sec::Changes => "CHANGES",
             Sec::Comments => "COMMENTS",
             Sec::Stash => "STASH",
+            Sec::Commits => "COMMITS",
         }
     }
 }
@@ -45,6 +48,8 @@ enum Fold {
     Level(Level),
     /// A severity of the comments.
     CLevel(Level),
+    /// The commits' group: pushed (true) / unpushed.
+    Push(bool),
     /// The comments' group: resolved (true) / open.
     CState(bool),
 }
@@ -64,8 +69,14 @@ pub(super) enum PRow {
     Empty(&'static str),
     /// PR mode: the commit picker.
     Pick,
+    /// The commits' group (pushed: true): its count.
+    Push(bool, usize),
+    /// A commit (index in the read's commits).
+    Commit(usize),
     /// The comments' group (resolved: true): its count.
     CState(bool, usize),
+    /// The branch's changes against its base, as 1 view (commits + uncommitted).
+    All,
 }
 
 impl PRow {
@@ -74,6 +85,7 @@ impl PRow {
             PRow::Section(s, _) => Some(Fold::Sec(*s)),
             PRow::Level(l, _) => Some(Fold::Level(*l)),
             PRow::CLevel(l, _) => Some(Fold::CLevel(*l)),
+            PRow::Push(p, _) => Some(Fold::Push(*p)),
             PRow::CState(r, _) => Some(Fold::CState(*r)),
             _ => None,
         }
@@ -100,6 +112,8 @@ pub(super) struct Panel {
     folded: HashSet<Fold>,
     /// Picked files (space, shift+click): s / p take them.
     pub picked: BTreeSet<String>,
+    /// Picked unpushed commits (space): u uncommits them, the ship menu pushes up to them.
+    pub commit_picks: BTreeSet<String>,
     /// Picked comments (ids; space): the next prompt takes them along, then they clear.
     pub comment_picks: BTreeSet<String>,
     anchor: Option<usize>,
@@ -128,6 +142,11 @@ impl Panel {
         self.pick.is_some()
     }
 
+    /// The cursor row is a commit.
+    pub(super) fn on_commit(&self) -> bool {
+        matches!(self.rows.get(self.at), Some(PRow::Commit(_)))
+    }
+
     pub fn new() -> Panel {
         let mut msg = TextArea::new(false, "message");
         msg.style = Some(theme::panel());
@@ -142,6 +161,7 @@ impl Panel {
             top: 0,
             folded: HashSet::new(),
             picked: BTreeSet::new(),
+            commit_picks: BTreeSet::new(),
             comment_picks: BTreeSet::new(),
             anchor: None,
             rect: Rect::default(),
@@ -267,7 +287,171 @@ impl View {
             }
             v.extend((0..self.stash.len()).map(PRow::Stash));
         }
+
+        // the branch's commits: unpushed, then pushed (newest first in each)
+        let cs = &self.changes.commits;
+        v.push(PRow::Section(Sec::Commits, cs.list.len()));
+        if p.folded.contains(&Fold::Sec(Sec::Commits)) {
+            return v;
+        }
+
+        // a branch: its changes against the base (commits + uncommitted) as 1 view
+        if self.changes.base != "HEAD" && !self.changes.base.is_empty() {
+            v.push(PRow::All);
+        }
+
+        if cs.list.is_empty() {
+            v.push(PRow::Empty("0 commits on the branch"));
+        }
+        for pushed in [false, true] {
+            let at: Vec<usize> = (0..cs.list.len()).filter(|&i| cs.list[i].pushed == pushed).collect();
+            if at.is_empty() {
+                continue;
+            }
+            v.push(PRow::Push(pushed, at.len()));
+            if !p.folded.contains(&Fold::Push(pushed)) {
+                v.extend(at.into_iter().map(PRow::Commit));
+            }
+        }
+        if cs.more {
+            v.push(PRow::Empty("older commits: not listed"));
+        }
         v
+    }
+
+    /// After a read: picks and the shown commit of commits that left the list go.
+    pub(super) fn sync_commits(&mut self) {
+        let cs = &self.changes.commits;
+        self.scm.commit_picks.retain(|o| cs.find(o).is_some_and(|c| !c.pushed));
+        if let Some(o) = self.peeked()
+            && cs.find(o).is_none()
+        {
+            self.peek = None;
+        }
+    }
+
+    /// The review shows commit I of the list (STAY: the keys stay on the panel).
+    fn open_commit(&mut self, i: usize, stay: bool) {
+        let Some(c) = self.changes.commits.list.get(i).cloned() else { return };
+        if self.peeked() != Some(c.oid.as_str()) {
+            let mut p = View::for_commit(&self.dir, &c);
+            p.refresh(true);
+            self.peek = Some(Box::new(p));
+        }
+        self.scm.focus = stay;
+    }
+
+    /// The review shows the branch's changes against its base (STAY: the keys stay on the panel).
+    fn open_all(&mut self, stay: bool) {
+        if !self.peek.as_ref().is_some_and(|p| p.all) {
+            let mut p = View::for_branch(&self.id, &self.dir);
+            p.refresh(true);
+            self.peek = Some(Box::new(p));
+        }
+        self.scm.focus = stay;
+    }
+
+    /// The picked commits, else the cursor's commit: unpushed ones only (oids, list order).
+    fn commit_targets(&self) -> Vec<String> {
+        let cs = &self.changes.commits;
+        let picked: Vec<String> = cs.list.iter().filter(|c| !c.pushed && self.scm.commit_picks.contains(&c.oid)).map(|c| c.oid.clone()).collect();
+        if !picked.is_empty() {
+            return picked;
+        }
+        match self.scm.rows.get(self.scm.at) {
+            Some(PRow::Commit(i)) => cs.list.get(*i).filter(|c| !c.pushed).map(|c| vec![c.oid.clone()]).unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// `abc1234 subject` per commit (oids), list order, at most 8 lines.
+    fn commit_lines(&self, oids: &[String]) -> String {
+        let cs = &self.changes.commits;
+        let mut v: Vec<String> = cs.list.iter().filter(|c| oids.contains(&c.oid)).map(|c| format!("{} {}", c.short, c.subject)).collect();
+        if v.len() > 8 {
+            let n = v.len() - 7;
+            v.truncate(7);
+            v.push(format!("… {n} more"));
+        }
+        v.join("\n")
+    }
+
+    /// u: the question, then the picked commits leave the history (their changes: uncommitted).
+    fn ask_uncommit(&mut self) -> Act {
+        if self.changes.stopped.is_some() {
+            return Act::Toast("a rebase stopped: finish it first (S)".into());
+        }
+
+        let oids = self.commit_targets();
+        if oids.is_empty() {
+            let pushed = matches!(self.scm.rows.get(self.scm.at), Some(PRow::Commit(i)) if self.changes.commits.list.get(*i).is_some_and(|c| c.pushed));
+            return Act::Toast(if pushed { "pushed: 0 uncommit".into() } else { "0 commits · space on a commit: pick it".into() });
+        }
+
+        let n = oids.len();
+        let question = format!("uncommit {n} commit{}? files stay, changes become uncommitted\n{}", if n == 1 { "" } else { "s" }, self.commit_lines(&oids));
+        self.modal = Some(Modal::Confirm { question, yes: false, then: Then::Uncommit(oids, self.changes.commits.head.clone()) });
+        Act::None
+    }
+
+    /// The uncommit runs (asked): the messages of the commits go to the commit message box.
+    pub(super) fn start_uncommit(&mut self, oids: Vec<String>, head: String) -> Act {
+        let cs = &self.changes.commits;
+        // oldest first, as they were made
+        let msgs: Vec<String> = cs.list.iter().rev().filter(|c| oids.contains(&c.oid)).map(|c| c.body.clone()).collect();
+        let op = Op::Uncommit { thread: self.id.clone(), head, picks: oids };
+        let act = self.start_op(op);
+        if self.op.is_some() {
+            self.prefill = Some(msgs.join("\n\n"));
+            self.scm.commit_picks.clear();
+        }
+        act
+    }
+
+    /// The newest picked unpushed commit, and how many unpushed commits a push up to it takes.
+    pub(super) fn push_pick(&self) -> Option<(&super::commits::Commit, usize)> {
+        let cs = &self.changes.commits;
+        let un: Vec<&super::commits::Commit> = cs.list.iter().filter(|c| !c.pushed).collect();
+        let k = un.iter().position(|c| self.scm.commit_picks.contains(&c.oid))?;
+        Some((un[k], un.len() - k))
+    }
+
+    /// The ship menu's "push up to": the question lists every commit that goes.
+    pub(super) fn ask_push_to(&mut self) -> Act {
+        let Some((top, _)) = self.push_pick() else { return Act::Toast("0 commits picked".into()) };
+        let oid = top.oid.clone();
+        let cs = &self.changes.commits;
+        let un: Vec<String> = cs.list.iter().filter(|c| !c.pushed).map(|c| c.oid.clone()).collect();
+        let k = un.iter().position(|o| *o == oid).unwrap_or(0);
+        let going = un[k..].to_vec();
+        let to = cs.upstream.clone().unwrap_or_else(|| "origin".into());
+        let n = going.len();
+
+        // the newer unpushed commits (above the pick) stay local
+        let mut question = format!("push {n} commit{} to {to}?", if n == 1 { "" } else { "s" });
+        if k > 0 {
+            question.push_str(&format!(" {k} newer stay local"));
+        }
+
+        question.push('\n');
+        question.push_str(&self.commit_lines(&going));
+
+        // the list stops at 50: older unpushed commits past it go too
+        if cs.more && cs.list.last().is_some_and(|c| !c.pushed) {
+            question.push_str("\n+ older unpushed commits (not listed)");
+        }
+        self.modal = Some(Modal::Confirm { question, yes: false, then: Then::PushTo(oid) });
+        Act::None
+    }
+
+    /// The previous / next section label from the cursor (DOWN: next).
+    fn jump_section(&mut self, down: bool) {
+        let secs: Vec<usize> = (0..self.scm.rows.len()).filter(|&i| matches!(self.scm.rows[i], PRow::Section(..))).collect();
+        let at = self.scm.at;
+        let to = if down { secs.iter().copied().find(|&i| i > at) } else { secs.iter().rev().copied().find(|&i| i < at) };
+        if let Some(i) = to {
+            self.scm.at = i;
+        }
     }
 
     /// The labels stuck to the top and to the bottom of a list of H rows from TOP.
@@ -428,6 +612,7 @@ impl View {
             }
             let picked = match row {
                 PRow::File(fi, _) => self.changes.files.get(fi).is_some_and(|x| self.scm.picked.contains(&x.path)),
+                PRow::Commit(ci) => self.changes.commits.list.get(ci).is_some_and(|c| self.scm.commit_picks.contains(&c.oid)),
                 PRow::Comment(ci) => self.comments.get(ci).is_some_and(|c| self.scm.comment_picks.contains(&c.id)),
                 _ => false,
             };
@@ -548,6 +733,42 @@ impl View {
                 right_fill(&left, &right)
             }
             PRow::Empty(t) => Line::styled(crate::nav::fit(&format!("     {t}"), w), theme::muted().add_modifier(Modifier::ITALIC)),
+            PRow::Push(pushed, n) => {
+                let (label, color) = if *pushed { ("PUSHED", theme::pal().muted) } else { ("UNPUSHED", theme::pal().accent) };
+                let st = Style::default().fg(color).add_modifier(Modifier::BOLD);
+                let cs = &self.changes.commits;
+                let mut right = format!("{n} ");
+                if *pushed && let Some(u) = &cs.upstream {
+                    right = format!("{n} · {u} ");
+                }
+                if !*pushed && cs.remote_only > 0 {
+                    right = format!("{n} · ↓{} on the remote ", cs.remote_only);
+                }
+                right_fill(&[Span::styled(format!("   {} {label}", fold(Fold::Push(*pushed))), st)], &[Span::styled(crate::nav::fit(&right, w / 2), theme::muted())])
+            }
+            PRow::All => {
+                let on = self.peek.as_ref().is_some_and(|p| p.all);
+                let (dot, st) = if on { ("◆", theme::accent()) } else { ("◇", theme::muted()) };
+                let n = self.changes.commits.list.len();
+                let left = vec![Span::styled(format!("   {dot} "), st), Span::styled("all changes", theme::text())];
+                right_fill(&left, &[Span::styled(crate::nav::fit(&format!("{n} commits + uncommitted · vs {} ", self.changes.base), w.saturating_sub(16)), theme::muted())])
+            }
+            PRow::Commit(ci) => {
+                let Some(c) = self.changes.commits.list.get(*ci) else { return Line::raw("") };
+                let shown = self.peeked() == Some(c.oid.as_str());
+                let (dot, dot_st) = match (shown, c.pushed) {
+                    (true, _) => ("◆", theme::accent()),
+                    (false, false) => ("●", theme::accent()),
+                    (false, true) => ("○", theme::muted()),
+                };
+                let age = crate::nav::ago(c.time.max(0) as u64 * 1000).replace(" ago", "");
+                let right = vec![Span::styled(format!("{age} "), theme::muted())];
+                let room = w.saturating_sub(5 + c.short.len() + 1 + age.width() + 2);
+                let subject = crate::nav::fit(&c.subject, room);
+                let sub_st = if c.pushed { theme::muted() } else { theme::text() };
+                let left = vec![Span::raw("     "), Span::styled(format!("{dot} "), dot_st), Span::styled(format!("{} ", c.short), theme::muted()), Span::styled(subject, sub_st)];
+                right_fill(&left, &right)
+            }
             PRow::Pick => {
                 let (text, detail) = self.pick_label(self.pick_index());
                 let left = vec![Span::styled(" ◆ ", theme::accent()), Span::styled(crate::nav::fit(&text, w.saturating_sub(detail.width() + 8)), theme::bold())];
@@ -571,6 +792,8 @@ impl View {
 
     /// The review's cursor on file I's head (the filter clears when it hides the file).
     pub(super) fn jump_file(&mut self, i: usize) {
+        // a commit in the review's place: the changes come back
+        self.peek = None;
         if !self.rows.iter().any(|r| r.head && r.file == i) && !self.filter.is_empty() {
             self.filter.clear();
             self.built = None;
@@ -715,11 +938,13 @@ impl View {
         let mine = &self.scm.rows.get(i)?;
         let is_file_of_level = matches!(mine, PRow::File(_, false));
         let is_comment = matches!(mine, PRow::CommentFile(..) | PRow::Comment(_));
+        let is_commit = matches!(mine, PRow::Commit(_));
         let is_clevel = matches!(mine, PRow::CLevel(..));
         (0..i).rev().find(|&j| match &self.scm.rows[j] {
             PRow::Level(..) => is_file_of_level,
             PRow::CLevel(..) => is_comment,
             PRow::CState(..) => is_comment || is_clevel,
+            PRow::Push(..) => is_commit,
             PRow::Section(..) => true,
             _ => false,
         })
@@ -774,6 +999,8 @@ impl View {
                 }
                 Some(PRow::File(i, _)) => self.jump_file(i),
                 Some(PRow::Comment(ci)) => self.jump_comment(ci),
+                Some(PRow::Commit(ci)) => self.open_commit(ci, true),
+                Some(PRow::All) => self.open_all(true),
                 Some(PRow::Stash(si)) => {
                     if let Some(i) = self.stash.get(si).and_then(|e| self.changes.files.iter().position(|f| f.path == e.path)) {
                         self.jump_file(i);
@@ -788,6 +1015,9 @@ impl View {
                     self.scm.focus = false;
                 }
                 Some(PRow::Comment(ci)) => self.edit_comment(ci),
+                // enter on a commit: its files in the review, the keys there
+                Some(PRow::Commit(ci)) => self.open_commit(ci, false),
+                Some(PRow::All) => self.open_all(false),
                 // enter on a stash entry: its agent restores it
                 Some(PRow::Stash(si)) => {
                     if let Some(id) = self.stash.get(si).map(|e| e.id.clone()) {
@@ -811,8 +1041,23 @@ impl View {
                 {
                     self.scm.comment_picks.insert(id);
                 }
+
+                // a commit: unpushed ones only (a pushed one stays as it is)
+                if let Some(PRow::Commit(i)) = row
+                    && let Some(c) = self.changes.commits.list.get(i)
+                {
+                    if c.pushed {
+                        return Act::Toast(format!("{}: pushed, read only", c.short));
+                    }
+                    if !self.scm.commit_picks.remove(&c.oid) {
+                        self.scm.commit_picks.insert(c.oid.clone());
+                    }
+                }
                 self.scm.at = (self.scm.at + 1).min(last);
             }
+            KeyCode::Char('[') => self.jump_section(false),
+            KeyCode::Char(']') => self.jump_section(true),
+            KeyCode::Char('u') => return self.ask_uncommit(),
             // d on a comment: resolved / open again
             KeyCode::Char('d') => {
                 if let Some(PRow::Comment(ci)) = row {
@@ -858,6 +1103,7 @@ impl View {
             }
             KeyCode::Esc => {
                 self.scm.picked.clear();
+                self.scm.commit_picks.clear();
                 self.scm.comment_picks.clear();
                 self.built = None;
             }
@@ -951,6 +1197,22 @@ impl View {
             Some(PRow::Comment(ci)) => {
                 self.scm.at = i;
                 self.jump_comment(ci);
+            }
+            Some(PRow::All) => {
+                self.scm.at = i;
+                self.open_all(true);
+            }
+            // a click on a commit: its files in the review (shift+click: pick / unpick it)
+            Some(PRow::Commit(ci)) => {
+                self.scm.at = i;
+                if shift && let Some(c) = self.changes.commits.list.get(ci).filter(|c| !c.pushed) {
+                    let oid = c.oid.clone();
+                    if !self.scm.commit_picks.remove(&oid) {
+                        self.scm.commit_picks.insert(oid);
+                    }
+                } else {
+                    self.open_commit(ci, true);
+                }
             }
             Some(PRow::Pick) => {
                 self.scm.at = i;
@@ -1082,6 +1344,200 @@ mod tests {
         assert!(v.rows[v.at].head && v.rows[v.at].file == i);
     }
 
+    /// A view of fixture repo W (read now), the panel with the keys.
+    fn commit_view(w: &std::path::Path, id: &str) -> View {
+        let mut v = View::new(id, w);
+        v.marks.clear();
+        v.comments.clear();
+        v.stash.clear();
+        v.changes = super::super::load(w).unwrap();
+        v.loaded = Some(std::time::Instant::now());
+        v.scm.focus = true;
+        v
+    }
+
+    fn press(v: &mut View, c: KeyCode) -> Act {
+        v.key(KeyEvent::new(c, KeyModifiers::NONE))
+    }
+
+    /// The panel's cursor on the commit with SUBJECT.
+    fn on_commit(v: &mut View, subject: &str) {
+        draw(v, 140, 40);
+        v.scm.at = v.scm.rows.iter().position(|r| matches!(r, PRow::Commit(i) if v.changes.commits.list[*i].subject == subject)).unwrap();
+    }
+
+    /// The git step on its way ends: its note.
+    fn wait_op(v: &mut View) -> String {
+        for _ in 0..300 {
+            if v.poll_op() {
+                return v.take_note().unwrap_or_default();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("git step: 0 end");
+    }
+
+    /// The read on its way ends.
+    fn wait_read(v: &mut View) {
+        for _ in 0..300 {
+            if v.loading.is_none() || v.poll() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn the_commits_section_lists_unpushed_then_pushed_space_picks_brackets_jump() {
+        use super::super::commits::fixture::*;
+        let w = repo("panel");
+        sh(&w, "echo draft > x.txt");
+        let mut v = commit_view(&w, "commits-panel-1");
+
+        let all = draw(&mut v, 140, 40).join("\n");
+
+        assert!(all.contains("▾ COMMITS  4") && all.contains("▾ UNPUSHED") && all.contains("▾ PUSHED"), "{all}");
+        let s = draw(&mut v, 140, 40);
+        let row = |pat: &str| s.iter().position(|l| l.contains(pat)).unwrap_or_else(|| panic!("{pat}"));
+        assert!(row("UNPUSHED") < row("c4 subject") && row("c4 subject") < row("c3 subject") && row("c3 subject") < row("▾ PUSHED") && row("▾ PUSHED") < row("c2 subject"));
+        assert!(s[row("c4 subject")].contains("● ") && s[row("c2 subject")].contains("○ "), "{all}");
+
+        // space: an unpushed commit picked, a pushed one refused
+        on_commit(&mut v, "c4 subject");
+        press(&mut v, KeyCode::Char(' '));
+        assert_eq!(v.scm.commit_picks.len(), 1);
+        assert!(v.hints().contains("u: uncommit"), "the cursor on c3: commit keys");
+
+        on_commit(&mut v, "c2 subject");
+        assert!(matches!(press(&mut v, KeyCode::Char(' ')), Act::Toast(t) if t.contains("pushed")));
+        assert_eq!(v.scm.commit_picks.len(), 1);
+
+        // [ ]: section labels; esc: 0 picks
+        press(&mut v, KeyCode::Char('['));
+        assert_eq!(v.scm.rows[v.scm.at], PRow::Section(Sec::Commits, 4));
+        press(&mut v, KeyCode::Char('['));
+        assert_eq!(v.scm.rows[v.scm.at], PRow::Section(Sec::Stash, 0));
+        press(&mut v, KeyCode::Char(']'));
+        assert_eq!(v.scm.rows[v.scm.at], PRow::Section(Sec::Commits, 4));
+        assert!(v.takes_esc());
+        press(&mut v, KeyCode::Esc);
+        assert!(v.scm.commit_picks.is_empty());
+        drop(&w);
+    }
+
+    #[test]
+    fn enter_on_a_commit_shows_its_files_read_only_esc_brings_the_changes_back() {
+        use super::super::commits::fixture::*;
+        let w = repo("peek");
+        sh(&w, "echo draft > x.txt");
+        let mut v = commit_view(&w, "commits-peek-1");
+        on_commit(&mut v, "c3 subject");
+
+        press(&mut v, KeyCode::Enter);
+        if let Some(p) = v.peek.as_mut() {
+            wait_read(p);
+        }
+        let s = draw(&mut v, 140, 40);
+        let all = s.join("\n");
+        let review: String = s.iter().map(|l| l.chars().skip(36).collect::<String>()).collect::<Vec<_>>().join("\n");
+
+        assert!(!v.scm.focus, "the keys to the review");
+        assert!(review.contains("◆ ") && review.contains("c3 subject") && review.contains("read only"), "{all}");
+        assert!(review.contains("c3.txt") && !review.contains("x.txt"), "the commit's files only: {all}");
+        assert!(v.hints().contains("read only"));
+
+        // c, v, s, space: refused; 0 comments / marks
+        for c in ['c', 'v', 's', ' ', 'a'] {
+            assert!(matches!(press(&mut v, KeyCode::Char(c)), Act::Toast(t) if t.contains("read only")), "{c}");
+        }
+        assert!(v.peek.as_ref().is_some_and(|p| p.comments.is_empty() && p.marks.is_empty() && p.modal.is_none()));
+
+        // j k move in the commit's diff; esc: the changes back
+        press(&mut v, KeyCode::Char('j'));
+        assert!(v.takes_esc());
+        press(&mut v, KeyCode::Esc);
+        assert!(v.peek.is_none());
+        let all = draw(&mut v, 140, 40).join("\n");
+        assert!(all.contains("x.txt") && !all.contains("read only"), "{all}");
+
+        // → on a commit: shown, the keys stay on the panel
+        on_commit(&mut v, "c2 subject");
+        v.scm.focus = true;
+        press(&mut v, KeyCode::Right);
+        assert!(v.peek.is_some() && v.scm.focus);
+        assert!(v.peeked() == Some(v.changes.commits.list[2].oid.as_str()));
+        drop(&w);
+    }
+
+    #[test]
+    fn u_asks_then_uncommits_the_picked_commit_its_message_goes_to_the_box() {
+        use super::super::commits::fixture::*;
+        let w = repo("uncommit");
+        let mut v = commit_view(&w, "commits-uncommit-1");
+        on_commit(&mut v, "c4 subject");
+        let before = oid(&w, "HEAD");
+
+        press(&mut v, KeyCode::Char('u'));
+        let all = draw(&mut v, 140, 40).join("\n");
+
+        assert!(all.contains("uncommit 1 commit? files stay") && all.contains("c4 subject"), "{all}");
+        assert!(v.op.is_none(), "a question first");
+
+        // n: 0 uncommit; u again, y: it runs
+        press(&mut v, KeyCode::Char('n'));
+        assert!(v.modal.is_none() && v.op.is_none());
+        assert_eq!(oid(&w, "HEAD"), before);
+
+        press(&mut v, KeyCode::Char('u'));
+        press(&mut v, KeyCode::Char('y'));
+        let note = wait_op(&mut v);
+
+        assert!(note.contains("uncommitted 1 commit"), "{note}");
+        assert_eq!(oid(&w, "HEAD"), oid(&w, &format!("{before}^")));
+        assert!(v.scm.msg.text().contains("c4 subject") && v.scm.msg.text().contains("c4 body"));
+
+        // a pushed commit: 0 question
+        wait_read(&mut v);
+        on_commit(&mut v, "c2 subject");
+        assert!(matches!(press(&mut v, KeyCode::Char('u')), Act::Toast(t) if t.contains("pushed")));
+        assert!(v.modal.is_none());
+        drop(&w);
+    }
+
+    #[test]
+    fn the_ship_menu_pushes_up_to_the_picked_commit_after_a_question() {
+        use super::super::commits::fixture::*;
+        let w = repo("shipto");
+        let mut v = commit_view(&w, "commits-shipto-1");
+        let c3 = oid(&w, "HEAD^");
+
+        // 0 picks: the ship menu as before
+        press(&mut v, KeyCode::Char('S'));
+        assert!(!draw(&mut v, 140, 40).join("\n").contains("push up to"));
+        press(&mut v, KeyCode::Esc);
+
+        on_commit(&mut v, "c3 subject");
+        v.scm.focus = true;
+        press(&mut v, KeyCode::Char(' '));
+        press(&mut v, KeyCode::Char('S'));
+        let all = draw(&mut v, 140, 40).join("\n");
+        assert!(all.contains("push up to") && all.contains("1 commit"), "{all}");
+
+        // the row: the question lists the commits, 0 push yet
+        press(&mut v, KeyCode::Char('j'));
+        press(&mut v, KeyCode::Enter);
+        let all = draw(&mut v, 140, 40).join("\n");
+        assert!(all.contains("push 1 commit to origin/feat?") && all.contains("1 newer stay local") && all.contains("c3 subject"), "{all}");
+        assert!(v.op.is_none());
+
+        press(&mut v, KeyCode::Char('y'));
+        let note = wait_op(&mut v);
+
+        assert!(note.contains("pushed up to"), "{note}");
+        assert_eq!(oid(&w, "origin/feat"), c3);
+        drop(&w);
+    }
+
     #[test]
     fn comments_split_into_open_and_resolved_space_picks_d_resolves() {
         let mut v = test_view();
@@ -1150,5 +1606,42 @@ mod tests {
         assert_eq!((c[0].id.as_str(), c[0].open()), ("c1", true));
         assert!(std::fs::read_to_string(crate::engine::store::thread_dir(&id).join("comments.json")).unwrap().contains("\"c1\""), "written back");
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(&id));
+    }
+
+    #[test]
+    fn changes_show_uncommitted_files_all_changes_shows_the_branch_with_comments() {
+        use super::super::commits::fixture::*;
+        let w = repo("all-changes");
+        sh(&w, "echo draft > x.txt");
+        let id = format!("commits-all-{}", std::process::id());
+        let mut v = commit_view(&w, &id);
+
+        let all = draw(&mut v, 140, 40).join("\n");
+
+        // CHANGES: the uncommitted x.txt only (c1-c4.txt: committed)
+        assert!(all.contains("▾ CHANGES  1") && !all.contains("c3.txt"), "{all}");
+        assert!(all.contains("uncommitted"), "{all}");
+
+        // the "all changes" row: the branch against origin/main, comments on, git steps off
+        let at = v.scm.rows.iter().position(|r| *r == PRow::All).unwrap();
+        v.scm.at = at;
+        press(&mut v, KeyCode::Enter);
+        if let Some(p) = v.peek.as_mut() {
+            wait_read(p);
+        }
+        let all = draw(&mut v, 140, 40).join("\n");
+        let review: String = all.lines().map(|l| l.chars().skip(36).collect::<String>()).collect::<Vec<_>>().join("\n");
+
+        assert!(review.contains("all changes against origin/main") && review.contains("c3.txt") && review.contains("x.txt"), "{review}");
+        assert!(matches!(press(&mut v, KeyCode::Char('s')), Act::Toast(t) if t.contains("all changes")));
+        assert!(v.hints().contains("c: comment"));
+        press(&mut v, KeyCode::Char('c'));
+        assert!(v.peek.as_ref().is_some_and(|p| p.modal.is_some()), "the comment modal");
+
+        press(&mut v, KeyCode::Esc);
+        press(&mut v, KeyCode::Esc);
+        assert!(v.peek.is_none());
+        let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(&id));
+        drop(&w);
     }
 }

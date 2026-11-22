@@ -1,5 +1,5 @@
-//! The changes view of a thread: the branch's changes against its base (commits since the
-//! merge-base + staged + unstaged + untracked files), 1 review box per file, ordered by what to
+//! The changes view of a thread: the uncommitted changes (staged + unstaged + untracked; the
+//! panel's "all changes": the branch against its merge-base), 1 review box per file, ordered by what to
 //! review first (schema / API → logic → config → UI → docs → tests → generated). A box marked
 //! reviewed folds; a reviewed file whose diff changed shows `updated`. Unified or side by side by
 //! the room. Marks: `<thread dir>/review.json` (path → hash of the file's diff).
@@ -21,6 +21,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::theme;
 
+pub mod commits;
 mod patch;
 mod scm;
 pub mod stash;
@@ -33,6 +34,8 @@ const MAX_UNTRACKED: usize = 300;
 const MAX_FILE: u64 = 512 * 1024;
 /// The view re-reads git this often while it is open.
 const REFRESH: Duration = Duration::from_secs(4);
+/// Git's empty tree: the base of a branch with 0 commits.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -271,7 +274,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["-c", "core.quotePath=false"])
+        .args(["-c", "core.quotePath=false", "-c", "log.showSignature=false"])
         .args(args)
         .stdin(Stdio::null())
         .output()
@@ -339,15 +342,39 @@ pub struct Changes {
     /// Commits ahead of / behind the base.
     pub ahead: usize,
     pub behind: usize,
+    /// The branch's commits (the panel's COMMITS section).
+    pub commits: commits::Commits,
+}
+
+/// A rebase / merge of DIR stopped (its state dir or MERGE_HEAD exists).
+fn stopped(dir: &Path) -> bool {
+    ["rebase-merge", "rebase-apply", "MERGE_HEAD"].iter().any(|p| {
+        git(dir, &["rev-parse", "--git-path", p]).is_ok_and(|g| {
+            let g = PathBuf::from(g.trim());
+            if g.is_absolute() { g.exists() } else { dir.join(g).exists() }
+        })
+    })
 }
 
 fn z_paths(s: &str) -> Vec<String> {
     s.split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect()
 }
 
+/// The uncommitted changes of DIR (staged + unstaged + untracked, against HEAD); the base,
+/// ahead / behind and the commits as for the branch.
+#[cfg(test)]
 pub fn load(dir: &Path) -> Result<Changes, String> {
+    load_from(dir, false)
+}
+
+/// ALL: the branch's changes against its merge-base (commits + uncommitted), else the
+/// uncommitted ones (against HEAD). `rev`: the diff's base.
+fn load_from(dir: &Path, all: bool) -> Result<Changes, String> {
     git(dir, &["rev-parse", "--is-inside-work-tree"]).map_err(|_| "not a git worktree".to_string())?;
-    let (rev, label) = base(dir);
+    let (mb, label) = base(dir);
+    // an unborn branch (0 commits): against the empty tree
+    let head = if git(dir, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok() { "HEAD".to_string() } else { EMPTY_TREE.to_string() };
+    let rev = if all { mb.clone() } else { head };
     let diff = git(dir, &["diff", "-M", "--no-color", "--no-ext-diff", "-U3", &rev])?;
     let mut files = parse(&diff);
     let others = git(dir, &["ls-files", "--others", "--exclude-standard", "-z"]).unwrap_or_default();
@@ -361,11 +388,7 @@ pub fn load(dir: &Path) -> Result<Changes, String> {
     let cached = z_paths(&git(dir, &["diff", "--cached", "--name-only", "-z"]).unwrap_or_default());
     let unstaged = z_paths(&git(dir, &["diff", "--name-only", "-z"]).unwrap_or_default());
     let staged = cached.into_iter().map(|p| (p.clone(), !unstaged.contains(&p))).collect();
-    let in_progress = ["rebase-merge", "rebase-apply", "MERGE_HEAD"].iter().any(|p| git(dir, &["rev-parse", "--git-path", p]).is_ok_and(|g| {
-        let g = PathBuf::from(g.trim());
-        if g.is_absolute() { g.exists() } else { dir.join(g).exists() }
-    }));
-    let stopped = in_progress.then(|| z_paths(&git(dir, &["diff", "--name-only", "--diff-filter=U", "-z"]).unwrap_or_default()));
+    let stopped = stopped(dir).then(|| z_paths(&git(dir, &["diff", "--name-only", "--diff-filter=U", "-z"]).unwrap_or_default()));
     let (ahead, behind) = if label == "HEAD" {
         (0, 0)
     } else {
@@ -373,7 +396,8 @@ pub fn load(dir: &Path) -> Result<Changes, String> {
         let mut it = lr.split_whitespace().map(|x| x.parse::<usize>().unwrap_or(0));
         (it.next().unwrap_or(0), it.next().unwrap_or(0))
     };
-    Ok(Changes { base: label, rev, untracked: fresh, files, staged, stopped, ahead, behind })
+    let commits = commits::list(dir, &mb);
+    Ok(Changes { base: label, rev, untracked: fresh, files, staged, stopped, ahead, behind, commits })
 }
 
 /// The branch's pull request (gh): number, url, state, checks passed / failed / pending.
@@ -494,6 +518,10 @@ pub enum Op {
     /// Take the picked lines of each file out of the worktree into the stash of thread
     /// THREAD: (path, lines label, pick); the diff against REV.
     Stash { thread: String, rev: String, items: Vec<(String, String, patch::Pick)> },
+    /// Take these commits (oids) out of THREAD's history; HEAD: the HEAD they were picked on.
+    Uncommit { thread: String, head: String, picks: Vec<String> },
+    /// Push the commits up to this oid.
+    PushTo(String),
 }
 
 impl Op {
@@ -514,6 +542,8 @@ impl Op {
             Op::UnstageFiles(p) => format!("unstaged {}", files_label(p)),
             Op::StageLines(v) => format!("staged the selected lines of {}", files_label(&v.iter().map(|x| x.0.clone()).collect::<Vec<_>>())),
             Op::Stash { items, .. } => format!("stashed {}", files_label(&items.iter().map(|x| x.0.clone()).collect::<Vec<_>>())),
+            Op::Uncommit { picks, .. } => format!("uncommitted {} commit{}", picks.len(), if picks.len() == 1 { "" } else { "s" }),
+            Op::PushTo(oid) => format!("pushed up to {}", &oid[..oid.len().min(7)]),
         }
     }
 }
@@ -653,6 +683,9 @@ pub fn run_op(dir: &Path, op: &Op) -> Result<String, String> {
             if n == 0 { Err("0 unstaged changes in the selected lines".into()) } else { Ok(String::new()) }
         }
         Op::Stash { thread, rev, items } => stash_items(dir, thread, rev, items).map(|_| String::new()),
+        // the note says more than the label (cascaded files, dropped commits)
+        Op::Uncommit { thread, head, picks } => return commits::uncommit(dir, picks, head, thread).map(|u| u.note()),
+        Op::PushTo(oid) => commits::push_to(dir, oid),
         Op::Stage(p) => git(dir, &["add", "-A", "--", p]),
         Op::Unstage(p) => git(dir, &["restore", "--staged", "--", p]).or_else(|_| git(dir, &["rm", "--cached", "-q", "--", p])),
         Op::Commit(msg) => {
@@ -1401,8 +1434,20 @@ pub struct View {
     note: Option<String>,
     /// A pull request's diff (the merge tab): read only, 0 git steps.
     pub pr_src: Option<PrSrc>,
+    /// A commit view: this commit's diff, read only (0 comments, marks, git steps).
+    commit_src: Option<commits::Commit>,
+    /// The commit the panel's cursor showed (enter on a commit): it takes the review's place.
+    peek: Option<Box<View>>,
     /// The comments in the file view: 1 row each (C), else their whole text.
     comments_folded: bool,
+    /// The branch's changes against its merge-base (the panel's "all changes" row): comments and
+    /// reviewed marks (own file), 0 git steps. Else the uncommitted changes.
+    all: bool,
+    /// Where the reviewed marks live (`<id>~all` for the branch view: its diffs differ).
+    marks_id: String,
+    /// The commit message box gets this after the git step on its way ends well (an uncommit:
+    /// the messages of the commits taken out).
+    prefill: Option<String>,
 }
 
 /// The pull request of a PR-mode view: its commits (the panel's picker), the picked 1 (None:
@@ -1448,6 +1493,14 @@ fn load_pr(src: &PrSrc) -> Result<Changes, String> {
         None => src.base.clone(),
     };
     Ok(Changes { base, files, ..Default::default() })
+}
+
+/// The diff of commit C of DIR (against its 1st parent; a root commit: all new) as changes.
+fn load_commit(dir: &Path, c: &commits::Commit) -> Result<Changes, String> {
+    let text = git(dir, &["show", "--format=", "--diff-merges=first-parent", "-M", "--no-color", "--no-ext-diff", "-U3", &c.oid])?;
+    let mut files = parse(&text);
+    order(&mut files);
+    Ok(Changes { base: format!("{}^", c.short), rev: c.oid.clone(), files, ..Default::default() })
 }
 
 impl View {
@@ -1563,8 +1616,49 @@ impl View {
             op: None,
             note: None,
             pr_src: None,
+            commit_src: None,
+            peek: None,
             comments_folded: false,
+            all: false,
+            marks_id: id.to_string(),
+            prefill: None,
         }
+    }
+
+    /// The read-only view of commit C of DIR's branch (the review box of the panel's commit).
+    pub(super) fn for_commit(dir: &Path, c: &commits::Commit) -> View {
+        let mut v = View::new(&format!("commit~{}", c.short), dir);
+        v.marks.clear();
+        v.comments.clear();
+        v.stash.clear();
+        v.review = None;
+        v.review_model = None;
+        v.classifier = None;
+        v.rank = None;
+        v.scm.shown = false;
+        v.commit_src = Some(c.clone());
+        v
+    }
+
+    /// The branch's changes against its merge-base of thread ID (the panel's "all changes" row):
+    /// the thread's comments, its own reviewed marks, 0 git steps.
+    pub(super) fn for_branch(id: &str, dir: &Path) -> View {
+        let mut v = View::new(id, dir);
+        v.all = true;
+        v.marks_id = format!("{id}~all");
+        v.marks = read_marks(&v.marks_id);
+        v.stash.clear();
+        v.review = None;
+        v.review_model = None;
+        v.classifier = None;
+        v.rank = None;
+        v.scm.shown = false;
+        v
+    }
+
+    /// The commit the review shows now (enter on a commit in the panel).
+    pub(super) fn peeked(&self) -> Option<&str> {
+        self.peek.as_ref().and_then(|p| p.commit_src.as_ref()).map(|c| c.oid.as_str())
     }
 
     /// The files in the model's order (its groups first, the rest after in path-rule order);
@@ -1633,6 +1727,18 @@ impl View {
     fn summary(&self) -> Line<'static> {
         let (add, del) = self.changes.files.iter().fold((0, 0), |(a, d), f| (a + f.add, d + f.del));
         let (done, all) = self.progress();
+        if let Some(c) = &self.commit_src {
+            let state = if c.pushed { "pushed" } else { "unpushed" };
+            return Line::from(vec![
+                Span::styled(format!(" ◆ {} ", c.short), theme::accent_bold()),
+                Span::styled(format!("{} · ", crate::nav::fit(&c.subject, 60)), theme::text()),
+                Span::styled(format!("{all} files · "), theme::muted()),
+                Span::styled(format!("+{add}"), Style::default().fg(theme::pal().ok)),
+                Span::styled(format!(" −{del}"), Style::default().fg(theme::pal().danger)),
+                Span::styled(format!(" · {state} · read only · esc: back"), theme::muted()),
+            ]);
+        }
+
         let order = if self.ranking.is_some() {
             "classifying…".to_string()
         } else if let Some(e) = &self.rank_error {
@@ -1646,9 +1752,14 @@ impl View {
             Span::styled(format!(" {all} files · "), theme::muted()),
             Span::styled(format!("+{add}"), Style::default().fg(theme::pal().ok)),
             Span::styled(format!(" −{del}"), Style::default().fg(theme::pal().danger)),
-            Span::styled(format!(" · {done}/{all} reviewed · against {} · {order}", self.changes.base), theme::muted()),
+            Span::styled(format!(" · {done}/{all} reviewed · {} · {order}", self.against()), theme::muted()),
             Span::styled(self.git_state(), theme::accent()),
         ])
+    }
+
+    /// What the diff is against: `uncommitted`, `all changes against origin/main · esc: back`.
+    fn against(&self) -> String {
+        if self.all { format!("all changes against {} · esc: back", self.changes.base) } else { "uncommitted".into() }
     }
 
     /// ` · 2 staged · ↑1 ↓3 · git…`: the git side of the summary.
@@ -1726,6 +1837,15 @@ impl View {
         if self.pr_src.is_some() {
             return Act::Toast("a pull request's diff: read only (the merge tab's prompt tells the agents)".into());
         }
+
+        if let Some(c) = &self.commit_src {
+            return Act::Toast(format!("commit {}: read only", c.short));
+        }
+
+        if self.all {
+            return Act::Toast("all changes: 0 git steps (esc: the uncommitted changes)".into());
+        }
+
         if self.op.is_some() {
             return Act::Toast("git: 1 step at a time".into());
         }
@@ -1760,7 +1880,7 @@ impl View {
             changed = self.pr != p;
             self.pr = p;
         }
-        let on_branch = !cfg!(test) && self.pr_src.is_none() && self.changes.base != "HEAD" && !self.changes.base.is_empty();
+        let on_branch = !cfg!(test) && self.pr_src.is_none() && self.commit_src.is_none() && self.changes.base != "HEAD" && !self.changes.base.is_empty();
         if on_branch && self.pr_read.is_none() && self.pr_at.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
             self.pr_at = Some(Instant::now());
             let (tx, rx) = mpsc::channel();
@@ -1787,6 +1907,14 @@ impl View {
         let Some(rx) = &self.op else { return false };
         let Ok(r) = rx.try_recv() else { return false };
         self.op = None;
+        let prefill = self.prefill.take();
+        if r.is_ok()
+            && let Some(m) = prefill
+            && self.scm.msg.text().trim().is_empty()
+        {
+            self.scm.msg.set_text(&m);
+        }
+
         self.note = Some(match r {
             Ok(s) => format!("git: {s}"),
             Err(e) => format!("git: {e}"),
@@ -1853,7 +1981,21 @@ impl View {
         if !now && self.pr_src.is_some() && (self.loaded.is_some() || self.error.is_some()) {
             return;
         }
+        // a commit: its diff never changes, 1 read
+        if !now && self.commit_src.is_some() && (self.loaded.is_some() || self.error.is_some()) {
+            return;
+        }
+
         let (tx, rx) = mpsc::channel();
+        if let Some(c) = self.commit_src.clone() {
+            let dir = self.dir.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(load_commit(&dir, &c));
+            });
+            self.loading = Some(rx);
+            return;
+        }
+
         if let Some(src) = self.pr_src.clone() {
             std::thread::spawn(move || {
                 let _ = tx.send(load_pr(&src));
@@ -1861,9 +2003,9 @@ impl View {
             self.loading = Some(rx);
             return;
         }
-        let dir = self.dir.clone();
+        let (dir, all) = (self.dir.clone(), self.all);
         std::thread::spawn(move || {
-            let _ = tx.send(load(&dir));
+            let _ = tx.send(load_from(&dir, all));
         });
         self.loading = Some(rx);
     }
@@ -1884,12 +2026,13 @@ impl View {
                     v
                 };
                 if hashes(&c.files) == hashes(&self.changes.files) && self.error.is_none() {
-                    let git = (&c.base, &c.staged, &c.stopped, c.ahead, c.behind);
-                    let changed = git != (&self.changes.base, &self.changes.staged, &self.changes.stopped, self.changes.ahead, self.changes.behind);
+                    let git = (&c.base, &c.staged, &c.stopped, c.ahead, c.behind, &c.commits);
+                    let changed = git != (&self.changes.base, &self.changes.staged, &self.changes.stopped, self.changes.ahead, self.changes.behind, &self.changes.commits);
                     if changed {
                         self.built = self.built.filter(|_| c.stopped.is_some() == self.changes.stopped.is_some());
                         let files = std::mem::take(&mut self.changes.files);
                         self.changes = Changes { files, ..c };
+                        self.sync_commits();
                     }
                     return changed;
                 }
@@ -1903,6 +2046,7 @@ impl View {
                     self.paints.borrow_mut().clear();
                 }
                 self.changes = c;
+                self.sync_commits();
                 self.error = None;
                 self.built = None;
                 self.apply_rank(false);
@@ -2352,6 +2496,9 @@ impl View {
     /// The prompt took the context (picked comments): the picks clear, 1 prompt each.
     pub fn took_context(&mut self) {
         self.scm.comment_picks.clear();
+        if let Some(p) = self.peek.as_mut() {
+            p.scm.comment_picks.clear();
+        }
     }
 
     /// Comment CI open → resolved by the owner, resolved → open.
@@ -2545,6 +2692,9 @@ impl View {
         }
 
         let mut v = vec![row(Ship::Push, "push".into(), format!("{} ahead of {}", c.ahead, c.base), true)];
+        if let Some((top, n)) = self.push_pick() {
+            v.push(row(Ship::PushTo, format!("push up to {} (picked)", top.short), format!("{n} commit{}", if n == 1 { "" } else { "s" }), false));
+        }
         if c.base != "HEAD" {
             v.push(row(Ship::Update, format!("fetch + rebase on {}", c.base), format!("{} behind", c.behind), true));
         }
@@ -2564,6 +2714,7 @@ impl View {
     fn ship(&mut self, s: Ship) -> Act {
         match s {
             Ship::Push => self.start_op(Op::Push),
+            Ship::PushTo => self.ask_push_to(),
             Ship::Update => self.start_op(Op::Update(self.changes.base.clone())),
             Ship::Continue => self.start_op(Op::Continue),
             Ship::Abort => self.start_op(Op::Abort),
@@ -2639,11 +2790,23 @@ impl View {
         if !yes {
             return Act::None;
         }
+
+        match then {
+            Then::Uncommit(picks, head) => return self.start_uncommit(picks, head),
+            Then::PushTo(oid) => {
+                self.scm.commit_picks.clear();
+                self.pr_at = None;
+                return self.start_op(Op::PushTo(oid));
+            }
+            _ => {}
+        }
+
         self.stash = stash::read(&self.id);
         let n = self.stash.len();
         match then {
             Then::DropStash(id) => self.stash.retain(|e| e.id != id),
             Then::ClearStash => self.stash.clear(),
+            Then::Uncommit(..) | Then::PushTo(_) => {}
         }
         stash::write(&self.id, &self.stash);
         self.stash_at = stash::stamp(&self.id);
@@ -2752,15 +2915,23 @@ impl View {
                 self.modal_btns.push((Rect { x: hint.x + save.len() as u16 + 1, width: cancel.len() as u16, ..hint }, false));
             }
             Modal::Confirm { question, yes, .. } => {
+                // the question's 1st line, then its list (commits: 1 per line), muted
+                let lines: Vec<&str> = question.lines().collect();
+                let n = lines.len().max(1) as u16;
                 let w = w.min(70);
                 let x = area.x + (area.width.saturating_sub(w)) / 2;
-                let r = Rect { x, y: area.y + area.height / 3, width: w, height: 5.min(area.height) };
+                let h = (n + 4).min(area.height);
+                let r = Rect { x, y: area.y + (area.height / 3).min(area.height.saturating_sub(h)), width: w, height: h };
                 f.render_widget(Clear, r);
                 f.render_widget(Block::bordered().border_style(theme::accent()).style(theme::text()), r);
-                let inner = Rect { x: r.x + 2, y: r.y + 1, width: w.saturating_sub(4), height: 3 };
-                f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(question, usize::from(inner.width)), theme::text())), Rect { height: 1, ..inner });
+                let inner = Rect { x: r.x + 2, y: r.y + 1, width: w.saturating_sub(4), height: h.saturating_sub(2) };
+                for (i, l) in lines.iter().enumerate().take(usize::from(inner.height.saturating_sub(2))) {
+                    let st = if i == 0 { theme::text() } else { theme::muted() };
+                    f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(l, usize::from(inner.width)), st)), Rect { y: inner.y + i as u16, height: 1, ..inner });
+                }
+
                 let (ys, ns) = if *yes { (theme::pill(), theme::muted()) } else { (theme::muted(), theme::pill()) };
-                let row = Rect { y: inner.y + 2, height: 1, ..inner };
+                let row = Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner };
                 f.render_widget(Paragraph::new(Line::from(vec![Span::styled(" yes ", ys), Span::raw("  "), Span::styled(" no ", ns), Span::styled("   y / n · ←→ · enter", theme::muted())])), row);
                 self.modal_btns.push((Rect { width: 5, ..row }, true));
                 self.modal_btns.push((Rect { x: row.x + 7, width: 4, ..row }, false));
@@ -2840,6 +3011,12 @@ impl View {
                 s.push_str(&format!("- {} [{}, {state}] `{}:{}` by {}: {}\n", c.id, c.level.label(), c.path, c.at(), c.author(), c.text.replace('\n', " / ")));
             }
         }
+
+        if let Some(p) = self.peek.as_ref()
+            && let Some(more) = p.context()
+        {
+            s.push_str(more.trim_start_matches("[codehead: context from the changes view]\n"));
+        }
         (!s.is_empty()).then(|| format!("[codehead: context from the changes view]\n{}", s.trim_end()))
     }
 
@@ -2856,18 +3033,24 @@ impl View {
 
     /// The cursor on the 1st row of the diff, 0 panel / modal / filter: ↑ leaves the view.
     pub fn at_top(&self) -> bool {
+        if let Some(p) = self.peek.as_ref().filter(|_| !self.scm.focus && self.modal.is_none()) {
+            return p.at_top();
+        }
         self.at == 0 && !self.scm.focus && self.modal.is_none() && !self.filtering
     }
 
     /// The view has the letters: the filter, a modal, the commit message.
     pub fn typing(&self) -> bool {
-        self.filtering || self.modal.is_some() || (self.scm.focus && self.scm.msg_focus)
+        let peek = !self.scm.focus && self.peek.as_ref().is_some_and(|p| p.typing());
+        peek || self.filtering || self.modal.is_some() || (self.scm.focus && self.scm.msg_focus)
     }
 
     /// Esc is the view's: it closes a modal, leaves the filter or the message, clears the
-    /// filter, the selection or the panel's picks.
+    /// filter, the selection or the panel's picks, closes the commit in the review's place.
     pub fn takes_esc(&self) -> bool {
-        self.typing() || !self.filter.is_empty() || !self.sel.is_empty() || (self.scm.focus && !self.scm.picked.is_empty()) || !self.scm.comment_picks.is_empty() || self.scm.picking()
+        let picks = (self.scm.focus && (!self.scm.picked.is_empty() || !self.scm.commit_picks.is_empty())) || !self.scm.comment_picks.is_empty();
+        let peek = !self.scm.focus && self.peek.is_some();
+        self.typing() || !self.filter.is_empty() || !self.sel.is_empty() || picks || peek || self.scm.picking()
     }
 
     /// The keys of the footer now.
@@ -2878,6 +3061,20 @@ impl View {
             Some(Modal::Ship { .. }) => return "↑↓ move · enter: run (outward: enter enter) · esc: close ",
             None => {}
         }
+        if let Some(p) = self.peek.as_ref().filter(|_| !self.scm.focus) {
+            return if p.filtering {
+                "type to filter · enter: 1st hit · esc: clear "
+            } else if p.all {
+                "all changes · j k: file · c: comment · d: resolve · C: comments · space: pick · v: reviewed · esc: back · alt: panel "
+            } else {
+                "commit, read only · j k: file · ←→: fold · f: filter · w: side by side · esc: back · alt: panel "
+            };
+        }
+
+        if self.scm.focus && !self.scm.msg_focus && self.scm.on_commit() {
+            return "j k · space: pick · enter: show · u: uncommit · S: ship (push picked) · [ ]: sections · esc: 0 picks ";
+        }
+
         if self.pr_src.is_some() {
             return if self.scm.focus {
                 "j k · enter on the commit: pick a commit · →: open the file · e: IDE · alt: diff "
@@ -2890,7 +3087,7 @@ impl View {
         if self.scm.focus && self.scm.msg_focus {
             "commit message · ctrl+⏎: commit the staged files · ctrl+g: draft by model · esc: back "
         } else if self.scm.focus {
-            "j k · space: pick · e: IDE · s: stage / unstage · p: stash · →: open · x: remove · enter: restore · S: ship · ctrl+b: review "
+            "j k · [ ]: sections · space: pick · e: IDE · s: stage / unstage · p: stash · →: open · x: remove · enter: restore · S: ship · ctrl+b: review "
         } else if self.filtering {
             "type to filter · enter: 1st hit · esc: clear "
         } else {
@@ -3056,6 +3253,17 @@ impl View {
             self.scm.rect = Rect::default();
             (Rect::default(), area)
         };
+
+        // the panel's commit in the review's place
+        if let Some(p) = self.peek.as_mut() {
+            p.draw_now(f, area);
+            if panel {
+                self.draw_panel(f, panel_rect);
+            }
+            self.draw_modal(f, full);
+            return;
+        }
+
         // the summary row and the filter row on top (room permitting), the rows below
         let bars = area.height >= 6;
         self.summary_rect = if bars { Rect { height: 1, ..area } } else { Rect::default() };
@@ -3066,7 +3274,7 @@ impl View {
         let msg = if let Some(e) = &self.error {
             Some(format!("  changes: {e}"))
         } else if self.changes.files.is_empty() {
-            Some(if self.loaded.is_none() { "  reading changes…".to_string() } else { format!("  0 changes against {}", self.changes.base) })
+            Some(if self.loaded.is_none() { "  reading changes…".to_string() } else { format!("  0 changes · {}", self.against()) })
         } else {
             None
         };
@@ -3238,6 +3446,31 @@ impl View {
         if self.scm.focus {
             return self.panel_key(k);
         }
+
+        // the panel's commit in the review's place: the keys are its (esc: back to the changes)
+        if let Some(p) = self.peek.as_mut() {
+            if k.code == KeyCode::Esc && !p.takes_esc() {
+                self.peek = None;
+                return Act::None;
+            }
+            return p.key(k);
+        }
+
+        // a commit's diff: moving, folding, the filter; 0 IDE, comment, mark, git step
+        if let Some(c) = &self.commit_src
+            && !read_only_key(k)
+        {
+            return Act::Toast(format!("commit {}: read only · esc: back", c.short));
+        }
+
+        // the branch's changes: comments and marks, 0 git step (stage, stash, ship: the panel's
+        // uncommitted changes), 0 reviewer / classifier (their files are the uncommitted view's)
+        if self.all
+            && matches!(k.code, KeyCode::Char('s' | 'p' | 'a' | 'u' | 'm' | 'S' | 'V' | 'R'))
+        {
+            return Act::Toast("all changes: comments only · git steps on the uncommitted changes (esc)".into());
+        }
+
         let last = self.rows.len().saturating_sub(1);
         match k.code {
             // ↑↓: 1 line; j / ctrl+↑: 1 file up, k / ctrl+↓: 1 file down (the owner's pick)
@@ -3444,7 +3677,7 @@ impl View {
             self.marks.remove(&f.path);
         }
         self.toggled.remove(&f.path);
-        write_marks(&self.id, &self.marks);
+        write_marks(&self.marks_id, &self.marks);
         self.rebuild_on_file();
         if on {
             self.jump(true, |r| r.head);
@@ -3469,6 +3702,14 @@ impl View {
         let at = ratatui::layout::Position { x: m.column, y: m.row };
         if self.drag.is_none() && (self.scm.rect.contains(at) || self.scm.picking()) {
             return self.panel_mouse(m);
+        }
+
+        // the panel's commit in the review's place: the review's mouse is its
+        if let Some(p) = self.peek.as_mut() {
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                self.scm.focus = false;
+            }
+            return p.mouse(m);
         }
         let click = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
         // the filter input: its own mouse (cursor, selection + copy); a click on the row opens it
@@ -3559,6 +3800,18 @@ impl View {
 }
 
 /// The comment modal's text input with TEXT.
+/// A key of a commit view (read only): it moves, folds, filters, reads again.
+fn read_only_key(k: KeyEvent) -> bool {
+    let plain = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+    match k.code {
+        KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End | KeyCode::Esc => true,
+        KeyCode::Enter => plain,
+        // 0 o / e: the worktree's file may differ from the commit's (other lines, deleted)
+        KeyCode::Char(c) => matches!(c, 'j' | 'k' | 'n' | 'N' | 'g' | 'G' | 'w' | 'f' | '/' | 't' | 'r'),
+        _ => false,
+    }
+}
+
 fn comment_area(text: &str) -> Box<crate::textarea::TextArea> {
     let mut t = crate::textarea::TextArea::new(false, "the comment · ctrl+⏎ save");
     t.style = Some(theme::panel());
@@ -3593,6 +3846,8 @@ enum Modal {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ship {
     Push,
+    /// Push up to the newest picked commit (a question lists the commits first).
+    PushTo,
     Update,
     OpenPr,
     Merge,
@@ -3623,6 +3878,10 @@ enum QLine {
 enum Then {
     DropStash(String),
     ClearStash,
+    /// Uncommit these commits (oids); HEAD when the question asked (an agent commit after it: 0 uncommit).
+    Uncommit(Vec<String>, String),
+    /// Push up to this commit.
+    PushTo(String),
 }
 
 /// The patch pick of KEYS (selected lines) in F: added lines by number, removed lines by (the

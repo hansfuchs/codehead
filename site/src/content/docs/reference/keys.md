@@ -95,8 +95,8 @@ by file name and diff content, best hit first) stay on top; a box's head (and it
 under them until the box scrolls past.
 
 The source control panel on the left (`ctrl+b`, from 90 columns): the commit message on top,
-then staged, changes (by level, `U` `A` `M` `D` `R` per file), comments (open by severity,
-resolved) and the stash.
+then staged, changes (the uncommitted files, by level, `U` `A` `M` `D` `R` per file), comments
+(open by severity, resolved), the stash and the commits.
 Labels out of view stick to the top / bottom edge; a click on one scrolls to it. Narrow (0 chat on
 the left): the chat sits above the prompt (`t` or a click on its title row folds it). A message
 from the changes view takes the selected lines and the picked comments (`space` on a comment) along,
@@ -112,6 +112,19 @@ The stash: lines or files out of the worktree, each with the patch that puts the
 stash). The agent that wrote the lines names the entry (MCP tool `stash_name`). `↺` restore: the
 agent applies the patch at the lines' place (`git apply`, else `git apply -C1`) and asks you on any conflict (`stash_restored` ends
 the entry). `✕` remove one, `✕ clear` all (both ask first).
+
+The commits section at the bottom of the panel: "all changes" (a branch: its changes against
+`origin/<default>`, commits + uncommitted, in the review with comments and reviewed marks; 0 git
+step), then the branch's commits, unpushed first (`●`, not on
+the branch of the same name: `@{u}` when it has that name, else `origin/<branch>`), then pushed (`○`), newest first, the 50 newest at
+most. `enter` / click on a commit: its files in the review (`◆`), read only: moving, folding, the
+filter, `w`; 0 IDE (the worktree file may differ), comment, reviewed mark or git step; `esc` brings the changes back. `u`
+uncommits the picked unpushed commits (else the commit under the cursor): they leave the history,
+the later commits get replayed on top, the files stay as they are (their changes show uncommitted,
+the staged changes stay staged), the commits' messages go into the empty commit message box. A
+later commit's change that conflicts with the change taken out leaves the history too (the toast
+names each file). Pushed commits, merge commits in the range and a stopped rebase: 0 uncommit.
+The old HEAD stays at `refs/codehead/uncommit/<thread>` (with a reflog: older uncommits too); `git reset --mixed` on it undoes it (the staged changes go unstaged).
 
 | Key | Action |
 | --- | --- |
@@ -143,7 +156,7 @@ the entry). `✕` remove one, `✕ clear` all (both ask first).
 | `ctrl+w`, `shift+←→` | the next checkout / the repo tabs (several checkouts) |
 | `alt` (alone: press, release) | the keys to the panel / the review (terminals with the kitty keyboard protocol) |
 | `t` | the chat above the prompt: fold / open |
-| `S` | the ship menu (review and panel): the steps valid now, each with its state; `↑↓` `j` `k`, `enter` runs, an outward step asks first (`enter enter`), `esc` closes. Steps: push (`git push -u origin HEAD`, `n ahead`) · fetch + rebase on the base (`origin/<default>`, `n behind`) · push + open the pull request (`gh pr create --fill`) · merge the PR when its checks pass (`gh pr merge --squash --auto`, `✓ ✗ ●`) · CI failed: the latest failed run's log (last 150 lines) to the agents of your last message. A rebase stopped on conflicts: only its steps: the agents resolve · continue · abort |
+| `S` | the ship menu (review and panel): the steps valid now, each with its state; `↑↓` `j` `k`, `enter` runs, an outward step asks first (`enter enter`), `esc` closes. Steps: push (`git push -u origin HEAD`, `n ahead`) · push up to the newest picked commit (its older unpushed commits go along; a question lists them first) · fetch + rebase on the base (`origin/<default>`, `n behind`) · push + open the pull request (`gh pr create --fill`) · merge the PR when its checks pass (`gh pr merge --squash --auto`, `✓ ✗ ●`) · CI failed: the latest failed run's log (last 150 lines) to the agents of your last message. A rebase stopped on conflicts: only its steps: the agents resolve · continue · abort |
 | `V` | the reviewer (setting `review`) reads the diff: findings show under their line (`⚠ severity · title`) |
 | `y` | on a finding: into the comment batch (`ctrl+enter` sends it) |
 | `i`, `tab` | the prompt gets the keys; `esc` / `tab` gives them back |
@@ -153,12 +166,14 @@ In the panel:
 | Key | Action |
 | --- | --- |
 | `j` / `k`, `↑` `↓` | move the cursor |
-| `←` / `→` | on a label: fold / open; `←` on a row: to its label; `→` on a file / comment: jump to it |
-| `space`, `shift+click` | pick files, comments (comments: for the next prompt) |
+| `←` / `→` | on a label: fold / open; `←` on a row: to its label; `→` on a file / comment: jump to it; on a commit: show it, the keys stay |
+| `[` / `]` | the previous / next section |
+| `space`, `shift+click` | pick files, unpushed commits, comments (comments: for the next prompt) |
 | `d` | on a comment: resolved / open again |
+| `u` | uncommit the picked commits (else the commit under the cursor; asks first) |
 | `s` | stage the picked files (staged section: unstage) |
 | `p` | stash the picked files (whole) |
-| `enter` | on a comment: edit it; on a file: jump to it, the keys to the review |
+| `enter` | on a comment: edit it; on a file: jump to it, the keys to the review; on a commit: its files in the review (read only, `esc`: back) |
 | `x` | delete the comment / remove the stash entry (the stash entry asks first) |
 | `enter` (stash entry) | restore the stash entry (its agent) |
 | `X` | clear the stash (asks first) |

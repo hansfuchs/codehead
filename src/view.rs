@@ -3691,6 +3691,66 @@ mod ask_tests {
     }
 
     #[test]
+    fn the_changes_panel_shows_a_commit_read_only_and_esc_brings_the_changes_back() {
+        use crate::changes::commits::fixture;
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let w = fixture::repo("thread-view");
+        fixture::sh(&w, "echo draft > x.txt");
+        let t = store::Thread::new("commits", "task", &w, vec!["ada".into()]);
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(&t.id, &w, "commits", tx);
+        let k = |v: &mut View, c: KeyCode, m: KeyModifiers| {
+            v.key(KeyEvent::new(c, m));
+        };
+        let wait = |v: &mut View, pat: &str| -> String {
+            for _ in 0..200 {
+                let s = screen(v).join("\n");
+                if s.contains(pat) {
+                    return s;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            panic!("0 {pat}: {}", screen(v).join("\n"));
+        };
+
+        // a draft in the prompt, then the changes view, the panel with the keys
+        typed_text(&mut v, "draft");
+        k(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
+        // (a new read dissolves in over a few frames: each label waited for)
+        wait(&mut v, "UNPUSHED");
+        wait(&mut v, "COMMITS  4");
+        wait(&mut v, "PUSHED    2");
+        k(&mut v, KeyCode::Char('b'), KeyModifiers::CONTROL);
+
+        // G: the last row (the oldest pushed commit); enter: its files, read only
+        k(&mut v, KeyCode::Char('G'), KeyModifiers::NONE);
+        k(&mut v, KeyCode::Enter, KeyModifiers::NONE);
+        let all = wait(&mut v, "c1 subject · 1 files");
+
+        assert!(all.contains("c1.txt") && all.contains("◆"), "{all}");
+
+        k(&mut v, KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(!screen(&mut v).join("\n").contains("comment on"), "0 comment modal");
+
+        // esc: the changes back (x.txt), the draft still in the prompt
+        k(&mut v, KeyCode::Esc, KeyModifiers::NONE);
+        let all = screen(&mut v).join("\n");
+
+        assert!(!all.contains("c1 subject · ") && all.contains("x.txt"), "{all}");
+        assert_eq!(v.input.text(), "draft");
+        fixture::drop(&w);
+    }
+
+    /// TEXT typed into the prompt.
+    fn typed_text(v: &mut View, text: &str) {
+        for c in text.chars() {
+            v.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
+    #[test]
     fn the_flow_row_shows_a_gate_and_its_box_answers_and_switches() {
         let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut t = store::Thread::new("flow view", "task", Path::new("/tmp"), vec!["ada".into()]);
