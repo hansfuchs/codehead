@@ -22,6 +22,7 @@ mod harnesstab;
 mod gh;
 mod histsearch;
 mod home;
+mod homeinit;
 mod editor;
 mod files;
 mod flowbar;
@@ -97,6 +98,7 @@ usage: codehead                    the thread updated last (0 threads: the start
        codehead --view <thread>   thread view of a thread (id or id prefix)
        codehead --cost <thread>   cost box of a thread, full screen
        codehead --version         print the version
+       codehead home [init]       what codehead keeps in the home repo; init: move agents, flows, servers, settings there
        codehead --update          install the latest release (curl -fsSL https://codehead.sh/install | sh)
   -a  agents preselected for the new thread (default: the default agent)
   -b  branch for the new worktree (default: <prefix>/<title slug>, prefix \"task\")
@@ -110,6 +112,9 @@ config:  ~/.config/codehead.toml ($CODEHEAD_CONFIG overrides). keys, each overri
            repo   = \"~/app\"     repo of the new tab's where rows ($CODEHEAD_REPO; default: the start dir's)
            agent  = \"amon\"      default agent ($CODEHEAD_AGENT)
            prefix = \"task\"      branch prefix ($CODEHEAD_PREFIX)
+           home   = \"~/home\"    home repo ($CODEHEAD_HOME_REPO). with home/codehead/ (codehead home init): settings
+                                   there too, shared: codehead/settings.toml, this device: codehead/devices/<device>.toml
+           device = \"mbp\"       this device's name (default: the host name)
            models = \"fable,opus,sonnet,haiku\"  Claude models ($CODEHEAD_MODELS)
            messages = \"bubbles\"  thread view messages: bubbles or lines ($CODEHEAD_MESSAGES)
            thoughts = \"hidden\"  thread view thoughts: hidden, folded or open ($CODEHEAD_THOUGHTS)
@@ -510,6 +515,7 @@ fn sub() {
     match argv.first().map(String::as_str) {
         Some("host") => engine::host::run(&arg(1)),
         Some("mcp") => engine::mcp::run(),
+        Some("home") => homeinit::run(argv.get(1).map(String::as_str)),
         Some("ctl") => {
             // codehead ctl <thread> '<json command>': 1 command to the thread's host
             let c: serde_json::Value = serde_json::from_str(&arg(2)).unwrap_or_else(|e| fail(&format!("ctl: {e}"), 2));
