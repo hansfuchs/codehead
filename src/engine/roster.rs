@@ -136,15 +136,8 @@ pub fn rename(old: &str, new: &str) -> Result<(), String> {
         return Err(format!("agent {new} exists"));
     }
     std::fs::rename(dir.join(format!("{old}.toml")), dir.join(format!("{new}.toml"))).map_err(|e| e.to_string())?;
-    for t in super::store::all().into_iter().filter(|t| t.agents.iter().any(|a| a == old) || t.sessions.contains_key(old)) {
-        let _ = super::store::update(&t.id, |t| {
-            for a in t.agents.iter_mut().filter(|a| *a == old) {
-                *a = new.to_string();
-            }
-            if let Some(s) = t.sessions.remove(old) {
-                t.sessions.insert(new.to_string(), s);
-            }
-        });
+    for t in super::store::all().into_iter().filter(|t| t.agents.iter().any(|a| a == old) || t.sessions.contains_key(old) || t.flows.contains_key(old)) {
+        let _ = super::store::update(&t.id, |t| t.rename_agent(old, new));
     }
     Ok(())
 }

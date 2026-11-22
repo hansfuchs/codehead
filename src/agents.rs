@@ -367,7 +367,12 @@ pub fn delete(agent: &Agent, fallback: &Agent, uses: &[Use], _logs: &Path) -> Ve
         let left = if client::alive(&u.thread_id) {
             client::send(&u.thread_id, &serde_json::json!({"op": "leave", "agent": agent.name})).map(|_| ())
         } else {
-            store::update(&u.thread_id, |t| t.agents.retain(|a| *a != agent.name)).map(|_| ())
+            // as the host's leave: its flow goes first (the lead's old flow field too)
+            store::update(&u.thread_id, |t| {
+                t.set_flow(&agent.name, None);
+                t.agents.retain(|a| *a != agent.name);
+            })
+            .map(|_| ())
         };
         if let Err(e) = left {
             line.push(Span::styled(format!(" · leave failed: {e}"), danger));

@@ -152,6 +152,10 @@ struct View {
     slots: std::cell::RefCell<Vec<(String, Rect)>>,
     /// ctrl+q: the agents box has the keys (None: the prompt or a view).
     agents_focus: Option<AgentsFocus>,
+    /// The next sent message goes to this agent (a flow wait's reply), not the default.
+    reply_to: Option<String>,
+    /// The agents of the menu's agent rows, as the menu opened (ids stay valid after a join).
+    menu_agents: Vec<String>,
     // stream
     drawn: stream::Drawn,
     dirty: bool,
@@ -347,6 +351,8 @@ impl View {
             spawns: HashMap::new(),
             slots: std::cell::RefCell::new(Vec::new()),
             agents_focus: None,
+            reply_to: None,
+            menu_agents: Vec::new(),
             drawn: stream::Drawn::default(),
             dirty: true,
             width: 0,
@@ -708,6 +714,8 @@ impl View {
         }
         let asks = self.thread.asks.first().map(|a| a.id.clone());
         self.thread = t;
+        // the head in front: every item index moved, the search's texts again
+        self.find.reset();
         self.place_flow_ask();
         if self.thread.asks.first().map(|a| a.id.clone()) != asks {
             self.sync_ask();
@@ -986,7 +994,9 @@ impl View {
             format!("[codehead: the owner ran these shell commands since the last message]\n\n{}", std::mem::take(&mut self.shell_ctx).join("\n\n"))
         };
         if named.is_empty() {
-            self.host("send", json!({"op": "prompt", "text": text, "to": self.default_to(), "context": context}));
+            // a flow wait's reply: to that flow's agent
+            let to = self.reply_to.take().map_or_else(|| self.default_to(), |a| vec![a]);
+            self.host("send", json!({"op": "prompt", "text": text, "to": to, "context": context}));
         } else {
             self.host("send", json!({"op": "prompt", "text": text, "context": context}));
         }
@@ -1176,21 +1186,23 @@ impl View {
             crate::ask::Act::Answer(c) if c["id"].as_str().is_some_and(|id| id.starts_with("flow:")) => {
                 let option = c["option"].as_str().unwrap_or_default().to_string();
                 let empty = self.input.text().trim().is_empty();
-                // reply: the prompt's text as a message, the wait stays
+                let id = c["id"].as_str().unwrap_or_default().to_string();
+                let Some(b) = self.flowbars.iter().position(|b| b.wait_ask().is_some_and(|a| a.id == id)) else { return true };
+                // reply: the prompt's text as a message to the waiting flow's agent, the wait stays
                 if option == crate::flowbar::REPLY {
                     self.ask.focus = false;
                     if empty {
                         self.toast("reply: type the message in the prompt first (ctrl+enter sends it too)");
                     } else {
+                        self.reply_to = Some(self.flowbars[b].agent.clone());
                         self.submit();
+                        self.reply_to = None;
                     }
                     self.dirty = true;
                     return true;
                 }
 
                 // a gate's outcome back to a step: 0 send without the owner's words what to change
-                let id = c["id"].as_str().unwrap_or_default().to_string();
-                let Some(b) = self.flowbars.iter().position(|b| b.wait_ask().is_some_and(|a| a.id == id)) else { return true };
                 if empty && option != "approve" && self.flowbars[b].waits_gate() {
                     self.ask.focus = false;
                     self.toast(format!("{option}: type what to change in the prompt first, then pick it again"));
@@ -1821,6 +1833,10 @@ impl View {
         if self.pane == p {
             return;
         }
+        // the search bar shows in the chat only: another view gets the keys
+        if p != Pane::Chat {
+            self.find.focus = false;
+        }
         self.pane = p;
         self.prompt_focus = false;
         self.dirty = true;
@@ -2101,6 +2117,19 @@ impl View {
         }
     }
 
+    /// A mouse event on the flow rows: a click that opens a box closes the others. True: used.
+    fn flow_mouse(&mut self, m: MouseEvent) -> bool {
+        let Some(i) = self.flowbars.iter_mut().position(|b| b.mouse(m)) else { return false };
+        if self.flowbars[i].is_open() {
+            for (j, b) in self.flowbars.iter_mut().enumerate() {
+                if j != i {
+                    b.close();
+                }
+            }
+        }
+        true
+    }
+
     /// The flow box of AGENT open (PICK: on the flows to switch to); every other box closed.
     fn open_flow(&mut self, agent: &str, pick: bool) {
         if !self.flowbars.iter().any(|b| b.agent == agent) {
@@ -2365,7 +2394,9 @@ impl View {
     fn draw_agents_menu(&mut self, f: &mut Frame, bounds: Rect) {
         let Some(fo) = self.agents_focus.clone() else { return };
         let Some(agent) = self.order.get(fo.at).cloned() else { return };
-        let Some(anchor) = self.slots.borrow().iter().find(|(a, _)| *a == agent).map(|(_, r)| *r) else { return };
+        // the agent's card (0 drawn: a narrow or short screen): else over the prompt
+        let slot = self.slots.borrow().iter().find(|(a, _)| *a == agent).map(|(_, r)| *r);
+        let anchor = slot.unwrap_or(Rect { y: self.input_rect.y.saturating_sub(1), height: 1, width: 1, ..self.input_rect });
         if let Some((cur, off)) = fo.replace {
             let rows: Vec<crate::dropdown::Row> = self
                 .replace_candidates()
@@ -2431,6 +2462,7 @@ impl View {
         ];
         // per agent of the thread: its flow, remove it, replace it (the agents box's menu)
         let mut items = items;
+        self.menu_agents = self.order.clone();
         for (i, a) in self.order.iter().enumerate() {
             let flow = self.flowbars.iter().find(|b| b.agent == *a).and_then(|b| b.state.as_ref()).map_or_else(|| "0 flow".to_string(), |st| format!("{} · step {}", st.title, st.node + 1));
             for (k, label) in [format!("@{a}: flow ({flow})"), format!("@{a}: remove"), format!("@{a}: replace with …")].into_iter().enumerate() {
@@ -2536,7 +2568,7 @@ impl View {
             Action::Command(id) if id >= AGENT_ITEMS => {
                 self.menu = None;
                 let (i, k) = ((id - AGENT_ITEMS) / 3, (id - AGENT_ITEMS) % 3);
-                let Some(agent) = self.order.get(i).cloned() else { return false };
+                let Some(agent) = self.menu_agents.get(i).cloned().filter(|a| self.members.contains(a)) else { return false };
                 match k {
                     0 => self.open_flow(&agent, false),
                     _ => {
@@ -2607,7 +2639,7 @@ impl View {
             }
             return;
         }
-        if self.flowbars.iter_mut().any(|b| b.mouse(m))
+        if self.flow_mouse(m)
             || self.subthreads.mouse(m)
             || self.subagents.mouse(m)
             || self.monitors.mouse(m)
@@ -3754,6 +3786,7 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
     crate::nav::mark_seen_now(id);
     let mut opening = Some(opened);
     let mut roster_at = Instant::now();
+    let mut flows_at = Instant::now();
     let mut drawn = Instant::now() - Duration::from_secs(1);
     let mut dirty = true;
     // the tail: on a `wake` of the host; each second as a fallback (0 host, a lost line)
@@ -3927,9 +3960,15 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
         dirty |= v.monitors.tick(id);
         dirty |= v.subagents.tick(&v.thread.subs);
         dirty |= v.subthreads.tick(id);
+        // the flow rows: 1 read of the thread per second for all of them
         let mut flows_changed = false;
-        for b in &mut v.flowbars {
-            flows_changed |= b.tick(id, false);
+        if flows_at.elapsed() >= Duration::from_secs(1) {
+            flows_at = Instant::now();
+            if let Some(t) = store::load(id) {
+                for b in &mut v.flowbars {
+                    flows_changed |= b.sync(&t, false);
+                }
+            }
         }
         if flows_changed {
             // a wait came / went: the question picker's ask too
@@ -5638,6 +5677,47 @@ mod agents_box_tests {
         // ada's replace row: the replace picker
         v.menu_action(crate::menu::Action::Command(AGENT_ITEMS + 2));
         assert!(v.agents_focus.as_ref().is_some_and(|f| f.at == 0 && f.replace.is_some()));
+    }
+
+    /// reply on a gate of a non-lead agent: the message goes to that agent, the gate stays.
+    #[test]
+    fn reply_on_a_gate_goes_to_the_waiting_agent() {
+        let mut v = view("agentsbox-0005");
+        v.flowbars[1].state = Some(crate::engine::flows::run::FlowState { flow: "chore".into(), title: "chore".into(), wait: Some(crate::engine::flows::run::Wait::Gate), ..Default::default() });
+        v.sync_flow_ask();
+        v.input.set_text("also cover X");
+        // chore's gate: approve (1), reply (2)
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        key(&mut v, KeyCode::Char('2'), KeyModifiers::NONE);
+        let op = v.ops.borrow().iter().find(|o| o["op"] == "prompt").cloned().unwrap();
+        assert_eq!(op["to"], json!(["zed"]), "{op}");
+        assert!(!v.ops.borrow().iter().any(|o| o["op"] == "flow_answer"));
+        assert!(v.reply_to.is_none());
+    }
+
+    /// ctrl+f, then another view: the view gets the keys, 0 hidden search bar takes them.
+    #[test]
+    fn a_view_switch_takes_the_keys_from_the_search_bar() {
+        let mut v = view("agentsbox-0006");
+        key(&mut v, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        key(&mut v, KeyCode::Char('x'), KeyModifiers::NONE);
+        key(&mut v, KeyCode::F(4), KeyModifiers::NONE);
+        assert!(v.pane == Pane::Files && !v.find.focus);
+        key(&mut v, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(v.find.ta.text(), "x", "j went to the files view");
+    }
+
+    /// The menu's agent rows keep their agent when the order changes before the pick.
+    #[test]
+    fn menu_agent_rows_keep_their_agent_after_a_join() {
+        let mut v = view("agentsbox-0007");
+        v.open_menu();
+        // nova joins at the front while the menu is open
+        v.members.insert(0, "nova".into());
+        v.order.insert(0, "nova".into());
+        v.menu_action(crate::menu::Action::Command(AGENT_ITEMS + 4));
+        let fo = v.agents_focus.clone().unwrap();
+        assert_eq!(v.order[fo.at], "zed", "row 2 of the menu: zed, not the new 2nd");
     }
 
     #[test]

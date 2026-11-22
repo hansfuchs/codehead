@@ -145,6 +145,22 @@ impl Thread {
         self.flow_map().remove(agent)
     }
 
+    /// Agent OLD is NEW now: its place, its session, its flow (an older thread's 1 flow: moved in
+    /// first).
+    pub fn rename_agent(&mut self, old: &str, new: &str) {
+        let flow = self.flow_of(old);
+        self.set_flow(old, None);
+        for a in self.agents.iter_mut().filter(|a| *a == old) {
+            *a = new.to_string();
+        }
+        if let Some(s) = self.sessions.remove(old) {
+            self.sessions.insert(new.to_string(), s);
+        }
+        if flow.is_some() {
+            self.set_flow(new, flow);
+        }
+    }
+
     /// AGENT's flow is ST (None: 0 flow). The old thread flow moves into FLOWS first.
     pub fn set_flow(&mut self, agent: &str, st: Option<super::flows::run::FlowState>) {
         self.flows = self.flow_map();

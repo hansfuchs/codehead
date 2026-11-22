@@ -17,6 +17,9 @@ use crate::stream::{self, Item};
 use crate::textarea::{Outcome, TextArea};
 use crate::theme;
 
+/// The last items whose texts a refresh builds again (they grow in place).
+const TAIL: usize = 4;
+
 /// What a key asks the view to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
@@ -59,8 +62,14 @@ impl ChatSearch {
     }
 
     pub fn close(&mut self) {
-        let msgs = std::mem::take(&mut self.msgs);
-        *self = ChatSearch { msgs, ..Default::default() };
+        *self = ChatSearch::default();
+    }
+
+    /// The stream was built again (the log's head in front): the texts and matches again.
+    pub fn reset(&mut self) {
+        self.msgs.clear();
+        self.seen.1 = usize::MAX;
+        self.cur = None;
     }
 
     /// The query words (lowercased), 0 while closed.
@@ -78,11 +87,24 @@ impl ChatSearch {
     }
 
     /// The matches again when the query or the items changed. A new query: the newest match.
-    /// New items only: the shown match stays. Some(item): the match to show.
+    /// New items only: the shown match stays. Some(item): the match to show. The last items can
+    /// grow in place (a run's calls, a flow section's lines): their texts again each time.
     pub fn refresh(&mut self, t: &stream::Thread) -> Option<usize> {
+        if !self.open {
+            return None;
+        }
+
         let q = self.ta.text();
         let n = t.items.len();
-        if !self.open || (q == self.seen.0 && n == self.seen.1) {
+        let mut grown = false;
+        for i in n.saturating_sub(TAIL)..n.min(self.msgs.len()) {
+            let text = item_text(t, &t.items[i]);
+            if self.msgs[i].text != text {
+                self.msgs[i] = Msg::new("", "", "", 0, &text);
+                grown = true;
+            }
+        }
+        if q == self.seen.0 && n == self.seen.1 && !grown {
             return None;
         }
 
@@ -282,6 +304,35 @@ mod tests {
         t.push(&Event { ts: 9, agent: Some("ada".into()), kind: Kind::Text { text: "fix c".into() } });
         assert_eq!(s.refresh(&t), None, "a new message: 0 jump");
         assert_eq!((s.current(), s.label().as_str()), (Some(0), "1/3"));
+    }
+
+    /// A rebuilt stream (the log's head in front) and items that grow in place: the matches
+    /// follow (0 stale text by index).
+    #[test]
+    fn a_rebuilt_stream_and_grown_items_keep_the_matches_right() {
+        let t = thread(&["fix it", "other"]);
+        let mut s = ChatSearch::default();
+        s.open();
+        typed(&mut s, &t, "fix");
+        assert!(s.is_hit(0));
+        // the head comes in front: the hit is item 2 now
+        let t = thread(&["head 1", "head 2", "fix it", "other"]);
+        s.reset();
+        s.refresh(&t);
+        assert!(s.is_hit(2) && !s.is_hit(0), "{:?}", s.hits);
+        assert_eq!(s.label(), "1/1");
+        // a flow section grows by a line: found with 0 new item
+        let mut t = stream::Thread::default();
+        let flow = |text: &str| Event { ts: 1, agent: Some("ada".into()), kind: Kind::Flow { op: "step".into(), text: text.into() } };
+        t.push(&flow("▶ step 1"));
+        let mut s = ChatSearch::default();
+        s.open();
+        typed(&mut s, &t, "gate");
+        assert_eq!(s.label(), "0 matches");
+        t.push(&flow("⏸ gate plan approval"));
+        assert_eq!(t.items.len(), 1);
+        s.refresh(&t);
+        assert_eq!(s.label(), "1/1");
     }
 
     #[test]

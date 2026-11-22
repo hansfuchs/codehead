@@ -121,7 +121,7 @@ fn choices(w: &Wait, n: Option<&Resolved>) -> Vec<(String, String)> {
 pub const WAIT_TOOL: &str = "FlowWait";
 
 /// The choice of a flow wait that sends the prompt's text as a message: the wait stays.
-pub const REPLY: &str = "reply";
+pub const REPLY: &str = "__reply";
 
 impl FlowBar {
     /// The flow row of AGENT.
@@ -182,6 +182,12 @@ impl FlowBar {
         }
         self.read_at = Some(Instant::now());
         let Some(t) = crate::engine::store::load(id) else { return false };
+        self.sync(&t, force)
+    }
+
+    /// The agent's flow of thread T (read by the caller: 1 read for every row). FORCE: also when
+    /// T is not newer. True: the flow changed.
+    pub fn sync(&mut self, t: &crate::engine::store::Thread, force: bool) -> bool {
         if t.updated == self.updated && !force {
             return false;
         }
@@ -217,7 +223,6 @@ impl FlowBar {
         self.open = false;
     }
 
-    #[cfg(test)]
     pub fn is_open(&self) -> bool {
         self.open
     }

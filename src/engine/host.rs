@@ -1452,6 +1452,22 @@ mod tests {
     }
 
     /// An older version's thread: its 1 flow is the lead's; a save keeps `flow` = the lead's.
+    /// A rename keeps the flow with its agent: the lead of an older thread (its 1 flow) and a
+    /// non-lead; 0 copy under the old name.
+    #[test]
+    fn a_renamed_agent_keeps_its_flow() {
+        let mut t = store::Thread::new("rename", "task", Path::new("/tmp"), vec!["ada".into(), "zed".into()]);
+        t.flow = Some(crate::engine::flows::run::FlowState { flow: "chore".into(), ..Default::default() });
+        t.set_flow("zed", Some(crate::engine::flows::run::FlowState { flow: "code-review".into(), ..Default::default() }));
+        t.rename_agent("ada", "nova");
+        assert_eq!(t.agents, ["nova", "zed"]);
+        assert_eq!(t.flow_map().keys().cloned().collect::<Vec<_>>(), ["nova", "zed"]);
+        assert_eq!(t.flow_of("nova").map(|f| f.flow), Some("chore".into()));
+        t.rename_agent("zed", "rex");
+        assert_eq!(t.flow_of("rex").map(|f| f.flow), Some("code-review".into()));
+        assert!(t.flow_of("zed").is_none() && t.flow_of("ada").is_none());
+    }
+
     #[test]
     fn an_old_thread_flow_belongs_to_the_lead() {
         let mut t = store::Thread::new("old", "task", Path::new("/tmp"), vec!["ada".into(), "zed".into()]);
