@@ -190,6 +190,9 @@ threads: worktrees, then recent Claude Code sessions. enter on a session:
 thread view: the thread's agents on top (sprite, model, working / idle / waits on you; ★ the lead),
          the stream (every message, tool run and open question, from the thread's event log), the
          prompt below, the cost box beside it (screens ≥ 100 columns).
+         ctrl+q: the agents box has the keys: ←→ an agent, its menu above it (flow: its flow box,
+         remove: 2 enters, replace with: an agent off the thread takes over, flow too); esc back.
+         ctrl+m (kitty protocol): the prompt again, from every pane, box, filter and the menu.
          below the prompt: who gets the message, where the thread works (repo ⎇ branch, (worktree);
          1 per checkout, read again every 3 s).
          a message without @name goes to the lead; @name: to that agent (an agent not on the thread

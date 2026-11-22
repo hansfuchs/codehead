@@ -21,7 +21,7 @@ Rules on every screen:
 
 | Key | Action |
 | --- | --- |
-| `ctrl+p` | menu, from every field: quick commands (`n`: new thread, `f`: search), threads, merge, search, tokens, agents (`tab` / `shift+tab`: tabs, `←→` too outside threads and merge, where they step the repos / states; `esc` / `ctrl+p`: close) |
+| `ctrl+p` | menu, from every field: quick commands (`n`: new thread, `f`: search; in a thread per agent: its flow, remove, replace with), threads, merge, search, tokens (`tab` / `shift+tab`: tabs, `←→` too outside threads and merge, where they step the repos / states; `esc` / `ctrl+p`: close) |
 | `ctrl+n` | notifications, from everywhere: questions, blocked agents, flow gates, errors, usage limits, PR conflicts / failed checks / comments, `@owner` mentions, context ≥ 90 %, threads done (`↑↓` move, `enter` jump to the event, `x` mark seen, `esc` close). The header shows the counts; a note goes once its event was on screen for 1 s |
 | `tab` / `shift+tab` | next / previous field (a question: its choices ↔ the prompt; a view: the view ↔ the prompt; a row of tabs: into its content) |
 | `F1`-`F6`, `alt+1`-`alt+6` | start screen: the tabs new, threads, merge, agents, flows, settings (macOS: Option as Meta) |
@@ -29,6 +29,7 @@ Rules on every screen:
 | `esc` | 1 level back: never saves, never drops edits unasked (edited text: `esc` again within 2 s) |
 | `ctrl+z` / `ctrl+shift+z`, `ctrl+y` | undo / redo in any text field (`⌘z` / `⌘⇧z`) |
 | `ctrl+c` | the selection: copy; else the field's text: cleared (`ctrl+z` brings it back); else 2× within 1 s: quit |
+| `ctrl+m` | thread view: the prompt has the keys again, from every pane, box, filter, dropdown and the menu (kitty keyboard protocol; a legacy terminal sends `ctrl+m` as `enter`) |
 
 ## Start screen
 
@@ -39,6 +40,7 @@ Rules on every screen:
 | `d d` | drafts dropdown: delete the draft |
 | menu → reset | new tab: reset the where row, notes and context (asks first) |
 | `@` / `>` | agents (cards by harness) / commands dropdown in the prompt |
+| `f` | agents field: the flow of the card under the cursor (the flows, `→` its steps: the start step); the card shows it under its effort row. A flow picks the agent. The repo's last flow: the lead's default |
 | `←` `→` | the **where** row: branch or worktree |
 | `enter` | the **repo** row: the repo picker (a repo not on disk gets cloned at the start) |
 | `←` `→` | threads tab: the previous / next repo (menu → filter by repo: the dropdown) |
@@ -75,8 +77,9 @@ Rules on every screen:
 | `F1`-`F4`, `ctrl+1`-`ctrl+4`, `alt+1`-`alt+4` | chat / changes / merge / files view (the view bar on the top row) |
 | `alt+\` | changes view: the chat on its right on / off (from 160 columns; on by default) |
 | `ctrl+f` | the search bar above the prompt: the chat's messages, notes, shell, tool calls; `tab` / `enter` / `↑` the next older match, `shift+tab` / `↓` the next newer one (both wrap), `esc` closes. Another view: its filter |
-| `> flow` | the flow box: the steps (`s` skip, `j` jump, `@` role, `c` change, `e` edit, `x x` remove) |
-| a flow wait | a gate (approve or an outcome), a loop at its max (1 more round, move on), a role with 0 agent (the agents): a question in the picker under the stream, after the agents' questions. It never takes the keys: write in the prompt, `ctrl+enter` sends it as a message (the wait stays); `tab` then `1`-`9` / `↑↓` `enter` answers, the prompt's text goes along as your note. An outcome back to a step needs that note; `reply` sends the prompt's text, the wait stays |
+| `ctrl+q` | the agents box above the prompt has the keys: `←` `→` an agent, its menu above it: `flow` (that agent's flow box), `remove` (`enter` twice), `replace with` (an agent off the thread takes over, its flow too); `1`-`3` pick a row, `esc` / `ctrl+m` back to the prompt |
+| agents box → flow, `> flow` | an agent's flow box: the steps (`s` skip, `j` jump, `c` change, `e` edit, `x x` remove); 0 flow: the flows to pick. `> flow`: the agent a message goes to |
+| a flow wait | a gate (approve or an outcome), a loop at its max (1 more round, move on): a question in the picker under the stream, after the agents' questions. It never takes the keys: write in the prompt, `ctrl+enter` sends it as a message (the wait stays); `tab` then `1`-`9` / `↑↓` `enter` answers, the prompt's text goes along as your note. An outcome back to a step needs that note; `reply` sends the prompt's text, the wait stays |
 | menu → yazi, files view `y` | yazi (full screen) on the worktree; a picked file goes into the prompt as its path |
 | `d d` | subagents / monitors box: stop the subagent / end the watch; another key closes the box and acts as usual |
 

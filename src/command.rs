@@ -40,7 +40,7 @@ pub enum Action {
     Branch,
     Handoff,
     Reload,
-    /// The thread's flow box on the flows (change / set the flow).
+    /// The flow box of the agent a message goes to now, on the flows (change / set its flow).
     Flow,
 }
 
@@ -61,7 +61,7 @@ const RELOAD: usize = 4;
 const FLOW: usize = 5;
 const SUB: usize = 6;
 /// 1st level: name, what it does.
-const COMMANDS: [(&str, &str); 7] = [("mention", "path · name · url"), ("branch", "copy of this thread"), ("skills", "of the harnesses"), ("handoff", "new thread from a summary of this one"), ("reload", "new harness sessions: MCP servers, settings"), ("flow", "set / change the thread's flow"), ("sub", "sub-thread: 0 history, same checkout, reports here")];
+const COMMANDS: [(&str, &str); 7] = [("mention", "path · name · url"), ("branch", "copy of this thread"), ("skills", "of the harnesses"), ("handoff", "new thread from a summary of this one"), ("reload", "new harness sessions: MCP servers, settings"), ("flow", "set / change the flow of the agent a message goes to"), ("sub", "sub-thread: 0 history, same checkout, reports here")];
 /// 2nd level of `mention`: kind, name, what goes into the text.
 const KINDS: [(Kind, &str, &str); 4] =
     [(Kind::Files, "files", "relative path"), (Kind::Notes, "notes", "path"), (Kind::Threads, "threads", "name"), (Kind::Artifacts, "artifacts", "url")];
