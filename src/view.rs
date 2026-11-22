@@ -150,6 +150,8 @@ struct View {
     spawns: HashMap<String, crate::avatar::Spawn>,
     /// The sprite slots of the last draw (agent, its 7x4 rect): who is in view, where a spawn goes.
     slots: std::cell::RefCell<Vec<(String, Rect)>>,
+    /// The flow lines of the cards of the last draw (agent, its rect): a click opens its flow box.
+    flow_slots: std::cell::RefCell<Vec<(String, Rect)>>,
     /// ctrl+q: the agents box has the keys (None: the prompt or a view).
     agents_focus: Option<AgentsFocus>,
     /// The next sent message goes to this agent (a flow wait's reply), not the default.
@@ -350,6 +352,7 @@ impl View {
             front: Vec::new(),
             spawns: HashMap::new(),
             slots: std::cell::RefCell::new(Vec::new()),
+            flow_slots: std::cell::RefCell::new(Vec::new()),
             agents_focus: None,
             reply_to: None,
             menu_agents: Vec::new(),
@@ -2016,6 +2019,13 @@ impl View {
                 self.send_prompt(text);
                 self.toast(format!("review comments sent to {to}"));
             }
+            crate::changes::Act::Checkout(root) => {
+                self.load_checkouts();
+                match self.checkouts.iter().position(|d| crate::changes::same_dir(d, &root)) {
+                    Some(i) => self.pick_checkout(i),
+                    None => self.toast(format!("{}: 0 checkout of this thread", root.display())),
+                }
+            }
         }
     }
 
@@ -2681,6 +2691,16 @@ impl View {
             self.toast(format!("open {url}"));
             return;
         }
+        // the flow line of an agent card: its flow box opens (open: closes)
+        let flow_at = self.flow_slots.borrow().iter().find(|(_, r)| r.contains(at)).map(|(a, _)| a.clone());
+        if click && let Some(agent) = flow_at {
+            match self.flowbars.iter_mut().find(|b| b.agent == agent && b.is_open()) {
+                Some(b) => b.close(),
+                None => self.open_flow(&agent, false),
+            }
+            self.dirty = true;
+            return;
+        }
         // the view bar
         if click && let Some(&(_, p)) = self.bar_rects.iter().find(|(r, _)| r.contains(at)) {
             self.set_pane(p);
@@ -2879,7 +2899,13 @@ impl View {
         };
         // the status right of the effort: `  ░▒▓ monitoring…`, 17 columns
         let status_w = if status.is_empty() { 0 } else { 17 };
-        let text_w = [name.chars().count(), tech.chars().count(), effort.chars().count() + status_w].into_iter().max().unwrap_or(0);
+        let mut text_w = [name.chars().count(), tech.chars().count(), effort.chars().count() + status_w].into_iter().max().unwrap_or(0);
+        // the agent's flow: its step below the effort (the rows shift up), cut to the card's text width (34 columns at least)
+        let flow = self.flowbars.iter().find(|b| b.agent == name).and_then(crate::flowbar::FlowBar::card_line).map(|(s, st)| {
+            let s = crate::nav::fit(&s, text_w.max(34));
+            text_w = text_w.max(s.chars().count());
+            vec![Span::styled(format!("  {s}"), st)]
+        });
         let mut last = vec![Span::styled(format!("  {effort}"), theme::muted())];
         last.extend(status);
         let mut side = vec![
@@ -2892,6 +2918,10 @@ impl View {
             vec![Span::styled(format!("  {tech}"), theme::muted())],
             last,
         ];
+        if let Some(fl) = flow {
+            side.remove(0);
+            side.push(fl);
+        }
         // a spawn: 0 text until the snap, then the text decodes in (width kept: 0 layout jump)
         if let Some(sp) = self.spawns.get(name) {
             let p = sp.reveal();
@@ -2907,6 +2937,7 @@ impl View {
         if area.height == 0 {
             // 0 cards drawn: 0 slots (the agents box's menu then sits over the prompt)
             self.slots.borrow_mut().clear();
+            self.flow_slots.borrow_mut().clear();
             return;
         }
         let cards: Vec<Card> = self.order.iter().map(|n| self.card(n)).collect();
@@ -2920,6 +2951,7 @@ impl View {
         let rows = Rect { y, height: area.bottom().saturating_sub(1).saturating_sub(y), ..area };
         let mut x = area.x + 2;
         let mut slots = Vec::new();
+        let mut flow_slots = Vec::new();
         for ((sprite, color, side, w), name) in cards.into_iter().zip(&self.order) {
             if x + w - 1 > outer.right() {
                 break;
@@ -2927,9 +2959,14 @@ impl View {
             let st = self.avatar_status(name);
             f.render_widget(Paragraph::new(crate::sprites::lines_as(&sprite, color, st, side)), Rect { x, width: w - 4, ..rows });
             slots.push((name.clone(), Rect { x, y: rows.y, width: crate::sprites::W as u16, height: crate::sprites::H as u16 }));
+            if self.flowbars.iter().any(|b| b.agent == *name && b.state.is_some()) {
+                let sw = crate::sprites::W as u16;
+                flow_slots.push((name.clone(), Rect { x: x + sw, y: rows.y + 3, width: (w - 4).saturating_sub(sw), height: 1 }.intersection(rows)));
+            }
             x += w;
         }
         *self.slots.borrow_mut() = slots;
+        *self.flow_slots.borrow_mut() = flow_slots;
     }
 
     /// Who gets a message now: the @named agents of the input, else the lead.
@@ -4231,8 +4268,20 @@ mod ask_tests {
         let mut v = View::new(&t.id, Path::new("/tmp"), "flow view", tx);
         v.members = t.agents.clone();
         v.sync_flowbars();
+        // closed: 0 flow row, the card's 4th row has the step; a click on it opens the box (the
+        // row of before on its bottom), a 2nd click closes it
+        let s = screen(&mut v).join("\n");
+        assert!(s.contains("⏸ 4/9 plan approval") && !s.contains("◆ new feature · 4/9"), "{s}");
+        let card = s.lines().position(|l| l.contains("⏸ 4/9 plan approval")).unwrap();
+        assert!(s.lines().nth(card - 3).is_some_and(|l| l.contains("ada")), "name 3 rows above the step: {s}");
+        let r = v.flow_slots.borrow()[0].1;
+        let click = MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 3, row: r.y, modifiers: KeyModifiers::NONE };
+        v.mouse(click);
         let s = screen(&mut v).join("\n");
         assert!(s.contains("◆ new feature · 4/9 plan approval · @ada") && s.contains("⏸ gate plan approval: answer below"), "{s}");
+        v.mouse(click);
+        let s = screen(&mut v).join("\n");
+        assert!(!s.contains("◆ new feature · 4/9"), "{s}");
         // the gate: a question in the picker under the stream; it never takes the keys (the owner
         // may write first), tab gives them to it; the prompt's text goes along as the note
         v.sync_flow_ask();
@@ -4263,7 +4312,7 @@ mod ask_tests {
         let op = v.ops.borrow().iter().find(|o| o["op"] == "flow_set").cloned().unwrap();
         assert_eq!((op["flow"].as_str(), op["start"].as_u64(), op["mode"].as_str()), (Some("refactor"), Some(1), Some("now")));
         let s = screen(&mut v).join("\n");
-        assert!(s.contains("→ refactor at the next tool boundary"), "{s}");
+        assert!(s.contains("→ refactor at the next tool boundary") || s.contains("4/9 plan approval → refactor"), "{s}");
         let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
     }
 

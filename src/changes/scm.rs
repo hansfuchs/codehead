@@ -5,6 +5,7 @@
 //! on a stuck label scrolls to it.
 
 use std::collections::{BTreeSet, HashSet};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 
 use ratatui::Frame;
@@ -65,6 +66,8 @@ pub(super) enum PRow {
     /// A file of the comments: path, count.
     CommentFile(String, usize),
     Comment(usize),
+    /// Open comments in another checkout: its root, their count (enter: the view goes there).
+    Elsewhere(PathBuf, usize),
     Stash(usize),
     Empty(&'static str),
     /// PR mode: the commit picker.
@@ -198,6 +201,36 @@ impl View {
         self.lv.get(i).copied().unwrap_or(Level::Medium)
     }
 
+    /// The comments of this view's checkout: (index, path in it); the open comments of other
+    /// checkouts: (root, count), in order of the 1st comment.
+    pub(super) fn comments_here(&self) -> (Vec<(usize, String)>, Vec<(PathBuf, usize)>) {
+        let mut here = Vec::new();
+        let mut away: Vec<(PathBuf, usize)> = Vec::new();
+        for (i, c) in self.comments.iter().enumerate() {
+            match super::place(c) {
+                (Some(r), _) if !super::same_dir(&r, &self.dir) => {
+                    if !c.open() {
+                        continue;
+                    }
+                    match away.iter_mut().find(|(a, _)| *a == r) {
+                        Some((_, n)) => *n += 1,
+                        None => away.push((r, 1)),
+                    }
+                }
+                (_, rel) => here.push((i, rel)),
+            }
+        }
+        (here, away)
+    }
+
+    /// Comment CI's path in this view's checkout (None: another checkout's).
+    pub(super) fn comment_path(&self, ci: usize) -> Option<String> {
+        match super::place(self.comments.get(ci)?) {
+            (Some(r), _) if !super::same_dir(&r, &self.dir) => None,
+            (_, rel) => Some(rel),
+        }
+    }
+
     /// The panel's rows now.
     fn panel_rows(&self) -> Vec<PRow> {
         let p = &self.scm;
@@ -229,30 +262,33 @@ impl View {
                 }
             }
         }
-        let open = self.comments.iter().filter(|c| c.open()).count();
+        // the comments of this checkout (their path in it); the open ones of other checkouts:
+        // 1 row per checkout
+        let (here, away) = self.comments_here();
+        let open = here.iter().filter(|(i, _)| self.comments[*i].open()).count();
         v.push(PRow::Section(Sec::Comments, open));
         if !p.folded.contains(&Fold::Sec(Sec::Comments)) {
-            if self.comments.is_empty() {
+            if here.is_empty() && away.is_empty() {
                 v.push(PRow::Empty("c on lines: a comment"));
             }
 
             // OPEN (per severity, as the changes' levels: its files, their comments), RESOLVED
             // (its files, their comments)
-            let with_files = |v: &mut Vec<PRow>, at: &[usize]| {
+            let with_files = |v: &mut Vec<PRow>, at: &[(usize, &str)]| {
                 let mut paths: Vec<&str> = Vec::new();
-                for &i in at {
-                    if !paths.contains(&self.comments[i].path.as_str()) {
-                        paths.push(&self.comments[i].path);
+                for &(_, path) in at {
+                    if !paths.contains(&path) {
+                        paths.push(path);
                     }
                 }
                 for path in paths {
-                    let of: Vec<usize> = at.iter().copied().filter(|&i| self.comments[i].path == path).collect();
+                    let of: Vec<usize> = at.iter().filter(|(_, p)| *p == path).map(|(i, _)| *i).collect();
                     v.push(PRow::CommentFile(path.to_string(), of.len()));
                     v.extend(of.into_iter().map(PRow::Comment));
                 }
             };
             for resolved in [false, true] {
-                let at: Vec<usize> = (0..self.comments.len()).filter(|&i| self.comments[i].open() != resolved).collect();
+                let at: Vec<(usize, &str)> = here.iter().filter(|(i, _)| self.comments[*i].open() != resolved).map(|(i, p)| (*i, p.as_str())).collect();
                 if at.is_empty() {
                     continue;
                 }
@@ -266,7 +302,7 @@ impl View {
                     continue;
                 }
                 for l in Level::ALL {
-                    let of: Vec<usize> = at.iter().copied().filter(|&i| self.comments[i].level == l).collect();
+                    let of: Vec<(usize, &str)> = at.iter().copied().filter(|(i, _)| self.comments[*i].level == l).collect();
                     if of.is_empty() {
                         continue;
                     }
@@ -276,6 +312,7 @@ impl View {
                     }
                 }
             }
+            v.extend(away.into_iter().map(|(root, n)| PRow::Elsewhere(root, n)));
         }
         if pr {
             return v;
@@ -733,6 +770,11 @@ impl View {
                 right_fill(&left, &right)
             }
             PRow::Empty(t) => Line::styled(crate::nav::fit(&format!("     {t}"), w), theme::muted().add_modifier(Modifier::ITALIC)),
+            PRow::Elsewhere(root, n) => {
+                let name = root.file_name().map_or_else(|| root.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
+                let text = format!("   ↗ {n} open in {name}");
+                right_fill(&[Span::styled(crate::nav::fit(&text, w.saturating_sub(8)), theme::muted())], &[Span::styled("enter ", theme::muted())])
+            }
             PRow::Push(pushed, n) => {
                 let (label, color) = if *pushed { ("PUSHED", theme::pal().muted) } else { ("UNPUSHED", theme::pal().accent) };
                 let st = Style::default().fg(color).add_modifier(Modifier::BOLD);
@@ -807,7 +849,7 @@ impl View {
 
     /// The review's cursor on comment CI (its box opens).
     pub(super) fn jump_comment(&mut self, ci: usize) {
-        let Some(path) = self.comments.get(ci).map(|c| c.path.clone()) else { return };
+        let Some(path) = self.comment_path(ci) else { return };
         let Some(i) = self.changes.files.iter().position(|f| f.path == path) else { return };
         if self.folded(&self.changes.files[i]) && !self.toggled.remove(&path) {
             self.toggled.insert(path);
@@ -1018,6 +1060,8 @@ impl View {
                 // enter on a commit: its files in the review, the keys there
                 Some(PRow::Commit(ci)) => self.open_commit(ci, false),
                 Some(PRow::All) => self.open_all(false),
+                // enter on another checkout's comments: the view goes there
+                Some(PRow::Elsewhere(root, _)) => return Act::Checkout(root),
                 // enter on a stash entry: its agent restores it
                 Some(PRow::Stash(si)) => {
                     if let Some(id) = self.stash.get(si).map(|e| e.id.clone()) {
@@ -1571,6 +1615,45 @@ mod tests {
         v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert!(v.comments[0].open());
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(&v.id));
+    }
+
+    #[test]
+    fn comments_resolve_on_0_uncommitted_changes_and_list_per_checkout() {
+        use super::super::commits::fixture;
+        let w = fixture::repo("comment-checkouts");
+        let wt = w.parent().unwrap().join("wt");
+        fixture::sh(&w, "git worktree add -q ../wt && echo dirty >> x.txt");
+        fixture::sh(&wt, "echo dirty >> x.txt");
+        let root = w.to_string_lossy().into_owned();
+        let c = |id: &str, path: String, root: &str| super::super::Comment { path, line: 1, text: format!("{id} text"), id: id.into(), root: root.into(), ..Default::default() };
+        let mut all = vec![
+            c("c1", "x.txt".into(), &root),
+            c("c2", "y.txt".into(), &root),
+            // an older comment: absolute path in the linked worktree, 1 relative one
+            c("c3", wt.join("x.txt").to_string_lossy().into_owned(), ""),
+            c("c4", wt.join("y.txt").to_string_lossy().into_owned(), ""),
+            c("c5", "c1.txt".into(), ""),
+        ];
+
+        // dirty x.txt (both checkouts): open; clean files: resolved (c5: in the work dir)
+        let ids = super::super::committed(&all, &w);
+        assert_eq!(ids, ["c2", "c4", "c5"]);
+        assert!(super::super::resolve_committed(&mut all, &ids));
+        assert!(all[1].resolved_by == "codehead" && !all[1].open() && all[0].open() && all[2].open());
+
+        // the view on the main checkout: c3 of the linked worktree is 1 row, enter goes there
+        let mut v = test_view();
+        v.dir = w.clone();
+        v.comments = all;
+        let rows = v.panel_rows();
+        assert!(rows.contains(&PRow::CommentFile("x.txt".into(), 1)) && rows.contains(&PRow::Elsewhere(wt.clone(), 1)), "{rows:?}");
+        assert!(!rows.iter().any(|r| matches!(r, PRow::CommentFile(p, _) if p.contains("wt"))), "{rows:?}");
+        let all = draw(&mut v, 140, 40).join("\n");
+        assert!(all.contains("▾ COMMENTS  1") && all.contains("↗ 1 open in wt"), "{all}");
+        alt_tap(&mut v);
+        v.scm.at = v.scm.rows.iter().position(|r| matches!(r, PRow::Elsewhere(..))).unwrap();
+        assert!(matches!(v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), Act::Checkout(r) if r == wt));
+        fixture::drop(&w);
     }
 
     #[test]

@@ -111,7 +111,13 @@ fn call(thread: &str, agent: &str, name: &str, args: &Value) -> Result<String, S
             let ids = crate::changes::agent_comments(thread, agent, root.as_deref(), &args["comments"])?;
             Ok(format!("{} comments added to the changes view (open): {}", ids.len(), ids.join(", ")))
         }
-        "comments" => Ok(crate::changes::list_comments(thread, args["state"].as_str().unwrap_or("open"))),
+        "comments" => {
+            // comments on files with 0 uncommitted changes: resolved first
+            if let Some(t) = super::store::load(thread) {
+                crate::changes::settle_comments(thread, &t.work_dir());
+            }
+            Ok(crate::changes::list_comments(thread, args["state"].as_str().unwrap_or("open")))
+        }
         "comment_status" => {
             let ids: Vec<String> = args["ids"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
             if ids.is_empty() {

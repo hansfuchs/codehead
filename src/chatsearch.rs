@@ -202,12 +202,11 @@ impl ChatSearch {
 /// The searched text of item IT of T.
 fn item_text(t: &stream::Thread, it: &Item) -> String {
     match it {
-        Item::Prompt { text, .. } | Item::Text { text, .. } | Item::Note { text, .. } => text.clone(),
+        Item::Prompt { text, .. } | Item::Text { text, .. } | Item::Note { text, .. } | Item::Edits { text, .. } => text.clone(),
         Item::Run { calls, .. } => calls.iter().map(|c| stream::call_summary(&c.name, &c.input)).collect::<Vec<_>>().join("\n"),
         Item::Shell { command, output, .. } => format!("{command}\n{output}"),
         Item::Settled { question, answer, .. } => format!("{question}\n{answer}"),
         Item::Sub { sub, .. } => t.subs.get(*sub).map(|s| format!("{}\n{}", s.description, s.result)).unwrap_or_default(),
-        Item::Flow { lines, .. } => lines.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join("\n"),
     }
 }
 
@@ -330,18 +329,6 @@ mod tests {
         assert!(s.is_hit(2) && !s.is_hit(0), "{:?}", s.hits);
         assert_eq!(s.label(), "1/1");
         assert_eq!(s.current(), Some(2), "the shown match stays");
-        // a flow section grows by a line: found with 0 new item
-        let mut t = stream::Thread::default();
-        let flow = |text: &str| Event { ts: 1, agent: Some("ada".into()), kind: Kind::Flow { op: "step".into(), text: text.into() } };
-        t.push(&flow("▶ step 1"));
-        let mut s = ChatSearch::default();
-        s.open();
-        typed(&mut s, &t, "gate");
-        assert_eq!(s.label(), "0 matches");
-        t.push(&flow("⏸ gate plan approval"));
-        assert_eq!(t.items.len(), 1);
-        s.refresh(&t);
-        assert_eq!(s.label(), "1/1");
         // an open run further back than the last items gets a call: found
         let mut t = stream::Thread::default();
         let tool = |id: &str, file: &str| Event { ts: 1, agent: Some("ada".into()), kind: Kind::Tool { id: id.into(), name: "Read".into(), input: serde_json::json!({"file_path": file}) } };

@@ -436,6 +436,26 @@ impl FlowBar {
         false
     }
 
+    /// The agent card's flow line: `◆ 4/8 implement` (a gate wait: ⏸, finished: ✓,
+    /// warnings: `!2`) and its style. None: 0 flow.
+    pub fn card_line(&self) -> Option<(String, Style)> {
+        let st = self.state.as_ref()?;
+        if st.finished {
+            return Some((format!("✓ {} finished", self.name), Style::default().fg(theme::pal().ok)));
+        }
+        let step = self.nodes.get(st.node).map(|n| n.title.clone()).unwrap_or_default();
+        let mut s = format!("{} {}/{} {step}", if st.wait.is_some() { "⏸" } else { "◆" }, st.node + 1, self.nodes.len());
+        if !self.warnings.is_empty() {
+            s.push_str(&format!(" !{}", self.warnings.len()));
+        }
+        // a switch at the next tool boundary
+        if let Some(p) = &st.pending {
+            s.push_str(&format!(" → {}", self.lib.flow(&p.flow).map_or(p.flow.clone(), |f| f.name.clone())));
+        }
+        let style = if st.pending.is_some() || st.wait.is_some() { Style::default().fg(theme::pal().warn) } else { theme::accent() };
+        Some((s, style))
+    }
+
     /// The row's text and style.
     fn bar_line(&self) -> (Vec<Span<'static>>, Style) {
         let Some(st) = &self.state else { return (vec![Span::raw(format!("◆ @{} · 0 flow: pick one", self.agent))], theme::muted()) };
@@ -478,11 +498,11 @@ impl FlowBar {
         (spans, style)
     }
 
-    /// Rows for the flow area: 0 (0 flow, closed), 1 (the row) or the row + the open box (0 flow:
-    /// the row says so).
+    /// Rows for the flow area: 0 (closed: the agent card shows the step) or the row + the open
+    /// box (0 flow: the row says so).
     pub fn rows(&self, max: u16) -> u16 {
         if !self.open {
-            return u16::from(self.state.is_some());
+            return 0;
         }
         let body = self.len().max(1) as u16 + 4 + if self.detail { 8 } else { 0 } + self.warnings.len().min(4) as u16;
         (1 + body).min(max.max(1))

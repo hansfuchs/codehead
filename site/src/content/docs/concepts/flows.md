@@ -102,15 +102,16 @@ The last layer wins per name. `r` in the flows tab resets an edited built-in.
 - new task: each agent card shows its flow under the effort row. `f` on a card: the flows
   (`→` a flow's steps: start at a later step, `0` none). A flow picks the agent. The last flow of
   a repo is the lead's default for the next task. Each agent's step 1 goes to it with the task.
-- the thread view: 1 flow row per agent with a flow (above the agents): the flow, the step,
-  the agent, a wait, warnings. `ctrl+q` → an agent → `flow` (or a click on its row) opens the
-  agent's flow box (`> flow`: of the agent a message goes to): the steps with their arcs,
-  `enter` a step's text, `s` skip, `j` jump, `c` change the flow, `u` undo a queued change,
-  `e` edit it, `x x` remove it. The menu (`ctrl+p`) has the same per agent.
-- the stream: an agent's flow lines (step started, done, a wait) sit inside its messages, in
-  a section with its own border.
-- a wait: the row says `⏸ … answer below`. The wait is a question in the picker under the
-  stream, after the agents' questions. It never takes the keys: write in the prompt,
+- the thread view: the agent card of an agent with a flow shows its step below the effort
+  (`◆ 4/8 implement`; a wait: `⏸`, warnings: `!2`, a queued switch: `→ chore`). A click on that
+  line, or `ctrl+q` → an agent → `flow`, opens the agent's flow box (`> flow`: of the agent a
+  message goes to): its row (the flow, the step, the agent, a wait, warnings), the steps with
+  their arcs, `enter` a step's text, `s` skip, `j` jump, `c` change the flow, `u` undo a
+  queued change, `e` edit it, `x x` remove it. The menu (`ctrl+p`) has the same per agent.
+- the stream: 0 flow lines. The agent card shows the step.
+- a wait: the card says `⏸`, the flow box's row `⏸ … answer below`. The wait is a question in
+  the picker under the stream, after the agents' questions. It never takes the keys: write in
+  the prompt,
   `ctrl+enter` sends a message (the wait stays); `tab` then `1`-`9` / `↑↓` `enter` answers, the
   prompt's text goes to the agent as your note.
   - a gate: approve, or an outcome (`changes · back to plan`; it needs your note).

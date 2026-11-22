@@ -109,8 +109,11 @@ with the MCP tool `comments` when you ask it to.
 
 Comments, as on GitHub: each has an id (`c3`), an author (`you`, `@REGI`) and a state, open or
 resolved. Agents resolve the comments they addressed (MCP tool `comment_status`, with a note) and
-a reviewer re-opens one whose fix does not hold. A resolved comment leaves the file view; the
-panel's RESOLVED lists it with who resolved it (`✓ @REGI`).
+a reviewer re-opens one whose fix does not hold. A comment on a file with 0 uncommitted changes
+(committed or reverted) resolves itself (`✓ @codehead`). A resolved comment leaves the file
+view; the panel's RESOLVED lists it with who resolved it (`✓ @REGI`). The panel lists the
+comments of the checkout in view; the open comments of another checkout (an agent's linked
+worktree) are 1 row, `↗ 3 open in <worktree>`: `enter` goes there.
 
 The stash: lines or files out of the worktree, each with the patch that puts them back (not a git
 stash). The agent that wrote the lines names the entry (MCP tool `stash_name`). `↺` restore: the

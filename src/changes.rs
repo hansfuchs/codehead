@@ -344,6 +344,8 @@ pub struct Changes {
     pub behind: usize,
     /// The branch's commits (the panel's COMMITS section).
     pub commits: commits::Commits,
+    /// Ids of open comments on files with 0 uncommitted changes (they resolve).
+    pub committed: Vec<String>,
 }
 
 /// A rebase / merge of DIR stopped (its state dir or MERGE_HEAD exists).
@@ -397,7 +399,7 @@ fn load_from(dir: &Path, all: bool) -> Result<Changes, String> {
         (it.next().unwrap_or(0), it.next().unwrap_or(0))
     };
     let commits = commits::list(dir, &mb);
-    Ok(Changes { base: label, rev, untracked: fresh, files, staged, stopped, ahead, behind, commits })
+    Ok(Changes { base: label, rev, untracked: fresh, files, staged, stopped, ahead, behind, commits, committed: Vec::new() })
 }
 
 /// The branch's pull request (gh): number, url, state, checks passed / failed / pending.
@@ -1041,6 +1043,8 @@ pub enum Act {
     Send(String),
     /// The chat above the prompt: open / folded.
     ToggleChat,
+    /// The view on the checkout at this root (its comments).
+    Checkout(PathBuf),
 }
 
 /// Lines of 1 file a comment is on: LINE (new side) shows it; LINES (`11-13, 15 · removed 14`)
@@ -1179,6 +1183,98 @@ pub struct Comment {
     /// In a batch to the agents already (ctrl+enter sends only the new open ones).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sent: bool,
+    /// The checkout PATH is in (absolute; "": an older comment, see `place`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub root: String,
+}
+
+/// The checkout (top dir of a worktree, linked ones included) that PATH is in.
+fn checkout_of(path: &Path) -> Option<PathBuf> {
+    path.ancestors().filter(|d| !d.as_os_str().is_empty()).find(|d| d.join(".git").exists()).map(Path::to_path_buf)
+}
+
+/// Comment C's checkout and its path in it. None: an older comment with a relative path (the
+/// thread's work dir, any checkout of the view).
+pub(crate) fn place(c: &Comment) -> (Option<PathBuf>, String) {
+    if !c.root.is_empty() {
+        return (Some(PathBuf::from(&c.root)), c.path.clone());
+    }
+    let p = Path::new(&c.path);
+    if p.is_absolute()
+        && let Some(r) = p.parent().and_then(checkout_of)
+        && let Ok(rel) = p.strip_prefix(&r)
+    {
+        return (Some(r), rel.to_string_lossy().into_owned());
+    }
+    (None, c.path.clone())
+}
+
+/// A and B: the same dir (/var = /private/var on macOS).
+pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b || std::fs::canonicalize(a).ok().is_some_and(|x| std::fs::canonicalize(b).ok() == Some(x))
+}
+
+/// The paths of ROOT with uncommitted changes (staged, unstaged, untracked; both sides of a
+/// rename). None: 0 git read.
+fn uncommitted(root: &Path) -> Option<HashSet<String>> {
+    let out = Command::new("git").arg("-C").arg(root).args(["status", "--porcelain=v1", "-z", "--untracked-files=all"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut set = HashSet::new();
+    let mut parts = text.split('\0').filter(|s| !s.is_empty());
+    while let Some(e) = parts.next() {
+        let Some(path) = e.get(3..) else { continue };
+        set.insert(path.to_string());
+        // a rename / copy: its source path follows
+        if matches!(e.as_bytes().first(), Some(b'R' | b'C'))
+            && let Some(from) = parts.next()
+        {
+            set.insert(from.to_string());
+        }
+    }
+    Some(set)
+}
+
+/// The ids of the open comments of COMMENTS on a file with 0 uncommitted changes in its
+/// checkout (WORK: the checkout of older relative ones). A checkout git cannot read: 0 ids.
+pub(crate) fn committed(comments: &[Comment], work: &Path) -> Vec<String> {
+    let mut reads: HashMap<PathBuf, Option<HashSet<String>>> = HashMap::new();
+    let mut ids = Vec::new();
+    for c in comments.iter().filter(|c| c.open()) {
+        let (root, rel) = place(c);
+        let root = root.unwrap_or_else(|| work.to_path_buf());
+        let dirty = reads.entry(root.clone()).or_insert_with(|| uncommitted(&root));
+        if dirty.as_ref().is_some_and(|d| !d.contains(&rel)) {
+            ids.push(c.id.clone());
+        }
+    }
+    ids
+}
+
+/// The note of a comment resolved by a commit.
+const COMMITTED: &str = "the file has 0 uncommitted changes (committed or reverted)";
+
+/// Comments IDS of COMMENTS (open ones): resolved by codehead. True: one changed.
+pub(crate) fn resolve_committed(comments: &mut [Comment], ids: &[String]) -> bool {
+    let mut changed = false;
+    for c in comments.iter_mut().filter(|c| c.open() && ids.contains(&c.id)) {
+        c.state = CState::Resolved;
+        c.resolved_by = "codehead".into();
+        c.note = COMMITTED.into();
+        changed = true;
+    }
+    changed
+}
+
+/// THREAD's open comments on files with 0 uncommitted changes: resolved (WORK: its work dir).
+pub fn settle_comments(thread: &str, work: &Path) {
+    let mut all = read_comments(thread);
+    let ids = committed(&all, work);
+    if resolve_committed(&mut all, &ids) {
+        write_comments(thread, &all);
+    }
 }
 
 /// The state of a comment.
@@ -1260,10 +1356,14 @@ pub fn agent_comments(thread: &str, agent: &str, root: Option<&Path>, list: &ser
             return Err("each comment needs file and text".into());
         }
 
+        // an absolute path: relative to its checkout (the work dir, a linked worktree of an
+        // agent); a relative one: relative to the work dir
         let p = Path::new(file);
-        let rel = root.and_then(|r| p.strip_prefix(r).ok()).unwrap_or(p).to_string_lossy().trim_start_matches("./").to_string();
+        let at = if p.is_absolute() { root.filter(|r| p.starts_with(r)).map(Path::to_path_buf).or_else(|| p.parent().and_then(checkout_of)) } else { root.map(Path::to_path_buf) };
+        let rel = at.as_deref().and_then(|r| p.strip_prefix(r).ok()).unwrap_or(p).to_string_lossy().trim_start_matches("./").to_string();
         let level = crate::rank::Level::parse(c["severity"].as_str().unwrap_or_default()).unwrap_or_default();
-        add.push(Comment { path: rel, line, text: text.to_string(), lines: c["lines"].as_str().unwrap_or_default().to_string(), level, by: agent.to_string(), ..Default::default() });
+        let root = at.map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+        add.push(Comment { path: rel, line, text: text.to_string(), lines: c["lines"].as_str().unwrap_or_default().to_string(), level, by: agent.to_string(), root, ..Default::default() });
     }
 
     let mut all = read_comments(thread);
@@ -2004,8 +2104,17 @@ impl View {
             return;
         }
         let (dir, all) = (self.dir.clone(), self.all);
+        let (id, open): (String, Vec<Comment>) = (self.id.clone(), self.comments.iter().filter(|c| c.open()).cloned().collect());
         std::thread::spawn(move || {
-            let _ = tx.send(load_from(&dir, all));
+            let mut r = load_from(&dir, all);
+            // open comments on files with 0 uncommitted changes (in their checkouts): resolved
+            if let Ok(c) = &mut r
+                && !open.is_empty()
+            {
+                let work = crate::engine::store::load(&id).map_or_else(|| dir.clone(), |t| t.work_dir());
+                c.committed = committed(&open, &work);
+            }
+            let _ = tx.send(r);
         });
         self.loading = Some(rx);
     }
@@ -2017,7 +2126,11 @@ impl View {
         self.loading = None;
         self.loaded = Some(Instant::now());
         match r {
-            Ok(c) => {
+            Ok(mut c) => {
+                if resolve_committed(&mut self.comments, &std::mem::take(&mut c.committed)) {
+                    self.save_comments();
+                    self.built = None;
+                }
                 // the same diffs (the view's order is the agent's, the read's the path rules'):
                 // 0 new rows; the git state (staged, ahead, a stopped rebase) still applies
                 let hashes = |fs: &[FileDiff]| {
@@ -2203,7 +2316,8 @@ impl View {
             notes.push((x.line, (0..n).map(|k| Row::new(Body::Finding(fi, k), i, Some(x.line))).collect()));
         }
         // open comments only (resolved: the panel's RESOLVED); C folded: 1 row each
-        for (ci, c) in self.comments.iter().enumerate().filter(|(_, c)| c.path == f.path && c.open()) {
+        let here: Vec<usize> = self.comments.iter().enumerate().filter(|(ci, c)| c.open() && self.comment_path(*ci).is_some_and(|p| p == f.path)).map(|(ci, _)| ci).collect();
+        for (ci, c) in here.into_iter().map(|ci| (ci, &self.comments[ci])) {
             let n = if self.comments_folded { 1 } else { c.text.lines().count().max(1) };
             notes.push((c.line, (0..n).map(|k| Row::new(Body::Comment(ci, k), i, Some(c.line))).collect()));
         }
@@ -2533,7 +2647,8 @@ impl View {
         }
         for s in spots {
             let quote = self.quote(s);
-            self.comments.push(Comment { path: s.path.clone(), line: s.line, text: text.to_string(), lines: s.lines.clone(), quote, level, ..Default::default() });
+            let root = self.dir.to_string_lossy().into_owned();
+            self.comments.push(Comment { path: s.path.clone(), line: s.line, text: text.to_string(), lines: s.lines.clone(), quote, level, root, ..Default::default() });
         }
         self.save_comments();
         self.sel.clear();
@@ -4710,8 +4825,8 @@ Binary files a/img.png and b/img.png differ
         v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
         assert_eq!(v.comments[0].level, crate::rank::Level::Critical);
         // an agent's comments (the MCP tool): into the file, the view reads them at its next draw
-        let root = Path::new("/w");
-        let n = agent_comments(&v.id, "amon", Some(root), &serde_json::json!([{"file": "/w/src/a.rs", "line": 12, "severity": "low", "text": "nit"}])).unwrap();
+        let root = Path::new("/tmp");
+        let n = agent_comments(&v.id, "amon", Some(root), &serde_json::json!([{"file": "/tmp/src/a.rs", "line": 12, "severity": "low", "text": "nit"}])).unwrap();
         assert_eq!(n, vec!["c2".to_string()], "ids after the owner's c1");
         let s = screen(&mut v, 140, 40).join("\n");
         assert_eq!(v.comments.len(), 2);
