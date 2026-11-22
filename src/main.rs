@@ -189,7 +189,7 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          Claude Code session (claude --resume ID --fork-session). the old thread stays.
          @: agent names. ←→ on a name: + add, or ⇄ replace an agent of the thread: on send, the old
          agent leaves and the new one gets the message with the old one's last messages.
-         ctrl+i / ⌘i: the IDE on the thread's worktree (setting editor: auto, code, cursor, zed, idea …).
+         ctrl+i / ⌘i (every pane): the IDE on the repo root, several repos: a picker (setting editor: auto, code, cursor, zed, idea …).
          views (row 0): alt/option+←→ previous / next (chat, changes, merge, files), alt+1-4. tab / i: the prompt, tab / esc: back to the view. ctrl+y: yazi. changes: 1 box per file in review
          order (schema, logic, config, UI, docs, tests, generated), j k box (j: down), n N hunk,
          v reviewed, enter fold, e / o IDE at the line, w side by side / unified, r read git again,

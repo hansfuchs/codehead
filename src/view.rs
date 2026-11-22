@@ -164,6 +164,13 @@ struct View {
     // prompt
     input: TextArea,
     input_rect: Rect,
+    /// The IDE's repo picker (ctrl+i with several repos): cursor, 1st row in view; its drawn rows;
+    /// the repos line below the prompt (its anchor).
+    ide_pick: Option<(usize, usize)>,
+    ide_rows: Vec<(Rect, usize)>,
+    hint_rect: Rect,
+    #[cfg(test)]
+    ide_opened: Vec<PathBuf>,
     mention: Mention,
     /// The thread's checkouts (its work dir 1st), the one the changes view shows.
     checkouts: Vec<PathBuf>,
@@ -326,6 +333,11 @@ impl View {
             ops: Default::default(),
             input,
             input_rect: Rect::default(),
+            ide_pick: None,
+            ide_rows: Vec::new(),
+            hint_rect: Rect::default(),
+            #[cfg(test)]
+            ide_opened: Vec::new(),
             mention: Mention::default(),
             checkouts: Vec::new(),
             checkout: 0,
@@ -1223,6 +1235,18 @@ impl View {
             self.open_menu();
             return false;
         }
+        // the IDE's repo picker: its keys first
+        if self.ide_pick.is_some() {
+            self.ide_pick_key(k);
+            self.dirty = true;
+            return false;
+        }
+        // ctrl+i / ⌘i: the IDE on the repo root, from every pane and field (several repos: a picker)
+        if k.code == KeyCode::Char('i') && k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) && !k.modifiers.contains(KeyModifiers::ALT) {
+            self.ide_key();
+            self.dirty = true;
+            return false;
+        }
         // the flow box: ctrl+f opens / closes it; its keys while open
         if k.code == KeyCode::Char('f') && k.modifiers.contains(KeyModifiers::CONTROL) && !self.flowbar.is_open() {
             self.flowbar.open();
@@ -1458,10 +1482,6 @@ impl View {
                     }
                     Pasted::Nothing => self.toast("clipboard: 0 image, 0 text"),
                 }
-                return false;
-            }
-            KeyCode::Char('i') if ctrl || k.modifiers.contains(KeyModifiers::SUPER) => {
-                self.open_vscode();
                 return false;
             }
             // shell mode, 1 line: enter runs it
@@ -1778,15 +1798,95 @@ impl View {
         self.mention.is_open(&self.input, &self.roster)
     }
 
-    /// ctrl+i: the IDE on the thread's worktree.
-    fn open_vscode(&mut self) {
-        let cwd = self.cwd.clone();
-        self.open_editor(|k| crate::editor::args_dir(k, &cwd), None, cwd.display().to_string());
+    /// The repo roots the thread works in (its work dir 1st), with their labels
+    /// (`repo ⎇ branch`); 0 repo: the work dir.
+    fn ide_dirs(&self) -> Vec<(PathBuf, String)> {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let all = store::load(&self.id).map(|t| t.all_checkouts()).unwrap_or_default();
+        for c in all.iter().map(|c| PathBuf::from(&c.dir)).filter(|d| d.is_dir()).chain([self.cwd.clone()]) {
+            let top = crate::workspot::top(&c);
+            if !dirs.contains(&top) {
+                dirs.push(top);
+            }
+        }
+        dirs.into_iter()
+            .map(|d| {
+                let s = crate::workspot::spot(&d, None);
+                let label = match &s.branch {
+                    Some(b) => format!("{} ⎇ {b}", s.repo),
+                    None => s.repo,
+                };
+                (d, label)
+            })
+            .collect()
+    }
+
+    /// ctrl+i / ⌘i: the IDE on the repo root; several repos: the picker above the repos line.
+    fn ide_key(&mut self) {
+        let dirs = self.ide_dirs();
+        match dirs.len() {
+            0 => self.open_ide(self.cwd.clone()),
+            1 => self.open_ide(dirs[0].0.clone()),
+            _ => self.ide_pick = Some((0, 0)),
+        }
+    }
+
+    /// Keys of the IDE's repo picker: ↑↓ move, enter opens, esc closes.
+    fn ide_pick_key(&mut self, k: KeyEvent) {
+        let Some((cur, off)) = self.ide_pick else { return };
+        let n = self.ide_dirs().len().max(1);
+        match k.code {
+            KeyCode::Esc => self.ide_pick = None,
+            KeyCode::Up | KeyCode::Char('k') => self.ide_pick = Some(((cur + n - 1) % n, off)),
+            KeyCode::Down | KeyCode::Char('j') => self.ide_pick = Some(((cur + 1) % n, off)),
+            KeyCode::Enter | KeyCode::Char(' ') => self.ide_pick_open(cur),
+            _ => {}
+        }
+    }
+
+    /// Repo I of the picker: the IDE on it, the picker closed.
+    fn ide_pick_open(&mut self, i: usize) {
+        self.ide_pick = None;
+        if let Some((d, _)) = self.ide_dirs().into_iter().nth(i) {
+            self.open_ide(d);
+        }
+    }
+
+    /// The IDE on DIR (a window with DIR open: that one).
+    fn open_ide(&mut self, dir: PathBuf) {
+        #[cfg(test)]
+        {
+            self.ide_opened.push(dir);
+        }
+        #[cfg(not(test))]
+        self.open_editor_in(&dir, |k| crate::editor::args_dir(k, &dir), None, tilde(&dir));
+    }
+
+    /// The IDE's repo picker above the repos line (the row below the prompt), at its left.
+    fn draw_ide_pick(&mut self, f: &mut Frame, bounds: Rect) {
+        let Some((cur, off)) = self.ide_pick else {
+            self.ide_rows.clear();
+            return;
+        };
+        let dirs = self.ide_dirs();
+        let rows: Vec<crate::dropdown::Row> = dirs.iter().map(|(d, l)| crate::dropdown::Row { text: l.clone(), detail: tilde(d), now: *d == crate::workspot::top(&self.cwd), marks: Vec::new() }).collect();
+        let w = rows.iter().map(|r| r.text.chars().count() + r.detail.chars().count() + 8).max().unwrap_or(0).clamp(30, 90) as u16;
+        let anchor = Rect { x: self.hint_rect.x + 2, width: w, ..self.hint_rect };
+        let Some(r) = crate::dropdown::place(anchor, w, rows.len(), bounds, true) else { return };
+        let (off, drawn) = crate::dropdown::list(f, r, "open in IDE", "enter: open · esc: close", &rows, cur.min(rows.len().saturating_sub(1)), off, "0 repos");
+        self.ide_pick = Some((cur, off));
+        self.ide_rows = drawn;
     }
 
     /// Start the IDE with ARGS (by its kind); the toast names WHAT, else why not; once: the trust hint.
     /// TARGET (file, line; None: the worktree): a window that has the worktree open gets it.
     fn open_editor(&mut self, args: impl Fn(crate::editor::Kind) -> Vec<std::ffi::OsString>, target: Option<(&str, u32)>, what: String) {
+        let wt = self.cwd.clone();
+        self.open_editor_in(&wt, args, target, what)
+    }
+
+    /// [`Self::open_editor`] for the checkout WT.
+    fn open_editor_in(&mut self, wt: &Path, args: impl Fn(crate::editor::Kind) -> Vec<std::ffi::OsString>, target: Option<(&str, u32)>, what: String) {
         let Some(e) = crate::editor::find() else {
             self.toast("IDE: 0 found · setting editor (code, cursor, zed, idea …)");
             return;
@@ -1798,14 +1898,14 @@ impl View {
             self.outside = Some(argv);
             return;
         }
-        let (argv, reused) = match crate::editor::reuse_args(&e, &self.cwd, target) {
+        let (argv, reused) = match crate::editor::reuse_args(&e, wt, target) {
             Some(a) => (a, true),
             None => (args(e.kind), false),
         };
         let what = if reused { format!("{what} (open window)") } else { what };
         match crate::editor::spawn(&e, &argv) {
             Ok(()) => {
-                let hint = crate::editor::trust_hint(&self.cwd);
+                let hint = crate::editor::trust_hint(wt);
                 self.toast(hint.unwrap_or_else(|| format!("IDE: {what}")));
             }
             Err(err) => self.toast(format!("IDE: {err}")),
@@ -1834,7 +1934,7 @@ impl View {
         use crate::menu::Item;
         let items = vec![
             Item { label: "back to the start screen".into(), key: "esc esc".into(), id: 3, section: "thread" },
-            Item { label: "IDE on the worktree".into(), key: "ctrl+i".into(), id: 2, section: "thread" },
+            Item { label: "IDE on the repo root (several repos: pick 1)".into(), key: "ctrl+i · ⌘i".into(), id: 2, section: "thread" },
             Item { label: "interrupt the agents".into(), key: "esc".into(), id: 12, section: "thread" },
             Item { label: "tool calls: open / close all".into(), key: "ctrl+o".into(), id: 1, section: "chat" },
             Item { label: "thoughts: open / close all".into(), key: "ctrl+t".into(), id: 13, section: "chat" },
@@ -1968,6 +2068,18 @@ impl View {
                 self.menu = None;
                 // a thread picked: the view ends
                 self.mouse_exit = true;
+            }
+            return;
+        }
+        // the IDE's repo picker: a click on a repo opens it, next to it closes the picker
+        if self.ide_pick.is_some() {
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                let at = Position { x: m.column, y: m.row };
+                match self.ide_rows.iter().find(|(r, _)| r.contains(at)).map(|x| x.1) {
+                    Some(i) => self.ide_pick_open(i),
+                    None => self.ide_pick = None,
+                }
+                self.dirty = true;
             }
             return;
         }
@@ -2743,6 +2855,7 @@ impl View {
             }
             to.extend(crate::workspot::spans(&self.spots));
         }
+        self.hint_rect = hint;
         let lead: u16 = to.iter().map(|s| s.content.chars().count() as u16).sum();
         let left_w = to_width(&hint, self.cwd_edit.is_some() && shell, self.hist.is_open(), shell, self.input.is_empty());
         f.render_widget(Paragraph::new(Line::from(to)), Rect { width: left_w, ..hint });
@@ -2762,7 +2875,7 @@ impl View {
             _ if self.pane == Pane::Merge && !self.prompt_focus => Span::styled(self.merge.hints(), theme::muted()),
             _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · pgup pgdn: scroll · o: IDE · y: yazi · c: copy path · S: share · i: prompt ", theme::muted()),
             _ if self.pane != Pane::Chat => Span::styled("tab / esc: back to the view · F1-F4: views ", theme::muted()),
-            _ => Span::styled(format!("{}: menu · F1-F4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label), theme::muted()),
+            _ => Span::styled(format!("{}: menu · ctrl+i: IDE · F1-F4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label), theme::muted()),
         };
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), foot);
 
@@ -2781,6 +2894,7 @@ impl View {
                 _ => self.cwd_paths.hide(),
             }
         }
+        self.draw_ide_pick(f, area);
         // spawns over the header, under the menu
         self.draw_spawns(f);
         if let Some(m) = self.menu.as_mut() {
@@ -4157,5 +4271,70 @@ fn tilde(p: &Path) -> String {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
         Ok(rest) => format!("~/{}", rest.display()),
         Err(_) => p.display().to_string(),
+    }
+}
+
+/// ctrl+i / ⌘i: the IDE on the repo root from every pane; several repos: the picker.
+#[cfg(test)]
+mod ide_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn draw(v: &mut View) -> String {
+        let mut t = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        t.draw(|f| v.draw(f)).unwrap();
+        let b = t.backend().buffer().clone();
+        (0..40).map(|y| (0..120).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn ctrl_i_opens_the_repo_root_and_several_repos_get_a_picker() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("codehead-ide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (a, b) = (root.join("alpha"), root.join("beta"));
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(d).status().unwrap().success());
+        }
+        // 1 repo, the work dir below its root: the IDE on the root, from the chat and the changes view
+        let t = store::Thread::new("ide", "task", &a.join("src"), vec!["ada".into()]);
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(&t.id, &a.join("src"), "ide", tx);
+        v.input.set_text("draft");
+        v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
+        v.set_pane(Pane::Changes);
+        v.prompt_focus = false;
+        v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::SUPER));
+        assert_eq!(v.ide_opened, [a.clone(), a.clone()]);
+        assert!(v.ide_pick.is_none() && v.input.text() == "draft");
+        // 2 repos: the picker above the repos line; ↓ enter: the 2nd
+        let mut t = store::load(&t.id).unwrap();
+        t.checkouts.push(store::Checkout { dir: b.display().to_string(), branch: None });
+        t.save().unwrap();
+        v.set_pane(Pane::Chat);
+        v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
+        assert_eq!(v.ide_pick, Some((0, 0)));
+        let s = draw(&mut v);
+        assert!(s.contains("open in IDE") && s.contains("alpha") && s.contains("beta"), "{s}");
+        let pick = v.ide_rows.iter().map(|(r, _)| r.y).max().unwrap();
+        assert!(pick < v.hint_rect.y, "above the repos line");
+        v.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(v.ide_opened.last(), Some(&b));
+        assert!(v.ide_pick.is_none());
+        // a click on a row opens it; esc closes the picker (0 interrupt)
+        v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
+        let _ = draw(&mut v);
+        let (r, i) = v.ide_rows[0];
+        v.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
+        assert_eq!((v.ide_opened.last(), i), (Some(&a), 0));
+        v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
+        v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(v.ide_pick.is_none() && v.last_esc.is_none());
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

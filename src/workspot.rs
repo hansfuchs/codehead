@@ -46,6 +46,11 @@ fn head(git_dir: &Path) -> Option<String> {
     }
 }
 
+/// The top dir of DIR's checkout (a linked worktree: its own top); 0 git: DIR.
+pub fn top(dir: &Path) -> PathBuf {
+    git_dir(dir).map_or_else(|| dir.to_path_buf(), |g| g.0)
+}
+
 /// The spot of DIR (BRANCH: the stored one, for a dir without git data).
 pub fn spot(dir: &Path, branch: Option<String>) -> Spot {
     let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
