@@ -759,7 +759,14 @@ impl Host {
         store::update(&self.id, move |t| t.flow = Some(st)).map(|_| ())
     }
 
+    /// A flow line in the log. Steps and waits name their flow after the mark (`▶ chore · step
+    /// 1/3 implement · @ADA`): the line stands alone in the stream.
     fn flow_log(&self, op: &str, text: String) {
+        let name = self.thread().ok().and_then(|t| t.flow).map(|f| f.title).filter(|n| !n.is_empty());
+        let text = match (op, name, text.split_once(' ')) {
+            ("step" | "wait", Some(n), Some((mark, rest))) => format!("{mark} {n} · {rest}"),
+            _ => text,
+        };
         self.log(None, Kind::Flow { op: op.into(), text });
     }
 
@@ -1229,7 +1236,8 @@ mod tests {
         assert_eq!(flow().wait, Some(crate::engine::flows::run::Wait::Role { role: "reviewer".into() }));
         assert!(h.later.is_empty());
         let log: Vec<String> = store::events(&t.id).into_iter().filter_map(|e| match e.kind { Kind::Flow { text, .. } => Some(text), _ => None }).collect();
-        assert!(log.iter().any(|l| l.starts_with("⏸ gate plan approval: waits for the owner (approve · changes)")), "{log:?}");
+        assert!(log.iter().any(|l| l.starts_with("⏸ new feature · gate plan approval: waits for the owner (approve · changes)")), "{log:?}");
+        assert!(log.iter().any(|l| l == "▶ chore · step 1/3 implement · @ada"), "steps name their flow: {log:?}");
         assert!(log.iter().any(|l| l.contains("@reviewer has 0 agent")), "{log:?}");
         let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
     }
