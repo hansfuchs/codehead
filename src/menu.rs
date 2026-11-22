@@ -1,6 +1,6 @@
-//! F2 menu: 1 modal for the start screen and the thread view. Tabs: quick (commands),
-//! threads (filter + thread cards), search (the messages of every thread), tokens, agents (the agents of the thread in view: remove, add; edit →
-//! the agents tab of the start screen). 3 focus levels: the tab bar, a tab's tab group (threads:
+//! The menu (ctrl+p): 1 modal for the start screen and the thread view. Tabs: quick (commands; in
+//! a thread: per agent its flow, remove, replace), threads (filter + thread cards), search (the
+//! messages of every thread), tokens. 3 focus levels: the tab bar, a tab's tab group (threads:
 //! repos, merge: states), its list. ↑ at the top of a list: up 1 level; ↓: down 1 level. ←→ on
 //! the tab bar (a list without a tab group too): next / previous tab; on a tab group: its tabs.
 //! enter: run, a single esc or tab closes.
@@ -28,17 +28,15 @@ pub enum Tab {
     Merge,
     Search,
     Tokens,
-    Agents,
 }
 
-const TABS: [(Tab, &str); 6] = [(Tab::Quick, "quick"), (Tab::Threads, "threads"), (Tab::Merge, "merge"), (Tab::Search, "search"), (Tab::Tokens, "tokens"), (Tab::Agents, "agents")];
+const TABS: [(Tab, &str); 5] = [(Tab::Quick, "quick"), (Tab::Threads, "threads"), (Tab::Merge, "merge"), (Tab::Search, "search"), (Tab::Tokens, "tokens")];
 
 /// A tab of the start screen the menu opens.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Home {
     New,
     Settings,
-    Agents,
     /// The merge tab, a PR open in it (0 thread has it).
     Merge(Option<crate::gh::PrRef>),
     /// The flows tab, a flow open on its rail.
@@ -57,8 +55,6 @@ pub enum Action {
     Jump(Card, u64),
     /// Quick command of the host (its id).
     Command(usize),
-    Remove(String),
-    Add(String),
     /// A PR of the merge tab: its thread's merge tab, else the start screen's.
     Pr(crate::prlist::Entry),
 }
@@ -77,14 +73,6 @@ pub enum Level {
     Bar,
     Group,
     Body,
-}
-
-/// Agents tab rows: the edit button, the agents of the thread, the add button.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Row {
-    Edit,
-    Member(usize),
-    Add,
 }
 
 pub struct Menu {
@@ -107,17 +95,8 @@ pub struct Menu {
     repo_pick: Option<RepoTab>,
     /// Thread in view (None: start screen).
     thread: Option<String>,
-    members: Vec<String>,
+    /// The agents (their colors in the search tab).
     roster: Vec<Agent>,
-    acursor: usize,
-    /// Agents tab: 1st virtual row of the card grid in view.
-    aoffset: usize,
-    /// Effort of claude agents (the effort row of the cards).
-    effort: String,
-    /// Remove armed for this agent: a 2nd enter removes.
-    armed: Option<String>,
-    /// Add picker open: its cursor over the roster agents off the thread.
-    adding: Option<usize>,
     started: Instant,
     /// Tokens tab: the last read, the read running, its time, the first line in view.
     detail: Option<crate::cost::Detail>,
@@ -152,7 +131,7 @@ fn builtins() -> Vec<Item> {
 impl Menu {
     /// ITEMS: the host's quick commands (after new + settings). THREAD: the thread in view.
     /// CARDS: thread cards the host has (empty: read in the background now).
-    pub fn new(items: Vec<Item>, thread: Option<String>, members: Vec<String>, roster: Vec<Agent>, cards: Vec<Card>) -> Menu {
+    pub fn new(items: Vec<Item>, thread: Option<String>, roster: Vec<Agent>, cards: Vec<Card>) -> Menu {
         // tests: 0 thread reads (they write the seen file)
         let loading = (cards.is_empty() && !cfg!(test)).then(|| {
             let (tx, rx) = mpsc::channel();
@@ -186,13 +165,7 @@ impl Menu {
             repos: crate::tabgroup::TabGroup::default(),
             repo_pick: None,
             thread,
-            members,
             roster,
-            acursor: 0,
-            aoffset: 0,
-            effort: crate::agents::effort_name(),
-            armed: None,
-            adding: None,
             started: Instant::now(),
             detail: None,
             detail_rx: None,
@@ -375,62 +348,15 @@ impl Menu {
         self.toffset = 0;
     }
 
-    /// The agents of the thread (an agent the roster lacks: 0 harness), index = index in `members`.
-    fn member_agents(&self) -> Vec<Agent> {
-        self.members
-            .iter()
-            .map(|n| self.roster.iter().find(|a| a.name == *n).cloned().unwrap_or_else(|| Agent { name: n.clone(), harness: "?".into(), model: None, color: None, mode: String::new(), prompt: None, last_seen: None }))
-            .collect()
-    }
 
-    /// Edit, the agents of the thread (by harness, A→Z, as the grid shows them), add.
-    fn agent_rows(&self) -> Vec<Row> {
-        let mut v = vec![Row::Edit];
-        if self.thread.is_some() {
-            let groups = crate::cards::groups(&self.member_agents(), |_| true);
-            v.extend(groups.iter().flat_map(|(_, g)| g.iter().map(|&i| Row::Member(i))));
-            v.push(Row::Add);
-        }
-        v
-    }
 
-    /// Roster agents off the thread (the add picker), by harness, A→Z.
-    fn addable(&self) -> Vec<Agent> {
-        let off: Vec<Agent> = self.roster.iter().filter(|a| !self.members.contains(&a.name)).cloned().collect();
-        let groups = crate::cards::groups(&off, |_| true);
-        groups.iter().flat_map(|(_, g)| g.iter().map(|&i| off[i].clone())).collect()
-    }
 
-    /// Card width of the agents tab: as the agents tab of the start screen (text of every agent).
-    fn card_width(&self) -> u16 {
-        let rows: Vec<String> = self.roster.iter().chain(self.member_agents().iter()).flat_map(|a| [a.name.clone(), crate::cards::tech(a), crate::cards::effort(a, &self.effort)]).collect();
-        crate::cards::card_width(crate::cards::text_width(rows.iter()), true)
-    }
 
-    /// AGENTS (in their order) as a card grid by harness in AREA, CUR: the agent index with the
-    /// cursor; CARD draws 1 (frame, area, agent index, cursor on it). Returns the drawn cards.
-    fn draw_grid(&mut self, f: &mut Frame, area: Rect, agents: &[Agent], cur: Option<usize>, mut card: impl FnMut(&mut Frame, Rect, usize, bool)) -> Vec<(Rect, usize)> {
-        let groups = crate::cards::groups(agents, |_| true);
-        let g = crate::cards::tight_grid(&groups, self.card_width(), crate::cards::CARD_H, area.width);
-        let view = area.height as usize;
-        let top = cur.and_then(|c| g.places.iter().find(|p| p.0 == c)).map_or(0, |p| p.2);
-        self.aoffset = if cur.is_some() { crate::cards::scroll(&g, top, crate::cards::CARD_H, self.aoffset, view) } else { 0 };
-        let off = self.aoffset;
-        let drawn = crate::cards::draw_grid(f, area, &g, crate::cards::CARD_H, off, |f, r, i| card(f, r, i, Some(i) == cur));
-        let below = g.height.saturating_sub(off + view);
-        if off > 0 || below > 0 {
-            let text = format!("{off}↑ · {below}↓");
-            f.render_widget(Paragraph::new(Span::styled(text, theme::muted())).right_aligned(), Rect { height: 1, ..area });
-        }
-        drawn
-    }
 
     fn switch(&mut self, d: isize) {
         let i = TABS.iter().position(|(t, _)| *t == self.tab).unwrap_or(0) as isize;
         self.tab = TABS[(i + d).rem_euclid(TABS.len() as isize) as usize].0;
         self.level = Level::Bar;
-        self.armed = None;
-        self.adding = None;
     }
 
     /// The tab has a tab group (threads: repos, merge: states).
@@ -446,7 +372,6 @@ impl Menu {
             Tab::Merge => self.prs.at_top(),
             Tab::Search => self.scursor == 0,
             Tab::Tokens => self.dscroll == 0,
-            Tab::Agents => self.adding.is_none() && self.acursor == 0,
         }
     }
 
@@ -542,7 +467,6 @@ impl Menu {
                 }
                 Action::None
             }
-            Tab::Agents => self.agents_key(k),
         }
     }
 
@@ -599,56 +523,7 @@ impl Menu {
         Action::None
     }
 
-    fn agents_key(&mut self, k: KeyEvent) -> Action {
-        if let Some(c) = self.adding {
-            let names: Vec<String> = self.addable().iter().map(|a| a.name.clone()).collect();
-            let n = names.len();
-            match k.code {
-                KeyCode::Up if n > 0 => self.adding = Some((c + n - 1) % n),
-                KeyCode::Down if n > 0 => self.adding = Some((c + 1) % n),
-                KeyCode::Backspace => self.adding = None,
-                KeyCode::Enter => {
-                    if let Some(name) = names.get(c) {
-                        self.adding = None;
-                        return Action::Add(name.clone());
-                    }
-                }
-                _ => {}
-            }
-            return Action::None;
-        }
-        let rows = self.agent_rows();
-        let n = rows.len();
-        if !matches!(k.code, KeyCode::Enter | KeyCode::Char('d') | KeyCode::Delete) {
-            self.armed = None;
-        }
-        match k.code {
-            KeyCode::Up | KeyCode::Char('k') => self.acursor = self.acursor.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => self.acursor = (self.acursor + 1).min(n - 1),
-            KeyCode::Enter | KeyCode::Char('d') | KeyCode::Delete => return self.activate(rows[self.acursor.min(n - 1)]),
-            _ => {}
-        }
-        Action::None
-    }
 
-    fn activate(&mut self, row: Row) -> Action {
-        match row {
-            Row::Edit => Action::Home(Home::Agents),
-            Row::Add => {
-                self.adding = Some(0);
-                Action::None
-            }
-            Row::Member(i) => {
-                let Some(name) = self.members.get(i).cloned() else { return Action::None };
-                if self.armed.as_ref() == Some(&name) {
-                    self.armed = None;
-                    return Action::Remove(name);
-                }
-                self.armed = Some(name);
-                Action::None
-            }
-        }
-    }
 
     /// A click: a tab label switches, a row runs (agents: selects; remove needs enter). Outside: close.
     pub fn mouse(&mut self, m: MouseEvent) -> Action {
@@ -683,8 +558,6 @@ impl Menu {
                 if let Some((_, t)) = self.tab_rects.iter().find(|(r, _)| r.contains(at)) {
                     self.tab = *t;
                     self.level = Level::Bar;
-                    self.armed = None;
-                    self.adding = None;
                     return Action::None;
                 }
                 if self.tab == Tab::Merge {
@@ -713,19 +586,6 @@ impl Menu {
                         return self.jump(i);
                     }
                     Tab::Tokens | Tab::Merge => {}
-                    Tab::Agents => {
-                        if let Some(c) = self.adding {
-                            let name = self.addable().get(i).map(|a| a.name.clone());
-                            let _ = c;
-                            self.adding = None;
-                            return name.map(Action::Add).unwrap_or(Action::None);
-                        }
-                        self.acursor = i;
-                        let row = self.agent_rows()[i];
-                        if !matches!(row, Row::Member(_)) {
-                            return self.activate(row);
-                        }
-                    }
                 }
             }
             MouseEventKind::ScrollDown if self.tab == Tab::Threads => {
@@ -823,14 +683,6 @@ impl Menu {
             Tab::Tokens => {
                 self.draw_tokens(f, body);
                 &[("↑↓", "scroll"), ("r", "reload"), ("←→", "tabs"), ("esc", "close")]
-            }
-            Tab::Agents if self.adding.is_some() => {
-                self.draw_agents(f, body);
-                &[("↑↓", "move"), ("enter", "add"), ("⌫", "back"), ("esc", "close")]
-            }
-            Tab::Agents => {
-                self.draw_agents(f, body);
-                &[("↑↓", "move"), ("enter", "run · remove (2×)"), ("←→", "tabs"), ("esc", "close")]
             }
         };
         let mut spans = Vec::new();
@@ -1001,75 +853,6 @@ impl Menu {
         }
     }
 
-    fn draw_agents(&mut self, f: &mut Frame, body: Rect) {
-        if let Some(c) = self.adding {
-            let list = self.addable();
-            f.render_widget(Paragraph::new(Span::styled("add an agent to the thread", theme::muted())), Rect { height: 1, ..body });
-            if list.is_empty() {
-                f.render_widget(Paragraph::new(Span::styled("every agent is on the thread", theme::muted())), Rect { y: body.y + 2, height: 1, ..body });
-                return;
-            }
-            let area = Rect { y: body.y + 2, height: body.height.saturating_sub(2), ..body };
-            let c = c.min(list.len() - 1);
-            let effort = self.effort.clone();
-            self.rows = self.draw_grid(f, area, &list, Some(c), |f, r, i, cur| {
-                let a = &list[i];
-                let title = cur.then(|| Span::styled(" enter: add ", theme::accent()));
-                let look = crate::cards::Look { cur, lit: false, border: Some(crate::cards::border(cur, false, theme::pal().accent)), title, bg: None };
-                crate::cards::draw(f, r, a, &[a.name.clone(), crate::cards::tech(a), crate::cards::effort(a, &effort)], look);
-            });
-            return;
-        }
-        let rows = self.agent_rows();
-        self.acursor = self.acursor.min(rows.len() - 1);
-        let cur_row = rows[self.acursor];
-        let button = |f: &mut Frame, r: Rect, label: &str, hl: bool| {
-            let st = if hl { Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD) } else { Style::default().bg(theme::pal().panel).fg(theme::pal().text) };
-            let br = Rect { width: (label.chars().count() as u16).min(r.width), height: 1, ..r };
-            f.render_widget(Paragraph::new(label.to_string()).style(st), br);
-            br
-        };
-        let edit = button(f, body, " ✎ edit agents: start screen, agents tab ", cur_row == Row::Edit);
-        self.rows.push((edit, 0));
-        if self.thread.is_none() {
-            let note = Rect { y: body.y + 2, height: 1, ..body };
-            if note.bottom() <= body.bottom() {
-                f.render_widget(Paragraph::new(Span::styled("0 thread in view: open a thread for its agents", theme::muted())), note);
-            }
-            return;
-        }
-        // the agents of the thread: the grid of the start screen; add below it
-        let members = self.member_agents();
-        let groups = crate::cards::groups(&members, |_| true);
-        let height = crate::cards::tight_grid(&groups, self.card_width(), crate::cards::CARD_H, body.width).height as u16;
-        let area = Rect { y: body.y + 2, height: height.min(body.height.saturating_sub(4)), ..body };
-        let cur = match cur_row {
-            Row::Member(i) => Some(i),
-            _ => None,
-        };
-        let armed = self.armed.clone();
-        let effort = self.effort.clone();
-        let drawn = self.draw_grid(f, area, &members, cur, |f, r, i, hl| {
-            let a = &members[i];
-            let title = if armed.as_deref() == Some(a.name.as_str()) {
-                Some(Span::styled(" enter again: remove · ↑↓: keep ", Style::default().fg(theme::pal().danger).add_modifier(Modifier::BOLD)))
-            } else {
-                hl.then(|| Span::styled(" enter: remove ", theme::muted()))
-            };
-            let look = crate::cards::Look { cur: hl, lit: true, border: Some(crate::cards::border(hl, false, theme::pal().accent)), title, bg: None };
-            crate::cards::draw(f, r, a, &[a.name.clone(), crate::cards::tech(a), crate::cards::effort(a, &effort)], look);
-        });
-        for (r, i) in drawn {
-            if let Some(at) = rows.iter().position(|row| *row == Row::Member(i)) {
-                self.rows.push((r, at));
-            }
-        }
-        let add = Rect { y: area.bottom() + 1, height: 1, ..body };
-        if add.bottom() <= body.bottom() {
-            let r = button(f, add, " + add an agent ", cur_row == Row::Add);
-            self.rows.push((r, rows.len() - 1));
-        }
-    }
 }
 
 /// A repo tab of the threads tab.
@@ -1117,7 +900,7 @@ mod tests {
 
     fn menu() -> Menu {
         let items = vec![Item { label: "keys".into(), key: "?".into(), id: 7, section: "help" }];
-        Menu::new(items, Some("t1".into()), vec!["amon".into()], vec![agent("amon"), agent("lilith")], vec![card("t1", "first"), card("t2", "deploy fix")])
+        Menu::new(items, Some("t1".into()), vec![agent("amon"), agent("lilith")], vec![card("t1", "first"), card("t2", "deploy fix")])
     }
 
     #[test]
@@ -1156,12 +939,11 @@ mod tests {
         assert_eq!((m.tab, m.level), (Tab::Search, Level::Bar));
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Tokens);
-        m.key(k(KeyCode::Right));
-        assert_eq!(m.tab, Tab::Agents);
+        // 0 agents tab (the agents box of the thread view, ctrl+q, has their actions)
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Quick);
         m.key(k(KeyCode::Left));
-        assert_eq!(m.tab, Tab::Agents);
+        assert_eq!(m.tab, Tab::Tokens);
         assert_eq!(m.key(k(KeyCode::Esc)), Action::Close);
         // the menu key closes it too; tab: the next menu tab (0 close)
         assert_eq!(m.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)), Action::Close);
@@ -1248,7 +1030,7 @@ mod tests {
     #[test]
     fn threads_tab_has_the_current_thread_on_top() {
         let cards = vec![card("t1", "newest"), card("t2", "older"), card("t3", "this one")];
-        let mut m = Menu::new(Vec::new(), Some("t3".into()), Vec::new(), Vec::new(), cards);
+        let mut m = Menu::new(Vec::new(), Some("t3".into()), Vec::new(), cards);
         m.key(k(KeyCode::Right));
         // a letter on the tab bar: the filter takes it (here: enter dives into the list)
         m.key(k(KeyCode::Enter));
@@ -1271,7 +1053,7 @@ mod tests {
     fn threads_repo_tabs_start_on_the_current_threads_repo() {
         let repo = |c: &str, r: &str| Card { repo: Some(r.into()), ..card(c, c) };
         let cards = vec![repo("t1", "/x/alpha"), repo("b1", "/x/beta"), repo("b2", "/x/beta"), repo("g1", "/x/gamma"), card("o1", "o1")];
-        let mut m = Menu::new(Vec::new(), Some("t1".into()), Vec::new(), Vec::new(), cards);
+        let mut m = Menu::new(Vec::new(), Some("t1".into()), Vec::new(), cards);
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Threads);
         m.key(k(KeyCode::Down));
@@ -1307,38 +1089,10 @@ mod tests {
     }
 
     #[test]
-    fn agents_remove_needs_2_enters_and_add_picks_off_thread_agents() {
-        let mut m = menu();
-        m.key(k(KeyCode::Left));
-        assert_eq!(m.tab, Tab::Agents);
-        m.key(k(KeyCode::Down));
-        assert_eq!(m.key(k(KeyCode::Enter)), Action::Home(Home::Agents));
-        m.key(k(KeyCode::Down));
-        assert_eq!(m.key(k(KeyCode::Enter)), Action::None);
-        assert_eq!(m.key(k(KeyCode::Enter)), Action::Remove("amon".into()));
-        // a move disarms
-        m.key(k(KeyCode::Enter));
-        m.key(k(KeyCode::Down));
-        m.key(k(KeyCode::Up));
-        assert_eq!(m.key(k(KeyCode::Enter)), Action::None);
-        m.key(k(KeyCode::Down));
-        assert_eq!(m.key(k(KeyCode::Enter)), Action::None);
-        assert_eq!(m.key(k(KeyCode::Enter)), Action::Add("lilith".into()));
-    }
-
-    #[test]
-    fn start_screen_agents_tab_has_the_edit_button_only() {
-        let mut m = Menu::new(Vec::new(), None, Vec::new(), vec![agent("amon")], vec![card("t1", "x")]);
-        m.key(k(KeyCode::Left));
-        m.key(k(KeyCode::Down));
-        assert_eq!(m.key(k(KeyCode::Enter)), Action::Home(Home::Agents));
-    }
-
-    #[test]
     #[ignore = "reads the real threads"]
     fn live_threads_tab() {
         let cards = nav::load();
-        let mut m = Menu::new(Vec::new(), cards.first().map(|c| c.id.clone()), vec!["amon".into()], crate::agents::cached(), cards);
+        let mut m = Menu::new(Vec::new(), cards.first().map(|c| c.id.clone()), crate::agents::cached(), cards);
         m.key(k(KeyCode::Right));
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 34)).unwrap();
         t.draw(|f| m.render(f, f.area())).unwrap();
@@ -1374,30 +1128,15 @@ mod render_tests {
         s
     }
 
+    /// 0 agents tab (the thread view's agents box, ctrl+q, has their actions); n starts a thread.
     #[test]
-    fn agents_tab_shows_cards_by_harness_and_n_starts_a_thread() {
-        let roster = vec![agent("amon", "claude"), agent("nova", "codex"), agent("lilith", "claude"), agent("regi", "codex")];
-        let mut m = Menu::new(Vec::new(), Some("t1".into()), vec!["nova".into(), "amon".into(), "lilith".into()], roster, vec![Card { id: "t1".into(), ..Default::default() }]);
+    fn the_menu_has_0_agents_tab_and_n_starts_a_thread() {
+        let roster = vec![agent("amon", "claude"), agent("nova", "codex")];
+        let mut m = Menu::new(Vec::new(), Some("t1".into()), roster, vec![Card { id: "t1".into(), ..Default::default() }]);
+        let s = screen(&mut m);
+        let bar = s.lines().find(|l| l.contains("tokens")).unwrap_or_default();
+        assert!(bar.contains("quick") && !bar.contains("agents"), "{s}");
         assert_eq!(m.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)), Action::Home(Home::New));
-        m.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        let s = screen(&mut m);
-        assert!(s.contains("claude · 2") && s.contains("codex · 1") && s.contains("+ add an agent"), "{s}");
-        // 0 blank rows between the harness groups: the heading right below the cards above
-        let lines: Vec<&str> = s.lines().collect();
-        let codex = lines.iter().position(|l| l.contains("codex · 1")).unwrap();
-        assert!(lines[codex - 1].contains('└'), "{s}");
-        // ↓: the cards in grid order (claude: amon, lilith; codex: nova)
-        m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        m.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(m.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), Action::Remove("lilith".into()));
-        // add: the agents off the thread as cards
-        m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        m.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        m.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        let s = screen(&mut m);
-        assert!(s.contains("codex · 1") && s.contains("regi") && s.contains("enter: add"), "{s}");
-        assert_eq!(m.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), Action::Add("regi".into()));
     }
+
 }

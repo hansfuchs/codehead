@@ -2403,7 +2403,7 @@ impl App {
         let mut items: Vec<crate::menu::Item> =
             cmds.iter().enumerate().map(|(i, c)| crate::menu::Item { label: c.label.to_string(), key: c.key.to_string(), id: i, section: "this screen" }).collect();
         items.push(crate::menu::Item { label: "keys of this screen".into(), key: String::new(), id: KEYS_ITEM, section: "help" });
-        self.menu = Some(crate::menu::Menu::new(items, None, Vec::new(), self.agents.clone(), Vec::new()));
+        self.menu = Some(crate::menu::Menu::new(items, None, self.agents.clone(), Vec::new()));
         self.menu_cmds = cmds;
         self.menu_help = help;
     }
@@ -2419,7 +2419,6 @@ impl App {
         self.switch_tab(match h {
             Home::New => Tab::New,
             Home::Settings => Tab::Settings,
-            Home::Agents => Tab::Agents,
             Home::Merge(_) => Tab::Merge,
             Home::Flows(_) => Tab::Flows,
         });
@@ -2465,7 +2464,7 @@ impl App {
         use crate::menu::Action;
         match a {
             Action::None => return,
-            Action::Close | Action::Remove(_) | Action::Add(_) => {}
+            Action::Close => {}
             Action::Home(h) => self.go_home(h),
             Action::Open(c) => self.outcome = Some(Outcome::Resume(Box::new(worktree_of(&c)))),
             Action::Pr(e) => match e.thread {

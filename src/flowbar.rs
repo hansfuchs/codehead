@@ -217,6 +217,11 @@ impl FlowBar {
         self.open = false;
     }
 
+    #[cfg(test)]
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
     /// Open on the steps (the current one under the cursor), or on the wait's choices.
     pub fn open(&mut self) {
         self.open = true;

@@ -123,6 +123,9 @@ struct AgentsFocus {
 /// The rows of the agents box's menu.
 const AGENT_MENU: [&str; 3] = ["flow", "remove", "replace with"];
 
+/// The 1st id of the menu's agent rows: 3 per agent (flow, remove, replace with).
+const AGENT_ITEMS: usize = 1000;
+
 struct View {
     id: String,
     title: String,
@@ -2424,6 +2427,18 @@ impl View {
             Item { label: "interrupt the agents".into(), key: "esc".into(), id: 12, section: "thread" },
             Item { label: "yazi on the worktree (its pick: into the prompt)".into(), key: "files view: y".into(), id: 14, section: "thread" },
             Item { label: "views: chat · changes · merge · files".into(), key: "F1-F4".into(), id: 15, section: "thread" },
+            Item { label: "agents box: flow, remove, replace".into(), key: "ctrl+q".into(), id: 17, section: "agents" },
+        ];
+        // per agent of the thread: its flow, remove it, replace it (the agents box's menu)
+        let mut items = items;
+        for (i, a) in self.order.iter().enumerate() {
+            let flow = self.flowbars.iter().find(|b| b.agent == *a).and_then(|b| b.state.as_ref()).map_or_else(|| "0 flow".to_string(), |st| format!("{} · step {}", st.title, st.node + 1));
+            for (k, label) in [format!("@{a}: flow ({flow})"), format!("@{a}: remove"), format!("@{a}: replace with …")].into_iter().enumerate() {
+                items.push(Item { label, key: String::new(), id: AGENT_ITEMS + i * 3 + k, section: "agents" });
+            }
+        }
+        items.extend([
+            Item { label: "search the chat".into(), key: "ctrl+f".into(), id: 16, section: "chat" },
             Item { label: "tool calls: open / close all".into(), key: "ctrl+o".into(), id: 1, section: "chat" },
             Item { label: "thoughts: open / close all".into(), key: "ctrl+t".into(), id: 13, section: "chat" },
             Item { label: "scroll the stream".into(), key: "wheel · pgup".into(), id: 10, section: "chat" },
@@ -2432,10 +2447,10 @@ impl View {
             Item { label: "agents: mention · →: replace an agent".into(), key: "@".into(), id: 4, section: "prompt" },
             Item { label: "commands: files, notes, threads, skills, branch".into(), key: crate::config::command_key().to_string(), id: 5, section: "prompt" },
             Item { label: "paste a clipboard image".into(), key: "ctrl+v".into(), id: 7, section: "prompt" },
-        ];
+        ]);
         // cards: read in the background by the menu (0 wait on open)
         let cards = Vec::new();
-        self.menu = Some(crate::menu::Menu::new(items, Some(self.id.clone()), self.members.clone(), self.roster.clone(), cards));
+        self.menu = Some(crate::menu::Menu::new(items, Some(self.id.clone()), self.roster.clone(), cards));
     }
 
     fn menu_action(&mut self, a: crate::menu::Action) -> bool {
@@ -2508,17 +2523,37 @@ impl View {
             }
             Action::Command(12) => self.interrupt(),
             Action::Command(14) => self.yazi = Some(self.cwd.clone()),
+            Action::Command(16) => {
+                self.menu = None;
+                return self.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+            }
+            Action::Command(17) => {
+                self.menu = None;
+                self.focus_agents(None);
+                return false;
+            }
+            // an agent's row: its flow box, remove (a 2nd enter in the agents box), replace
+            Action::Command(id) if id >= AGENT_ITEMS => {
+                self.menu = None;
+                let (i, k) = ((id - AGENT_ITEMS) / 3, (id - AGENT_ITEMS) % 3);
+                let Some(agent) = self.order.get(i).cloned() else { return false };
+                match k {
+                    0 => self.open_flow(&agent, false),
+                    _ => {
+                        self.focus_agents(Some(&agent));
+                        if let Some(fo) = self.agents_focus.as_mut() {
+                            fo.cur = k;
+                            if k == 1 {
+                                fo.armed = true;
+                            } else {
+                                fo.replace = Some((0, 0));
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
             Action::Command(_) => {}
-            Action::Remove(name) => {
-                self.host("leave", json!({"op": "leave", "agent": name}));
-                self.toast(format!("{name} leaves…"));
-                return false;
-            }
-            Action::Add(name) => {
-                self.host("join", json!({"op": "join", "agent": name}));
-                self.toast(format!("{name} joins…"));
-                return false;
-            }
         }
         self.menu = None;
         false
@@ -5580,6 +5615,29 @@ mod agents_box_tests {
         assert!(v.agents_focus.as_ref().is_some_and(|f| f.replace.is_none()), "esc: back to the menu");
         key(&mut v, KeyCode::Esc, KeyModifiers::NONE);
         assert!(v.agents_focus.is_none(), "esc: the prompt");
+    }
+
+    /// ctrl+p: per agent of the thread 3 rows (flow, remove, replace with), the agents box's actions.
+    #[test]
+    fn the_menu_has_the_agents_box_actions_per_agent() {
+        let mut v = view("agentsbox-0004");
+        v.open_menu();
+        let mut t = Terminal::new(TestBackend::new(110, 50)).unwrap();
+        t.draw(|f| v.draw(f)).unwrap();
+        let b = t.backend().buffer().clone();
+        let s: String = (0..50).map(|y| (0..110).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
+        assert!(s.contains("@zed: flow (0 flow)") && s.contains("@ada: remove"), "{s}");
+        // zed's flow row: its flow box on the flows
+        v.menu_action(crate::menu::Action::Command(AGENT_ITEMS + 3));
+        assert!(v.menu.is_none() && v.flowbars.iter().find(|b| b.agent == "zed").is_some_and(|b| b.is_open()));
+        // zed's remove row: the agents box on zed, remove armed (enter removes)
+        v.menu_action(crate::menu::Action::Command(AGENT_ITEMS + 4));
+        assert!(v.agents_focus.as_ref().is_some_and(|f| f.at == 1 && f.cur == 1 && f.armed));
+        key(&mut v, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(v.ops.borrow().iter().any(|o| o["op"] == "leave" && o["agent"] == "zed"));
+        // ada's replace row: the replace picker
+        v.menu_action(crate::menu::Action::Command(AGENT_ITEMS + 2));
+        assert!(v.agents_focus.as_ref().is_some_and(|f| f.at == 0 && f.replace.is_some()));
     }
 
     #[test]
