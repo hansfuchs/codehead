@@ -1506,6 +1506,12 @@ impl View {
                 self.input.insert("! ");
                 return false;
             }
+            // 1 backspace on the bare `! ` (or `!`): shell mode off, the prompt empty
+            KeyCode::Backspace if matches!(self.input.text().as_str(), "! " | "!") && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) => {
+                self.input.set_text("");
+                self.shell_at = None;
+                return false;
+            }
             KeyCode::Up if self.input.on_first_row() && (empty || self.hist_at.is_some()) => {
                 self.history_step(true);
                 return false;
@@ -3581,6 +3587,14 @@ mod comment_tests {
         };
         // `!` on an empty prompt: a space after it
         key(&mut v, KeyCode::Char('!'));
+        assert_eq!(v.input.text(), "! ");
+        // 1 backspace: shell mode off, the prompt empty
+        key(&mut v, KeyCode::Backspace);
+        assert!(v.input.text().is_empty() && !v.shell_mode());
+        key(&mut v, KeyCode::Char('!'));
+        // a command typed: backspace deletes 1 char only
+        key(&mut v, KeyCode::Char('l'));
+        key(&mut v, KeyCode::Backspace);
         assert_eq!(v.input.text(), "! ");
         for c in ["ls", "pwd", "ls"] {
             v.thread.items.push(stream::Item::Shell { command: c.into(), output: String::new(), code: 0, ts: 0, dir: None });
