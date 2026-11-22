@@ -354,7 +354,8 @@ impl FlowBar {
                     self.open = false;
                     Act::Answer(choice)
                 }
-                _ => Act::None,
+                // other keys: the prompt's (the note goes along with the answer)
+                _ => return None,
             },
             Mode::Steps => match k.code {
                 KeyCode::Enter => {
@@ -603,7 +604,7 @@ impl FlowBar {
             Mode::How(_) => ("change flow".into(), "↑↓ · enter · esc: back"),
             Mode::Start(_) => ("start step".into(), "↑↓ · enter: switch · esc: back"),
             Mode::Role(_) => ("role".into(), "↑↓ · enter: map · esc: back"),
-            Mode::Answer => ("answer".into(), "↑↓ · enter · esc: back"),
+            Mode::Answer => ("answer".into(), "↑↓ · enter · type: the note · esc: back"),
         }
     }
 

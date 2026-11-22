@@ -81,25 +81,29 @@ The last layer wins per name. `r` in the flows tab resets an edited built-in.
 
 `F5` (alt+5). `←→` on the list: flows / steps. Every edit is saved at once.
 
-- flows: `n` new, `D` duplicate, `R` rename, `d d` delete, `m` user ↔ repo, `/` filter,
+- flows: `n` new, `D` duplicate, `R` rename, `d d` delete, `m` user ↔ repo, `/` filter, `r` read
+  the files again, `ctrl+d ctrl+d` an edited built-in back to its default,
   `enter` the rail.
 - the rail: `a` add a step (type: a shared step, a new shared step, or a one-off), `enter`
   edit, `J` `K` move, `d d` remove, `g` gate, `o` gate outcome (`O` clears), `L` loop (`+`
   `-` its max), `@` role, `s` save a one-off as a shared step.
 - the step editor: `tab` next field, `ctrl+g` gate, `ctrl+f` fork a shared step into a
-  one-off of this flow, `#` shortcuts, `esc` save.
+  one-off of this flow, `#` shortcuts, `ctrl+s` save, `esc` close (edits: `esc` again within 2 s
+  drops them).
 - steps: usage count per step, `n` new, `enter` edit, `R` rename (flows follow), `d d`
   delete (each flow keeps the text as a one-off).
 
 ## On a thread
 
-- new task: the `flow` row (`←→` flows, a letter jumps, `0` none). The last flow of a repo
+- new task: the `flow` row (`←→` flows, a letter jumps, `0` none, `enter` the flows with their
+  steps: start at a later step). The last flow of a repo
   is the next task's default. Step 1 goes to its agent with the task.
 - the thread view: the flow row above the agents shows the flow, the step, its agent, a
-  wait, warnings. `ctrl+f` (or a click, or `> flow`) opens its box: the steps with their
+  wait, warnings. `ctrl+f` (or a click) opens its box (`> flow`: the flow picker): the steps with their
   arcs, `enter` a step's text, `a` answer a wait, `s` skip, `j` jump, `@` map a role,
-  `c` change the flow, `e` edit it, `x x` remove it.
-- a gate: the row says `⏸ gate ...`. `ctrl+f`, pick approve or an outcome; text in the prompt
+  `c` change the flow, `u` undo a queued change, `e` edit it, `x x` remove it.
+- a gate: the row says `⏸ gate ...`. `ctrl+f`, pick approve or an outcome (`↑↓` `enter`); type the
+  note while the box is open: text in the prompt
   goes to the agent as your note.
 - a role with 0 agent: the flow waits; pick the agent to bring in. Agent files take default
   roles: `roles = ["reviewer"]`.

@@ -126,8 +126,9 @@ config:  ~/.config/codehead.toml ($CODEHEAD_CONFIG overrides). keys, each overri
            [colors] scheme = \"coral\" | \"amber\" ($CODEHEAD_SCHEME); accent, text, … = \"#RRGGBB\"
            [aliases]
            \"project:platform\" = \"~/projects/exampleorg/project/notes/platform/\"
-settings: 4th tab. edit fields and path aliases; ctrl+s saves, ctrl+r discards edits / reloads.
-          ctrl+n adds an alias; ctrl+d removes the current alias, on a field: back to its default (↺ too).
+settings: 6th tab (F6). edit fields and path aliases; ctrl+s saves, ctrl+r discards edits / reloads.
+          enter on + add (menu: add path alias) adds an alias; ctrl+d / d removes the current alias, on a
+          field ctrl+d: back to its default (↺ too).
           path fields use the prompt's path suggestions: tab completes, esc closes suggestions.
           esc on a field: its edit undone (0 apply). tab / shift+tab: next / previous field.
           environment variables override file values. edits stay until saved or reloaded.
@@ -159,16 +160,20 @@ prompt:  @: agent names. >: commands, in dropdowns above the prompt box (never o
          ctrl+v: clipboard image → [Image #n], a dropped image path too; text over
          1024 chars (code: never) → [Pasted text #n +L lines]. the files go into the message as a list.
 drafts:  an unsent task goes to ~/.cache/codehead/drafts ($CODEHEAD_DRAFTS) after every key. the new tab
-         shows \"view drafts (n)\" on top: enter lists them; enter loads 1, d deletes it, esc: back.
+         shows \"view drafts (n)\" on top: enter lists them; enter loads 1, d d deletes it, esc: back.
          a started thread drops its draft. drafts older than 30 days go. \"save as draft\" (right of
          it) or ctrl+s: the task as a kept draft (★ saved, 0 cleanup by age), the form starts over.
          n in the menu: an empty form, the task on screen stays a draft.
 artifacts: codehead sets CLAUDE_CODE_ARTIFACT=1 for the sessions it starts: Claude Code agents can
          publish web artifacts (off by default in SDK sessions). a value set before codehead stays.
-esc:     1 level back: never applies, never drops edits unasked (agent form, ctrl+r reset: asked).
-tabs:    F1-F6 (alt+1-6) switch tabs (word jumps: ctrl / alt+←→). tab / shift+tab: next / previous field
-         (on a row of tabs: into its content). ←→ on a row of tabs: the next / previous tab.
-esc esc: quit from the new tab. ctrl+c: quit at once.
+esc:     1 level back: never saves, never drops edits unasked (edited text: esc again within 2 s drops
+         it; the agent form and reset ask).
+keys:    1 key, 1 meaning: a letter key never acts with ctrl / alt / ⌘ held (alt+P never pushes).
+         outward or destructive keys ask first: a 2nd press (d d, S S, ctrl+d ctrl+d, enter enter).
+tabs:    start screen: F1-F6 (alt+1-6) switch tabs (word jumps: ctrl / alt+←→). tab / shift+tab: next /
+         previous field (on a row of tabs: into its content). ←→ on a row of tabs: the next / previous tab.
+quit:    esc esc on the start screen; ctrl+c 2× within 1 s (a 1st ctrl+c on text: clears it, ctrl+z back);
+         menu → quit codehead. q never quits.
 updates: 1 check per day (github.com releases, in the background). a newer release: 1 line after
          codehead quits. codehead --update installs it. $CODEHEAD_NO_UPDATE_CHECK=1: 0 checks.
 debug:   $CODEHEAD_KEYLOG=<file>: every key of the text inputs, with its time (a report on keys the
@@ -178,7 +183,7 @@ inputs:  all text fields (title, prompt, agent form, filters, thread prompt): ct
          Markdown lists (`- `, `* `, `1. `, 2 spaces per layer): enter starts the next item at the same
          layer; enter / backspace on an empty item: 1 layer out (1st layer: the marker goes), space: 1 layer in.
 start:   the new tab: the prompt first (its 1st line: the thread title, unless the title field has one),
-         then title, where, agents, notes. type, ctrl+enter. notes: tab to the notes field, enter.
+         then title, repo, where, opts, flow, agents, notes. type, ctrl+enter. notes: tab to the notes field, enter.
 threads: worktrees, then recent Claude Code sessions. enter on a session:
          new thread in its dir, its last response as context.
 thread view: the thread's agents on top (sprite, model, working / idle / waits on you; ★ the lead),
@@ -190,8 +195,10 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          joins it). agents message each other with the `send` tool of codehead's MCP server.
          wheel, pgup / pgdn, shift+↑↓: scroll · esc: back to live, else interrupt (after 0.5 s) · esc esc: back.
          send: ctrl+enter (⌘enter, alt+enter); ctrl+s never sends. a question: ↑↓ space enter 1-9,
-         letters: Other, tab: question ↔ prompt.
-         click a link: open it; ctrl+click: any URL on screen. ctrl+c: clears the prompt, 2× on an empty one closes codehead.
+         letters: Other, tab: question ↔ prompt. a new question takes the keys only on an empty prompt
+         after 1 s of 0 keys; else it waits for tab (0 typed key answers it by surprise).
+         click a link: open it; ctrl+click: any URL on screen. ctrl+c: copies the prompt's selection,
+         else clears the prompt (ctrl+z: back), 2× on an empty one closes codehead.
          #: shortcuts (settings → shortcuts): #name stands for its text; tab / enter puts the text in,
          a #name left in the prompt: its text on send. ↑↓ in any dropdown: the row into the text at once.
          >: commands, as in the task prompt (files: of the thread's worktree), and
@@ -200,15 +207,17 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          @: agent names. ←→ on a name: + add, or ⇄ replace an agent of the thread: on send, the old
          agent leaves and the new one gets the message with the old one's last messages.
          ctrl+i / ⌘i (every pane): the IDE on the repo root, several repos: a picker (setting editor: auto, code, cursor, zed, idea …).
-         views (row 0): alt/option+←→ previous / next (chat, changes, merge, files), alt+1-4. tab / i: the prompt, tab / esc: back to the view. ctrl+y: yazi. changes: 1 box per file in review
+         views (row 0): alt+1-4 (option+1-4): chat, changes, merge, files. tab / i: the prompt, tab / esc:
+         back to the view. yazi: files view y, menu. changes: 1 box per file in review
          order (schema, logic, config, UI, docs, tests, generated), j k box (j: down), n N hunk,
          v reviewed, enter fold, e / o IDE at the line, w side by side / unified, r read git again,
-         i / tab prompt (esc / tab back). ↑ on the 1st row of a PR's diff: its views row.
+         f / filter, ctrl+b: panel shown → its keys → hidden, i / tab prompt (esc / tab back).
+         ↑ on the 1st row of a PR's diff: its views row.
          tool runs (▸): click opens / closes the calls (input + output); ctrl+o: all.
          thoughts (setting thoughts = hidden | folded | open): ∴ rows, a click opens 1, ctrl+t: all.
          ctrl+v pastes a clipboard image as [Image #n], a dropped image path too. pasted text over
          1024 chars (code: never): [Pasted text #n +L lines]. both go in as attachments.
-         ⌘/ctrl+Enter (alt+Enter, ctrl+s) sends, Enter: new line. ↑ on the 1st row of an empty
+         ⌘/ctrl+Enter (alt+Enter) sends, Enter: new line. ↑ on the 1st row of an empty
          prompt / ↓ on the last: the thread's sent messages.
          agent questions and permission requests: ↑↓ / 1-9 / space / enter on the empty prompt, or a
          click on a choice.
@@ -221,7 +230,8 @@ engine:  codehead runs the agents itself. 1 host process per thread (codehead ho
          events.jsonl; $CODEHEAD_HOME). agents: ~/.config/codehead/agents/<name>.toml.
          sockets: $XDG_RUNTIME_DIR/codehead. logs: ~/.local/share/codehead/logs.
          codehead ctl <thread> '<json>': 1 command to a thread's host (scripts).
-menu:    ctrl+p on every screen (setting keys.menu), esc / ctrl+p closes. ←→: tabs; ↓ / ↑ at the top of a list: in / out of a
+menu:    ctrl+p on every screen (setting keys.menu: 1 key codehead binds to nothing else), esc / ctrl+p
+         closes. tab / shift+tab: tabs (←→ too, outside threads / merge); ↓ / ↑ at the top of a list: in / out of a
          tab's sub-tabs (threads: repos, merge: states) and its list. quick: new, settings + the commands of
          the screen (keys: the keys of the screen). threads: filter (type) + thread cards, enter opens.
          agents: the agents of the thread in view (enter, enter: remove = it leaves the thread), add,

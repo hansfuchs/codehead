@@ -34,6 +34,8 @@ pub struct Monitors {
     ended: HashSet<String>,
     /// A line for the view's toast (`d`: what ended, or why not).
     note: Option<String>,
+    /// A 1st d: a 2nd d ends the selected watch.
+    armed: bool,
 }
 
 impl Monitors {
@@ -56,14 +58,18 @@ impl Monitors {
     }
     pub fn key(&mut self, k: KeyEvent) -> bool {
         if !self.open { return false; }
+        let armed = std::mem::take(&mut self.armed);
         match k.code {
             KeyCode::Esc => self.open = false,
             KeyCode::Up => { self.selected = self.selected.saturating_sub(1); self.scroll = 0; }
             KeyCode::Down => { self.selected = (self.selected + 1).min(self.watches.len().saturating_sub(1)); self.scroll = 0; }
             KeyCode::PageDown => self.scroll += 5,
             KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(5),
-            KeyCode::Char('d') if k.modifiers.is_empty() => self.end_selected(),
-            _ => self.open = false,
+            // d d: end the selected watch
+            KeyCode::Char('d') if k.modifiers.is_empty() && armed => self.end_selected(),
+            KeyCode::Char('d') if k.modifiers.is_empty() => self.armed = true,
+            // another key: the box closes, the key goes on (0 swallowed key)
+            _ => { self.open = false; return false; }
         }
         true
     }
@@ -161,7 +167,7 @@ impl Monitors {
         f.render_widget(Clear, r);
         let block = Block::new().borders(Borders::ALL).border_type(BorderType::Plain).border_style(theme::accent())
             .title(Span::styled(" monitors ", theme::accent_bold()))
-            .title_bottom(Line::styled(" ↑↓ select · d end · pgup/pgdn scroll · esc close ", theme::muted()).right_aligned());
+            .title_bottom(Line::styled(if self.armed { " d again: end the watch · another key: no " } else { " ↑↓ select · d d end · pgup/pgdn scroll · esc close " }, theme::muted()).right_aligned());
         let inner = block.inner(r);
         f.render_widget(block, r);
         let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
@@ -384,7 +390,7 @@ mod tests {
         let text = buffer.content.iter().map(|c| c.symbol()).collect::<String>();
         assert!(text.contains("smoke job progress"));
         assert!(text.contains("tail -f smoke.log"));
-        assert!(text.contains("d end"));
+        assert!(text.contains("d d end"));
         assert!(panel.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(!panel.open);
         assert_eq!(panel.rows(100, 20), 1);
@@ -401,6 +407,10 @@ mod tests {
         watch["content"]["raw_input"]["command"] = json!(format!("sleep 30; echo {tag}"));
         let mut panel = Monitors { watches: parse(&[watch], 2000), open: true, ..Default::default() };
         std::thread::sleep(std::time::Duration::from_millis(100));
+        // d: asks (the watch stays); d again: ends it
+        assert!(panel.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)));
+        assert!(panel.armed && panel.watches.len() == 1);
+
         assert!(panel.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)));
         assert!(panel.watches.is_empty() && !panel.open);
         assert!(panel.take_note().unwrap().starts_with("monitor ended"));

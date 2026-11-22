@@ -64,9 +64,29 @@ fn questions(a: &Ask) -> Vec<(String, String, Vec<(String, String)>, bool)> {
     a.questions()
 }
 
+/// K edits a text field with a modifier: ⌫ / Del, ctrl or ⌘ + a letter of the edit keys
+/// (u w h k a e d x z y), alt + a letter (alt+b/f/d), alt / ctrl / ⌘ + ←→ Home End.
+fn text_edit(k: &KeyEvent) -> bool {
+    let m = k.modifiers;
+    let cmd = m.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER);
+    match k.code {
+        KeyCode::Backspace | KeyCode::Delete => true,
+        KeyCode::Char(c) if cmd && !m.contains(KeyModifiers::ALT) => "uwhkaedxzy".contains(c.to_ascii_lowercase()),
+        KeyCode::Char(c) if m.contains(KeyModifiers::ALT) => c.is_ascii_alphabetic(),
+        KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => true,
+        _ => false,
+    }
+}
+
 impl Picker {
     /// Bind to ASK (the 1st open ask; None: 0 asks). A new ask: a fresh picker with the focus.
     pub fn sync(&mut self, ask: Option<&Ask>) {
+        self.sync_with(ask, true);
+    }
+
+    /// As `sync`; FOCUS: a new ask takes the focus. False (the owner types in the prompt): the
+    /// ask waits for tab, 0 typed key lands in the ask by surprise.
+    pub fn sync_with(&mut self, ask: Option<&Ask>, focus: bool) {
         let Some(a) = ask else {
             *self = Picker::default();
             return;
@@ -75,7 +95,7 @@ impl Picker {
             return;
         }
         let n = questions(a).len().max(1);
-        *self = Picker { id: a.id.clone(), focus: true, picks: vec![BTreeSet::new(); n], others: vec![String::new(); n], answers: vec![None; n], ..Default::default() };
+        *self = Picker { id: a.id.clone(), focus, picks: vec![BTreeSet::new(); n], others: vec![String::new(); n], answers: vec![None; n], ..Default::default() };
     }
 
     /// Answers so far: (question, answer) of the answered questions before the shown one.
@@ -126,7 +146,7 @@ impl Picker {
             return "answer sent…".into();
         }
         if !self.focus {
-            return "tab: back to the question".into();
+            return "tab: answer the question".into();
         }
         let qs = questions(a);
         let mut h: Vec<&str> = vec!["↑↓ move"];
@@ -152,8 +172,8 @@ impl Picker {
     /// Key K for ask A. Tab moves the focus between the ask and the prompt; with the focus, the
     /// ask takes every plain key but esc, page up / down and F-keys (0 key edits the hidden prompt).
     pub fn key(&mut self, a: &Ask, k: KeyEvent) -> Act {
-        // a picker of another ask (0 sync yet): a fresh one for A
-        self.sync(Some(a));
+        // a picker of another ask (0 sync yet): a fresh one for A, the focus stays in the prompt
+        self.sync_with(Some(a), false);
         if self.sent {
             return Act::Pass;
         }
@@ -163,12 +183,22 @@ impl Picker {
         }
         let none = k.modifiers.is_empty();
         let typed = none || k.modifiers == KeyModifiers::SHIFT;
+        let other = self.other_row(a);
+        let on_other = other == Some(self.at);
+
+        // with the focus, a text edit key with a modifier (ctrl+w, alt+⌫, ctrl+u …): the Other
+        // text's, else 0 effect (never the hidden prompt's)
+        if self.focus && !typed && text_edit(&k) {
+            if on_other && crate::textarea::delete_key(&mut self.others[self.q], &k) && self.others[self.q].is_empty() {
+                self.picks[self.q].remove(&self.at);
+            }
+            return Act::Changed;
+        }
+
         if !self.focus || !typed || matches!(k.code, KeyCode::Esc | KeyCode::PageUp | KeyCode::PageDown | KeyCode::F(_)) {
             return Act::Pass;
         }
         let n = self.rows_n(a);
-        let other = self.other_row(a);
-        let on_other = other == Some(self.at);
         let qn = questions(a).len();
         match k.code {
             // shift+↑↓: the view scrolls
@@ -469,7 +499,7 @@ mod tests {
             assert_eq!(p.key(&a, key(c)), Act::Pass, "{c:?}");
         }
         assert!(p.rows(&a).iter().all(|r| !r.picked));
-        assert_eq!(p.hint(&a), "tab: back to the question");
+        assert_eq!(p.hint(&a), "tab: answer the question");
         press(&mut p, &a, "⇥");
         assert!(p.focus);
     }

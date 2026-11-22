@@ -681,6 +681,12 @@ impl Command {
         self.sync(ta).map(|_| self.depth())
     }
 
+    /// The dropdown shows (as `key` sees it: a deeper level, or 1+ command matching the text).
+    pub fn is_open(&mut self, ta: &TextArea) -> bool {
+        let Some((_, q)) = self.sync(ta) else { return false };
+        self.settle(&q) > 0 || self.depth() > 0
+    }
+
     /// Key for the dropdown. true: used (the input must not see it).
     pub fn key(&mut self, k: KeyEvent, ta: &mut TextArea) -> bool {
         let Some((at, q)) = self.sync(ta) else { return false };

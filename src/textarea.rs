@@ -234,6 +234,18 @@ pub fn line_mod(m: KeyModifiers) -> bool {
     m.contains(KeyModifiers::SUPER) || (!cfg!(target_os = "macos") && m.contains(KeyModifiers::ALT))
 }
 
+/// Esc on unsaved edits (esc never drops edits unasked): DIRTY and 0 esc within 2 s before → false
+/// (the caller warns: "esc again: drop"); a 2nd esc in time or 0 edits → true (drop / close now).
+/// AT: the caller's last esc.
+pub fn esc_drops(at: &mut Option<std::time::Instant>, dirty: bool) -> bool {
+    if !dirty || at.take().is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
+        return true;
+    }
+
+    *at = Some(std::time::Instant::now());
+    false
+}
+
 /// Delete keys of a 1-line text kept as a String (dropdown filters): ⌫ 1 char; ⌥⌫ / ctrl+⌫ /
 /// ctrl+w / ctrl+h the string left of the end (a path: 1 segment, as [`TextArea`]); ⌘⌫ (alt+⌫ off
 /// macOS) / ctrl+u all. True: S changed or the key was 1 of these.
@@ -322,6 +334,11 @@ impl TextArea {
 
     pub fn text(&self) -> String {
         self.lines.iter().map(|l| l.iter().collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// The owner edited the text since the last `set_text` (1+ undo step).
+    pub fn edited(&self) -> bool {
+        !self.undo.is_empty()
     }
 
     /// New value from the program (load, send): a new undo history, like a browser input.

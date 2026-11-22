@@ -111,6 +111,17 @@ enum Menu {
     Labels { cur: usize, filter: Box<TextArea> },
 }
 
+/// Enter on stop S of tab T: true on the 2nd enter within ARM (a 1st arms it).
+fn twice(t: &mut Tab, s: Stop) -> bool {
+    if t.armed.is_some_and(|(a, at)| a == s && at.elapsed() < ARM) {
+        t.armed = None;
+        return true;
+    }
+
+    t.armed = Some((s, Instant::now()));
+    false
+}
+
 /// 1 PR's tab.
 #[derive(Default)]
 struct Tab {
@@ -128,6 +139,11 @@ struct Tab {
     reading: bool,
     fast_until: Option<Instant>,
     armed_merge: Option<Instant>,
+    /// A 1st enter on a stop that changes the PR at once (remove a label, update prompt,
+    /// auto-merge off, close): a 2nd enter on it within ARM acts.
+    armed: Option<(Stop, Instant)>,
+    /// The last esc in an edit: a 2nd within 2 s drops edited text.
+    esc_at: Option<Instant>,
     /// An edit on its way.
     busy: Option<String>,
     changes: Option<crate::changes::View>,
@@ -588,12 +604,15 @@ impl Merge {
         if self.tab_ref().is_some_and(|t| t.menu.is_some()) {
             return self.menu_key(k);
         }
-        match k.code {
-            KeyCode::Char('[') => return self.step_pr(-1),
-            KeyCode::Char(']') => return self.step_pr(1),
-            KeyCode::Char('<') => return self.set_sub(Sub::Overview),
-            KeyCode::Char('>') => return self.set_sub(Sub::Changes),
-            _ => {}
+        // [ ] < >: PR and sub-view, never while the PR diff's filter / comment takes text
+        if !self.typing() {
+            match k.code {
+                KeyCode::Char('[') => return self.step_pr(-1),
+                KeyCode::Char(']') => return self.step_pr(1),
+                KeyCode::Char('<') => return self.set_sub(Sub::Overview),
+                KeyCode::Char('>') => return self.set_sub(Sub::Changes),
+                _ => {}
+            }
         }
         if self.tab_ref().is_some_and(|t| t.sub == Sub::Changes) {
             if ctrl && k.code == KeyCode::Char('r') {
@@ -814,6 +833,9 @@ impl Merge {
             }
             Stop::Label(i) => {
                 if let Some(l) = p.labels.get(i) {
+                    if !twice(t, s) {
+                        return Act::Toast(format!("enter again: remove the label {}", l.name));
+                    }
                     return self.run(Op::RemoveLabel(l.name.clone()));
                 }
             }
@@ -829,10 +851,17 @@ impl Merge {
                     });
                 }
             }
-            Stop::Update => return Act::Prompt(self.update_prompt(&p)),
+            Stop::Update => {
+                if !twice(t, s) {
+                    return Act::Toast("enter again: the agents update the branch".into());
+                }
+                return Act::Prompt(self.update_prompt(&p));
+            }
             Stop::Merge => {
-                if let Some(m) = &p.auto_merge {
-                    let _ = m;
+                if p.auto_merge.is_some() {
+                    if !twice(t, s) {
+                        return Act::Toast("enter again: auto-merge off".into());
+                    }
                     return self.run(Op::DisableAuto);
                 }
                 if !matches!(p.state, State::Open) {
@@ -872,9 +901,14 @@ impl Merge {
         let Some(t) = self.tab() else { return Act::None };
         let Some((e, ta)) = t.edit.as_mut() else { return Act::None };
         let single = matches!(e, Edit::Title);
+        // esc: closes; edited text only on a 2nd esc (esc never drops edits unasked)
         if k.code == KeyCode::Esc {
+            let dirty = ta.edited();
+            if !crate::textarea::esc_drops(&mut t.esc_at, dirty) {
+                return Act::Toast("esc again: drop the edit · ctrl+⏎: save".into());
+            }
             t.edit = None;
-            return Act::Toast("edit dropped".into());
+            return if dirty { Act::Toast("edit dropped".into()) } else { Act::None };
         }
         if save || (single && k.code == KeyCode::Enter) {
             let text = ta.text();
@@ -946,6 +980,10 @@ impl Merge {
                 match menu {
                     Menu::Status(_, o) => {
                         let op = o.get(c).map(|x| x.1.clone());
+                        // close: a 2nd enter within ARM (the menu stays open for it)
+                        if matches!(op, Some(Op::Close)) && !twice(t, Stop::Status) {
+                            return Act::Toast("enter again: close the pull request".into());
+                        }
                         t.menu = None;
                         if let Some(op) = op {
                             return self.run(op);
@@ -1585,7 +1623,7 @@ impl Merge {
             return t.changes.as_ref().map(|c| format!("{}· ↑ on top: views ", c.hints())).unwrap_or_default();
         }
         if t.edit.is_some() {
-            return "ctrl+⏎ save · esc drop ".into();
+            return "ctrl+⏎ save · esc: close (edited: esc esc) ".into();
         }
         if t.menu.is_some() {
             return "↑↓ pick · ⏎ take · esc close ".into();
@@ -1765,15 +1803,48 @@ pub mod tests {
         m.tab().unwrap().focus = Some(Stop::Merge);
         let a = key(&mut m, KeyCode::Enter);
         assert!(matches!(a, Act::Toast(ref t) if t.contains("enter again: merge when ready (squash)")), "{a:?}");
+        // update: a 1st enter asks, a 2nd sends the prompt
         m.tab().unwrap().focus = Some(Stop::Update);
         let a = key(&mut m, KeyCode::Enter);
+        assert!(matches!(a, Act::Toast(ref t) if t.contains("enter again: the agents update")), "{a:?}");
+
+        let a = key(&mut m, KeyCode::Enter);
         assert!(matches!(a, Act::Prompt(ref t) if t.contains("Update the branch `feat/x`") && t.contains("0 conflicts expected")), "{a:?}");
+
         let mut p = pr();
         p.mergeable = "CONFLICTING".into();
         let mut m = with(p);
         m.tab().unwrap().focus = Some(Stop::Update);
+        key(&mut m, KeyCode::Enter);
         let a = key(&mut m, KeyCode::Enter);
         assert!(matches!(a, Act::Prompt(ref t) if t.contains("resolve every conflict")), "{a:?}");
+    }
+
+    #[test]
+    fn a_label_goes_on_a_2nd_enter_and_brackets_type_into_the_diff_filter() {
+        let mut p = pr();
+        p.labels = vec![gh::Label { name: "bug".into(), color: String::new() }];
+        let mut m = with(p);
+        m.tab().unwrap().focus = Some(Stop::Label(0));
+        let a = key(&mut m, KeyCode::Enter);
+        assert!(matches!(a, Act::Toast(ref t) if t.contains("enter again: remove the label bug")), "{a:?}");
+
+        // another stop between: the arm goes
+        m.tab().unwrap().focus = Some(Stop::Update);
+        key(&mut m, KeyCode::Enter);
+        m.tab().unwrap().focus = Some(Stop::Label(0));
+        let a = key(&mut m, KeyCode::Enter);
+        assert!(matches!(a, Act::Toast(ref t) if t.contains("enter again: remove the label")), "{a:?}");
+
+        // the PR diff's filter takes [ ] < > as text, 0 PR switch
+        key(&mut m, KeyCode::Char('>'));
+        m.tab().unwrap().focus = None;
+        key(&mut m, KeyCode::Char('f'));
+        for c in "[a]<>".chars() {
+            key(&mut m, KeyCode::Char(c));
+        }
+        assert_eq!(m.tab_ref().unwrap().sub, Sub::Changes);
+        assert!(m.typing(), "the filter still takes keys");
     }
 
     #[test]

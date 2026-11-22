@@ -200,6 +200,11 @@ impl Paths {
         }
     }
 
+    /// The dropdown shows (a path at the cursor, 1+ entries).
+    pub fn is_open(&mut self, ta: &TextArea) -> bool {
+        self.open(ta).is_some()
+    }
+
     /// Key for the dropdown. true: used (the input must not see it).
     pub fn key(&mut self, k: KeyEvent, ta: &mut TextArea) -> bool {
         let Some(o) = self.open(ta) else { return false };

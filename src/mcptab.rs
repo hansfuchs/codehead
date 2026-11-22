@@ -104,6 +104,8 @@ pub struct McpTab {
     /// Click targets of the last draw: (area, index into items()).
     hits: Vec<(Rect, usize)>,
     modal_hits: Vec<(Rect, usize)>,
+    /// The last esc in the edit form: a 2nd within 2 s drops its edits.
+    esc_at: Option<std::time::Instant>,
 }
 
 fn icon(state: &str) -> (&'static str, Style) {
@@ -148,6 +150,7 @@ impl McpTab {
             modal: None,
             hits: Vec::new(),
             modal_hits: Vec::new(),
+            esc_at: None,
         };
         t.load();
         t
@@ -354,7 +357,6 @@ impl McpTab {
         let n = self.items().0.len();
         match k.code {
             KeyCode::Char('/') => self.filtering = true,
-            KeyCode::Char('f') if ctrl => self.filtering = true,
             KeyCode::Up if self.cursor == 0 => {
                 self.filtering = true;
             }
@@ -592,7 +594,16 @@ impl McpTab {
             Modal::Edit(mut e) => {
                 let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
                 match k.code {
-                    KeyCode::Esc => None,
+                    // esc: closes; edits only on a 2nd esc (esc never drops edits unasked)
+                    KeyCode::Esc => {
+                        let dirty = e.name.edited() || e.target.edited() || e.secrets.edited();
+                        if crate::textarea::esc_drops(&mut self.esc_at, dirty) {
+                            None
+                        } else {
+                            self.say("esc again: drop the edits · ctrl+s: save", false);
+                            Some(Modal::Edit(e))
+                        }
+                    }
                     KeyCode::Char('s') if ctrl => self.save_edit(e),
                     KeyCode::Enter if e.field == 4 => self.save_edit(e),
                     KeyCode::Tab | KeyCode::Down if !(e.field == 3 && k.code == KeyCode::Down && !e.secrets_at_end()) => {

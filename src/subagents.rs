@@ -39,6 +39,8 @@ pub struct Subagents {
     read_at: Option<std::time::Instant>,
     /// Box rows of the last draw: (row in the box text, subagent id).
     rows: Vec<(usize, String)>,
+    /// A 1st d: a 2nd d stops the selected subagent.
+    armed: bool,
 }
 
 /// The running subagents of SUBS in box order: by master (first start first), each master's
@@ -124,14 +126,21 @@ impl Subagents {
         }
         let list = order(subs);
         let at = self.current(&list).and_then(|c| list.iter().position(|(s, _)| s.id == c.id)).unwrap_or(0);
+        let armed = std::mem::take(&mut self.armed);
         match k.code {
             KeyCode::Esc => self.open = false,
             KeyCode::Up => self.selected = list.get(at.saturating_sub(1)).map(|(s, _)| s.id.clone()),
             KeyCode::Down => self.selected = list.get((at + 1).min(list.len().saturating_sub(1))).map(|(s, _)| s.id.clone()),
             KeyCode::PageDown => self.scroll += 5,
             KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(5),
-            KeyCode::Char('d') if k.modifiers.is_empty() => return Some(self.current(&list).map_or(Act::None, |s| Act::Stop(s.id.clone()))),
-            _ => self.open = false,
+            // d d: stop the selected subagent
+            KeyCode::Char('d') if k.modifiers.is_empty() && armed => return Some(self.current(&list).map_or(Act::None, |s| Act::Stop(s.id.clone()))),
+            KeyCode::Char('d') if k.modifiers.is_empty() => self.armed = true,
+            // another key: the box closes, the key goes on (0 swallowed key)
+            _ => {
+                self.open = false;
+                return None;
+            }
         }
         Some(Act::None)
     }
@@ -240,7 +249,7 @@ impl Subagents {
             .border_type(BorderType::Plain)
             .border_style(theme::accent())
             .title(Span::styled(" subagents ", theme::accent_bold()))
-            .title_bottom(Line::styled(" ↑↓ select · d stop · pgup/pgdn scroll · esc close ", theme::muted()).right_aligned());
+            .title_bottom(Line::styled(if self.armed { " d again: stop the subagent · another key: no " } else { " ↑↓ select · d d stop · pgup/pgdn scroll · esc close " }, theme::muted()).right_aligned());
         let inner = block.inner(r);
         f.render_widget(block, r);
         let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
@@ -265,5 +274,22 @@ mod tests {
         let subs = [sub("a", "ada", None), sub("b", "bob", None), sub("c", "ada", Some("a")), done, sub("d", "ada", None), sub("e", "ada", Some("gone"))];
         let o: Vec<(&str, usize)> = order(&subs).into_iter().map(|(s, d)| (s.id.as_str(), d)).collect();
         assert_eq!(o, [("a", 0), ("c", 1), ("d", 0), ("e", 0), ("b", 0)]);
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use ratatui::crossterm::event::KeyModifiers;
+
+    #[test]
+    fn another_key_closes_the_box_and_goes_on_d_asks_first() {
+        let mut s = Subagents { open: true, ..Default::default() };
+        assert!(s.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE), &[]).is_none(), "x: not the box's");
+        assert!(!s.open);
+
+        s.open = true;
+        assert!(matches!(s.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE), &[]), Some(Act::None)));
+        assert!(s.armed && s.open);
     }
 }

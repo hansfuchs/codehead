@@ -1208,6 +1208,8 @@ pub struct View {
     fx: crate::dissolve::Dissolve,
     /// An alt press with 0 key after it yet: its release toggles the focus.
     alt_tap: bool,
+    /// The last esc in the comment modal: a 2nd within 2 s drops an edited comment.
+    esc_at: Option<std::time::Instant>,
     id: String,
     dir: PathBuf,
     pub changes: Changes,
@@ -1434,6 +1436,7 @@ impl View {
             scm: scm::Panel::new(),
             modal: None,
             alt_tap: false,
+            esc_at: None,
             modal_btns: Vec::new(),
             modal_quote: Rect::default(),
             shown_rows: Vec::new(),
@@ -2317,6 +2320,19 @@ impl View {
     /// A key while a modal is open.
     fn modal_key(&mut self, k: KeyEvent) -> Act {
         let send = k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+
+        // esc: closes; an edited comment only on a 2nd esc (esc never drops edits unasked)
+        if k.code == KeyCode::Esc
+            && let Some(Modal::Comment { text, .. }) = &self.modal
+        {
+            let dirty = text.edited();
+            if !crate::textarea::esc_drops(&mut self.esc_at, dirty) {
+                return Act::Toast("esc again: drop the comment · ctrl+⏎: save it".into());
+            }
+            self.modal = None;
+            return Act::None;
+        }
+
         match self.modal.as_mut() {
             // the severity row: ←→ cycle it, ↓ / a letter: the text
             // alt+↑↓: the selected lines scroll
@@ -2572,7 +2588,7 @@ impl View {
     /// The keys of the footer now.
     pub fn hints(&self) -> &'static str {
         match &self.modal {
-            Some(Modal::Comment { .. }) => return "ctrl+⏎: save · esc: cancel · alt+↑↓ / wheel: scroll the lines · 0 text: delete ",
+            Some(Modal::Comment { .. }) => return "ctrl+⏎: save · esc: close (edited: esc esc) · alt+↑↓ / wheel: scroll the lines · 0 text: delete ",
             Some(Modal::Confirm { .. }) => return "y / enter: yes · n / esc: no ",
             None => {}
         }
@@ -2885,10 +2901,22 @@ impl View {
     }
 
     /// The side panel on / off (ctrl+b: from the view, from the prompt too).
+    /// ctrl+b: hidden → shown with the keys; shown, the keys in the review → the keys to the
+    /// panel; the panel with the keys → hidden (0 kitty protocol needed, as the alt tap is).
     pub fn toggle_panel(&mut self) {
+        if self.scm.shown && !self.scm.focus {
+            self.scm.focus = true;
+            return;
+        }
+
         self.scm.shown = !self.scm.shown;
-        self.scm.focus &= self.scm.shown;
+        self.scm.focus = self.scm.shown;
         self.scm.msg_focus &= self.scm.shown;
+    }
+
+    /// The source control panel has the keys.
+    pub fn panel_focus(&self) -> bool {
+        self.scm.shown && self.scm.focus
     }
 
     pub fn key(&mut self, k: KeyEvent) -> Act {
@@ -2911,6 +2939,16 @@ impl View {
             return Act::None;
         }
 
+        // a letter with ctrl / alt / ⌘: 0 review or panel key (alt+P never pushes); ctrl+r reads
+        // again, ctrl+x deletes, as their plain letters; the commit message takes its own
+        if !self.scm.msg_focus
+            && let KeyCode::Char(c) = k.code
+            && k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+            && !(ctrl && !k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER) && matches!(c, 'r' | 'x'))
+        {
+            return Act::None;
+        }
+
         if self.scm.focus {
             return self.panel_key(k);
         }
@@ -2923,8 +2961,6 @@ impl View {
             KeyCode::Char('k') | KeyCode::Up => self.jump(false, |r| r.head),
             KeyCode::PageDown => self.at = (self.at + self.page()).min(last),
             KeyCode::PageUp => self.at = self.at.saturating_sub(self.page()),
-            KeyCode::Char('}') => self.jump(true, |r| r.head),
-            KeyCode::Char('{') => self.jump(false, |r| r.head),
             KeyCode::Char('n') => self.jump(true, |r| r.hunk || r.head),
             KeyCode::Char('N') => self.jump(false, |r| r.hunk || r.head),
             KeyCode::Char('g') | KeyCode::Home => self.at = 0,
@@ -2943,7 +2979,7 @@ impl View {
             KeyCode::Char('v') => return self.toggle_reviewed(),
             KeyCode::Left => self.fold(true),
             KeyCode::Right => self.fold(false),
-            KeyCode::Char('f') => self.filtering = true,
+            KeyCode::Char('f' | '/') => self.filtering = true,
             KeyCode::Char('t') => return Act::ToggleChat,
             KeyCode::Esc => {
                 if !self.filter.is_empty() {
@@ -3649,9 +3685,9 @@ Binary files a/img.png and b/img.png differ
         v.at = v.rows.iter().position(|r| r.head).unwrap();
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)), Act::Open("src/a.rs".into(), 12));
         v.sel.clear();
-        // } / {: box heads
+        // j: the next box head
         v.at = v.rows.iter().position(|r| r.head).unwrap();
-        v.key(KeyEvent::new(KeyCode::Char('}'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert!(v.rows[v.at].head && v.changes.files[v.rows[v.at].file].path == "new.rs");
     }
 

@@ -493,14 +493,19 @@ impl Menu {
     pub fn key(&mut self, k: KeyEvent) -> Action {
         self.poll();
         let ctrl = k.modifiers.contains(ratatui::crossterm::event::KeyModifiers::CONTROL);
-        // a tab with a tab group (threads: repos, merge: states): ←→ move in the group, ctrl+←→
-        // switch the menu tabs; the other tabs: ←→ switch them too
+        // tab / shift+tab: the next / previous menu tab, from every level; a tab with a tab group
+        // (threads: repos, merge: states): ←→ move in the group; the other tabs: ←→ switch them
+        // too; ctrl+←→: the filter's word jumps
         let group = self.grouped();
         match k.code {
             // esc or the menu key again: closed
             KeyCode::Esc => return Action::Close,
             _ if crate::config::menu_key().matches(&k) => return Action::Close,
-            KeyCode::Right | KeyCode::Left if ctrl || (!group && self.level == Level::Body) => {
+            KeyCode::Tab | KeyCode::BackTab if !ctrl => {
+                self.switch(if k.code == KeyCode::Tab { 1 } else { -1 });
+                return Action::None;
+            }
+            KeyCode::Right | KeyCode::Left if !ctrl && !group && self.level == Level::Body => {
                 self.switch(if k.code == KeyCode::Right { 1 } else { -1 });
                 return Action::None;
             }
@@ -800,7 +805,7 @@ impl Menu {
                 match self.level {
                     Level::Bar => &[("←→", "tabs"), ("↓", "repos"), ("type", "filter"), ("esc", "close")],
                     Level::Group => &[("←→", "repo"), ("↑", "tabs"), ("↓", "threads"), ("esc", "close")],
-                    Level::Body => &[("type", "filter"), ("←→", "repo"), ("↑↓", "move"), ("enter", "open"), ("ctrl+←→", "tabs"), ("esc", "close")],
+                    Level::Body => &[("type", "filter"), ("←→", "repo"), ("↑↓", "move"), ("enter", "open"), ("tab", "tabs"), ("esc", "close")],
                 }
             }
             Tab::Merge => {
@@ -808,7 +813,7 @@ impl Menu {
                 match self.level {
                     Level::Bar => &[("←→", "tabs"), ("↓", "states"), ("esc", "close")],
                     Level::Group => &[("←→", "state"), ("↑", "tabs"), ("↓", "list"), ("esc", "close")],
-                    Level::Body => &[("←→", "state"), ("↑↓", "move"), ("enter", "open: its thread, else the merge tab"), ("ctrl+←→", "tabs"), ("esc", "close")],
+                    Level::Body => &[("←→", "state"), ("↑↓", "move"), ("enter", "open: its thread, else the merge tab"), ("tab", "tabs"), ("esc", "close")],
                 }
             }
             Tab::Search => {
@@ -1139,7 +1144,7 @@ mod tests {
         assert_eq!(m.level, Level::Bar);
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Merge);
-        // merge: the same 3 levels; ctrl+←→ switch the tabs from any level
+        // merge: the same 3 levels; tab switches the tabs from any level
         m.key(k(KeyCode::Down));
         m.key(k(KeyCode::Down));
         assert_eq!(m.level, Level::Body);
@@ -1147,8 +1152,7 @@ mod tests {
         m.key(k(KeyCode::Up));
         assert_eq!(m.level, Level::Bar);
         m.key(k(KeyCode::Down));
-        let ctrl = |c| KeyEvent::new(c, KeyModifiers::CONTROL);
-        m.key(ctrl(KeyCode::Right));
+        m.key(k(KeyCode::Tab));
         assert_eq!((m.tab, m.level), (Tab::Search, Level::Bar));
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Tokens);
@@ -1159,7 +1163,7 @@ mod tests {
         m.key(k(KeyCode::Left));
         assert_eq!(m.tab, Tab::Agents);
         assert_eq!(m.key(k(KeyCode::Esc)), Action::Close);
-        // the menu key closes it too; tab: 0 close (tab walks fields, ctrl+p is the menu)
+        // the menu key closes it too; tab: the next menu tab (0 close)
         assert_eq!(m.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)), Action::Close);
         assert_ne!(m.key(k(KeyCode::Tab)), Action::Close);
     }

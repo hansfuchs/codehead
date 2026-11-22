@@ -5,7 +5,7 @@
 //!   a shared step. A shared step edited from a flow changes every flow that uses it (the editor
 //!   says which); f forks it into a one-off of this flow.
 //! - steps: the step library: usage count, n new, enter edit, R rename (flows follow), D
-//!   duplicate, d d delete (each flow keeps the text as a one-off), r reset a built-in.
+//!   duplicate, d d delete (each flow keeps the text as a one-off), ctrl+d ctrl+d resets an edited built-in, r reads the files again.
 //!
 //! ←→ on a list: the other sub-tab. / filters the list.
 
@@ -85,6 +85,8 @@ struct Editor {
     fields: Vec<(&'static str, TextArea, bool)>,
     field: usize,
     gate: bool,
+    /// The gate when the editor opened (a toggle counts as an edit).
+    gate0: bool,
 }
 
 /// A row of the add-step picker.
@@ -112,6 +114,10 @@ pub struct FlowsTab {
     ask: Option<(Ask, TextArea)>,
     target: Option<Target>,
     armed: bool,
+    /// A 1st ctrl+d: a 2nd resets the edited built-in.
+    reset_armed: bool,
+    /// The last esc in the editor: a 2nd within 2 s drops its edits.
+    esc_at: Option<std::time::Instant>,
     error: Option<String>,
     note: Option<String>,
     shortcuts: crate::shortcuts::Pick,
@@ -148,6 +154,8 @@ impl FlowsTab {
             ask: None,
             target: None,
             armed: false,
+            reset_armed: false,
+            esc_at: None,
             error: None,
             note: None,
             shortcuts: crate::shortcuts::Pick::default(),
@@ -254,8 +262,11 @@ impl FlowsTab {
 
     pub fn key(&mut self, k: KeyEvent) -> Out {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        if !matches!(k.code, KeyCode::Char('d')) {
+        if !matches!(k.code, KeyCode::Char('d')) || ctrl {
             self.armed = false;
+        }
+        if !(ctrl && k.code == KeyCode::Char('d')) {
+            self.reset_armed = false;
         }
         if self.ask.is_some() {
             self.ask_key(k);
@@ -349,6 +360,16 @@ impl FlowsTab {
                     self.ask = Some((if self.sub == Sub::Flows { Ask::RenameFlow } else { Ask::RenameStep }, input(true, "name", &c)));
                 }
             }
+            // ctrl+d ctrl+d: an edited built-in back to its default (as ctrl+d in settings)
+            KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !self.reset_armed {
+                    self.reset_armed = true;
+                    self.note = Some("ctrl+d again: back to the built-in (your edits go)".into());
+                    return self.out();
+                }
+                self.reset_armed = false;
+                self.reset();
+            }
             KeyCode::Char('d') | KeyCode::Delete => {
                 if !self.armed {
                     self.armed = true;
@@ -357,7 +378,11 @@ impl FlowsTab {
                 self.armed = false;
                 self.delete();
             }
-            KeyCode::Char('r') => self.reset(),
+            // r: read the flow and step files again, as on every screen
+            KeyCode::Char('r') => {
+                self.reload();
+                self.note = Some("flows: read again".into());
+            }
             KeyCode::Char('m') if self.sub == Sub::Flows => self.move_layer(),
             _ => {}
         }
@@ -379,7 +404,7 @@ impl FlowsTab {
             Sub::Steps => {
                 let Some(s) = self.cur_step().cloned() else { return };
                 if s.edited {
-                    return self.fail("an edited built-in: r resets it");
+                    return self.fail("an edited built-in: ctrl+d resets it");
                 }
                 match self.lib.delete_step(&s.name) {
                     Ok(n) => self.note = Some(format!("step {} deleted · {n} flows keep its text as a one-off", s.name)),
@@ -806,6 +831,7 @@ impl FlowsTab {
             ],
             field: 4,
             gate: s.gate,
+            gate0: s.gate,
         });
         self.focus = Focus::Editor;
     }
@@ -832,7 +858,7 @@ impl FlowsTab {
             ],
         };
         let field = fields.len() - 1;
-        self.editor = Some(Editor { what: Edit::Node(i, shared), fields, field, gate: r.gate });
+        self.editor = Some(Editor { what: Edit::Node(i, shared), fields, field, gate: r.gate, gate0: r.gate });
         self.focus = Focus::Editor;
     }
 
@@ -922,12 +948,16 @@ impl FlowsTab {
         let Some(ed) = self.editor.as_mut() else { return back(self) };
         let n = ed.fields.len();
         match k.code {
+            // esc: closes without a save; edits only on a 2nd esc (ctrl+s saves)
             KeyCode::Esc => {
-                if self.store_editor() {
-                    self.editor = None;
-                    self.shortcuts.hide();
-                    back(self);
+                let dirty = ed.gate != ed.gate0 || ed.fields.iter().any(|(_, t, _)| t.edited());
+                if !crate::textarea::esc_drops(&mut self.esc_at, dirty) {
+                    self.note = Some("esc again: drop the edits · ctrl+s: save".into());
+                    return;
                 }
+                self.editor = None;
+                self.shortcuts.hide();
+                back(self);
             }
             KeyCode::Char('s') if ctrl => {
                 if self.store_editor() {
@@ -1028,11 +1058,11 @@ impl FlowsTab {
         }
         match self.focus {
             Focus::List if self.armed => &[("d", "again: delete"), ("any key", "keep")],
-            Focus::List if self.sub == Sub::Flows => &[("↑↓", "move"), ("enter", "rail"), ("←→", "steps"), ("n", "new"), ("D", "duplicate"), ("R", "rename"), ("d d", "delete"), ("r", "reset"), ("m", "user ↔ repo"), ("/", "filter")],
-            Focus::List => &[("↑↓", "move"), ("enter", "edit"), ("←→", "flows"), ("n", "new"), ("D", "duplicate"), ("R", "rename"), ("d d", "delete"), ("r", "reset"), ("/", "filter")],
+            Focus::List if self.sub == Sub::Flows => &[("↑↓", "move"), ("enter", "rail"), ("←→", "steps"), ("n", "new"), ("D", "duplicate"), ("R", "rename"), ("d d", "delete"), ("r", "read again"), ("ctrl+d", "reset"), ("m", "user ↔ repo"), ("/", "filter")],
+            Focus::List => &[("↑↓", "move"), ("enter", "edit"), ("←→", "flows"), ("n", "new"), ("D", "duplicate"), ("R", "rename"), ("d d", "delete"), ("r", "read again"), ("ctrl+d", "reset"), ("/", "filter")],
             Focus::Rail if self.armed => &[("d", "again: remove the step"), ("any key", "keep")],
             Focus::Rail => &[("a", "add"), ("enter", "edit"), ("J K", "move"), ("d d", "remove"), ("g", "gate"), ("o / O", "outcome / clear"), ("L", "loop"), ("+ -", "max"), ("@", "role"), ("s", "save as step"), ("esc", "list")],
-            Focus::Editor => &[("tab", "next field"), ("ctrl+g", "gate"), ("ctrl+f", "fork shared → one-off"), ("#", "shortcuts"), ("esc ctrl+s", "save")],
+            Focus::Editor => &[("tab", "next field"), ("ctrl+g", "gate"), ("ctrl+f", "fork shared → one-off"), ("#", "shortcuts"), ("ctrl+s", "save"), ("esc", "close")],
         }
     }
 
@@ -1132,7 +1162,7 @@ impl FlowsTab {
         };
         let nodes = flows::resolve(&fl, &self.lib);
         let layer = match (fl.layer, fl.edited) {
-            (_, true) => "edited built-in · r: reset".to_string(),
+            (_, true) => "edited built-in · ctrl+d: reset".to_string(),
             (l, _) => l.label().to_string(),
         };
         let roles = flows::roles(&fl, &nodes).join(", ");
@@ -1234,7 +1264,7 @@ impl FlowsTab {
             .border_type(BorderType::Plain)
             .border_style(theme::accent())
             .title(Span::styled(title, theme::accent_bold()))
-            .title_bottom(Line::styled(format!(" gate {} · ctrl+g · tab next · esc save ", if ed.gate { "on" } else { "off" }), theme::muted()).right_aligned());
+            .title_bottom(Line::styled(format!(" gate {} · ctrl+g · tab next · ctrl+s save · esc close ", if ed.gate { "on" } else { "off" }), theme::muted()).right_aligned());
         let inner = block.inner(r);
         f.render_widget(Clear, r);
         f.render_widget(block, r);
@@ -1429,7 +1459,12 @@ mod tests {
         t.key(k(KeyCode::Enter));
         assert!(matches!(t.editor.as_ref().map(|e| &e.what), Some(Edit::Node(0, Some(_)))));
         typed(&mut t, " ZZ");
+
+        // esc: 0 save, the editor stays (edits); ctrl+s saves
         t.key(k(KeyCode::Esc));
+        assert!(t.editor.is_some() && !Library::load(None).step("implement").unwrap().text.ends_with(" ZZ"));
+
+        t.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         let lib = Library::load(None);
         assert!(lib.step("implement").unwrap().text.ends_with(" ZZ"));
         assert!(lib.step("implement").unwrap().edited);

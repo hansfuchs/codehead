@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -173,6 +173,8 @@ pub struct View {
     /// Fuzzy filter (f): name and content; typing while focused.
     filter: crate::textarea::TextArea,
     filtering: bool,
+    /// A 1st S (share: commit + push) at: a 2nd within 3 s shares.
+    share_armed: Option<std::time::Instant>,
     list: Rect,
     /// The drawn rows of the list: (y, row).
     drawn: Vec<(u16, Row)>,
@@ -202,6 +204,7 @@ impl View {
             named: Vec::new(),
             filter,
             filtering: false,
+            share_armed: None,
             list: Rect::default(),
             drawn: Vec::new(),
             preview: Rect::default(),
@@ -407,7 +410,7 @@ impl View {
         self.poll();
         self.refresh(false);
         if self.files.is_empty() {
-            f.render_widget(Paragraph::new(Line::styled("  0 files yet: the files the agents write, and the home repo's notes of this thread · ctrl+y: yazi", theme::muted())), area);
+            f.render_widget(Paragraph::new(Line::styled("  0 files yet: the files the agents write, and the home repo's notes of this thread · menu: yazi", theme::muted())), area);
             return;
         }
         let lw = (area.width * 2 / 5).clamp(24, 60).min(area.width);
@@ -528,6 +531,12 @@ impl View {
             }
             return Act::None;
         }
+        // a letter with ctrl / alt / ⌘: 0 view key (alt+S never shares)
+        if matches!(k.code, KeyCode::Char(_)) && k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) {
+            return Act::None;
+        }
+
+        let armed = self.share_armed.take().filter(|t| t.elapsed() < std::time::Duration::from_secs(3));
         let page = usize::from(self.preview.height.saturating_sub(3)).max(1);
         match k.code {
             KeyCode::Char('f') | KeyCode::Char('/') => self.filtering = true,
@@ -536,8 +545,9 @@ impl View {
             KeyCode::PageDown | KeyCode::Char(' ') => self.scroll += page,
             KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(page),
             KeyCode::Char('g') | KeyCode::Home => self.scroll = 0,
-            KeyCode::Char('o') => return self.cur().map_or(Act::None, |e| Act::Open(e.path.clone())),
-            KeyCode::Char('y') => return self.cur().map_or(Act::None, |e| Act::Yazi(e.path.clone())),
+            KeyCode::Char('o' | 'e') => return self.cur().map_or(Act::None, |e| Act::Open(e.path.clone())),
+            // y: yazi on the file (0 files: on the work dir)
+            KeyCode::Char('y') => return Act::Yazi(self.cur().map_or_else(|| self.dir.clone(), |e| e.path.clone())),
             KeyCode::Char('c') => {
                 if let Some(e) = self.cur() {
                     let p = e.path.display().to_string();
@@ -546,9 +556,13 @@ impl View {
                 }
             }
             KeyCode::Char('r') => self.refresh(true),
-            // S: share the thread's home repo files (commit those paths, push if tracked)
+            // S S: share the thread's home repo files (commit those paths, push if tracked)
             KeyCode::Char('S') => {
                 let Some(home) = crate::config::home_repo() else { return Act::Toast("0 home repo (setting home)".into()) };
+                if armed.is_none() {
+                    self.share_armed = Some(std::time::Instant::now());
+                    return Act::Toast("S again: share (commit + push the thread's home repo files)".into());
+                }
                 let paths: Vec<PathBuf> = self.files.iter().map(|e| e.path.clone()).collect();
                 let title = store::load(&self.id).map(|t| t.title).unwrap_or_default();
                 let r = share(&home, &paths, &title);
@@ -743,6 +757,17 @@ mod view_tests {
         for c in keys.chars() {
             v.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
+    }
+
+    #[test]
+    fn letters_with_a_modifier_do_nothing_and_y_opens_yazi_on_the_dir_without_files() {
+        let mut v = View::new("fileskeys-0000", Path::new("/tmp/fileskeys"));
+        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::ALT | KeyModifiers::SHIFT)), Act::None);
+        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)), Act::None);
+        assert!(!v.filtering, "ctrl+f: 0 filter (f, / are)");
+
+        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)), Act::Yazi(PathBuf::from("/tmp/fileskeys")));
+        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)), Act::None, "0 file: 0 IDE");
     }
 
     #[test]

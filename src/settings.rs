@@ -44,7 +44,7 @@ const SPECS: [Spec; 27] = [
     spec("rank", "review order", "changes view: claude:<model> when 0 classifier agent is found, off: path rules", "CODEHEAD_RANK"),
     spec("review", "reviewer", "changes view V: claude:<model> reviews the diff (read-only tools), off: 0 reviews", "CODEHEAD_REVIEW"),
     spec("editor", "editor", "IDE for ctrl+i and the changes view e: auto, or code, codium, cursor, zed, idea, flow …, terminal ($EDITOR), or a path", "CODEHEAD_EDITOR"),
-    spec("keys.menu", "menu", "opens the menu: F1-F12, ctrl+<letter>, alt+<letter>", "CODEHEAD_MENU_KEY"),
+    spec("keys.menu", "menu", "opens the menu: F7-F12, ctrl+<letter>, alt+<letter> (not 1 codehead binds already)", "CODEHEAD_MENU_KEY"),
     spec("keys.command", "commands", "opens the command dropdown in a prompt: 1 symbol", "CODEHEAD_COMMAND_KEY"),
     spec("colors.scheme", "scheme", "preset: coral or amber", "CODEHEAD_SCHEME"),
     spec("colors.accent", "accent", "the 1 accent: titles, pills, the cursor row", ""),
@@ -69,7 +69,7 @@ const SECTIONS: [(usize, &str, &str); 5] = [
     (16, "colors", "a preset; a set field below overrides 1 of its colors"),
 ];
 /// The alias group, after the plain fields.
-const ALIASES: (&str, &str) = ("path aliases", "short names for directories: name/ → target/ · enter: edit / done · d: delete · ctrl+a: add");
+const ALIASES: (&str, &str) = ("path aliases", "short names for directories: name/ → target/ · enter: edit / done · d: delete · enter on + add: add");
 /// Fields and boxes: this many columns right of the group's heading.
 const INDENT: u16 = 2;
 
@@ -345,11 +345,19 @@ impl Form {
         self.focus = (self.focus as isize + d).clamp(0, self.add_item() as isize) as usize;
     }
 
-    fn add_alias(&mut self) {
+    /// A new alias box, open on its name (enter on + add, menu → add path alias).
+    pub fn add_alias(&mut self) {
+        if !self.aliases_on {
+            return;
+        }
         self.commit();
         self.push_alias("", "");
         self.focus = self.add_item() - 1;
         self.editing = Some(self.fields.len() - 2);
+
+        // esc's target: the empty box (as `key` sets it for a box unlocked by a key)
+        self.pair_entry = Some((self.fields.len() - 2, String::new(), String::new()));
+        self.focus_input();
     }
 
     fn delete_alias(&mut self, k: usize) {
@@ -430,10 +438,7 @@ impl Form {
                     self.applied = self.reload();
                     return Action::None;
                 }
-                KeyCode::Char('a' | 'A') if self.aliases_on => {
-                    self.add_alias();
-                    return Action::None;
-                }
+                // ctrl+a: the text field's row start (+ add / enter adds an alias)
                 KeyCode::Char('d' | 'D') if self.focus < self.plain() => {
                     self.reset(self.focus);
                     return Action::None;
@@ -759,7 +764,7 @@ impl Form {
         if self.aliases_on && let Some(row) = at(items[self.add_item()].0, 1) {
             let focused = active && self.focus == self.add_item();
             f.render_widget(
-                Paragraph::new(Line::styled(" + add path alias (ctrl+a) ", if focused { theme::pill() } else { theme::panel() })),
+                Paragraph::new(Line::styled(" + add path alias (enter) ", if focused { theme::pill() } else { theme::panel() })),
                 row,
             );
             self.rows.push((row, Hit::Add));
@@ -943,7 +948,7 @@ impl Settings {
             return &[("←→", "sub-tab"), ("↓ enter", "in"), ("↑", "main tabs")];
         }
         match self.sub {
-            Sub::Codehead => &[("↑↓", "move"), ("enter", "edit / done"), ("ctrl+d", "default"), ("d", "delete alias"), ("ctrl+a", "add alias"), ("tab", "next field"), ("esc", "undo edit")],
+            Sub::Codehead => &[("↑↓", "move"), ("enter", "edit / done"), ("ctrl+d", "default"), ("d", "delete alias"), ("tab", "next field"), ("esc", "undo edit")],
             Sub::Harnesses => &[("↑↓", "move"), ("tab", "next field"), ("ctrl+d", "default"), ("esc", "undo edit")],
             Sub::Mcp => self.mcp.help(),
             Sub::Shortcuts => self.shortcuts.help(),
@@ -1105,8 +1110,9 @@ mod tests {
     fn alias_boxes_lock_apply_on_leave_and_delete_with_d() {
         let (dir, mut form) = fixture("save");
         assert!(!form.dirty());
-        // ctrl+a: a new box, open on its name
-        form.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        // enter on + add: a new box, open on its name
+        form.focus = form.add_item();
+        form.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!((form.focus, form.editing), (PLAIN, Some(PLAIN)));
         form.paste("project:platform");
         // enter locks the box: 0 target → not applied, the error shows
@@ -1151,7 +1157,9 @@ mod tests {
     fn form_scrolls_to_controls_and_handles_invalid_reload() {
         let (dir, mut form) = fixture("render");
         for _ in 0..10 {
-            form.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+            form.editing = None;
+            form.focus = form.add_item();
+            form.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         }
         form.editing = None;
         form.focus = form.add_item();
@@ -1177,7 +1185,8 @@ mod tests {
     #[test]
     fn alias_box_draws_a_border_and_highlights_when_locked() {
         let (dir, mut form) = fixture("box");
-        form.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        form.focus = form.add_item();
+        form.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         form.paste("docs");
         key(&mut form, KeyCode::Down);
         form.paste("~/docs/");
@@ -1204,7 +1213,8 @@ mod tests {
         let (dir, mut form) = fixture("paths");
         std::fs::create_dir_all(dir.join("browse/child")).unwrap();
         std::fs::write(dir.join("browse/guide.md"), "guide").unwrap();
-        form.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        form.focus = form.add_item();
+        form.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         form.paste("notes");
         form.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         form.paste(&format!("{}/browse/", dir.display()));

@@ -381,6 +381,8 @@ pub struct Tab {
     error: Option<String>,
     /// d once: armed, d again: deleted.
     armed: bool,
+    /// The last esc in the name / text: a 2nd within 2 s drops the edits.
+    esc_at: Option<std::time::Instant>,
     list_rect: Rect,
     name_rect: Rect,
     text_rect: Rect,
@@ -406,7 +408,7 @@ impl Tab {
         name.style = Some(theme::panel());
         let mut text = TextArea::new(false, "the text #name stands for");
         text.style = Some(theme::panel());
-        let mut t = Tab { list: Vec::new(), at: 0, focus: Focus::List, name, text, error: None, armed: false, list_rect: Rect::default(), name_rect: Rect::default(), text_rect: Rect::default(), rows: Vec::new() };
+        let mut t = Tab { list: Vec::new(), at: 0, focus: Focus::List, name, text, error: None, armed: false, esc_at: None, list_rect: Rect::default(), name_rect: Rect::default(), text_rect: Rect::default(), rows: Vec::new() };
         t.enter();
         t
     }
@@ -518,16 +520,24 @@ impl Tab {
                     _ => {}
                 }
             }
-            Focus::Name => match k.code {
-                KeyCode::Esc => {
-                    // a new shortcut never saved: it goes
-                    if self.list.get(self.at).is_some_and(|s| s.text.is_empty() && !all().iter().any(|a| a.name == s.name)) {
-                        self.list.remove(self.at);
-                        self.at = self.at.min(self.list.len());
-                    }
-                    self.load();
-                    self.focus = Focus::List;
+            // esc in the name or the text: back to the list, 0 save; edits only on a 2nd esc
+            Focus::Name | Focus::Text if k.code == KeyCode::Esc => {
+                let dirty = self.name.edited() || self.text.edited();
+                if !crate::textarea::esc_drops(&mut self.esc_at, dirty) {
+                    self.error = Some("esc again: drop the edits · ctrl+s: save".into());
+                    return true;
                 }
+
+                self.error = None;
+                // a new shortcut never saved: it goes
+                if self.list.get(self.at).is_some_and(|s| s.text.is_empty() && !all().iter().any(|a| a.name == s.name)) {
+                    self.list.remove(self.at);
+                    self.at = self.at.min(self.list.len());
+                }
+                self.load();
+                self.focus = Focus::List;
+            }
+            Focus::Name => match k.code {
                 KeyCode::Enter | KeyCode::Tab | KeyCode::Down => {
                     let name = self.name.text().trim().to_string();
                     if !valid_name(&name) {
@@ -545,12 +555,7 @@ impl Tab {
                 }
             },
             Focus::Text => match k.code {
-                // esc / ctrl+s: saved, back to the list
-                KeyCode::Esc => {
-                    if self.store() {
-                        self.focus = Focus::List;
-                    }
-                }
+                // ctrl+s / ctrl+enter: saved, back to the list
                 KeyCode::Char('s') if ctrl => {
                     if self.store() {
                         self.focus = Focus::List;
@@ -624,7 +629,7 @@ impl Tab {
             Focus::List if self.armed => &[("d", "again: delete"), ("↑↓", "keep")],
             Focus::List => &[("↑↓", "move"), ("enter →", "edit text"), ("r", "rename"), ("n", "new"), ("d d", "delete"), ("↑ top", "sub-tabs")],
             Focus::Name => &[("enter ↓", "the text"), ("esc", "back")],
-            Focus::Text => &[("esc ctrl+s", "save"), ("↑ 1st row", "the name"), ("enter", "new line")],
+            Focus::Text => &[("ctrl+s", "save"), ("esc", "back"), ("↑ 1st row", "the name"), ("enter", "new line")],
         }
     }
 

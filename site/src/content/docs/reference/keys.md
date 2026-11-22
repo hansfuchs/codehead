@@ -4,29 +4,40 @@ description: Every key, per screen.
 ---
 
 `codehead --help` prints the full list. ⌘ keys need a terminal with the kitty keyboard protocol.
-`ctrl+p` and `>` are the defaults of the settings `[keys] menu` and `[keys] command`. `tab` walks
-the fields on every screen; `←→` walk a row of tabs.
+`ctrl+p` and `>` are the defaults of the settings `[keys] menu` and `[keys] command` (a key
+codehead binds to something else is refused). `tab` walks the fields on every screen; `←→` walk a
+row of tabs.
+
+Rules on every screen:
+
+- 1 key, 1 meaning. A letter key never acts with `ctrl` / `alt` / `⌘` held (`alt+P` never pushes).
+- `esc` goes 1 level back. It never saves. Edited text goes only on a 2nd `esc` within 2 s.
+- Outward or destructive keys ask first: a 2nd press (`d d`, `S S`, `ctrl+d ctrl+d`, `enter enter`)
+  or a yes / no box.
+- `/` filters a list, `r` reads it again, `ctrl+d` puts a thing back to its default.
+- `q` never quits.
 
 ## Everywhere
 
 | Key | Action |
 | --- | --- |
-| `ctrl+p` | menu, from every field: quick commands (`n`: new thread), threads, tokens, agents (`←→`: tabs, `esc` / `ctrl+p`: close) |
+| `ctrl+p` | menu, from every field: quick commands (`n`: new thread, `f`: search), threads, merge, search, tokens, agents (`tab` / `shift+tab`: tabs, `←→` too outside threads and merge, where they step the repos / states; `esc` / `ctrl+p`: close) |
 | `ctrl+n` | notifications, from everywhere: questions, blocked agents, flow gates, errors, usage limits, PR conflicts / failed checks / comments, `@owner` mentions, context ≥ 90 %, threads done (`↑↓` move, `enter` jump to the event, `x` mark seen, `esc` close). The header shows the counts; a note goes once its event was on screen for 1 s |
 | `tab` / `shift+tab` | next / previous field (a question: its choices ↔ the prompt; a view: the view ↔ the prompt; a row of tabs: into its content) |
-| `F1`-`F5`, `alt+1`-`alt+5` | start screen: the tabs (macOS: Option as Meta) |
+| `F1`-`F6`, `alt+1`-`alt+6` | start screen: the tabs new, threads, merge, agents, flows, settings (macOS: Option as Meta) |
 | `ctrl+←` `ctrl+→`, `alt+←` `alt+→` | word jumps in a text field |
-| `esc` | 1 level back: never applies, never drops edits unasked |
-| `ctrl+z` / `ctrl+shift+z` | undo / redo in any text field (`⌘z` / `⌘⇧z`) |
+| `esc` | 1 level back: never saves, never drops edits unasked (edited text: `esc` again within 2 s) |
+| `ctrl+z` / `ctrl+shift+z`, `ctrl+y` | undo / redo in any text field (`⌘z` / `⌘⇧z`) |
+| `ctrl+c` | the selection: copy; else the field's text: cleared (`ctrl+z` brings it back); else 2× within 1 s: quit |
 
 ## Start screen
 
 | Key | Action |
 | --- | --- |
-| `esc esc` | quit from the new tab |
+| `esc esc` | quit (the task stays as a draft); menu → quit codehead too |
 | `ctrl+s` | new tab: save the task as a draft for later, start over |
+| `d d` | drafts dropdown: delete the draft |
 | menu → reset | new tab: reset the where row, notes and context (asks first) |
-| `ctrl+c` | quit |
 | `@` / `>` | agents (cards by harness) / commands dropdown in the prompt |
 | `←` `→` | the **where** row: branch or worktree |
 | `enter` | the **repo** row: the repo picker (a repo not on disk gets cloned at the start) |
@@ -34,8 +45,9 @@ the fields on every screen; `←→` walk a row of tabs.
 | `ctrl+v` | paste a clipboard image |
 | `ctrl+s` / `ctrl+r` | settings: save / reload |
 | `esc` | settings: undo the field's edit (0 apply); agent form with edits: asks first |
-| `ctrl+a` / `ctrl+d` | settings: add / remove an alias |
+| `enter` on **+ add** (menu: add path alias) / `d`, `ctrl+d` | settings: add / remove an alias |
 | `ctrl+d`, click `↺` | settings: the field back to its default |
+| `/` | settings → mcp servers: filter |
 
 ## Thread view
 
@@ -51,18 +63,20 @@ the fields on every screen; `←→` walk a row of tabs.
 | `↑` `↓` | a question open: its choices; else sent messages (an empty prompt too: shell commands only in shell mode) |
 | a path (`src/`, `~/x/`, `/usr/`) | a dropdown of that dir's entries; a name with a space gets a `"` in front (a file: one after it too), the dropdown goes on inside the quote |
 | `1`-`9`, `space` | a question: pick (several: toggle); letters: the **Other** answer |
+| a new question | takes the keys only on an empty prompt after 1 s of 0 keys; else it waits for `tab` (0 typed key answers it by surprise). `tab` with an `@` / `#` / path dropdown open: completes there |
 | `←` `→` | a question with several parts: previous / next part |
 | `esc` | back to live, else interrupt the running turns (after 0.5 s: a 2nd `esc` in time means back) |
 | `esc esc` | back to the start screen |
-| `ctrl+c` | clear the prompt; twice on an empty prompt: quit |
+| `ctrl+c` | the prompt's selection: copy; else clear the prompt (`ctrl+z`: back); twice on an empty prompt: quit |
 | `ctrl+o` | open / close all tool runs |
 | `ctrl+t` | open / close all thoughts (hidden: show them) |
 | `ctrl+i` | the IDE (setting `editor`) on the thread's worktree (`⌘i`): the window that has it open, else a new one |
 | `pgup` `pgdn`, `shift+↑↓`, wheel | scroll the stream |
-| `alt+←` `alt+→` (`⌥←` `⌥→`) | previous / next view of the thread: chat, changes, merge, files (the view bar on the top row); word jumps in the prompt: `ctrl+←→` |
-| `F1`-`F4`, `alt+1`-`alt+4` | chat / changes / merge / files view |
+| `alt+1`-`alt+4` (`⌥1`-`⌥4`) | chat / changes / merge / files view (the view bar on the top row) |
 | `alt+\` | changes view: the chat on its right on / off (from 160 columns; on by default) |
-| `ctrl+y` | yazi (full screen) on the worktree; a picked file goes into the prompt as its path |
+| `ctrl+f` | the flow box; a gate: `↑↓` `enter` answer, typed text goes into the prompt as the note |
+| menu → yazi, files view `y` | yazi (full screen) on the worktree; a picked file goes into the prompt as its path |
+| `d d` | subagents / monitors box: stop the subagent / end the watch; another key closes the box and acts as usual |
 
 ## Changes view
 
@@ -94,7 +108,6 @@ the entry). `✕` remove one, `✕ clear` all (both ask first).
 | Key | Action |
 | --- | --- |
 | `j` / `k`, `ctrl+↓` / `ctrl+↑` | 1 file down / up (the box head; its border lights up) |
-| `{` / `}` | previous / next box |
 | `n` / `N` | next / previous hunk |
 | `↑` `↓`, `pgup` `pgdn`, `g` `G` | move the cursor (`↑` `↓`: 1 line) |
 | `space` | select the line on / off, the cursor goes 1 down (lines apart are fine); `esc` clears |
@@ -104,18 +117,19 @@ the entry). `✕` remove one, `✕ clear` all (both ask first).
 | `p` | stash the selected lines (out of the worktree, into the panel's stash) |
 | `v` | reviewed on / off (the cursor goes to the next box) |
 | `←` / `→`, `enter` | fold / open, toggle the box |
-| `f`, click | the filter: type, `enter` jumps to the 1st hit, `esc` clears |
+| `f`, `/`, click | the filter: type, `enter` jumps to the 1st hit, `esc` clears |
 | `e`, `o` | edit in the IDE (setting `editor`): at the 1st selected line, else at the line under the cursor (a removed line: where it was); the window that has the worktree open, else a new one (VS Code family, Zed, JetBrains); `flow` (flow-control.dev): a running instance with the worktree as a project gets the file (`--connect`), else a new GUI window (`--gui`); `terminal`: full screen in codehead's terminal, back on quit |
 | `w` | side by side / unified |
 | `r` (`ctrl+r`) | read git again (it also does every 4 s) |
 | `R` | classify again (setting `classify`) |
-| `c` | comment on the selected lines (else the line under the cursor): a modal shows the lines per file (`alt+↑` `↓`, the wheel: scroll them), `⌘/ctrl+⏎` adds it to the batch, `esc` cancels |
+| `c` | comment on the selected lines (else the line under the cursor): a modal shows the lines per file (`alt+↑` `↓`, the wheel: scroll them), `⌘/ctrl+⏎` adds it to the batch, `esc` closes (typed text: `esc` again within 2 s) |
 | `enter`, click on a comment | edit it in the modal (0 text: deleted) |
 | `x` | delete the comment (or dismiss the finding) under the cursor |
 | `ctrl+enter` (`⌘enter`, `alt+enter`) | send all comments as 1 message to the lead (`file:line`: text each) |
 | `a` / `u` | stage / unstage: on a box head the file, on a diff row its hunk (box head: `●` staged, `◐` a part) |
-| `m` | the commit message (panel): `ctrl+g` drafts it from the staged diff (setting `rank` model), `⌘/ctrl+⏎` commits, `esc` leaves it |
-| `ctrl+b` | the source control panel on / off |
+| `m` | the commit message (panel): `ctrl+g` drafts it from the staged diff (setting `rank` model), `⌘/ctrl+⏎` commits (the keys go back to the review: `P` / `O` next), `esc` leaves it |
+| `ctrl+b` | the source control panel: hidden → shown with the keys; shown, keys in the review → the keys to the panel; the panel with the keys → hidden (any terminal) |
+| `ctrl+w`, `shift+←→` | the next checkout / the repo tabs (several checkouts) |
 | `alt` (alone: press, release) | the keys to the panel / the review (terminals with the kitty keyboard protocol) |
 | `t` | the chat above the prompt: fold / open |
 | `P` | push (`git push -u origin HEAD`) |
@@ -138,7 +152,7 @@ In the panel:
 | `s` | stage the picked files (staged section: unstage) |
 | `p` | stash the picked files (whole) |
 | `enter` | on a comment: edit it; on a file: jump to it, the keys to the review |
-| `x` | delete the comment / remove the stash entry (asks first) |
+| `x` | delete the comment / remove the stash entry (the stash entry asks first) |
 | `enter` (stash entry) | restore the stash entry (its agent) |
 | `X` | clear the stash (asks first) |
 | `m` | the commit message |
@@ -152,10 +166,29 @@ rendered, code in syntax colors).
 | Key | Action |
 | --- | --- |
 | `j` / `k`, `↑` `↓` | pick a file |
-| `space`, `pgup` `pgdn`, wheel | scroll the preview |
+| `f`, `/` | filter (fuzzy, names and content) |
+| `space`, `pgup` `pgdn`, wheel, `g` | scroll the preview (`g`: its top) |
 | `e`, `o` | edit the file in the IDE (its 1st changed line) |
-| `y` | yazi on the file (full screen; codehead's own yazi config, themed from the palette) |
+| `y` | yazi on the file (0 files: on the worktree; full screen; codehead's own yazi config, themed from the palette) |
 | `c` | copy the file's path |
 | `r` | read the list again |
-| `S` | share: commit the thread's home repo files (only those paths, message `notes: <title>`), push when the branch has an upstream |
+| `S S` | share: commit the thread's home repo files (only those paths, message `notes: <title>`), push when the branch has an upstream |
 | `i`, `tab` | the prompt gets the keys; `esc` / `tab` gives them back |
+
+## Merge view
+
+The thread's pull requests (`alt+3`), or a pull request of the start screen's merge tab (`F3`).
+An overview of stops (title, body, status, labels, update, merge, checks, comments) and the
+PR's diff (the changes view, read only).
+
+| Key | Action |
+| --- | --- |
+| `j` / `k`, `↑` `↓`, `g` `G`, `pgup` `pgdn` | the previous / next stop |
+| `←` `→` | along a row (PR tabs, views, checks) |
+| `enter` | act on the stop: edit the title / body, the status menu, add a label, a comment |
+| `enter enter` | remove a label · the agents update the branch · merge (when ready: auto-merge) · auto-merge off · status → close |
+| `ctrl+enter` | open the stop on GitHub |
+| `[` `]` · `<` `>` | the previous / next PR · overview / diff (typed as text in a filter or a comment) |
+| `r` | read the PR again (the diff: `ctrl+r`) |
+| `esc` | an edit: close (edited text: `esc` again within 2 s); the start screen: back to the list |
+| `i`, `tab` | the prompt gets the keys |

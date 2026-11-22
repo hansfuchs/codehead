@@ -614,6 +614,8 @@ impl View {
         }
         self.scm.msg.set_text("");
         self.scm.msg_focus = false;
+        // the keys back to the review: P (push), O (PR) work at once
+        self.scm.focus = false;
         self.scm.drafting = None;
         self.start_op(Op::Commit(msg))
     }
@@ -948,6 +950,29 @@ mod tests {
         v.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
         let all = draw(&mut v, 120, 30).join("\n");
         assert!(!all.contains("STAGED") && !v.scm.focus, "{all}");
+    }
+
+    #[test]
+    fn ctrl_b_cycles_the_panel_and_letters_with_a_modifier_do_nothing() {
+        let mut v = test_view();
+        draw(&mut v, 120, 30);
+        assert!(v.scm.shown && !v.scm.focus);
+
+        // alt+P, ctrl+s: 0 push, 0 stage (only the plain letters act)
+        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::ALT | KeyModifiers::SHIFT)), Act::None);
+        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)), Act::None);
+        assert!(v.op.is_none());
+
+        // ctrl+b: shown → the keys to the panel → hidden → shown with the keys (0 kitty needed)
+        let ctrl_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        v.key(ctrl_b);
+        assert!(v.scm.shown && v.scm.focus);
+
+        v.key(ctrl_b);
+        assert!(!v.scm.shown && !v.scm.focus);
+
+        v.key(ctrl_b);
+        assert!(v.scm.shown && v.scm.focus);
     }
 
     #[test]

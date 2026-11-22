@@ -394,8 +394,8 @@ pub fn validate(key: String, v: &str) -> Result<(), String> {
         "ports" if crate::portless::Mode::parse(v).is_none() => Err(format!("ports: auto, portless or block, not {v}")),
         "rank" | "review" if v != "off" && !v.strip_prefix("claude:").is_some_and(|m| !m.is_empty()) => Err(format!("{key}: off or claude:<model>, not {v}")),
         "classify" if !v.is_empty() && v != "off" && !crate::engine::roster::valid_name(v) => Err(format!("classify: an agent's name or off, not {v}")),
-        "keys.menu" => Bind::parse(v).map(|_| ()).ok_or_else(|| format!("keys.menu: F1-F12, ctrl+<letter> or alt+<letter>, not {v}")),
-        "keys.command" => command_char(v).map(|_| ()).ok_or_else(|| format!("keys.command: 1 symbol (not a letter, digit, space or @), not {v}")),
+        "keys.menu" => menu_bind(v).map(|_| ()).ok_or_else(|| format!("keys.menu: F7-F12, ctrl+<letter> or alt+<letter> codehead binds to nothing else (free: ctrl+l, ctrl+p, ctrl+q …), not {v}")),
+        "keys.command" => command_char(v).map(|_| ()).ok_or_else(|| format!("keys.command: 1 symbol (not a letter, digit, space, @ ! # / ~), not {v}")),
         "colors.scheme" if crate::theme::Palette::preset(v).is_none() => {
             Err(format!("colors.scheme: {}, not {v}", crate::theme::PRESETS.iter().map(|p| p.0).collect::<Vec<_>>().join(" or ")))
         }
@@ -467,11 +467,23 @@ impl Bind {
     }
 }
 
-/// The command trigger of S: 1 symbol.
+/// The command trigger of S: 1 symbol, not a trigger of its own (@ agents, ! shell, # shortcuts,
+/// / ~ paths).
 fn command_char(s: &str) -> Option<char> {
     let mut c = s.trim().chars();
     let ch = c.next()?;
-    (c.next().is_none() && !ch.is_alphanumeric() && !ch.is_whitespace() && ch != '@').then_some(ch)
+    (c.next().is_none() && !ch.is_alphanumeric() && !ch.is_whitespace() && !"@!#/~".contains(ch)).then_some(ch)
+}
+
+/// Keys codehead binds itself: a menu key on 1 of them never fires or hides a built-in.
+const TAKEN: [&str; 27] = [
+    "ctrl+a", "ctrl+b", "ctrl+c", "ctrl+d", "ctrl+e", "ctrl+f", "ctrl+g", "ctrl+h", "ctrl+i", "ctrl+k", "ctrl+n", "ctrl+o", "ctrl+r", "ctrl+s", "ctrl+t", "ctrl+u", "ctrl+v", "ctrl+w", "ctrl+x",
+    "ctrl+y", "ctrl+z", "F1", "F2", "F3", "F4", "F5", "F6",
+];
+
+/// The menu key of S: a valid key codehead binds to nothing else (alt+b/d/f: word keys too).
+fn menu_bind(s: &str) -> Option<Bind> {
+    Bind::parse(s).filter(|b| !TAKEN.contains(&b.label.as_str()) && !matches!(b.label.as_str(), "alt+b" | "alt+d" | "alt+f"))
 }
 
 pub fn validate_alias(name: &str, target: &str) -> Result<(), String> {
@@ -756,8 +768,8 @@ pub fn palette_of(f: &File) -> crate::theme::Palette {
 pub fn menu_key() -> Bind {
     // tests: the defaults, never the machine's config
     let set = if cfg!(test) { None } else { env("CODEHEAD_MENU_KEY").or_else(|| load().ok()?.menu_key) };
-    // F1-F6: the tabs; tab: the next field
-    set.and_then(|k| Bind::parse(&k)).unwrap_or_else(|| Bind::parse("ctrl+p").expect("ctrl+p parses"))
+    // a key codehead binds itself (F1-F6: the tabs, ctrl+n: notifications …): the default
+    set.and_then(|k| menu_bind(&k)).unwrap_or_else(|| Bind::parse("ctrl+p").expect("ctrl+p parses"))
 }
 
 /// The command trigger: $CODEHEAD_COMMAND_KEY, else `[keys] command`, else `>`.
@@ -960,8 +972,8 @@ mod tests {
 
     #[test]
     fn keys_and_colors_tables_round_trip() {
-        let f = parse("[keys]\nmenu = \"ctrl+p\"\ncommand = \"!\"\n[colors]\nscheme = \"amber\"\naccent = \"#112233\"\n").unwrap();
-        assert_eq!((f.menu_key.as_deref(), f.command_key.as_deref(), f.scheme.as_deref()), (Some("ctrl+p"), Some("!"), Some("amber")));
+        let f = parse("[keys]\nmenu = \"ctrl+p\"\ncommand = \"%\"\n[colors]\nscheme = \"amber\"\naccent = \"#112233\"\n").unwrap();
+        assert_eq!((f.menu_key.as_deref(), f.command_key.as_deref(), f.scheme.as_deref()), (Some("ctrl+p"), Some("%"), Some("amber")));
         assert_eq!(f.colors["accent"], "#112233");
         let p = palette_of(&f);
         assert_eq!(p.accent, ratatui::style::Color::Rgb(0x11, 0x22, 0x33));
@@ -970,10 +982,10 @@ mod tests {
         let mut g = f.clone();
         g.set("colors.accent", None);
         g.set("keys.command", None);
-        let text = document("[keys]\nmenu = \"ctrl+p\"\ncommand = \"!\"\n[colors]\nscheme = \"amber\"\naccent = \"#112233\"\n", &g).unwrap();
+        let text = document("[keys]\nmenu = \"ctrl+p\"\ncommand = \"%\"\n[colors]\nscheme = \"amber\"\naccent = \"#112233\"\n", &g).unwrap();
         let back = parse(&text).unwrap();
         assert_eq!(back, g);
-        for bad in ["[keys]\nmenu = \"x\"", "[keys]\ncommand = \"ab\"", "[colors]\nscheme = \"pink\"", "[colors]\naccent = \"red\"", "[colors]\nfoo = \"#000000\""] {
+        for bad in ["[keys]\nmenu = \"x\"", "[keys]\nmenu = \"ctrl+n\"", "[keys]\nmenu = \"F2\"", "[keys]\ncommand = \"#\"", "[keys]\ncommand = \"ab\"", "[colors]\nscheme = \"pink\"", "[colors]\naccent = \"red\"", "[colors]\nfoo = \"#000000\""] {
             assert!(parse(bad).is_err(), "{bad}");
         }
         let b = Bind::parse("ctrl+p").unwrap();

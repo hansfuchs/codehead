@@ -737,6 +737,8 @@ pub struct App {
     /// A key or paste (not esc) in the settings tab since it opened: its path suggestions came
     /// from typing, so their esc does not count for esc esc.
     settings_typed: bool,
+    /// Drafts dropdown: a 1st d on this row (a 2nd d deletes the draft).
+    draft_armed: Option<usize>,
     /// Time of the last ctrl+c that did not quit (unsent text: a 2nd within 1s quits).
     last_ctrl_c: Option<Instant>,
 }
@@ -804,7 +806,8 @@ fn key_name(k: &KeyEvent) -> String {
         s.push_str("alt+");
     }
     match k.code {
-        KeyCode::Char(c) => s.push(c.to_ascii_lowercase()),
+        // the case stays: D is not d (shift+d never deletes)
+        KeyCode::Char(c) => s.push(c),
         KeyCode::Esc => s.push_str("esc"),
         KeyCode::Enter => s.push_str("enter"),
         _ => s.push('?'),
@@ -1014,6 +1017,7 @@ impl App {
             suspend: None,
             last_esc: None,
             settings_typed: false,
+            draft_armed: None,
             last_ctrl_c: None,
             cfg,
         };
@@ -1249,13 +1253,27 @@ impl App {
             crate::clip::copy(&t);
             return self.toast(format!("copied {} chars", t.chars().count()), false);
         }
-        let unsent = !self.title.text().trim().is_empty() || !self.prompt.text().trim().is_empty();
-        if !unsent || self.last_ctrl_c.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+
+        // as in the thread view: the field's text → cleared (ctrl+z brings it back)
+        let field = match (self.screen, self.field) {
+            (Screen::Compose, Field::Title) => Some(&mut self.title),
+            (Screen::Compose, Field::Prompt) => Some(&mut self.prompt),
+            _ => None,
+        };
+        if let Some(ta) = field
+            && !ta.text().is_empty()
+        {
+            ta.load_text("");
+            return self.toast("cleared · ctrl+z: back", false);
+        }
+
+        // then: quit on a 2nd ctrl+c within 1 s (the task stays as a draft)
+        if self.last_ctrl_c.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
             self.outcome = Some(Outcome::Quit);
             return;
         }
         self.last_ctrl_c = Some(Instant::now());
-        self.toast("ctrl+c again: quit (the task text is not sent)", false);
+        self.toast("ctrl+c again: quit", false);
     }
 
     fn toast(&mut self, msg: impl Into<String>, err: bool) {
@@ -1934,11 +1952,17 @@ impl App {
                 m.0 = c;
             }
         };
+        let armed = self.draft_armed.take() == Some(cur);
         match k.code {
             KeyCode::Esc => self.drafts_menu = None,
             KeyCode::Up | KeyCode::Char('k') => set(self, (cur + n - 1) % n),
             KeyCode::Down | KeyCode::Char('j') => set(self, (cur + 1) % n),
             KeyCode::Enter => self.load_draft(cur),
+            // d d: delete the draft (a 1st d asks)
+            KeyCode::Char('d') | KeyCode::Delete if !armed => {
+                self.draft_armed = Some(cur);
+                self.toast("d again: delete the draft", false);
+            }
             KeyCode::Char('d') | KeyCode::Delete => {
                 let d = self.drafts.remove(cur.min(n - 1));
                 match trash(&drafts::path(&self.cfg.drafts, &d.id)) {
@@ -2010,7 +2034,7 @@ impl App {
         let shown = (r.height as usize).saturating_sub(2);
         let off = dropdown::fit(off, cur, n, shown);
         self.drafts_menu = Some((cur, off));
-        let inner = dropdown::frame(f, r, "drafts", "enter: load · d: delete · esc: back", off > 0, off + shown < n, true);
+        let inner = dropdown::frame(f, r, "drafts", "enter: load · d d: delete · esc: back", off > 0, off + shown < n, true);
         for (i, (name, detail)) in rows.iter().enumerate().skip(off).take(shown) {
             let row = Rect { y: inner.y + (i - off) as u16, height: 1, ..inner };
             let hl = i == cur;
@@ -2286,10 +2310,10 @@ impl App {
                     c("c", "collapse all folders", Act::CollapseAll),
                     c("o", "expand all folders", Act::ExpandAll),
                     c("r", "reload from disk", Act::Reload),
-                    c("q", "quit", Act::Quit),
+                    c("menu", "quit codehead", Act::Quit),
                 ],
                 vec![
-                    ("↑↓", "move · ↑ on top row: tabs"),
+                    ("↑↓", "move"),
                     ("←→", "fold / unfold folder"),
                     ("space", "select note / folder"),
                     ("enter", "confirm selection → new (0 notes allowed)"),
@@ -2304,7 +2328,7 @@ impl App {
                     c("←→", "filter by repo (dropdown; ←→: the previous / next repo at once)", Act::RepoFilter),
                     c("d", "delete thread + worktree (+ branch, if pushed)", Act::DeleteThreads),
                     c("r", "reload", Act::Reload),
-                    c("q", "quit", Act::Quit),
+                    c("menu", "quit codehead", Act::Quit),
                 ],
                 vec![
                     ("↑↓", "move · ↑ on top row: tabs"),
@@ -2326,7 +2350,7 @@ impl App {
                     c("e", "edit agent (also enter)", Act::EditAgent),
                     c("d", "delete agent: its threads move to the default agent", Act::DeleteAgent),
                     c("r", "reload", Act::Reload),
-                    c("q", "quit", Act::Quit),
+                    c("menu", "quit codehead", Act::Quit),
                 ],
                 vec![
                     ("↑↓←→", "move in the card grid · ↑ on top row: tabs"),
@@ -2334,11 +2358,11 @@ impl App {
                     ("f", "filter: enter / esc back to the cards"),
                     ("F1-F6 · alt+1-6", "switch tab"),
                     ("pgup pgdn", "scroll preview"),
-                    ("esc", "close local controls"),
+                    ("esc", "clear the filter"),
                 ],
             ),
             (Screen::Pick, Tab::Merge) => (
-                vec![c("r", "read the pull requests again", Act::Reload), c("q", "quit", Act::Quit)],
+                vec![c("r", "read the pull requests again", Act::Reload), c("menu", "quit codehead", Act::Quit)],
                 vec![
                     ("↑↓ / j k", "move: PRs; in a PR: the things to act on"),
                     ("enter", "open the PR · act (edit, dropdown, merge, update)"),
@@ -2352,12 +2376,12 @@ impl App {
                 ],
             ),
             (Screen::Pick, Tab::Flows) => (
-                vec![c("r", "read the flow and step files again", Act::Reload), c("q", "quit", Act::Quit)],
+                vec![c("r", "read the flow and step files again", Act::Reload), c("menu", "quit codehead", Act::Quit)],
                 vec![
                     ("←→", "flows / steps"),
                     ("enter", "flow: its rail · step: edit"),
                     ("n D R", "new · duplicate · rename"),
-                    ("d d · r", "delete · reset an edited built-in"),
+                    ("d d · ctrl+d ctrl+d · r", "delete · reset an edited built-in · read again"),
                     ("m", "flow: user ↔ repo (.codehead/flows)"),
                     ("rail: a enter J K", "add · edit · move a step"),
                     ("rail: g o L + -", "gate · gate outcome · loop · loop max"),
@@ -2366,7 +2390,7 @@ impl App {
                 ],
             ),
             (Screen::Pick, Tab::Settings) => (
-                vec![c("ctrl+a", "add path alias", Act::AddAlias), c("ctrl+r", "reload file", Act::Reload), c("q", "quit", Act::Quit)],
+                vec![c("menu", "add path alias (also enter on + add)", Act::AddAlias), c("ctrl+r", "reload file", Act::Reload), c("menu", "quit codehead", Act::Quit)],
                 vec![("↑↓", "field / alias box"), ("enter", "alias box: edit / done"), ("d", "delete the highlighted alias"), ("F1-F6 · alt+1-6", "switch tab"), ("esc", "close path suggestions"), ("auto", "changes apply on leaving a field")],
             ),
         }
@@ -2471,7 +2495,11 @@ impl App {
 
     fn run(&mut self, act: Act) {
         match act {
-            Act::AddAlias => self.settings_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            Act::AddAlias => {
+                if let Some(s) = self.settings.as_mut() {
+                    s.form.add_alias();
+                }
+            }
             Act::AgentFilter => {
                 self.switch_tab(Tab::Agents);
                 self.tabs_focus = false;
@@ -2796,7 +2824,7 @@ impl App {
             if self.settings_typed { self.last_esc = None; }
             return;
         }
-        if self.tab == Tab::Settings && k.code != KeyCode::Esc { self.settings_typed = true; }
+        if self.screen == Screen::Pick && self.tab == Tab::Settings && k.code != KeyCode::Esc { self.settings_typed = true; }
         if self.modal.is_some() {
             self.modal_key(k);
             return;
@@ -3052,15 +3080,15 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') => self.switch_tab(self.cur_tab().next()),
             KeyCode::Left | KeyCode::Char('h') => self.switch_tab(self.cur_tab().prev()),
             // tab: the next field, the tab's content (as ↓)
-            KeyCode::Down | KeyCode::Enter | KeyCode::Char('j') | KeyCode::Esc | KeyCode::Tab => {
+            KeyCode::Down | KeyCode::Enter | KeyCode::Char('j') | KeyCode::Tab => {
                 self.tabs_focus = false;
                 if self.screen == Screen::Compose {
                     self.field = self.fields()[0];
                 } else if self.tab == Tab::Settings
                     && let Some(settings) = &mut self.settings { settings.focus_input(); }
             }
-            KeyCode::Char('q') => self.outcome = Some(Outcome::Quit),
-            KeyCode::Up | KeyCode::BackTab => {}
+            // esc: the top level already (esc esc quits); q: 0 quit (menu → quit codehead)
+            KeyCode::Up | KeyCode::BackTab | KeyCode::Esc => {}
             // any other key: the tab's own (its hotkeys, e.g. f: filter), focus to the content.
             // Settings: 0 (a letter there would edit a field)
             _ if self.screen == Screen::Compose => {
@@ -3760,7 +3788,7 @@ impl App {
                     // voice, system prompt: ↑ on the 1st row / ↓ on the last leaves the box (shift: selects)
                     KeyCode::Down if k.modifiers.is_empty() && form.text().is_some_and(|t| t.on_last_row()) => form.field = next(form.field),
                     KeyCode::Up if k.modifiers.is_empty() && form.text().is_some_and(|t| t.on_first_row()) => form.field = prev(form.field),
-                    KeyCode::Char('r') if ctrl || matches!(form.field, F_SET | F_SPRITE) => form.random_sprite(),
+                    KeyCode::Char('r') if !ctrl && matches!(form.field, F_SET | F_SPRITE) => form.random_sprite(),
                     KeyCode::Enter if matches!(form.field, F_SET | F_SPRITE) => form.picker = Some(crate::picker::Picker::new(&form.sprite)),
                     KeyCode::Enter if form.field == F_BUTTONS => {
                         if form.save {
@@ -3821,7 +3849,7 @@ impl App {
     }
 
     fn paste_inner(&mut self, text: &str) {
-        self.settings_typed |= self.tab == Tab::Settings;
+        self.settings_typed |= self.screen == Screen::Pick && self.tab == Tab::Settings;
         if let Some(Modal::Agent(form)) = &mut self.modal
             && let Some(ta) = form.text()
         {
@@ -3941,11 +3969,16 @@ impl App {
             if !down {
                 return;
             }
+            // a click on yes / no: as y / n (no: a discarded agent form comes back)
             if let Some(&(_, yes)) = self.regions.buttons.iter().find(|(r, _)| r.contains(at))
+                && matches!(self.modal, Some(Modal::Confirm { .. }))
                 && let Some(Modal::Confirm { action, .. }) = self.modal.take()
-                && yes
             {
-                self.confirmed(action);
+                if yes {
+                    self.confirmed(action);
+                } else {
+                    self.declined(action);
+                }
             }
             return;
         }
@@ -5976,7 +6009,7 @@ mod render_tests {
         // enter: the dropdown; esc: back to the task (0 quit)
         key(&mut b, KeyCode::Enter, KeyModifiers::NONE);
         let s = dump(&mut b, 120, 40);
-        assert!(s.contains(" drafts ") && s.contains("fix the build") && s.contains("d: delete"), "{s}");
+        assert!(s.contains(" drafts ") && s.contains("fix the build") && s.contains("d d: delete"), "{s}");
         key(&mut b, KeyCode::Esc, KeyModifiers::NONE);
         assert!(b.drafts_menu.is_none() && b.outcome.is_none());
         // enter enter: loaded, the draft is this task's own now
@@ -5985,10 +6018,12 @@ mod render_tests {
         assert_eq!((b.title.text().as_str(), b.prompt.text().as_str()), ("fix the build", "- a\n- b"));
         assert!(b.drafts.is_empty() && b.field == Field::Prompt);
         assert_eq!(drafts::load(&dir, "").len(), 1);
-        // a 3rd codehead: d deletes the draft, the field goes
+        // a 3rd codehead: d d deletes the draft, the field goes
         let mut c = app_with(Some(dir.clone()));
         key(&mut c, KeyCode::Up, KeyModifiers::NONE);
         key(&mut c, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut c, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(c.drafts.len(), 1, "a 1st d only asks");
         key(&mut c, KeyCode::Char('d'), KeyModifiers::NONE);
         assert!(c.drafts.is_empty() && c.drafts_menu.is_none() && c.field == Field::Prompt);
         assert!(drafts::load(&dir, "").is_empty());
@@ -6520,11 +6555,14 @@ mod render_tests {
         let screen = dump(&mut a, 100, 30);
         assert!(screen.contains("codehead · every harness") && screen.contains("docs-x") && screen.contains("0 agents · auto-allow"), "{screen}");
         assert!(screen.contains("a add"), "help bar: {screen}");
-        // a: the add form; a typed name; esc: gone, 0 write
+        // a: the add form; a typed name; esc: asks, esc again: gone, 0 write
         key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE);
         a.paste("new-one");
         let screen = dump(&mut a, 100, 30);
         assert!(screen.contains("add MCP server") && screen.contains("new-one"), "{screen}");
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(dump(&mut a, 100, 30).contains("add MCP server"), "1 esc: the edits stay");
+
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         let screen = dump(&mut a, 100, 30);
         assert!(!screen.contains("add MCP server"), "{screen}");
@@ -6581,7 +6619,9 @@ mod render_tests {
         assert_eq!(a.settings.as_ref().unwrap().form.fields[0].text(), start);
         assert_eq!(std::fs::read_to_string(&a.settings_path).unwrap_or_default(), before);
         // an alias: unlocked, typed, esc → 0 alias, locked, 0 write
-        key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        // the menu → add path alias (its keys end the esc esc window)
+        a.last_esc = None;
+        a.run(Act::AddAlias);
         a.paste("project:x");
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         let s = a.settings.as_ref().unwrap();
@@ -7074,5 +7114,72 @@ mod flow_menu_tests {
         press(&mut a, KeyCode::Enter);
         press(&mut a, KeyCode::Char('0'));
         assert_eq!((a.flow_i, a.flow_start, a.flow_menu.is_none()), (0, 0, true));
+    }
+}
+
+/// Key fixes of the UX audit on the start screen: 0 q quit, ctrl+c as in the thread view, a
+/// click on No keeps the agent form, D is not d.
+#[cfg(test)]
+mod key_fix_tests {
+    use super::render_tests::app_with;
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn key(a: &mut App, code: KeyCode, m: KeyModifiers) {
+        a.key(KeyEvent::new(code, m));
+    }
+
+    #[test]
+    fn q_on_the_tabs_row_never_quits() {
+        let mut a = app_with(None);
+        a.tabs_focus = true;
+        key(&mut a, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(a.outcome.is_none());
+
+        // esc on the tabs row: 0 move into the content
+        a.tabs_focus = true;
+        a.last_esc = None;
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(a.tabs_focus && a.outcome.is_none());
+    }
+
+    #[test]
+    fn ctrl_c_clears_the_field_then_quits_on_a_2nd_press() {
+        let mut a = app_with(None);
+        a.field = Field::Prompt;
+        a.prompt.set_text("a task");
+        key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(a.prompt.text(), "");
+        assert!(a.outcome.is_none());
+
+        key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(a.prompt.text(), "a task", "ctrl+z: the text back");
+
+        a.prompt.set_text("");
+        key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(a.outcome.is_none(), "1st ctrl+c on an empty field: a hint");
+
+        key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(matches!(a.outcome, Some(Outcome::Quit)));
+    }
+
+    #[test]
+    fn a_click_on_no_brings_the_agent_form_back() {
+        let mut a = app_with(None);
+        let form = AgentForm::new(None, &a.styles, None);
+        a.modal = Some(Modal::Confirm { title: "discard".into(), question: "drop the new agent?".into(), yes: false, action: ConfirmAction::DiscardAgent(Box::new(form)) });
+        let mut t = ratatui::Terminal::new(TestBackend::new(110, 40)).unwrap();
+        t.draw(|f| a.draw(f)).unwrap();
+        let (r, _) = *a.regions.buttons.iter().find(|(_, yes)| !yes).expect("a no button");
+
+        a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
+        assert!(matches!(a.modal, Some(Modal::Agent(_))), "no: the form with its edits");
+    }
+
+    #[test]
+    fn a_capital_letter_is_not_its_small_command() {
+        let shift_d = KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT);
+        assert_eq!(key_name(&shift_d), "D");
+        assert_eq!(key_name(&KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)), "d");
     }
 }

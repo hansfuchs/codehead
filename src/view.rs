@@ -274,6 +274,8 @@ struct View {
     /// A 1st Esc armed an interrupt: it fires after DOUBLE_ESC unless a 2nd Esc means back.
     esc_interrupt: Option<Instant>,
     last_ctrl_c: Option<Instant>,
+    /// The last key press: a new ask takes the focus only after 1 s of 0 keys (and an empty prompt).
+    last_key: Option<Instant>,
     exit: Exit,
     /// A menu click switched threads: the view ends with EXIT.
     mouse_exit: bool,
@@ -409,6 +411,7 @@ impl View {
             last_esc: None,
             esc_interrupt: None,
             last_ctrl_c: None,
+            last_key: None,
             exit: Exit::Back,
             mouse_exit: false,
             drag_from: None,
@@ -655,7 +658,7 @@ impl View {
             }
         }
         if self.thread.asks.first().map(|a| a.id.clone()) != asks {
-            self.ask.sync(self.thread.asks.first());
+            self.sync_ask();
         }
         self.history = self.thread.sent();
         self.dirty = true;
@@ -672,7 +675,7 @@ impl View {
         let asks = self.thread.asks.first().map(|a| a.id.clone());
         self.thread = t;
         if self.thread.asks.first().map(|a| a.id.clone()) != asks {
-            self.ask.sync(self.thread.asks.first());
+            self.sync_ask();
         }
         self.history = self.thread.sent();
         self.dirty = true;
@@ -1288,6 +1291,7 @@ impl View {
             }
             return false;
         }
+        self.last_key = Some(Instant::now());
         self.changes.no_tap();
         self.merge.touch();
         // a key after a search jump: the mark goes
@@ -1368,14 +1372,7 @@ impl View {
             return false;
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        // views of the thread: F1-F4 (alt+1-4 too)
         let alt = k.modifiers.contains(KeyModifiers::ALT);
-        if let KeyCode::F(n @ 1..=9) = k.code {
-            if let Some(p) = Pane::ALL.get(usize::from(n - 1)) {
-                self.set_pane(*p);
-            }
-            return false;
-        }
         // alt+\: the chat next to the changes view on / off (wide terminals)
         if alt && !ctrl && k.code == KeyCode::Char('\\') {
             self.split = !self.split;
@@ -1383,15 +1380,20 @@ impl View {
             self.toast(if self.split { "changes: the chat on the right (≥ 160 columns)" } else { "changes: full width" });
             return false;
         }
+        // views of the thread: alt+1-4 (chat, changes, merge, files)
         if alt && !ctrl && let KeyCode::Char(c @ '1'..='9') = k.code {
             if let Some(p) = Pane::ALL.get(usize::from(c as u8 - b'1')) {
                 self.set_pane(*p);
             }
             return false;
         }
-        // ctrl+b in the changes view: its side panel on / off, the prompt's focus too
+        // ctrl+b from the prompt of the changes view: the panel's cycle; the panel with the keys:
+        // the keys leave the prompt for it
         if self.pane == Pane::Changes && self.prompt_focus && ctrl && !alt && k.code == KeyCode::Char('b') {
             self.changes.toggle_panel();
+            if self.changes.panel_focus() {
+                self.prompt_focus = false;
+            }
             self.dirty = true;
             return false;
         }
@@ -1411,7 +1413,7 @@ impl View {
             }
             // the changes view's filter, selection: esc is the view's
             let esc_here = k.code == KeyCode::Esc && ((self.pane == Pane::Changes && self.changes.takes_esc()) || (self.pane == Pane::Merge && self.merge.takes_esc()));
-            let through = (k.code == KeyCode::Esc && !esc_here) || (ctrl && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('y')));
+            let through = (k.code == KeyCode::Esc && !esc_here) || (ctrl && k.code == KeyCode::Char('c'));
             if !through {
                 if k.code == KeyCode::Char('i') && !ctrl && !alt && !(self.pane == Pane::Changes && self.changes.typing()) && !(self.pane == Pane::Merge && self.merge.typing()) {
                     self.prompt_focus = true;
@@ -1447,9 +1449,12 @@ impl View {
             }
         }
         // an open ask with the focus: its keys before the prompt's (text in the prompt or not);
-        // another view on screen: tab from the prompt goes back to that view, not to the ask
+        // another view on screen: tab from the prompt goes back to that view, not to the ask;
+        // the prompt with the focus and a dropdown open: tab completes there, not to the ask
+        let complete = tab && !self.ask.focus && !self.thread.asks.is_empty() && self.prompt_dropdown();
         if let Some(a) = self.thread.asks.first().cloned()
             && !(tab && self.pane != Pane::Chat && self.prompt_focus)
+            && !complete
         {
             let act = self.ask.key(&a, k);
             if self.ask_act(act) {
@@ -1544,22 +1549,26 @@ impl View {
                 self.sel = None;
                 return false;
             }
+            // ctrl+c: the prompt's selection → copy; text → clear it (ctrl+z brings it back); an
+            // empty prompt: quit on a 2nd ctrl+c within 1 s
             KeyCode::Char('c') if ctrl => {
-                if !empty {
-                    self.input.set_text("");
+                if let Some(t) = self.input.selected_text() {
+                    self.copy(&t);
                     return false;
                 }
+
+                if !empty {
+                    self.input.load_text("");
+                    self.toast("prompt cleared · ctrl+z: back");
+                    return false;
+                }
+
                 if self.last_ctrl_c.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
                     self.exit = Exit::Quit;
                     return true;
                 }
                 self.last_ctrl_c = Some(Instant::now());
                 self.toast("ctrl+c again: quit");
-                return false;
-            }
-            // ctrl+y: yazi (full screen) on the worktree; its pick goes into the prompt
-            KeyCode::Char('y') if ctrl => {
-                self.yazi = Some(self.cwd.clone());
                 return false;
             }
             KeyCode::Char('t') if ctrl => {
@@ -1898,6 +1907,22 @@ impl View {
         self.mention.is_open(&self.input, &self.roster)
     }
 
+    /// A dropdown of the prompt shows: @, commands, # shortcuts, paths.
+    fn prompt_dropdown(&mut self) -> bool {
+        self.mention_open() || self.command.is_open(&self.input) || self.shortcuts.is_open(&self.input) || self.paths.is_open(&self.input)
+    }
+
+    /// A new ask may take the focus: an empty prompt and 0 keys for 1 s.
+    fn ask_may_focus(&self) -> bool {
+        self.input.text().trim().is_empty() && self.last_key.is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
+    }
+
+    /// Bind the picker to the 1st open ask.
+    fn sync_ask(&mut self) {
+        let focus = self.ask_may_focus();
+        self.ask.sync_with(self.thread.asks.first(), focus);
+    }
+
     /// The repo roots the thread works in (its work dir 1st), with their labels
     /// (`repo ⎇ branch`); 0 repo: the work dir.
     fn ide_dirs(&self) -> Vec<(PathBuf, String)> {
@@ -2036,6 +2061,8 @@ impl View {
             Item { label: "back to the start screen".into(), key: "esc esc".into(), id: 3, section: "thread" },
             Item { label: "IDE on the repo root (several repos: pick 1)".into(), key: "ctrl+i · ⌘i".into(), id: 2, section: "thread" },
             Item { label: "interrupt the agents".into(), key: "esc".into(), id: 12, section: "thread" },
+            Item { label: "yazi on the worktree (its pick: into the prompt)".into(), key: "files view: y".into(), id: 14, section: "thread" },
+            Item { label: "views: chat · changes · merge · files".into(), key: "alt+1-4".into(), id: 15, section: "thread" },
             Item { label: "tool calls: open / close all".into(), key: "ctrl+o".into(), id: 1, section: "chat" },
             Item { label: "thoughts: open / close all".into(), key: "ctrl+t".into(), id: 13, section: "chat" },
             Item { label: "scroll the stream".into(), key: "wheel · pgup".into(), id: 10, section: "chat" },
@@ -2119,6 +2146,7 @@ impl View {
                 return self.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
             }
             Action::Command(12) => self.interrupt(),
+            Action::Command(14) => self.yazi = Some(self.cwd.clone()),
             Action::Command(_) => {}
             Action::Remove(name) => {
                 self.host("leave", json!({"op": "leave", "agent": name}));
@@ -2989,9 +3017,9 @@ impl View {
             Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Span::styled(format!("{m} "), theme::accent()),
             _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled(self.changes.hints(), theme::muted()),
             _ if self.pane == Pane::Merge && !self.prompt_focus => Span::styled(self.merge.hints(), theme::muted()),
-            _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · pgup pgdn: scroll · o: IDE · y: yazi · c: copy path · S: share · i: prompt ", theme::muted()),
-            _ if self.pane != Pane::Chat => Span::styled("tab / esc: back to the view · F1-F4: views ", theme::muted()),
-            _ => Span::styled(format!("{}: menu · ctrl+i: IDE · F1-F4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label), theme::muted()),
+            _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · / filter · pgup pgdn: scroll · o e: IDE · y: yazi · c: copy path · S S: share · i: prompt ", theme::muted()),
+            _ if self.pane != Pane::Chat => Span::styled("tab / esc: back to the view · alt+1-4: views ", theme::muted()),
+            _ => Span::styled(format!("{}: menu · ctrl+i: IDE · alt+1-4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label), theme::muted()),
         };
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), foot);
 
@@ -3638,7 +3666,7 @@ mod ask_tests {
         // focus on the prompt: 0 cursor row, the hint says how back
         press(&mut v, &[KeyCode::Tab]);
         let s = screen(&mut v).join("\n");
-        assert!(!s.contains("› [x]") && s.contains("tab: back to the question"), "{s}");
+        assert!(!s.contains("› [x]") && s.contains("tab: answer the question"), "{s}");
     }
 
     #[test]
@@ -3760,7 +3788,7 @@ mod pane_tests {
         let s = screen(&mut v);
         // the changes label may carry a count (other tests share the thread id)
         assert!(s.contains(" chat   changes") && s.contains("files  │ thread p"), "{s}");
-        assert!(s.contains("F1-F4: views"), "{s}");
+        assert!(s.contains("alt+1-4: views"), "{s}");
         // the view bar on row 0
         assert!(s.lines().next().unwrap().contains(" chat "), "{s}");
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
@@ -3774,14 +3802,14 @@ mod pane_tests {
     #[test]
     fn tab_moves_between_the_view_and_the_prompt_ctrl_p_is_the_menu() {
         let mut v = view();
-        press(&mut v, KeyCode::F(2), KeyModifiers::NONE);
+        press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
         press(&mut v, KeyCode::Tab, KeyModifiers::NONE);
         assert!(v.prompt_focus && v.menu.is_none(), "tab: the prompt, 0 menu");
         press(&mut v, KeyCode::Char('h'), KeyModifiers::NONE);
         press(&mut v, KeyCode::Tab, KeyModifiers::NONE);
         assert!(!v.prompt_focus && v.input.text() == "h", "tab: back to the view, the text stays");
         // the chat: tab never opens the menu; ctrl+p does, from every field
-        press(&mut v, KeyCode::F(1), KeyModifiers::NONE);
+        press(&mut v, KeyCode::Char('1'), KeyModifiers::ALT);
         press(&mut v, KeyCode::Tab, KeyModifiers::NONE);
         assert!(v.menu.is_none());
         press(&mut v, KeyCode::Char('p'), KeyModifiers::CONTROL);
@@ -3789,7 +3817,7 @@ mod pane_tests {
         press(&mut v, KeyCode::Char('p'), KeyModifiers::CONTROL);
         assert!(v.menu.is_none(), "ctrl+p again: closed");
         // the changes view with the keys: ctrl+p opens the menu there too
-        press(&mut v, KeyCode::F(2), KeyModifiers::NONE);
+        press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
         press(&mut v, KeyCode::Char('p'), KeyModifiers::CONTROL);
         assert!(v.menu.is_some());
     }
@@ -3797,7 +3825,7 @@ mod pane_tests {
     #[test]
     fn changes_view_keeps_letters_from_the_prompt_until_i() {
         let mut v = view();
-        press(&mut v, KeyCode::F(2), KeyModifiers::NONE);
+        press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
         press(&mut v, KeyCode::Char('j'), KeyModifiers::NONE);
         assert_eq!(v.input.text(), "", "j: a view key");
         press(&mut v, KeyCode::Char('i'), KeyModifiers::NONE);
@@ -4004,9 +4032,13 @@ mod comment_tests {
         v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
         assert_eq!(v.changes.comment_count(), 1);
         assert!(!v.prompt_focus && v.input.text() == "half a message");
-        // esc cancels: 0 comment, 0 interrupt timer
+        // esc on a typed comment: asks (the text stays); esc again cancels: 0 comment, 0
+        // interrupt timer
         v.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         v.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(v.changes.typing(), "1 esc: the comment stays");
+
         v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(v.changes.comment_count(), 1);
         assert!(!v.changes.typing() && v.last_esc.is_none());
@@ -4096,7 +4128,7 @@ mod files_pane_tests {
     fn merge_is_the_3rd_view_its_keys_its_context() {
         let (tx, _rx) = mpsc::channel();
         let mut v = View::new("mergetest-0000", Path::new("/tmp"), "t", tx);
-        v.key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::ALT));
         assert_eq!(v.pane, Pane::Merge);
         v.merge = crate::merge::tests::with(crate::merge::tests::pr());
         // letters: the tab's keys (0 prompt text); i: the prompt
@@ -4116,7 +4148,7 @@ mod files_pane_tests {
     fn the_files_filter_takes_every_letter_and_esc() {
         let (tx, _rx) = mpsc::channel();
         let mut v = View::new("filesfilter-0000", Path::new("/tmp"), "t", tx);
-        v.key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::ALT));
         assert_eq!(v.pane, Pane::Files);
         for c in "fix".chars() {
             v.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -4136,14 +4168,14 @@ mod files_pane_tests {
         // letters: view keys, 0 prompt text
         v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert_eq!(v.input.text(), "");
-        // ctrl+y: yazi on the worktree, for the view loop
-        v.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        // the menu: yazi on the worktree, for the view loop
+        v.menu_action(crate::menu::Action::Command(14));
         assert_eq!(v.yazi.as_deref(), Some(Path::new("/tmp")));
         // a pick: its path into the prompt, relative to the worktree
         v.yazi_picked(&["/tmp/src/a.rs".to_string()]);
         assert_eq!(v.input.text(), "src/a.rs ");
-        // F1 from files: back to chat
-        v.key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        // alt+1 from files: back to chat
+        v.key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT));
         assert_eq!(v.pane, Pane::Chat);
     }
 }
@@ -4314,9 +4346,12 @@ mod subagent_tests {
         let col = |r: &str, x: &str| r[..r.find(x).unwrap()].chars().count();
         assert!(col(&s[docs], "read") > col(&s[scan], "scan"), "nested: indented");
         assert!(s[bob - 1].trim_matches(|c| c == '│' || c == ' ').is_empty(), "a blank row between masters: {s:#?}");
-        // ↓ ↓: bob's; d: stop it
+        // ↓ ↓: bob's; d: asks; d again: stop it
         v.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         v.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(!v.ops.borrow().iter().any(|o| o["op"] == "sub_stop"), "1 d: 0 stop");
+
         v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         let last = v.ops.borrow().last().cloned().unwrap();
         assert_eq!((last["op"].as_str(), last["id"].as_str()), (Some("sub_stop"), Some("t3")), "{last:?}");
@@ -4571,5 +4606,154 @@ mod ide_tests {
         assert!(v.ide_pick.is_none() && v.last_esc.is_none());
         let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// Key fixes of the UX audit: a new ask never takes typed keys, ctrl+c / ctrl+y in the prompt,
+/// alt+digit views, the flow gate's note, boxes that pass a key on.
+#[cfg(test)]
+mod key_fix_tests {
+    use super::*;
+
+    fn view(id: &str) -> View {
+        let (tx, _rx) = mpsc::channel();
+        View::new(id, Path::new("/tmp"), "t", tx)
+    }
+
+    fn key(v: &mut View, c: KeyCode, m: KeyModifiers) {
+        v.key(KeyEvent::new(c, m));
+    }
+
+    fn typed(v: &mut View, s: &str) {
+        for c in s.chars() {
+            key(v, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+    }
+
+    /// An ask ID arrives (a permission request, or a question with options a / b).
+    fn ask(v: &mut View, id: &str, question: bool) {
+        let (tool, input) = if question {
+            ("AskUserQuestion", json!({"questions": [{"question": "Which?", "header": "Q", "multiSelect": false, "options": [{"label": "a", "description": ""}, {"label": "b", "description": ""}]}]}))
+        } else {
+            ("Bash", json!({"command": "rm -rf build"}))
+        };
+        v.thread.push(&store::Event { ts: 1, agent: Some("ada".into()), kind: store::Kind::Ask { id: id.into(), tool: tool.into(), input } });
+        v.sync_ask();
+    }
+
+    fn answers(v: &View) -> usize {
+        v.ops.borrow().iter().filter(|o| o.get("allow").is_some() || o.get("answers").is_some() || o.get("label").is_some()).count()
+    }
+
+    #[test]
+    fn a_new_ask_while_the_owner_types_waits_for_tab() {
+        let mut v = view("keyfix-ask-0000");
+        typed(&mut v, "half");
+        ask(&mut v, "p1", false);
+        assert!(!v.ask.focus, "text in the prompt: the ask waits");
+
+        // space, 1, enter: the prompt's (enter: a new line), 0 answer (no surprise allow)
+        typed(&mut v, " 1");
+        key(&mut v, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(v.input.text(), "half 1\n");
+        assert_eq!(answers(&v), 0, "{:?}", v.ops.borrow());
+
+        // tab: the ask; enter: allow
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(v.ask.focus);
+
+        key(&mut v, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(answers(&v), 1);
+        assert_eq!(v.input.text(), "half 1\n", "the draft stays");
+    }
+
+    #[test]
+    fn a_new_ask_takes_the_focus_on_an_empty_idle_prompt_only() {
+        let mut v = view("keyfix-ask-0001");
+        ask(&mut v, "p1", false);
+        assert!(v.ask.focus, "empty prompt, 0 keys: the ask has the keys");
+
+        // a key less than 1 s ago, empty prompt: the next ask waits
+        v.thread.asks.clear();
+        v.sync_ask();
+        key(&mut v, KeyCode::PageUp, KeyModifiers::NONE);
+        ask(&mut v, "p2", false);
+        assert!(!v.ask.focus);
+    }
+
+    #[test]
+    fn ctrl_w_in_other_edits_the_other_text_never_the_hidden_prompt() {
+        let mut v = view("keyfix-ask-0002");
+        ask(&mut v, "q1", true);
+        assert!(v.ask.focus);
+
+        typed(&mut v, "ab cd");
+        key(&mut v, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(v.input.text(), "", "the prompt never got a key");
+
+        let a = v.thread.asks.first().cloned().unwrap();
+        assert_eq!(v.ask.rows(&a)[2].label, "ab ");
+
+        key(&mut v, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(v.ask.rows(&a)[2].label, "");
+    }
+
+    #[test]
+    fn tab_completes_an_open_mention_while_an_ask_waits() {
+        let mut v = view("keyfix-ask-0003");
+        v.roster = vec![crate::agents::Agent { name: "ada".into(), ..Default::default() }];
+        typed(&mut v, "hi @a");
+        ask(&mut v, "p1", false);
+        assert!(!v.ask.focus && v.mention_open());
+
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(!v.ask.focus, "tab: the dropdown's, not the ask's");
+        assert_eq!(v.input.text(), "hi @ada ");
+    }
+
+    #[test]
+    fn ctrl_c_clears_the_prompt_and_ctrl_z_brings_it_back() {
+        let mut v = view("keyfix-ctrlc-0000");
+        typed(&mut v, "a long draft");
+        key(&mut v, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(v.input.text(), "");
+        assert!(v.last_ctrl_c.is_none(), "a clear is 0 step to quit");
+
+        key(&mut v, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(v.input.text(), "a long draft");
+    }
+
+    #[test]
+    fn ctrl_y_redoes_in_the_prompt_0_yazi() {
+        let mut v = view("keyfix-ctrly-0000");
+        typed(&mut v, "ab");
+        key(&mut v, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_ne!(v.input.text(), "ab");
+
+        key(&mut v, KeyCode::Char('y'), KeyModifiers::CONTROL);
+        assert_eq!(v.input.text(), "ab");
+        assert!(v.yazi.is_none());
+    }
+
+    #[test]
+    fn views_switch_on_alt_digits_only() {
+        let mut v = view("keyfix-pane-0000");
+        key(&mut v, KeyCode::F(2), KeyModifiers::NONE);
+        assert_eq!(v.pane, Pane::Chat, "F-keys: 0 view switch");
+
+        key(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
+        assert_eq!(v.pane, Pane::Changes);
+    }
+
+    #[test]
+    fn the_gate_answer_box_lets_the_note_go_into_the_prompt() {
+        let mut v = view("keyfix-gate-0000");
+        v.flowbar.state = Some(crate::engine::flows::run::FlowState { flow: "chore".into(), wait: Some(crate::engine::flows::run::Wait::Gate), ..Default::default() });
+        v.flowbar.open();
+        assert!(v.flowbar.is_open());
+
+        typed(&mut v, "looks good");
+        assert_eq!(v.input.text(), "looks good");
+        assert!(v.flowbar.is_open(), "the box stays for enter");
     }
 }
