@@ -414,14 +414,19 @@ pub fn query_palette() {
             let mut got = Vec::new();
             let end = std::time::Instant::now() + std::time::Duration::from_millis(200);
             let fd = tty.as_raw_fd();
+            // non-blocking reads in 1 ms steps: poll on /dev/tty answers at once on macOS
+            // (POLLNVAL), a blocking read then waits for the next key when 0 reply comes
+            // SAFETY: FD is open (TTY lives); F_GETFL / F_SETFL take an int. Its own open file
+            // description: stdin keeps its flags.
+            unsafe { libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK) };
             // until DA1's `c` reply (`ESC [ ? … c`) or the deadline
-            while !da1_seen(&got) {
-                let left = end.saturating_duration_since(std::time::Instant::now());
-                if left.is_zero() { break; }
-                let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-                if unsafe { libc::poll(&mut p, 1, left.as_millis() as i32) } <= 0 { break; }
+            while !da1_seen(&got) && std::time::Instant::now() < end {
                 let mut buf = [0u8; 1024];
-                match tty.read(&mut buf) { Ok(n) if n > 0 => got.extend_from_slice(&buf[..n]), _ => break }
+                match tty.read(&mut buf) {
+                    Ok(n) if n > 0 => got.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(std::time::Duration::from_millis(1)),
+                    _ => break,
+                }
             }
             for (i, rgb) in parse_osc4(&String::from_utf8_lossy(&got)) { colors[i] = rgb; }
         }
