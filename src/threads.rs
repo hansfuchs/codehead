@@ -51,6 +51,9 @@ pub struct Thread {
     /// portless: the worktree's live URLs.
     #[serde(default)]
     pub urls: Vec<String>,
+    /// The owner's repo pick (`store::Thread::repo`): wins over DIR / WORKTREE.
+    #[serde(default)]
+    pub repo: Option<String>,
 }
 
 /// From the tail of thread ID's log: an open question, the last error (a turn that ended in
@@ -172,8 +175,11 @@ pub fn repo_root(path: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Repo of a thread: its project dir, else its worktree.
+/// Repo of a thread: the owner's pick, else its project dir's, else its worktree's.
 pub fn repo_of_thread(t: &Thread) -> Option<PathBuf> {
+    if let Some(r) = t.repo.as_deref().filter(|r| !r.is_empty()) {
+        return Some(PathBuf::from(r));
+    }
     [t.dir.as_deref(), t.worktree.as_deref()].into_iter().flatten().find_map(|p| repo_root(Path::new(p)))
 }
 
@@ -380,6 +386,7 @@ fn scan(full: bool) -> Vec<Thread> {
                 parent: t.parent.clone(),
                 urls: t.worktree.as_ref().and(t.branch.as_deref()).map(|b| crate::portless::urls_of(&routes, &crate::portless::prefix(b))).unwrap_or_default(),
                 updated: t.updated / 1000,
+                repo: t.repo.clone(),
                 worktree: t.worktree.clone(),
                 branch: t.branch.clone(),
                 dir: Some(t.dir.clone()),
@@ -630,9 +637,219 @@ pub fn remove(repo: &Path, items: &[Worktree], logs: &Path) -> Vec<Line<'static>
     out
 }
 
+/// The delete row of thread ID, from its record: its linked worktree (on disk), else its dir (in
+/// place: delete keeps the dir; an archived thread: its branch stays).
+pub fn row_of(id: &str) -> Option<Worktree> {
+    let t = store::load(id)?;
+    let wt = t.worktree.clone().filter(|p| Path::new(p).is_dir());
+    let lite = Thread { id: t.id.clone(), title: t.title.clone(), state: t.state.clone(), dir: Some(t.dir.clone()), worktree: t.worktree.clone(), branch: t.branch.clone(), repo: t.repo.clone(), ..Default::default() };
+    let repo = repo_of_thread(&lite);
+    let branch = match &wt {
+        Some(p) => t.branch.clone().filter(|b| !b.is_empty()).unwrap_or_else(|| Some(current_branch(Path::new(p))).filter(|b| !b.is_empty()).unwrap_or_else(|| "(detached)".into())),
+        None => "in place".into(),
+    };
+    Some(Worktree { path: wt.clone().unwrap_or_else(|| t.dir.clone()), branch, linked: wt.is_some(), thread: Some(lite), unpushed: 0, when: String::new(), repo })
+}
+
+/// Archive thread ID: its host stops; a linked worktree goes (the teardown script first,
+/// uncommitted files → git stash), its branch stays in `worktree_pending`: the next host start (an
+/// unarchive, an open) makes the worktree again. In place: the thread only. Ok: what happened.
+pub fn archive(id: &str) -> Result<String, String> {
+    let t = store::load(id).ok_or_else(|| format!("no thread {id}"))?;
+    if t.state == "archived" {
+        return Ok("archived already".into());
+    }
+    if !t.kids.is_empty() {
+        return Err(format!("{} sub-threads run: stop them first", t.kids.len()));
+    }
+    let wt = t.worktree.clone().filter(|p| Path::new(p).is_dir());
+    // checks first: a refused archive leaves the thread as it was
+    let branch = match &wt {
+        Some(p) => {
+            let b = t.branch.clone().filter(|b| !b.is_empty()).unwrap_or_else(|| current_branch(Path::new(p)));
+            if b.is_empty() || b == "(detached)" {
+                return Err("detached HEAD: 0 branch keeps its commits. check out a branch first".into());
+            }
+            Some(b)
+        }
+        None => None,
+    };
+    if client::alive(&t.id) {
+        let _ = client::send_within(&t.id, &serde_json::json!({"op": "stop"}), std::time::Duration::from_secs(3));
+    }
+    let mut done = Vec::new();
+    let repo = repo_root(Path::new(&t.dir)).or_else(|| wt.as_deref().and_then(|p| repo_of(Path::new(p))));
+    if let (Some(p), Some(b)) = (&wt, &branch) {
+        let path = Path::new(p);
+        if let Some((label, ok, _)) = crate::setup::run_teardown(&t) {
+            done.push(format!("{label}: {}", if ok { "ran" } else { "failed" }));
+        }
+        let (_, dirty, _) = git(path, &["status", "--porcelain"]);
+        let n = dirty.lines().count();
+        if n > 0 {
+            let msg = format!("codehead: {b} before archive");
+            let (ok, _, err) = git(path, &["stash", "push", "--include-untracked", "-m", &msg]);
+            if !ok {
+                return Err(format!("stash failed: {}", err.trim()));
+            }
+            done.push(format!("{n} uncommitted files → git stash \"{msg}\""));
+        }
+        let main = repo_of(path).or_else(|| repo.clone()).ok_or_else(|| format!("{p}: 0 git repo"))?;
+        let (ok, _, err) = git(&main, &["worktree", "remove", "--force", p]);
+        if !ok {
+            return Err(format!("git worktree remove: {}", err.trim()));
+        }
+        done.push(format!("worktree removed · branch {b} kept"));
+    }
+    let repo_s = repo.map(|r| r.display().to_string());
+    store::update(&t.id, |s| {
+        s.state = "archived".into();
+        if let Some(b) = &branch {
+            s.worktree = None;
+            s.worktree_pending = Some(b.clone());
+            s.port = None;
+            s.setup = None;
+        }
+        s.resume.clear();
+        if s.repo.is_none() {
+            s.repo = repo_s;
+        }
+    })?;
+    done.insert(0, "archived".into());
+    Ok(done.join(" · "))
+}
+
+/// Thread ID back from the archive: open; its host starts and makes the worktree again (its
+/// branch), the 1st turn waits for it.
+pub fn unarchive(id: &str) -> Result<String, String> {
+    let t = store::update(id, |t| {
+        if t.state == "archived" {
+            t.state = "open".into();
+        }
+    })?;
+    match &t.worktree_pending {
+        Some(b) => {
+            client::ensure(&t.id)?;
+            Ok(format!("unarchived · worktree on {b}: the host makes it"))
+        }
+        None => Ok("unarchived".into()),
+    }
+}
+
+/// The owner's edit of a thread: title, repo (None: the repo of its dirs), linked repos (the
+/// checkouts kept), agents (lead first).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Edit {
+    pub title: String,
+    pub repo: Option<String>,
+    pub checkouts: Vec<String>,
+    pub agents: Vec<String>,
+}
+
+/// Save edit E of thread ID. A live host: agents that leave / join go through it (their
+/// sessions stop / start); else thread.json only. Ok: what changed.
+pub fn edit(id: &str, e: &Edit) -> Result<String, String> {
+    let t = store::load(id).ok_or_else(|| format!("no thread {id}"))?;
+    let mut changed = Vec::new();
+    let title = e.title.trim().to_string();
+    if !title.is_empty() && title != t.title {
+        changed.push("title");
+    }
+    let derived = repo_root(Path::new(&t.dir)).or_else(|| t.worktree.as_deref().and_then(|p| repo_root(Path::new(p)))).map(|p| p.display().to_string());
+    // the pick of the repo of its dirs: 0 override
+    let repo = e.repo.clone().filter(|r| !r.is_empty() && Some(r) != derived.as_ref());
+    if repo != t.repo {
+        changed.push("repo");
+    }
+    let keep: Vec<store::Checkout> = t.checkouts.iter().filter(|c| e.checkouts.contains(&c.dir)).cloned().collect();
+    if keep.len() != t.checkouts.len() {
+        changed.push("linked repos");
+    }
+    let gone: Vec<String> = t.agents.iter().filter(|a| !e.agents.contains(a)).cloned().collect();
+    let new: Vec<String> = e.agents.iter().filter(|a| !t.agents.contains(a)).cloned().collect();
+    if e.agents.is_empty() {
+        return Err("1 agent at least".into());
+    }
+    let live = client::alive(&t.id);
+    if live {
+        for a in &gone {
+            client::call(&t.id, &serde_json::json!({"op": "leave", "agent": a}))?;
+        }
+        for a in &new {
+            client::call(&t.id, &serde_json::json!({"op": "join", "agent": a}))?;
+        }
+    }
+    if !gone.is_empty() || !new.is_empty() || e.agents != t.agents {
+        changed.push("agents");
+    }
+    store::update(&t.id, |s| {
+        if !title.is_empty() {
+            s.title = title.clone();
+        }
+        s.repo = repo.clone();
+        s.checkouts = keep.clone();
+        // the order of E (lead first); a join of a live host added its agent already
+        s.agents = e.agents.clone();
+    })?;
+    Ok(if changed.is_empty() { "0 changes".into() } else { format!("saved: {}", changed.join(", ")) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worktree thread: archive removes its worktree (uncommitted files → stash), keeps the
+    /// branch, remembers it for the next host start; unarchive opens it again.
+    #[test]
+    fn archive_removes_the_worktree_keeps_the_branch() {
+        let base = std::env::temp_dir().join(format!("ch-archive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let sh = |c: &str| assert!(Command::new("sh").arg("-c").arg(c).current_dir(&base).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success(), "{c}");
+        sh("git init -q -b main r && cd r && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m 1 && git worktree add -q -b feat ../w && echo x > ../w/new.txt");
+        let repo = base.join("r");
+        let wt = base.join("w");
+        let mut t = store::Thread::new("archive me", "task", &repo, vec!["ada".into()]);
+        t.worktree = Some(wt.display().to_string());
+        t.branch = Some("feat".into());
+        t.port = Some(4100);
+        t.save().unwrap();
+
+        let out = archive(&t.id).unwrap();
+        assert!(out.contains("worktree removed") && out.contains("git stash"), "{out}");
+        assert!(!wt.exists());
+        assert!(git(&repo, &["rev-parse", "--verify", "--quiet", "refs/heads/feat"]).0, "branch kept");
+        let a = store::load(&t.id).unwrap();
+        assert_eq!((a.state.as_str(), a.worktree.as_deref(), a.worktree_pending.as_deref(), a.port), ("archived", None, Some("feat"), None));
+        assert_eq!(a.repo.as_deref().map(PathBuf::from).and_then(|p| std::fs::canonicalize(p).ok()), std::fs::canonicalize(&repo).ok());
+        assert!(store::latest().is_none_or(|l| l.id != t.id), "plain codehead: 0 archived thread");
+
+        // unarchive: open again; 0 host binary in tests, the record is what counts
+        let _ = unarchive(&t.id);
+        assert_eq!(store::load(&t.id).unwrap().state, "open");
+        let _ = store::delete(&t.id);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// The edit: title, a repo override (the repo of its dir: 0 override), linked repos kept.
+    #[test]
+    fn edit_sets_title_repo_and_linked_repos() {
+        let dir = std::env::temp_dir().join(format!("ch-edit-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut t = store::Thread::new("old", "task", &dir, vec!["ada".into()]);
+        t.checkouts = vec![store::Checkout { dir: "/a".into(), branch: None }, store::Checkout { dir: "/b".into(), branch: None }];
+        t.save().unwrap();
+        let e = Edit { title: "new title".into(), repo: Some("/repos/other".into()), checkouts: vec!["/b".into()], agents: vec!["ada".into()] };
+        let out = edit(&t.id, &e).unwrap();
+        assert!(out.contains("title") && out.contains("repo") && out.contains("linked repos"), "{out}");
+        let s = store::load(&t.id).unwrap();
+        assert_eq!((s.title.as_str(), s.repo.as_deref(), s.checkouts.len()), ("new title", Some("/repos/other"), 1));
+        let lite = Thread { repo: s.repo.clone(), dir: Some(s.dir.clone()), ..Default::default() };
+        assert_eq!(repo_of_thread(&lite), Some(PathBuf::from("/repos/other")));
+        assert!(edit(&t.id, &Edit { agents: Vec::new(), ..e }).is_err(), "0 agents refused");
+        let _ = store::delete(&t.id);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn a_start_on_main_pulls_main_first_other_branches_not() {

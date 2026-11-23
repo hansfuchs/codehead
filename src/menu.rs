@@ -1,9 +1,9 @@
 //! The menu (ctrl+p): 1 modal for the start screen and the thread view. Tabs: quick (commands; in
-//! a thread: per agent its flow, remove, replace), threads (filter + thread cards), search (the
-//! messages of every thread), tokens. 3 focus levels: the tab bar, a tab's tab group (threads:
-//! repos, merge: states), its list. ↑ at the top of a list: up 1 level; ↓: down 1 level. ←→ on
-//! the tab bar (a list without a tab group too): next / previous tab; on a tab group: its tabs.
-//! enter: run, a single esc or tab closes.
+//! a thread: per agent its flow, remove, replace), threads (the thread list: filter, repo + view
+//! tabs, cards, actions), merge, search (the messages of every thread), tokens. Focus levels: the
+//! tab bar, a tab's tab groups (threads: repos, views; merge: states), its list. ↑ at the top of a
+//! list: up 1 level; ↓: down 1 level. ←→ on the tab bar (a list without a tab group too): next /
+//! previous tab; on a tab group: its tabs. enter: run, a single esc or tab closes.
 
 use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
@@ -19,6 +19,7 @@ use crate::agents::Agent;
 use crate::nav::{self, Card};
 use crate::textarea::TextArea;
 use crate::theme;
+use crate::threadlist::{self, ThreadList};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
@@ -37,6 +38,8 @@ const TABS: [(Tab, &str); 5] = [(Tab::Quick, "quick"), (Tab::Threads, "threads")
 pub enum Home {
     New,
     Settings,
+    /// The threads tab (the thread in view got archived / deleted).
+    Threads,
     /// The merge tab, a PR open in it (0 thread has it).
     Merge(Option<crate::gh::PrRef>),
     /// The flows tab, a flow open on its rail.
@@ -49,6 +52,8 @@ pub enum Action {
     /// Menu stays open.
     None,
     Close,
+    /// The start screen as it was (home).
+    Back,
     Home(Home),
     Open(Card),
     /// A search result: thread CARD, scrolled to its message of time TS.
@@ -67,7 +72,8 @@ pub struct Item {
     pub section: &'static str,
 }
 
-/// Where the keys go: the tab bar, the tab group of the tab (threads, merge), the list.
+/// Where the keys go: the tab bar, the tab group of the tab (merge), the list. The threads tab:
+/// Bar, else its thread list's own focus.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Level {
     Bar,
@@ -80,21 +86,8 @@ pub struct Menu {
     pub level: Level,
     items: Vec<Item>,
     qcursor: usize,
-    filter: TextArea,
-    cards: Vec<Card>,
-    loading: Option<Receiver<Vec<Card>>>,
-    /// Start of the last cards read: the threads tab reads again every 2s (busy, unread, blocked live).
-    cards_at: Option<Instant>,
-    /// Data version of the cards: up with each read that brings new cards (they dissolve in).
-    cards_version: u64,
-    cards_fx: crate::dissolve::Dissolve,
-    tcursor: usize,
-    toffset: usize,
-    /// Repo tabs of the threads tab (←→): the current thread's repo, the others by thread count,
-    /// rows outside of git repos, all.
-    repos: crate::tabgroup::TabGroup,
-    /// The picked repo tab (None: the default, the 1st tab).
-    repo_pick: Option<RepoTab>,
+    /// The threads tab.
+    pub list: ThreadList,
     /// Thread in view (None: start screen).
     thread: Option<String>,
     /// The agents (their colors in the search tab).
@@ -124,26 +117,21 @@ pub struct Menu {
     prs: crate::prlist::PrList,
 }
 
-/// Thread cards, read in the background (also saved: the next menu shows them at once).
-fn read_cards() -> Receiver<Vec<Card>> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let cards = nav::load();
-        crate::background::save("cards", &cards);
-        let _ = tx.send(cards);
-    });
-    rx
-}
-
-/// Time between 2 reads of the cards (threads tab) / the messages (search tab) while they show.
-const CARDS_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+/// Time between 2 reads of the messages (search tab) while they show.
 const MSGS_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Quick ids of the menu's own commands.
+const NEW: usize = usize::MAX;
+const SETTINGS: usize = usize::MAX - 1;
+const SEARCH: usize = usize::MAX - 2;
+const HOME: usize = usize::MAX - 3;
 
 fn builtins() -> Vec<Item> {
     vec![
-        Item { label: "new thread: start screen, new tab".into(), key: "n".into(), id: usize::MAX, section: "codehead" },
-        Item { label: "settings: start screen, settings tab".into(), key: String::new(), id: usize::MAX - 1, section: "codehead" },
-        Item { label: "search: the messages of every thread".into(), key: "f".into(), id: usize::MAX - 2, section: "codehead" },
+        Item { label: "new thread: start screen, new tab".into(), key: "n".into(), id: NEW, section: "codehead" },
+        Item { label: "home: the start screen (thread view: esc esc, ⌂ home)".into(), key: "h".into(), id: HOME, section: "codehead" },
+        Item { label: "settings: start screen, settings tab".into(), key: String::new(), id: SETTINGS, section: "codehead" },
+        Item { label: "search: the messages of every thread".into(), key: "f".into(), id: SEARCH, section: "codehead" },
     ]
 }
 
@@ -151,31 +139,18 @@ impl Menu {
     /// ITEMS: the host's quick commands (after new + settings). THREAD: the thread in view.
     /// CARDS: thread cards the host has (empty: read in the background now).
     pub fn new(items: Vec<Item>, thread: Option<String>, roster: Vec<Agent>, cards: Vec<Card>) -> Menu {
-        // tests: 0 thread reads (they write the seen file)
-        let loading = (cards.is_empty() && !cfg!(test)).then(read_cards);
-        // the cards of the last read at once; the read's new cards dissolve in
-        let cards = if cards.is_empty() && !cfg!(test) { crate::background::snapshot("cards").unwrap_or_default() } else { cards };
         let mut all = builtins();
         all.extend(items);
-        let mut filter = TextArea::new(true, "filter threads");
-        filter.style = Some(theme::text());
         let mut search = TextArea::new(true, "search messages: you + agents, every thread");
         search.style = Some(theme::text());
+        let mut list = ThreadList::new(threadlist::Mode::Switch, thread.clone(), None, cards);
+        list.roster = roster.iter().map(|a| a.name.clone()).collect();
         Menu {
             tab: Tab::Quick,
             level: Level::Body,
             items: all,
             qcursor: 0,
-            filter,
-            cards,
-            cards_at: loading.is_some().then(Instant::now),
-            loading,
-            cards_version: 0,
-            cards_fx: Default::default(),
-            tcursor: 0,
-            toffset: 0,
-            repos: crate::tabgroup::TabGroup::default(),
-            repo_pick: None,
+            list,
             thread,
             roster,
             started: Instant::now(),
@@ -197,8 +172,6 @@ impl Menu {
             prs: crate::prlist::PrList::default(),
         }
     }
-
-
 
     /// Tokens tab: a new read every 2s while it shows.
     fn poll_detail(&mut self) {
@@ -222,7 +195,7 @@ impl Menu {
 
     /// A background read on its way (threads, messages, tokens, PRs): the host draws often.
     pub fn waiting(&self) -> bool {
-        self.loading.is_some() || self.msgs_rx.is_some() || self.detail_rx.is_some() || (self.tab == Tab::Merge && self.prs.reading())
+        self.list.waiting() || self.msgs_rx.is_some() || self.detail_rx.is_some() || (self.tab == Tab::Merge && self.prs.reading())
     }
 
     fn poll(&mut self) {
@@ -230,18 +203,9 @@ impl Menu {
             self.prs.ensure();
             self.prs.poll();
         }
-        if let Some(rx) = &self.loading
-            && let Ok(c) = rx.try_recv()
-        {
-            self.loading = None;
-            self.set_cards(c);
-        }
         // the threads tab: a new read every 2s while it shows
-        let due = |at: Option<Instant>, every| at.is_none_or(|t| t.elapsed() >= every);
-        if self.tab == Tab::Threads && self.loading.is_none() && due(self.cards_at, CARDS_EVERY) && !cfg!(test) {
-            self.loading = Some(read_cards());
-            self.cards_at = Some(Instant::now());
-        }
+        self.list.poll(self.tab == Tab::Threads);
+        let due = |at: Option<Instant>, every| at.is_none_or(|t: Instant| t.elapsed() >= every);
         if let Some(rx) = &self.msgs_rx
             && let Ok(m) = rx.try_recv()
         {
@@ -260,19 +224,10 @@ impl Menu {
         self.refresh_hits();
     }
 
-    /// New cards (a read): the cursor stays on its thread (a busy thread moves up the list).
+    /// New cards (a read): the cursor stays on its thread.
+    #[cfg(test)]
     fn set_cards(&mut self, c: Vec<Card>) {
-        if c == self.cards {
-            return;
-        }
-        let picked = self.visible().get(self.tcursor).map(|&i| self.cards[i].id.clone());
-        self.cards = c;
-        self.cards_version += 1;
-        if let Some(id) = picked
-            && let Some(p) = self.visible().iter().position(|&i| self.cards[i].id == id)
-        {
-            self.tcursor = p;
-        }
+        self.list.set_cards(c);
     }
 
     /// New messages (a read): the hits again, the cursor stays on its message.
@@ -301,7 +256,7 @@ impl Menu {
 
     /// The card of thread ID (the threads tab's, else 1 from the message).
     fn card_of(&self, m: &crate::search::Msg) -> Card {
-        self.cards.iter().find(|c| c.id == m.thread).cloned().unwrap_or_else(|| Card { id: m.thread.clone(), title: m.title.clone(), dir: m.dir.clone(), ..Default::default() })
+        self.list.cards.iter().find(|c| c.id == m.thread).cloned().unwrap_or_else(|| Card { id: m.thread.clone(), title: m.title.clone(), dir: m.dir.clone(), ..Default::default() })
     }
 
     fn jump(&self, hit: usize) -> Action {
@@ -325,69 +280,18 @@ impl Menu {
         Action::None
     }
 
-    /// The threads tab's cards (filter + repo applied); the current thread always on top.
-    fn visible(&self) -> Vec<usize> {
-        let tab = self.repo_tab();
-        let mut v: Vec<usize> = nav::filter(&self.cards, &self.filter.text()).into_iter().filter(|&i| tab.keeps(self.cards[i].repo.as_deref())).collect();
-        if let Some(p) = v.iter().position(|&i| self.thread.as_deref() == Some(self.cards[i].id.as_str())) {
-            let here = v.remove(p);
-            v.insert(0, here);
-        }
-        v
-    }
-
-    /// The repo tabs: the current thread's repo, the other repos (most threads first, then A→Z),
-    /// outside of git repos (when a thread is), all.
-    fn repo_tabs(&self) -> Vec<RepoTab> {
-        let here = self.thread.as_deref().and_then(|id| self.cards.iter().find(|c| c.id == id)).and_then(|c| c.repo.clone());
-        let mut counts: Vec<(std::path::PathBuf, usize)> = Vec::new();
-        let mut outside = false;
-        for c in &self.cards {
-            match &c.repo {
-                Some(p) => match counts.iter_mut().find(|(q, _)| q == p) {
-                    Some(e) => e.1 += 1,
-                    None => counts.push((p.clone(), 1)),
-                },
-                None => outside = true,
+    /// What the thread list's OUT means for the host.
+    fn list_out(&mut self, out: threadlist::Out) -> Action {
+        match out {
+            threadlist::Out::Up => {
+                self.level = Level::Bar;
+                Action::None
             }
+            threadlist::Out::Open(c) => Action::Open(c),
+            threadlist::Out::Home => Action::Home(Home::Threads),
+            threadlist::Out::None | threadlist::Out::Pass => Action::None,
         }
-        let name = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
-        counts.sort_by(|a, b| (Some(&b.0) == here.as_ref()).cmp(&(Some(&a.0) == here.as_ref())).then(b.1.cmp(&a.1)).then_with(|| name(&a.0).cmp(&name(&b.0))));
-        let mut v: Vec<RepoTab> = counts.into_iter().map(|(p, _)| RepoTab::Repo(p)).collect();
-        if outside {
-            v.push(RepoTab::Outside);
-        }
-        v.push(RepoTab::All);
-        v
     }
-
-    /// The repo tab in use: the pick, else the current thread's repo (0 thread: all).
-    fn repo_tab(&self) -> RepoTab {
-        let tabs = self.repo_tabs();
-        if let Some(p) = self.repo_pick.as_ref().filter(|p| tabs.contains(p)) {
-            return p.clone();
-        }
-        if self.thread.is_some() && let Some(t) = tabs.first() {
-            return t.clone();
-        }
-        RepoTab::All
-    }
-
-    /// ←→ on the repo tabs.
-    fn step_repo(&mut self, d: isize) {
-        let tabs = self.repo_tabs();
-        let cur = self.repo_tab();
-        self.repos.i = tabs.iter().position(|t| *t == cur).unwrap_or(0);
-        self.repos.step(d, tabs.len());
-        self.repo_pick = tabs.get(self.repos.i).cloned();
-        self.tcursor = 0;
-        self.toffset = 0;
-    }
-
-
-
-
-
 
     fn switch(&mut self, d: isize) {
         let i = TABS.iter().position(|(t, _)| *t == self.tab).unwrap_or(0) as isize;
@@ -395,7 +299,7 @@ impl Menu {
         self.level = Level::Bar;
     }
 
-    /// The tab has a tab group (threads: repos, merge: states).
+    /// The tab has a tab group (threads: repos + views, merge: states).
     fn grouped(&self) -> bool {
         matches!(self.tab, Tab::Threads | Tab::Merge)
     }
@@ -404,7 +308,7 @@ impl Menu {
     fn at_top(&self) -> bool {
         match self.tab {
             Tab::Quick => self.qcursor == 0,
-            Tab::Threads => self.tcursor == 0,
+            Tab::Threads => self.list.cursor == 0,
             Tab::Merge => self.prs.at_top(),
             Tab::Search => self.scursor == 0,
             Tab::Tokens => self.dscroll == 0,
@@ -437,7 +341,6 @@ impl Menu {
                 match k.code {
                     KeyCode::Up => self.level = Level::Bar,
                     KeyCode::Down | KeyCode::Enter => self.level = Level::Body,
-                    KeyCode::Left | KeyCode::Right if self.tab == Tab::Threads => self.step_repo(if k.code == KeyCode::Right { 1 } else { -1 }),
                     KeyCode::Left | KeyCode::Right => {
                         self.prs.key(k);
                     }
@@ -451,12 +354,41 @@ impl Menu {
         }
     }
 
+    /// Keys of the threads tab: the tab bar's (Bar), else the thread list's.
+    fn threads_key(&mut self, k: KeyEvent) -> Action {
+        if self.level == Level::Bar {
+            match k.code {
+                KeyCode::Left | KeyCode::Right => self.switch(if k.code == KeyCode::Right { 1 } else { -1 }),
+                KeyCode::Up => {}
+                KeyCode::Down | KeyCode::Enter => {
+                    self.level = Level::Body;
+                    self.list.focus = threadlist::Focus::Repos;
+                }
+                // a letter: the list's filter takes it
+                _ => {
+                    self.level = Level::Body;
+                    self.list.focus = threadlist::Focus::List;
+                    let out = self.list.key(k);
+                    return self.list_out(out);
+                }
+            }
+            return Action::None;
+        }
+        let out = self.list.key(k);
+        self.list_out(out)
+    }
+
     pub fn key(&mut self, k: KeyEvent) -> Action {
         self.poll();
         let ctrl = k.modifiers.contains(ratatui::crossterm::event::KeyModifiers::CONTROL);
+        // the thread list's form / question / dropdown: every key is its own (esc, tab too)
+        if self.tab == Tab::Threads && self.level != Level::Bar && self.list.modal() {
+            let out = self.list.key(k);
+            return self.list_out(out);
+        }
         // tab / shift+tab: the next / previous menu tab, from every level; a tab with a tab group
-        // (threads: repos, merge: states): ←→ move in the group; the other tabs: ←→ switch them
-        // too; ctrl+←→: the filter's word jumps
+        // (threads: repos + views, merge: states): ←→ move in the group; the other tabs: ←→
+        // switch them too; ctrl+←→: the filter's word jumps
         let group = self.grouped();
         match k.code {
             // esc or the menu key again: closed
@@ -466,6 +398,7 @@ impl Menu {
                 self.switch(if k.code == KeyCode::Tab { 1 } else { -1 });
                 return Action::None;
             }
+            _ if self.tab == Tab::Threads => return self.threads_key(k),
             KeyCode::Right | KeyCode::Left if !ctrl && !group && self.level == Level::Body => {
                 self.switch(if k.code == KeyCode::Right { 1 } else { -1 });
                 return Action::None;
@@ -477,16 +410,9 @@ impl Menu {
             }
             _ => {}
         }
-        match k.code {
-            KeyCode::Right | KeyCode::Left if self.tab == Tab::Threads => {
-                self.step_repo(if k.code == KeyCode::Right { 1 } else { -1 });
-                return Action::None;
-            }
-            _ => {}
-        }
         match self.tab {
             Tab::Quick => self.quick_key(k),
-            Tab::Threads => self.threads_key(k),
+            Tab::Threads => Action::None,
             Tab::Search => self.search_key(k),
             Tab::Merge => match self.prs.key(k) {
                 crate::prlist::Pick::Open(e) => Action::Pr(e),
@@ -526,6 +452,7 @@ impl Menu {
             KeyCode::Up | KeyCode::Char('k') => self.qcursor = self.qcursor.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => self.qcursor = (self.qcursor + 1).min(n - 1),
             KeyCode::Char('n') => return Action::Home(Home::New),
+            KeyCode::Char('h') => return Action::Back,
             KeyCode::Char('f') => {
                 self.tab = Tab::Search;
                 self.level = Level::Body;
@@ -538,39 +465,17 @@ impl Menu {
 
     fn run_item(&mut self, i: usize) -> Action {
         match self.items.get(i).map(|it| it.id) {
-            Some(usize::MAX) => Action::Home(Home::New),
-            Some(id) if id == usize::MAX - 2 => {
+            Some(NEW) => Action::Home(Home::New),
+            Some(HOME) => Action::Back,
+            Some(SEARCH) => {
                 self.tab = Tab::Search;
                 self.level = Level::Body;
                 Action::None
             }
-            Some(id) if id == usize::MAX - 1 => Action::Home(Home::Settings),
+            Some(SETTINGS) => Action::Home(Home::Settings),
             Some(id) => Action::Command(id),
             None => Action::None,
         }
-    }
-
-    fn threads_key(&mut self, k: KeyEvent) -> Action {
-        let vis = self.visible();
-        let n = vis.len();
-        match k.code {
-            KeyCode::Up => self.tcursor = self.tcursor.saturating_sub(1),
-            KeyCode::Down if n > 0 => self.tcursor = (self.tcursor + 1).min(n - 1),
-            KeyCode::PageUp => self.tcursor = self.tcursor.saturating_sub(5),
-            KeyCode::PageDown if n > 0 => self.tcursor = (self.tcursor + 5).min(n - 1),
-            KeyCode::Enter => {
-                return vis.get(self.tcursor).map(|&i| Action::Open(self.cards[i].clone())).unwrap_or(Action::None);
-            }
-            _ => {
-                let before = self.filter.text();
-                self.filter.key(k);
-                if self.filter.text() != before {
-                    self.tcursor = 0;
-                    self.toffset = 0;
-                }
-            }
-        }
-        Action::None
     }
 
 
@@ -579,29 +484,23 @@ impl Menu {
     pub fn mouse(&mut self, m: MouseEvent) -> Action {
         self.poll();
         let at = Position { x: m.column, y: m.row };
-        // the filter / search input: its own mouse (cursor, selection + copy)
-        let input = match self.tab {
-            Tab::Threads => Some(&mut self.filter),
-            Tab::Search => Some(&mut self.search),
-            _ => None,
-        };
-        if let Some(ta) = input
-            && ta.mouse(m)
-        {
-            ta.copied = None;
+        let down = matches!(m.kind, MouseEventKind::Down(MouseButton::Left));
+        // the threads tab: the thread list's own clicks (filter, tabs, cards, actions)
+        if self.tab == Tab::Threads && self.frame.contains(at) && !(down && self.tab_rects.iter().any(|(r, _)| r.contains(at))) {
+            let out = self.list.mouse(m);
+            if out != threadlist::Out::Pass {
+                self.level = Level::Body;
+                return self.list_out(out);
+            }
+        }
+        // the search input: its own mouse (cursor, selection + copy)
+        if self.tab == Tab::Search && self.search.mouse(m) {
+            self.search.copied = None;
             self.level = Level::Body;
             return Action::None;
         }
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // a repo tab of the threads tab
-                if self.tab == Tab::Threads && self.repos.click(at) {
-                    self.level = Level::Group;
-                    self.repo_pick = self.repo_tabs().get(self.repos.i).cloned();
-                    self.tcursor = 0;
-                    self.toffset = 0;
-                    return Action::None;
-                }
                 if !self.frame.contains(at) {
                     return Action::Close;
                 }
@@ -624,27 +523,13 @@ impl Menu {
                         self.qcursor = i;
                         return self.run_item(i);
                     }
-                    Tab::Threads => {
-                        let vis = self.visible();
-                        if let Some(p) = vis.iter().position(|&v| v == i) {
-                            self.tcursor = p;
-                        }
-                        return Action::Open(self.cards[i].clone());
-                    }
                     Tab::Search => {
                         self.scursor = i;
                         return self.jump(i);
                     }
-                    Tab::Tokens | Tab::Merge => {}
+                    Tab::Tokens | Tab::Merge | Tab::Threads => {}
                 }
             }
-            MouseEventKind::ScrollDown if self.tab == Tab::Threads => {
-                let n = self.visible().len();
-                if n > 0 {
-                    self.tcursor = (self.tcursor + 1).min(n - 1);
-                }
-            }
-            MouseEventKind::ScrollUp if self.tab == Tab::Threads => self.tcursor = self.tcursor.saturating_sub(1),
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp if self.tab == Tab::Merge => {
                 self.prs.mouse(m);
             }
@@ -659,7 +544,8 @@ impl Menu {
 
     /// Row under AT (hover).
     pub fn row_at(&self, at: Position) -> Option<Rect> {
-        self.rows.iter().find(|(r, _)| r.contains(at)).map(|(r, _)| *r).or_else(|| self.tab_rects.iter().find(|(r, _)| r.contains(at)).map(|(r, _)| *r))
+        let list = if self.tab == Tab::Threads { self.list.row_at(at) } else { None };
+        list.or_else(|| self.rows.iter().find(|(r, _)| r.contains(at)).map(|(r, _)| *r)).or_else(|| self.tab_rects.iter().find(|(r, _)| r.contains(at)).map(|(r, _)| *r))
     }
 
     /// The menu in AREA (the whole screen), as a command palette: centered on the screen's
@@ -707,18 +593,27 @@ impl Menu {
         let body = Rect { y: inner.y + 2, height: inner.height.saturating_sub(3), ..inner };
         let foot = Rect { y: inner.bottom() - 1, height: 1, ..inner };
         self.rows.clear();
+        // the threads tab: the list's hints (the tab bar: the bar's)
+        let list_hints: Vec<(&str, &str)> = match (self.tab, self.level) {
+            (Tab::Threads, Level::Bar) => vec![("←→", "tabs"), ("↓", "repos"), ("type", "filter"), ("esc", "close")],
+            (Tab::Threads, _) => {
+                let mut h = self.list.hints();
+                if !self.list.modal() {
+                    h.push(("esc", "close"));
+                }
+                h
+            }
+            _ => Vec::new(),
+        };
         let hints: &[(&str, &str)] = match self.tab {
             Tab::Quick => {
                 self.draw_quick(f, body);
                 &[("↑↓", "move"), ("enter", "run"), ("←→", "tabs"), ("esc", "close")]
             }
             Tab::Threads => {
-                self.draw_threads(f, body);
-                match self.level {
-                    Level::Bar => &[("←→", "tabs"), ("↓", "repos"), ("type", "filter"), ("esc", "close")],
-                    Level::Group => &[("←→", "repo"), ("↑", "tabs"), ("↓", "threads"), ("esc", "close")],
-                    Level::Body => &[("type", "filter"), ("←→", "repo"), ("↑↓", "move"), ("enter", "open"), ("tab", "tabs"), ("esc", "close")],
-                }
+                let tick = (self.started.elapsed().as_millis() / nav::WAVE_MS) as usize;
+                self.list.draw(f, body, tick);
+                &list_hints
             }
             Tab::Merge => {
                 self.prs.draw_levels(f, body, self.level == Level::Group, self.level == Level::Body);
@@ -782,49 +677,6 @@ impl Menu {
             let line = Line::from(vec![Span::styled(format!(" {:<kw$}  ", it.key), ks), Span::styled(label, ls)]);
             f.render_widget(Paragraph::new(line).style(if hl { theme::pill() } else { Style::default() }), r);
             self.rows.push((r, i));
-        }
-    }
-
-    fn draw_threads(&mut self, f: &mut Frame, body: Rect) {
-        // the name filter, the repo tabs below it
-        let fr = Rect { height: 1, ..body };
-        f.render_widget(Paragraph::new(Span::styled("› ", theme::accent())), Rect { width: 2, ..fr });
-        self.filter.render(f, Rect { x: fr.x + 2, width: fr.width.saturating_sub(2), ..fr }, true);
-        let tabs = self.repo_tabs();
-        let cur = self.repo_tab();
-        self.repos.i = tabs.iter().position(|t| *t == cur).unwrap_or(0);
-        let labels: Vec<String> = tabs.iter().map(RepoTab::label).collect();
-        self.repos.draw(f, Rect { y: body.y + 1, height: 1, ..body }, "repo", &labels, self.level == Level::Group);
-        let list = Rect { y: body.y + 3, height: body.height.saturating_sub(3), ..body };
-        let vis = self.visible();
-        if vis.is_empty() {
-            let msg = if self.loading.is_some() && self.cards.is_empty() { "reading threads…" } else if cur != RepoTab::All { "0 threads in this repo" } else { "0 threads" };
-            f.render_widget(Paragraph::new(Span::styled(msg, theme::muted())), Rect { height: 1, ..list });
-            return;
-        }
-        self.tcursor = self.tcursor.min(vis.len() - 1);
-        let fits = (list.height / nav::CARD_H).max(1) as usize;
-        if self.tcursor < self.toffset {
-            self.toffset = self.tcursor;
-        }
-        if self.tcursor >= self.toffset + fits {
-            self.toffset = self.tcursor + 1 - fits;
-        }
-        let tick = (self.started.elapsed().as_millis() / nav::WAVE_MS) as usize;
-        let notes = crate::notify::unseen(self.thread.as_deref());
-        for (slot, &i) in vis.iter().enumerate().skip(self.toffset).take(fits) {
-            let y = list.y + (slot - self.toffset) as u16 * nav::CARD_H;
-            let r = Rect { y, height: nav::CARD_H, ..list };
-            let c = &self.cards[i];
-            nav::draw_card(f.buffer_mut(), r, c, slot == self.tcursor && self.level == Level::Body, self.thread.as_deref() == Some(c.id.as_str()), true, tick);
-            crate::notify::card_badge(f.buffer_mut(), r, &notes, &c.id);
-            self.rows.push((r, i));
-        }
-        self.cards_fx.apply(f, list, self.cards_version);
-        let more = vis.len().saturating_sub(self.toffset + fits);
-        if self.toffset > 0 || more > 0 {
-            let text = format!("{}↑ · {more}↓", self.toffset);
-            f.render_widget(Paragraph::new(Span::styled(text, theme::muted())).right_aligned(), fr);
         }
     }
 
@@ -894,7 +746,7 @@ impl Menu {
             return;
         };
         let names = self.roster.iter().map(|a| (a.name.clone(), (a.name.clone(), a.color.clone()))).collect();
-        let titles = self.cards.iter().map(|c| (c.id.clone(), c.name())).collect();
+        let titles = self.list.cards.iter().map(|c| (c.id.clone(), c.name())).collect();
         let lines = crate::cost::detail_lines(d, self.thread.as_deref(), &names, &titles, body.width as usize);
         let max = (lines.len() as u16).saturating_sub(body.height);
         self.dscroll = self.dscroll.min(max);
@@ -907,31 +759,6 @@ impl Menu {
 
 }
 
-/// A repo tab of the threads tab.
-#[derive(Clone, Debug, PartialEq)]
-enum RepoTab {
-    Repo(std::path::PathBuf),
-    Outside,
-    All,
-}
-
-impl RepoTab {
-    fn keeps(&self, repo: Option<&std::path::Path>) -> bool {
-        match self {
-            RepoTab::Repo(p) => repo == Some(p.as_path()),
-            RepoTab::Outside => repo.is_none(),
-            RepoTab::All => true,
-        }
-    }
-
-    fn label(&self) -> String {
-        match self {
-            RepoTab::Repo(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string()),
-            RepoTab::Outside => "outside git".into(),
-            RepoTab::All => "all".into(),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -966,15 +793,19 @@ mod tests {
         assert_eq!(m.tab, Tab::Merge);
         m.key(k(KeyCode::Left));
         assert_eq!(m.tab, Tab::Threads);
-        // ↓: the repo tabs (←→ there), ↓: the list; ↑ at its top: the repo tabs, ↑: the tab bar
+        // ↓: the repo tabs (←→ there), ↓: the view tabs, ↓: the list; ↑ at its top: the view
+        // tabs, the repo tabs, the tab bar
         m.key(k(KeyCode::Down));
-        assert_eq!(m.level, Level::Group);
+        assert_eq!((m.level, m.list.focus), (Level::Body, threadlist::Focus::Repos));
         m.key(k(KeyCode::Down));
-        assert_eq!(m.level, Level::Body);
+        assert_eq!(m.list.focus, threadlist::Focus::Views);
+        m.key(k(KeyCode::Down));
+        assert_eq!(m.list.focus, threadlist::Focus::List);
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Threads, "the list: ←→ walk the repos");
         m.key(k(KeyCode::Up));
-        assert_eq!(m.level, Level::Group);
+        m.key(k(KeyCode::Up));
+        assert_eq!(m.list.focus, threadlist::Focus::Repos);
         m.key(k(KeyCode::Up));
         assert_eq!(m.level, Level::Bar);
         m.key(k(KeyCode::Right));
@@ -1020,6 +851,10 @@ mod tests {
     fn quick_commands_run() {
         let mut m = menu();
         assert_eq!(m.key(k(KeyCode::Enter)), Action::Home(Home::New));
+        // home: the start screen as it was (h too)
+        m.key(k(KeyCode::Down));
+        assert_eq!(m.key(k(KeyCode::Enter)), Action::Back);
+        assert_eq!(m.key(k(KeyCode::Char('h'))), Action::Back);
         m.key(k(KeyCode::Down));
         assert_eq!(m.key(k(KeyCode::Enter)), Action::Home(Home::Settings));
         m.key(k(KeyCode::Down));
@@ -1031,7 +866,7 @@ mod tests {
         // the last row: ↓ stays; ↑ at the 1st row: the tab bar
         m.key(k(KeyCode::Down));
         assert_eq!(m.key(k(KeyCode::Enter)), Action::Command(7));
-        for _ in 0..4 {
+        for _ in 0..5 {
             m.key(k(KeyCode::Up));
         }
         assert_eq!(m.level, Level::Bar);
@@ -1074,7 +909,7 @@ mod tests {
         let mut busy = card("t3", "c");
         busy.busy = true;
         m.set_cards(vec![busy, card("t1", "a"), card("t2", "b")]);
-        assert!(m.cards[0].busy);
+        assert!(m.list.cards[0].busy);
         assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "t2"));
     }
 
@@ -1099,7 +934,7 @@ mod tests {
     fn live_quick_items_keep_the_cursor_on_its_command() {
         let it = |label: &str, id| Item { label: label.into(), key: String::new(), id, section: "agents" };
         let mut m = Menu::new(vec![it("@a: flow (0 flow)", 100), it("@b: flow (0 flow)", 103)], None, Vec::new(), vec![card("t1", "a")]);
-        for _ in 0..4 {
+        for _ in 0..5 {
             m.key(k(KeyCode::Down));
         }
         assert_eq!(m.key(k(KeyCode::Enter)), Action::Command(103));
@@ -1113,9 +948,10 @@ mod tests {
     fn threads_filter_and_open() {
         let mut m = menu();
         m.key(k(KeyCode::Right));
-        m.key(k(KeyCode::Down));
-        m.key(k(KeyCode::Down));
-        m.key(k(KeyCode::Down));
+        // repo tabs, view tabs, the list, its 2nd card
+        for _ in 0..4 {
+            m.key(k(KeyCode::Down));
+        }
         assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "t2"));
         for c in "first".chars() {
             m.key(k(KeyCode::Char(c)));
@@ -1124,22 +960,23 @@ mod tests {
     }
 
     #[test]
-    fn threads_tab_has_the_current_thread_on_top() {
-        let cards = vec![card("t1", "newest"), card("t2", "older"), card("t3", "this one")];
+    fn threads_tab_marks_the_thread_in_view_and_sorts_by_section() {
+        let mut busy = card("t2", "older");
+        busy.busy = true;
+        let cards = vec![card("t1", "newest"), busy, card("t3", "this one")];
         let mut m = Menu::new(Vec::new(), Some("t3".into()), Vec::new(), cards);
         m.key(k(KeyCode::Right));
-        // a letter on the tab bar: the filter takes it (here: enter dives into the list)
-        m.key(k(KeyCode::Enter));
-        m.key(k(KeyCode::Enter));
-        let ids = |m: &Menu| m.visible().iter().map(|&i| m.cards[i].id.clone()).collect::<Vec<_>>();
-        assert_eq!(ids(&m), ["t3", "t1", "t2"]);
-        assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "t3"));
-        // a filter that keeps it: on top too; one that drops it: the rest in order
-        for c in "o".chars() {
-            m.key(k(KeyCode::Char(c)));
-        }
-        assert_eq!(ids(&m)[0], "t3");
-        for c in "lder".chars() {
+        // a letter on the tab bar: the filter takes it
+        m.key(k(KeyCode::Char('e')));
+        let ids = |m: &Menu| m.list.visible().iter().map(|&i| m.list.cards[i].id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&m), ["t2", "t1", "t3"], "working first");
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 34)).unwrap();
+        t.draw(|f| m.render(f, f.area())).unwrap();
+        let b = t.backend().buffer().clone();
+        let s: String = (0..34).map(|y| (0..90).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
+        assert!(s.contains(" here ") && s.contains("working · 1") && s.contains("ctrl+o"), "{s}");
+        m.key(k(KeyCode::Backspace));
+        for c in "older".chars() {
             m.key(k(KeyCode::Char(c)));
         }
         assert_eq!(ids(&m), ["t2"]);
@@ -1165,7 +1002,7 @@ mod tests {
         let at = |t: &str| row.find(t).unwrap_or_else(|| panic!("{t}: {row}"));
         assert!(at(" alpha ") < at(" beta ") && at(" beta ") < at(" gamma ") && at(" gamma ") < at(" outside git ") && at(" outside git ") < at(" all "), "{row}");
         assert!(!s.join("\n").contains("ctrl+r"));
-        let ids = |m: &Menu| m.visible().iter().map(|&i| m.cards[i].id.clone()).collect::<Vec<_>>();
+        let ids = |m: &Menu| m.list.visible().iter().map(|&i| m.list.cards[i].id.clone()).collect::<Vec<_>>();
         assert_eq!(ids(&m), ["t1"], "the current thread's repo by default");
         // →: beta (2 threads); the name filter applies on top
         m.key(k(KeyCode::Right));
@@ -1179,7 +1016,7 @@ mod tests {
         assert_eq!(ids(&m).len(), 5);
         // a click on a tab picks it
         draw(&mut m);
-        let r = m.repos.rect_of(1).expect("tab 1 drawn");
+        let r = m.list.repo_rect(1).expect("tab 1 drawn");
         m.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x, row: r.y, modifiers: KeyModifiers::NONE });
         assert_eq!(ids(&m), ["b1", "b2"]);
     }
