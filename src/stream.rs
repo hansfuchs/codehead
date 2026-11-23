@@ -1635,6 +1635,7 @@ impl Attachment {
         {
             return Attachment { marker: Some(format!("{m}]")), path: p.trim().to_string() };
         }
+
         let name = line.rsplit('/').next().unwrap_or(line);
         let n = name.strip_prefix("image-").and_then(|n| n.strip_suffix(".png")).filter(|n| n.parse::<usize>().is_ok());
         Attachment { marker: n.map(|n| format!("[Image #{n}]")), path: line.to_string() }
@@ -1646,9 +1647,34 @@ impl Attachment {
     }
 }
 
-/// The `file://` link of an attachment: None for a gone file (a cleared cache, /tmp).
+/// The `file://` link of an attachment: None for a gone file (a cleared cache, /tmp). Its check
+/// is memoized 2 s: a redraw per streamed token does 0 stat calls.
 fn attach_link(a: &Attachment) -> Option<String> {
-    Path::new(&a.path).is_file().then(|| format!("file://{}", a.path))
+    use std::cell::RefCell;
+    use std::time::{Duration, Instant};
+
+    thread_local! {
+        static SEEN: RefCell<HashMap<String, (Instant, bool)>> = RefCell::new(HashMap::new());
+    }
+    let fresh = if cfg!(test) { Duration::ZERO } else { Duration::from_secs(2) };
+
+    let exists = SEEN.with(|seen| {
+        let mut seen = seen.borrow_mut();
+        match seen.get(&a.path) {
+            Some((at, ok)) if at.elapsed() < fresh => *ok,
+            _ => {
+                if seen.len() > 1024 {
+                    seen.clear();
+                }
+
+                let ok = Path::new(&a.path).is_file();
+                seen.insert(a.path.clone(), (Instant::now(), ok));
+                ok
+            }
+        }
+    });
+
+    exists.then(|| format!("file://{}", a.path))
 }
 
 /// The `📎` row of attachment A: its LABEL, a link over it (0 link for a gone file: `· missing`).
@@ -1658,10 +1684,12 @@ fn clip_row(a: &Attachment, label: &str, style: Style, right: usize) -> Row {
     let label = if link.is_some() { format!("📎 {label}") } else { format!("📎 {label} · missing") };
     let lead = right.saturating_sub(label.width());
     let (from, to) = (lead as u16, (lead + label.width()) as u16);
+
     let mut spans = vec![Span::styled(label, style)];
     if lead > 0 {
         spans.insert(0, Span::raw(" ".repeat(lead)));
     }
+
     Row { line: Line::from(spans), links: link.map(|l| vec![(from, to, l)]).unwrap_or_default(), ..Default::default() }
 }
 
@@ -1672,18 +1700,21 @@ fn link_markers(rows: &mut [Row], atts: &[Attachment]) {
     if links.is_empty() {
         return;
     }
+
     for r in rows {
-        let text: String = r.line.spans.iter().map(|s| s.content.as_ref()).collect();
         // byte ranges of the markers in the row's text
+        let text: String = r.line.spans.iter().map(|s| s.content.as_ref()).collect();
         let mut hits: Vec<(usize, usize, &str)> = Vec::new();
         for (m, url) in &links {
             hits.extend(text.match_indices(m).map(|(i, _)| (i, i + m.len(), url.as_str())));
         }
+
         if hits.is_empty() {
             continue;
         }
         hits.sort_by_key(|h| h.0);
-        // split the spans at the marker bounds; the marker pieces underlined
+
+        // split the spans at the marker bounds
         let mut out: Vec<Span<'static>> = Vec::new();
         let mut at = 0;
         for s in std::mem::take(&mut r.line.spans) {
@@ -1697,9 +1728,12 @@ fn link_markers(rows: &mut [Row], atts: &[Attachment]) {
                     }
                 }
             }
+
             out.push(Span::styled(s.content[cut - at..].to_string(), s.style));
             at = end;
         }
+
+        // the marker pieces underlined, a link over each marker's cols
         let mut at = 0;
         for s in &mut out {
             if hits.iter().any(|&(a, b, _)| at >= a && at < b) {
@@ -1707,6 +1741,7 @@ fn link_markers(rows: &mut [Row], atts: &[Attachment]) {
             }
             at += s.content.len();
         }
+
         for &(a, b, url) in &hits {
             let (from, to) = (text[..a].width() as u16, text[..b].width() as u16);
             r.links.push((from, to, url.to_string()));
@@ -1928,8 +1963,9 @@ mod tests {
     #[test]
     fn attachments_parse_both_formats() {
         let (body, a) = attachments("see [Image #2]\n\nAttachments (read these files):\n- [Image #2]: /p/shot.png\n- /q/image-3.png\n- /q/notes.txt\n- [Pasted text #1 +3 lines]: /q/pasted-text-1.txt");
-        assert_eq!(body, "see [Image #2]\n\n");
         let m: Vec<(Option<&str>, &str)> = a.iter().map(|a| (a.marker.as_deref(), a.path.as_str())).collect();
+
+        assert_eq!(body, "see [Image #2]\n\n");
         assert_eq!(m, [(Some("[Image #2]"), "/p/shot.png"), (Some("[Image #3]"), "/q/image-3.png"), (None, "/q/notes.txt"), (Some("[Pasted text #1 +3 lines]"), "/q/pasted-text-1.txt")]);
         assert_eq!(a[0].name(), "shot.png");
         assert_eq!(attachments("plain").1, []);
@@ -1941,29 +1977,37 @@ mod tests {
         let gone = img.with_file_name("gone.png");
         let msg = format!("look at [Image #1] and [Image #2] here\n\nAttachments (read these files):\n- [Image #1]: {}\n- [Image #2]: {}", img.display(), gone.display());
         let url = format!("file://{}", img.display());
+        let line_of = |r: &Row| r.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+
         for look in [Look::Bubbles, Look::Lines] {
             let mut t = Thread::default();
             t.push(&ev(None, Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text: msg.clone() }));
+
             let d = draw(&t, look, 70, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, &Picker::default());
             let s = text(&d);
-            // the marker of the existing file: a link over its cols; the gone file: 0 link, `· missing`
-            let row = d.rows.iter().find(|r| r.links.iter().any(|l| l.2 == url) && !r.line.spans.iter().any(|s| s.content.contains('📎'))).unwrap_or_else(|| panic!("{look:?}\n{s}"));
+
+            // the marker of the existing file: a link over its cols
+            let row = d.rows.iter().find(|r| r.links.iter().any(|l| l.2 == url) && !line_of(r).contains('📎')).unwrap_or_else(|| panic!("{look:?}\n{s}"));
             let (a, b, _) = row.links.iter().find(|l| l.2 == url).unwrap();
-            let line: String = row.line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let line = line_of(row);
             let at = line.find("[Image #1]").unwrap();
             assert_eq!((*a as usize, *b as usize), (line[..at].width(), line[..at].width() + 10), "{look:?}\n{s}");
+
             // markdown splits the brackets off: the marker's pieces underlined, 0 other text
             let under: String = row.line.spans.iter().filter(|s| s.style.add_modifier.contains(Modifier::UNDERLINED)).map(|s| s.content.as_ref()).collect();
             assert_eq!(under, "[Image #1]", "{look:?}");
+
+            // the gone file: 0 link, `· missing`
             assert!(d.rows.iter().all(|r| !r.links.iter().any(|l| l.2.contains("gone.png"))), "{look:?}");
             assert!(s.contains("· missing"), "{look:?}\n{s}");
-            let clip = d.rows.iter().find(|r| r.line.spans.iter().any(|s| s.content.contains("📎") && s.content.contains("shot.png"))).unwrap();
-            let line: String = clip.line.spans.iter().map(|s| s.content.as_ref()).collect();
+
+            // the 📎 row: a link from the clip on
+            let clip = d.rows.iter().find(|r| line_of(r).contains("📎") && line_of(r).contains("shot.png")).unwrap();
+            let line = line_of(clip);
             let start = line.find('📎').map(|i| line[..i].width()).unwrap();
             assert!(clip.links.iter().any(|(a, _, u)| *u == url && *a as usize == start), "{look:?}\n{s}");
         }
     }
-
     fn text(d: &Drawn) -> String {
         d.rows.iter().map(|r| r.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>().trim_end().to_string() + "\n").collect()
     }

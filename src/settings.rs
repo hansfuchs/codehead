@@ -44,7 +44,7 @@ const SPECS: [Spec; 34] = [
     spec("rank", "review order", "changes view: claude:<model> when 0 classifier agent is found, off: path rules", "CODEHEAD_RANK"),
     spec("review", "reviewer", "changes view V: claude:<model> reviews the diff (read-only tools), off: 0 reviews", "CODEHEAD_REVIEW"),
     spec("editor", "editor", "IDE for ctrl+i and the changes view e: auto, or code, codium, cursor, zed, idea, flow …, terminal ($EDITOR), or a path", "CODEHEAD_EDITOR"),
-    spec("previews", "previews", "files view: images + pdf drawn in terminals that can (Ghostty, kitty, Rio, iTerm2, WezTerm, sixel): auto or off", "CODEHEAD_PREVIEWS"),
+    spec("previews", "previews", "files view: images + pdf drawn as images: auto (Ghostty, kitty, Rio, iTerm2, WezTerm, sixel terminals), kitty, iterm2, sixel, or off", "CODEHEAD_PREVIEWS"),
     spec("keys.menu", "menu", "opens the menu: F7-F12, ctrl+<letter>, alt+<letter> (not 1 codehead binds already)", "CODEHEAD_MENU_KEY"),
     spec("keys.command", "commands", "opens the command dropdown in a prompt: 1 symbol", "CODEHEAD_COMMAND_KEY"),
     spec("colors.scheme", "scheme", "preset: lavender, coral or amber", "CODEHEAD_SCHEME"),

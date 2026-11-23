@@ -36,6 +36,11 @@ impl<K: Clone + Eq + Hash + Send + 'static, V: Send + 'static> Reads<K, V> {
     }
 
 
+    /// KEY's last read forgotten: a new request of it runs at once (0 wait of 5 s).
+    pub fn forget(&mut self, key: &K) {
+        self.updated.remove(key);
+    }
+
     pub fn invalidate(&mut self) {
         self.generation += 1;
         self.pending.clear();

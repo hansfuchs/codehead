@@ -192,7 +192,7 @@ The files the thread's agents wrote or edited (their Write / Edit calls), the ho
 notes of the thread (`thread: <id>` on line 1) and, last, the attachments of your messages
 (`[Image #1] image-1.png`), newest first; a preview right (Markdown rendered, code in syntax
 colors). Images (png, jpeg, gif, webp, heic) and a pdf's page 1 are drawn as images in
-Ghostty, kitty, Rio, iTerm2, WezTerm and sixel terminals (setting `previews`; 0 in tmux). A
+Ghostty, kitty, Rio, iTerm2, WezTerm and sixel terminals (setting `previews`; 0 in tmux, zellij, screen). A
 click on an attachment's marker or `📎` row in the chat opens this view on it.
 
 | Key | Action |

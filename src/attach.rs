@@ -58,12 +58,14 @@ impl Paster {
             let name = e.file_name();
             let name = name.to_string_lossy();
             let n = |pre: &str, ext: &str| name.strip_prefix(pre)?.strip_suffix(ext)?.parse::<usize>().ok();
+
             if let Some(n) = n("image-", ".png") {
                 p.images = p.images.max(n);
             } else if let Some(n) = n("pasted-text-", ".txt") {
                 p.texts = p.texts.max(n);
             }
         }
+
         p
     }
 
@@ -159,15 +161,19 @@ mod tests {
         std::fs::write(dir.join("image-3.png"), b"third").unwrap();
         std::fs::write(dir.join("pasted-text-2.txt"), b"x").unwrap();
         std::fs::write(dir.join("image-x.png"), b"x").unwrap();
+
         let mut p = Paster::new(dir.clone());
         assert_eq!((p.images, p.texts), (3, 2));
+
         p.seen("[Image #5]");
         p.seen("[Pasted text #4 +9 lines]");
         p.seen("[Image #2]");
         assert_eq!((p.images, p.texts), (5, 4));
+
         let long = "y\n".repeat(600);
         assert!(matches!(p.paste(&long), Pasted::File { marker, .. } if marker == "[Pasted text #5 +600 lines]"));
         assert_eq!(std::fs::read(dir.join("image-1.png")).unwrap(), b"first");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

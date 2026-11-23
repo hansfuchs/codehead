@@ -38,7 +38,8 @@ pub struct File {
     pub editor: Option<String>,
     /// Dev server ports: `auto` (default: portless when on PATH), `portless`, `block`.
     pub ports: Option<String>,
-    /// Files view image + pdf previews: `auto` (default: when the terminal draws images) or `off`.
+    /// Files view image + pdf previews: `auto` (default: the protocol from the terminal's env),
+    /// `kitty`, `iterm2`, `sixel`, or `off`.
     pub previews: Option<String>,
     /// `[keys] menu`: the menu key (ctrl+p, on every screen).
     pub menu_key: Option<String>,
@@ -399,7 +400,7 @@ pub fn validate(key: String, v: &str) -> Result<(), String> {
         "thoughts" if crate::stream::Thoughts::parse(v).is_none() => Err(format!("thoughts: hidden, folded or open, not {v}")),
         "edits" if crate::engine::edits::Mode::parse(v).is_none() => Err(format!("edits: off, files or diff, not {v}")),
         "ports" if crate::portless::Mode::parse(v).is_none() => Err(format!("ports: auto, portless or block, not {v}")),
-        "previews" if !matches!(v, "auto" | "off") => Err(format!("previews: auto or off, not {v}")),
+        "previews" if !matches!(v, "auto" | "kitty" | "iterm2" | "sixel" | "off") => Err(format!("previews: auto, kitty, iterm2, sixel or off, not {v}")),
         "rank" | "review" if v != "off" && !v.strip_prefix("claude:").is_some_and(|m| !m.is_empty()) => Err(format!("{key}: off or claude:<model>, not {v}")),
         "classify" if !v.is_empty() && v != "off" && !crate::engine::roster::valid_name(v) => Err(format!("classify: an agent's name or off, not {v}")),
         "keys.menu" => menu_bind(v).map(|_| ()).ok_or_else(|| format!("keys.menu: F7-F12, ctrl+<letter> or alt+<letter> codehead binds to nothing else (free: ctrl+l, ctrl+p …), not {v}")),
@@ -947,10 +948,11 @@ pub fn review_model() -> Option<String> {
     v.strip_prefix("claude:").filter(|m| !m.is_empty()).map(str::to_string)
 }
 
-/// Image + pdf previews in the files view: $CODEHEAD_PREVIEWS, else `previews`, else auto.
-/// False: `off` (0 terminal query, text previews only).
-pub fn previews() -> bool {
-    env("CODEHEAD_PREVIEWS").or_else(|| get().previews.clone()).is_none_or(|v| v.trim() != "off")
+/// Image + pdf previews in the files view: $CODEHEAD_PREVIEWS, else `previews`, else `auto`:
+/// `auto` (the protocol from the terminal's env), `kitty`, `iterm2`, `sixel`, or `off` (text
+/// previews only).
+pub fn previews() -> String {
+    env("CODEHEAD_PREVIEWS").or_else(|| get().previews.clone()).map(|v| v.trim().to_lowercase()).filter(|v| !v.is_empty()).unwrap_or_else(|| "auto".into())
 }
 
 /// Dev server ports: $CODEHEAD_PORTS, else `ports`, else auto.
@@ -987,6 +989,17 @@ pub fn messages() -> crate::stream::Look {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previews_takes_auto_a_protocol_or_off() {
+        for ok in ["auto", "kitty", "iterm2", "sixel", "off"] {
+            assert!(validate("previews".into(), ok).is_ok(), "{ok}");
+        }
+
+        assert!(validate("previews".into(), "on").unwrap_err().contains("auto, kitty, iterm2, sixel or off"));
+        assert_eq!(parse("previews = \"off\"\n").unwrap().previews.as_deref(), Some("off"));
+        assert!(parse("previews = \"yes\"\n").is_err());
+    }
 
     #[test]
     fn keys_and_colors_tables_round_trip() {

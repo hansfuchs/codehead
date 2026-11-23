@@ -230,7 +230,7 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          1024 chars (code: never): [Pasted text #n +L lines]. both go in as attachments.
          a click on a marker or a 📎 row: the files view on the file (section attachments), y: yazi.
          files view: images + pdf page 1 drawn in Ghostty, kitty, Rio, iTerm2, WezTerm, sixel
-         terminals (setting previews = auto | off; 0 in tmux).
+         terminals (setting previews = auto | kitty | iterm2 | sixel | off; 0 in tmux, zellij, screen).
          ⌘/ctrl+Enter (alt+Enter) sends, Enter: new line. ↑ on the 1st row of an empty
          prompt / ↓ on the last: the thread's sent messages.
          agent questions and permission requests: ↑↓ / 1-9 / space / enter on the empty prompt, or a

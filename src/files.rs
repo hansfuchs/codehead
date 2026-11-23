@@ -14,6 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::engine::store::{self, Kind};
+use crate::graphics::Preview;
 use crate::theme;
 
 /// Where a file comes from.
@@ -45,6 +46,7 @@ const WRITE_TOOLS: [&str; 5] = ["Write", "Edit", "MultiEdit", "NotebookEdit", "s
 pub fn log_files(id: &str, dir: &Path) -> (Vec<PathBuf>, Vec<(PathBuf, Option<String>)>) {
     let mut wrote: Vec<PathBuf> = Vec::new();
     let mut attached: Vec<(PathBuf, Option<String>)> = Vec::new();
+
     for e in store::events(id) {
         match e.kind {
             Kind::Tool { name, input, .. }
@@ -68,6 +70,7 @@ pub fn log_files(id: &str, dir: &Path) -> (Vec<PathBuf>, Vec<(PathBuf, Option<St
             _ => {}
         }
     }
+
     (wrote, attached)
 }
 
@@ -130,6 +133,12 @@ pub fn load(id: &str, dir: &Path) -> Vec<Entry> {
 
 /// An image preview: path, mtime, cols, rows.
 type ImageKey = (PathBuf, u64, u16, u16);
+
+/// Image encodes kept (back and forth between files: 0 new encode).
+const MAX_IMAGES: usize = 4;
+/// The cursor (or a resize) rests this long before an encode starts: fast j k over 20 photos
+/// starts 1 encode, not 20.
+const IMAGE_REST: Duration = if cfg!(test) { Duration::ZERO } else { Duration::from_millis(80) };
 
 /// What a key asks the thread view to do.
 #[derive(Clone, Debug, PartialEq)]
@@ -199,11 +208,15 @@ pub struct View {
     /// Preview renders (markdown, code highlight): off the UI thread.
     renders: crate::background::Reads<(PathBuf, u16, u64), Vec<Line<'static>>>,
     /// Image + pdf previews, encoded for the terminal per (path, mtime, cols, rows): off the UI
-    /// thread; the last 4 kept. Err: a line why 0 image.
-    images: HashMap<ImageKey, Result<crate::graphics::Preview, String>>,
-    image_reads: crate::background::Reads<ImageKey, Result<crate::graphics::Preview, String>>,
+    /// thread; the last MAX_IMAGES kept. Err: a line why 0 image.
+    images: HashMap<ImageKey, Result<Preview, String>>,
+    image_reads: crate::background::Reads<ImageKey, Result<Preview, String>>,
     /// The terminal's image picker (tests: a fixed one).
     picker: fn() -> Option<ratatui_image::picker::Picker>,
+    /// The cached encodes, oldest first.
+    image_order: Vec<ImageKey>,
+    /// The image the preview shows now, since when (an encode starts once it rests).
+    image_want: Option<(ImageKey, Instant)>,
     /// Data versions (a list read in, a preview in): their areas dissolve to the new rows.
     list_version: u64,
     preview_version: u64,
@@ -241,6 +254,8 @@ impl View {
             images: HashMap::new(),
             image_reads: crate::background::Reads::default(),
             picker: crate::graphics::picker,
+            image_order: Vec::new(),
+            image_want: None,
             list_version: 0,
             preview_version: 0,
             list_fx: Default::default(),
@@ -352,50 +367,95 @@ impl View {
             self.preview_version += 1;
             changed = true;
         }
-        let images = self.image_reads.poll();
-        if !images.is_empty() {
-            // the last 4 encodes stay (back and forth between files: 0 new encode)
-            if self.images.len() + images.len() > 4 {
-                self.images.clear();
-                // 0 5 s wait for a new read of a dropped key
-                self.image_reads.invalidate();
+        // encodes in: only the wanted one (fast j k, a resize drag: the others are stale)
+        for (key, pre) in self.image_reads.poll() {
+            if self.image_want.as_ref().is_some_and(|(k, _)| *k == key) {
+                self.images.insert(key.clone(), pre);
+                self.image_order.retain(|k| *k != key);
+                self.image_order.push(key);
+                changed = true;
+            } else {
+                // stale: 0 kept, 0 sent; back on it later: a new read at once
+                self.image_reads.forget(&key);
             }
-            self.images.extend(images);
+        }
+
+        // the last 4 encodes stay (back and forth between files: 0 new encode); the oldest out
+        while self.image_order.len() > MAX_IMAGES {
+            let old = self.image_order.remove(0);
+            self.drop_image(&old);
+        }
+
+        // the cursor rested on an image: its encode starts (a draw requests it)
+        if self.image_want.as_ref().is_some_and(|(k, at)| at.elapsed() >= IMAGE_REST && !self.images.contains_key(k) && !self.image_reads.waiting(k)) {
             changed = true;
         }
+
         changed
+    }
+
+    /// The encode of KEY out (the cache, the terminal's kitty store); a new request runs at once.
+    fn drop_image(&mut self, key: &ImageKey) {
+        if let Some(Ok(Preview { kitty: Some(id), transmit: None, .. })) = self.images.remove(key) {
+            crate::graphics::delete_kitty(id);
+        }
+
+        self.image_order.retain(|k| k != key);
+        self.image_reads.forget(key);
     }
 
     /// The encoded images out: the next draw encodes (and sends) them again. After another
     /// program had the terminal (yazi, an editor): it may have deleted them.
     pub fn forget_images(&mut self) {
+        for key in std::mem::take(&mut self.image_order) {
+            self.drop_image(&key);
+        }
+
         self.images.clear();
         self.image_reads.invalidate();
     }
 
     /// The image preview of P in BODY (cols × rows): drawn (true), or a line while it encodes or
-    /// why 0 image. False: 0 image preview for P (a text file, 0 graphics terminal).
+    /// why 0 image. False: 0 image preview for P (a text file, 0 graphics terminal, 0 room).
     fn draw_image(&mut self, f: &mut Frame, p: &Path, head: Rect, body: Rect) -> bool {
         let Some(kind) = crate::graphics::kind(p) else { return false };
+        if body.width == 0 || body.height == 0 {
+            return false;
+        }
         let Some(picker) = (self.picker)() else { return false };
+
         let key: ImageKey = (p.to_path_buf(), mtime(p), body.width, body.height);
         let hints = "y: yazi · o: IDE · c: copy path · ctrl+f: filter";
         let shown = self.shown(p);
         let line = |info: &str| Line::from(vec![Span::styled(format!(" {shown} "), theme::bold()), Span::styled(format!("{info} · {hints}"), theme::muted())]);
-        match self.images.get(&key) {
+
+        // a new file or area: wait for the cursor (or the resize) to rest
+        if self.image_want.as_ref().is_none_or(|(k, _)| *k != key) {
+            self.image_want = Some((key.clone(), Instant::now()));
+        }
+
+        match self.images.get_mut(&key) {
             Some(Ok(pre)) => {
+                // kitty: the image data 1x straight to the terminal, the cells: placeholders
+                if let Some(t) = pre.transmit.take() {
+                    crate::graphics::send(&t);
+                }
+
                 f.render_widget(Paragraph::new(line(&pre.info)), head);
                 f.render_widget(ratatui_image::Image::new(&pre.protocol), body);
             }
             Some(Err(why)) => f.render_widget(Paragraph::new(line(why)), head),
             None => {
-                if !self.image_reads.waiting(&key) {
+                let rested = self.image_want.as_ref().is_some_and(|(_, at)| at.elapsed() >= IMAGE_REST);
+                if rested && !self.image_reads.waiting(&key) {
                     let (path, cols, rows) = (p.to_path_buf(), body.width, body.height);
                     self.image_reads.request(key, move || crate::graphics::build(&path, kind, &picker, cols, rows));
                 }
+
                 f.render_widget(Paragraph::new(line("reading…")), head);
             }
         }
+
         true
     }
 
@@ -908,68 +968,152 @@ mod view_tests {
         store::append(&t.id, &prompt(format!("see [Image #1]\n\nAttachments (read these files):\n- [Image #1]: {}\n- {}", img.display(), code.display()))).unwrap();
         store::append(&t.id, &prompt(format!("again\n\nAttachments (read these files):\n- [Image #1]: {}\n- [Pasted text #1 +1 lines]: {}", img.display(), txt.display()))).unwrap();
         store::append(&t.id, &store::Event::new(Some("ada"), Kind::Tool { id: "1".into(), name: "Write".into(), input: serde_json::json!({"file_path": code}) })).unwrap();
+
         // the agent's file stays in its section; the 2 attachments once each, after it
         let files = load(&t.id, &d);
         assert_eq!(files.len(), 3, "{files:?}");
         assert_eq!(files.iter().find(|e| e.path == code).map(|e| &e.source), Some(&Source::Agent));
         assert_eq!(files.iter().find(|e| e.path == img).map(|e| &e.source), Some(&Source::Attached(Some("[Image #1]".into()))));
+
+        // on screen: the section last, marker + name per row
         let mut v = View::new(&t.id, &d);
         let (s, _) = screen(&mut v);
         let at = |s: &[String], x: &str| s.iter().position(|r| r.contains(x)).unwrap_or_else(|| panic!("{x}: {s:#?}"));
         let (repo, att) = (at(&s, "repo changes"), at(&s, "attachments"));
         assert!(repo < att && at(&s, "src/a.rs") < att, "{s:#?}");
         assert!(at(&s, "[Image #1] image-1.png") > att && at(&s, "pasted-text-1.txt") > att, "{s:#?}");
+
         let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    #[test]
-    fn an_image_previews_as_an_image_encoded_off_the_ui_thread_once() {
-        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let d = std::env::temp_dir().join(format!("codehead-fimage-{}", std::process::id()));
+    /// A thread in a temp dir whose agent wrote NAMES (png: an image of 2000×1000 px).
+    fn image_thread(tag: &str, names: &[&str]) -> (store::Thread, PathBuf) {
+        let d = std::env::temp_dir().join(format!("codehead-fimage-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let img = d.join("shot.png");
-        image::RgbaImage::from_pixel(2000, 1000, image::Rgba([10, 200, 10, 255])).save(&img).unwrap();
         let t = store::Thread::new("f", "t", &d, vec!["ada".into()]);
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
-        store::append(&t.id, &store::Event::new(Some("ada"), Kind::Tool { id: "1".into(), name: "Write".into(), input: serde_json::json!({"file_path": img}) })).unwrap();
-        let mut v = View::new(&t.id, &d);
-        // 0 graphics terminal (the tests' default): 0 image preview
-        assert!((v.picker)().is_none());
-        fn iterm2() -> Option<ratatui_image::picker::Picker> {
-            #[allow(deprecated)]
-            let mut p = ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(10, 20));
-            p.set_protocol_type(ratatui_image::picker::ProtocolType::Iterm2);
-            Some(p)
+
+        for (i, name) in names.iter().enumerate() {
+            let p = d.join(name);
+            if name.ends_with(".png") {
+                image::RgbaImage::from_pixel(2000, 1000, image::Rgba([10, 200, 10, 255])).save(&p).unwrap();
+            } else {
+                std::fs::write(&p, b"\x89PNG\0binary").unwrap();
+            }
+            store::append(&t.id, &store::Event::new(Some("ada"), Kind::Tool { id: i.to_string(), name: "Write".into(), input: serde_json::json!({"file_path": p}) })).unwrap();
         }
-        v.picker = iterm2;
-        // all 100 cols (the helper: the list's 40)
-        let full = |v: &mut View| {
-            let (_, b) = screen(v);
-            let s: Vec<String> = (0..16).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect();
-            (s, b)
-        };
-        let (s, _) = full(&mut v);
-        assert!(s.iter().any(|r| r.contains("shot.png") && r.contains("reading…")), "{s:#?}");
-        // the encode in: the size line, 1 image (the iTerm2 sequence in the buffer)
+
+        (t, d)
+    }
+
+    fn iterm2() -> Option<ratatui_image::picker::Picker> {
+        #[allow(deprecated)]
+        let mut p = ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(10, 20));
+        p.set_protocol_type(ratatui_image::picker::ProtocolType::Iterm2);
+        Some(p)
+    }
+
+    /// All 100 cols (the `screen` helper: the list's 40).
+    fn full(v: &mut View) -> (Vec<String>, ratatui::buffer::Buffer) {
+        let (_, b) = screen(v);
+        let s: Vec<String> = (0..16).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect();
+        (s, b)
+    }
+
+    /// Polls until an encode is in (max 10 s).
+    fn encoded(v: &mut View) {
         let end = Instant::now() + Duration::from_secs(10);
         while !v.poll() {
             assert!(Instant::now() < end, "0 encode in 10 s");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn an_image_previews_as_an_image_encoded_off_the_ui_thread_once() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (t, d) = image_thread("once", &["shot.png"]);
+        let mut v = View::new(&t.id, &d);
+        v.picker = iterm2;
+
+        // 1st draw: the encode starts
+        let (s, _) = full(&mut v);
+        assert!(s.iter().any(|r| r.contains("shot.png") && r.contains("reading…")), "{s:#?}");
+
+        // the encode in: the size line, 1 image (the iTerm2 sequence in the buffer)
+        encoded(&mut v);
         let (s, b) = full(&mut v);
         assert!(s.iter().any(|r| r.contains("2000×1000 px") && r.contains("y: yazi")), "{s:#?}");
         assert!(b.content().iter().any(|c| c.symbol().contains("\x1b]1337;File=")), "an iTerm2 image");
+
         // a 2nd draw: from the cache, 0 new read
         screen(&mut v);
         assert_eq!(v.image_reads.pending(), 0);
         assert_eq!(v.images.len(), 1);
-        // after yazi: encoded again
+
+        // after yazi: encoded again, at once (0 wait for the 5 s read throttle)
         v.forget_images();
         let (s, _) = full(&mut v);
         assert!(s.iter().any(|r| r.contains("reading…")), "{s:#?}");
+        assert_eq!(v.image_reads.pending(), 1);
+
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_image_without_a_graphics_terminal_keeps_the_text_preview() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (t, d) = image_thread("text", &["shot.png"]);
+        let mut v = View::new(&t.id, &d);
+
+        // the tests' default: 0 graphics terminal
+        assert!((v.picker)().is_none());
+        let (s, _) = full(&mut v);
+
+        // the head of the text preview (`N lines`), 0 encode
+        assert!(s.iter().any(|r| r.contains("shot.png") && r.contains("lines ·")), "{s:#?}");
+        assert!(!s.iter().any(|r| r.contains("reading…") || r.contains(" px ·")), "{s:#?}");
+        assert_eq!(v.image_reads.pending(), 0);
+
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn at_most_4_encodes_stay_and_the_shown_one_is_never_dropped() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let names = ["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"];
+        let (t, d) = image_thread("lru", &names);
+        let mut v = View::new(&t.id, &d);
+        v.picker = iterm2;
+        full(&mut v);
+
+        // each file in turn, its encode in
+        for _ in names {
+            full(&mut v);
+            encoded(&mut v);
+            full(&mut v);
+            v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+
+        // 4 kept; the one on screen among them
+        assert_eq!(v.images.len(), MAX_IMAGES);
+        assert_eq!(v.image_order.len(), MAX_IMAGES);
+        let shown = v.image_want.as_ref().map(|(k, _)| k.clone()).unwrap();
+        assert!(v.images.contains_key(&shown));
+
+        // back to the 1st file: dropped, a new read at once
+        v.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        for _ in names {
+            v.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        }
+        full(&mut v);
+        assert_eq!(v.image_reads.pending(), 1);
+
         let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
         let _ = std::fs::remove_dir_all(&d);
     }

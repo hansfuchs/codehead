@@ -4530,7 +4530,9 @@ mod ask_tests {
         let mut v = View::new("asktest-0002", Path::new("/tmp"), "t", tx);
         v.input.set_text("look at [Image #1]");
         v.attachments = vec![("[Image #1]".into(), PathBuf::from("/x/shot.png"))];
+
         v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+
         let text = v.ops.borrow().iter().find(|o| o["op"] == "prompt").and_then(|o| o["text"].as_str().map(String::from)).unwrap();
         assert!(text.ends_with("Attachments (read these files):\n- [Image #1]: /x/shot.png"), "{text}");
     }
@@ -5194,18 +5196,22 @@ mod subagent_tests {
         v.members = vec!["ada".into()];
         let text = format!("see [Image #1]\n\nAttachments (read these files):\n- [Image #1]: {}", img.display());
         v.thread.push(&store::Event { ts: 1, agent: None, kind: store::Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text } });
+
         // the marker in the body, then the 📎 row: each opens the files tab on the file
         for (needle, back) in [("[Image #1]", true), ("📎", false)] {
             let s = screen(&mut v);
             let y = s.iter().position(|r| r.contains(needle)).unwrap_or_else(|| panic!("{s:#?}"));
             let x = s[y].find(needle).map(|b| s[y][..b].chars().count()).unwrap() as u16;
+
             click(&mut v, x + 1, y as u16);
+
             assert_eq!(v.pane, Pane::Files, "{needle}");
             assert!(v.files.files.iter().any(|e| e.path == img), "{needle}");
             if back {
                 v.set_pane(Pane::Chat);
             }
         }
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
