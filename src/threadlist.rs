@@ -1,6 +1,6 @@
 //! The thread list of both threads tabs: the menu's (ctrl+p: a quick switch, type to filter) and
 //! the start screen's (manage: preview, multi-select, letter keys). 1 look: thread cards in
-//! sections (needs you · working · PRs merged · threads), the repo tabs, the view tabs (active ·
+//! sections (needs you · working · open · shipped · threads), the repo tabs, the view tabs (active ·
 //! archived; the start screen also: worktrees without thread, claude sessions: their rows are the
 //! host's), a name filter.
 //!
@@ -461,16 +461,19 @@ impl ThreadList {
 
     // ---------- rows ----------
 
-    /// Section of card C: 0 needs you, 1 working, 2 PRs merged, 3 the rest.
+    /// Section of card C: 0 needs you, 1 working, 2 open (work not in the base yet), 3 shipped,
+    /// 4 the rest (0 landed state read yet).
     fn section(c: &Card) -> u8 {
         if c.blocked {
             0
         } else if c.busy {
             1
-        } else if c.merged {
-            2
         } else {
-            3
+            match &c.land {
+                Some(l) if l.open() => 2,
+                Some(_) => 3,
+                None => 4,
+            }
         }
     }
 
@@ -507,8 +510,9 @@ impl ThreadList {
         match s {
             0 => format!("needs you · {n}"),
             1 => format!("working · {n}"),
-            2 => format!("PRs merged: archive? · {n}"),
-            3 => format!("threads · {n}"),
+            2 => format!("open · {n}"),
+            3 => format!("shipped: archive? · {n}"),
+            4 => format!("threads · {n}"),
             _ => format!("archived · {n} · branches kept, worktrees gone"),
         }
     }
@@ -955,8 +959,15 @@ impl ThreadList {
         let foot = Rect { y: list.bottom().saturating_sub(1), height: 1, ..list };
         let foot_line = if let Some(p) = &self.pending {
             let n = p.ids.len();
+            // threads with work not in the base: the question names it
+            let open: Vec<String> = p.ids.iter().filter_map(|id| self.cards.iter().find(|c| &c.id == id)?.land.clone().filter(|l| l.open())).map(|l| l.badge()).collect();
+            let ask_archive = match open.as_slice() {
+                [] => format!(" archive {n} thread(s)? "),
+                [one] if n == 1 => format!(" {one}: archive anyway? "),
+                _ => format!(" archive {n} thread(s), {} open (work not landed)? ", open.len()),
+            };
             let (ask, why) = match p.act {
-                Act::Archive => (format!(" archive {n} thread(s)? "), "hosts stop, worktrees go (uncommitted files → git stash), branches stay"),
+                Act::Archive => (ask_archive, "hosts stop, worktrees go (uncommitted files → git stash), branches stay"),
                 _ => (format!(" delete {n} thread(s) + worktree(s)? "), "uncommitted files → git stash, pushed branches go"),
             };
             Some(Line::from(vec![Span::styled(ask, theme::pill().add_modifier(Modifier::BOLD)), Span::styled(" enter: yes · esc: no  ", theme::accent()), Span::styled(why, theme::muted())]))
@@ -1319,22 +1330,27 @@ mod tests {
         (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
     }
 
-    /// Sections: needs you, working, PRs merged, the rest; archived threads only in their view.
+    /// Sections: needs you, working, open, shipped, the rest; archived threads only in their view.
     #[test]
     fn sections_and_the_archived_view() {
+        use crate::landed::Land;
         let cards = vec![
             card("idle", |_| {}),
             card("asks", |c| c.blocked = true),
             card("busy", |c| c.busy = true),
-            card("merged", |c| c.merged = true),
+            card("shipped", |c| c.land = Some(Land::Landed)),
+            card("talk", |c| c.land = Some(Land::NoCode)),
+            card("loose", |c| c.land = Some(Land::Unpushed(3))),
             card("old", |c| c.state = "archived".into()),
         ];
         let mut l = ThreadList::new(Mode::Switch, None, None, cards);
         let ids: Vec<String> = l.visible().iter().map(|&i| l.cards[i].id.clone()).collect();
-        assert_eq!(ids, ["asks", "busy", "merged", "idle"]);
-        let s = screen(&mut l, 70, 40);
-        assert!(s.contains("needs you · 1") && s.contains("working · 1") && s.contains("PRs merged: archive? · 1"), "{s}");
-        assert!(s.contains("active 4") && s.contains("archived 1") && !s.contains("old"), "{s}");
+        assert_eq!(ids, ["asks", "busy", "loose", "shipped", "talk", "idle"]);
+        let s = screen(&mut l, 70, 60);
+        for x in ["needs you · 1", "working · 1", "open · 1", "shipped: archive? · 2", "threads · 1", "◇ 3 unpushed", "⇲ shipped", "⇲ nothing to ship"] {
+            assert!(s.contains(x), "{x}: {s}");
+        }
+        assert!(s.contains("active 6") && s.contains("archived 1") && !s.contains("old"), "{s}");
 
         // ↑ from the 1st card: the view tabs; → archived
         l.key(k(KeyCode::Up));
@@ -1382,6 +1398,25 @@ mod tests {
         l.key(k(KeyCode::Char('a')));
         assert_eq!(l.key(k(KeyCode::Char('y'))), Out::Home);
         let _ = crate::engine::store::delete(&t.id);
+    }
+
+    /// Archive of a thread with work not landed: the question names the work; 2 picks, 1 open:
+    /// the count.
+    #[test]
+    fn archive_of_an_open_thread_names_the_work() {
+        use crate::landed::Land;
+        let cards = vec![card("loose", |c| c.land = Some(Land::Unpushed(3))), card("done", |c| c.land = Some(Land::Landed))];
+        let mut l = ThreadList::new(Mode::Manage, None, None, cards);
+        l.key(k(KeyCode::Char('a')));
+        let s = screen(&mut l, 120, 30);
+        assert!(s.contains("3 unpushed: archive anyway?"), "{s}");
+        l.key(k(KeyCode::Esc));
+
+        l.key(k(KeyCode::Char(' ')));
+        l.key(k(KeyCode::Char(' ')));
+        l.key(k(KeyCode::Char('a')));
+        let s = screen(&mut l, 120, 30);
+        assert!(s.contains("archive 2 thread(s), 1 open (work not landed)?"), "{s}");
     }
 
     /// The start screen: space picks, a asks for every pick, esc says no; e opens the form,

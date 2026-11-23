@@ -183,6 +183,14 @@ pub fn repo_of_thread(t: &Thread) -> Option<PathBuf> {
     [t.dir.as_deref(), t.worktree.as_deref()].into_iter().flatten().find_map(|p| repo_root(Path::new(p)))
 }
 
+/// `repo_of_thread` of a thread record.
+pub fn repo_of_thread_store(t: &store::Thread) -> Option<PathBuf> {
+    if let Some(r) = t.repo.as_deref().filter(|r| !r.is_empty()) {
+        return Some(PathBuf::from(r));
+    }
+    [Some(t.dir.as_str()), t.worktree.as_deref()].into_iter().flatten().find_map(|p| repo_root(Path::new(p)))
+}
+
 fn real(p: &str) -> String {
     std::fs::canonicalize(p).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| p.to_string())
 }

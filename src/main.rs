@@ -38,6 +38,7 @@ mod dropdown;
 mod mention;
 mod merge;
 mod mergetab;
+mod landed;
 mod models;
 mod monitors;
 mod nav;
@@ -632,6 +633,7 @@ fn start(args: Args) {
     let latest = plain.then(engine::store::latest).flatten().map(|t| t.id);
     // the thread view first: the start screen (App) is built when it ends
     notify::start();
+    landed::start();
     let mut back: Option<Option<menu::Home>> = None;
     if let Some(id) = args.view.as_ref().or(latest.as_ref()) {
         // 1 thread.json (an id prefix: the newest match), 0 scan of every thread's host and log

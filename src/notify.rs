@@ -279,14 +279,6 @@ fn reply_notes(t: &store::Thread) -> Vec<Note> {
 }
 
 static NOTES: Mutex<Vec<Note>> = Mutex::new(Vec::new());
-/// Threads whose PRs are all merged / closed (1 merged at least): the thread lists offer an
-/// archive. From the last PR pass.
-static MERGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-/// Threads whose PRs are all merged / closed, 1 merged at least (the last PR pass).
-pub fn merged() -> Vec<String> {
-    MERGED.lock().map(|m| m.clone()).unwrap_or_default()
-}
 
 /// Every PR of a thread done, 1 merged at least: STATES of its PRs (several repos too).
 pub fn all_merged(states: &[crate::gh::State]) -> bool {
@@ -422,11 +414,11 @@ fn pr_pass(threads: &[store::Thread], c: &mut Cache) {
     let now = crate::engine::now_ms();
     let mut live: HashSet<String> = HashSet::new();
     c.prs.clear();
-    let mut merged = Vec::new();
     for t in threads {
         let mut notes = Vec::new();
         let prs = crate::prlist::remembered(&t.id);
         let mut states = Vec::new();
+        let mut seen = Vec::new();
         for r in &prs {
             let Ok(p) = gh::fetch(r) else {
                 // a PR not read: 0 verdict on the thread
@@ -434,6 +426,7 @@ fn pr_pass(threads: &[store::Thread], c: &mut Cache) {
                 continue;
             };
             states.push(p.state);
+            seen.push(crate::landed::PrSeen { label: r.label(), state: p.state, head: p.head.clone(), head_oid: p.head_oid.clone() });
             if !matches!(p.state, gh::State::Open | gh::State::Draft) {
                 continue;
             }
@@ -454,20 +447,18 @@ fn pr_pass(threads: &[store::Thread], c: &mut Cache) {
                 add(Kind::Review, String::new(), Some(m.created * 1000), format!("{}: {}: {}", r.label(), m.author, first_line(&m.body)));
             }
         }
-        if all_merged(&states) {
+        crate::landed::set_prs(&t.id, seen);
+        // work after the merge (new commits, files): 0 archive offer
+        if all_merged(&states) && !crate::landed::of(&t.id).is_some_and(|l| l.open()) {
             let key = format!("merged:{}", t.id);
             let ts = *c.first.entry(key.clone()).or_insert(now);
             live.insert(key);
             let text = if prs.len() == 1 { format!("{} merged: archive the thread?", prs[0].label()) } else { format!("all {} PRs merged / closed: archive the thread?", prs.len()) };
             notes.push(Note { thread: t.id.clone(), title: t.title.clone(), dir: t.work_dir(), kind: Kind::Merged, agents: Vec::new(), ts, text, comment: String::new() });
-            merged.push(t.id.clone());
         }
         if !notes.is_empty() {
             c.prs.insert(t.id.clone(), notes);
         }
-    }
-    if let Ok(mut m) = MERGED.lock() {
-        *m = merged;
     }
     let before = c.first.len();
     c.first.retain(|k, _| live.contains(k));
