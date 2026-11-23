@@ -10,6 +10,7 @@ use image::DynamicImage;
 use ratatui::layout::Size;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
+use ratatui_image::protocol::kitty::Kitty;
 use ratatui_image::{FontSize, Resize};
 
 /// Files over this size: 0 preview (a decode of them would stall the preview).
@@ -114,12 +115,26 @@ pub fn build(p: &Path, kind: Kind, picker: &Picker, cols: u16, rows: u16) -> Res
     let img = if w > pw || h > ph { img.thumbnail(pw, ph) } else { img };
     // pdf pages: transparent; on white (black text on a dark terminal: invisible)
     let img = if kind == Kind::Pdf { on_white(img) } else { img };
-    let protocol = picker.new_protocol(img, Size::new(cols, rows), Resize::Fit(None)).map_err(|e| e.to_string())?;
+    let protocol = if picker.protocol_type() == ProtocolType::Kitty {
+        // zlib (`o=z`, in the kitty spec): the picker turns it on only after a terminal query
+        let size = Size::new((img.width().div_ceil(u32::from(fs.width)) as u16).clamp(1, cols), (img.height().div_ceil(u32::from(fs.height)) as u16).clamp(1, rows));
+        Protocol::Kitty(Kitty::new(img, size, next_id(), false, true).map_err(|e| e.to_string())?)
+    } else {
+        picker.new_protocol(img, Size::new(cols, rows), Resize::Fit(None)).map_err(|e| e.to_string())?
+    };
     let what = match kind {
         Kind::Pdf => "page 1 · ",
         _ => "",
     };
     Ok(Preview { protocol, info: format!("{what}{w}×{h} px · {} KB", bytes.div_ceil(1024)) })
+}
+
+/// A kitty image id: unique in the process, never 0 (its low 24 bits: the placeholders' color).
+fn next_id() -> u32 {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // pid in the high bits: 2 codeheads in 1 terminal get other ids
+    ((std::process::id() << 16) ^ n.wrapping_mul(2_654_435_761)) | 1
 }
 
 fn on_white(img: DynamicImage) -> DynamicImage {
@@ -225,6 +240,36 @@ mod tests {
         let bad = dir.join("bad.png");
         std::fs::write(&bad, b"not a png").unwrap();
         assert!(build(&bad, Kind::Image, &picker, 40, 20).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kitty_images_go_out_compressed_once_inside_the_area() {
+        use ratatui::widgets::Widget;
+        let dir = std::env::temp_dir().join(format!("codehead-graphics-kitty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("flat.png");
+        image::RgbaImage::from_pixel(1600, 800, image::Rgba([30, 30, 200, 255])).save(&p).unwrap();
+        #[allow(deprecated)]
+        let mut picker = Picker::from_fontsize(FontSize::new(10, 20));
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let pre = build(&p, Kind::Image, &picker, 40, 20).unwrap();
+        // 1600×800 into 400×400 px: 400×200 px = 40×10 cells
+        assert_eq!(pre.protocol.size(), Size::new(40, 10));
+        let area = ratatui::layout::Rect::new(0, 0, 40, 20);
+        let draw = || {
+            let mut buf = ratatui::buffer::Buffer::empty(area);
+            ratatui_image::Image::new(&pre.protocol).render(area, &mut buf);
+            buf.content().iter().map(|c| c.symbol().to_string()).collect::<String>()
+        };
+        let first = draw();
+        assert!(first.contains("o=z") && first.contains("a=T"), "zlib transmit");
+        // a flat 400×200 image: a few KB, not the raw 320 KB
+        assert!(first.len() < 40_000, "{} bytes", first.len());
+        // the next draw: placeholders only, 0 transmit
+        let next = draw();
+        assert!(!next.contains("a=T") && next.contains('\u{10EEEE}'));
+        assert_ne!(next_id(), next_id());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
