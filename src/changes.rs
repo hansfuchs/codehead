@@ -3571,6 +3571,10 @@ impl View {
             return "j k · space: pick · enter: show · u: uncommit · S: ship (push picked) · [ ]: sections · esc: 0 picks ";
         }
 
+        if self.scm.focus && !self.scm.msg_focus && self.scm.on_commit_file() {
+            return "j k · enter: the file in the review · →: show it, keys stay · ←: the commit · [ ]: sections ";
+        }
+
         if self.pr_src.is_some() {
             return if self.scm.focus {
                 "j k · enter on the commit: pick a commit · →: open the file · e: IDE · alt: diff "

@@ -125,7 +125,11 @@ The commits section at the bottom of the panel: "all changes" (a branch: its cha
 step), then the branch's commits, unpushed first (`●`, not on
 the branch of the same name: `@{u}` when it has that name, else `origin/<branch>`), then pushed (`○`), newest first, the 50 newest at
 most. `enter` / click on a commit: its files in the review (`◆`), read only: moving, folding, the
-filter, `w`; 0 IDE (the worktree file may differ), comment, reviewed mark or git step; `esc` brings the changes back. `u`
+filter, `w`; 0 IDE (the worktree file may differ), comment, reviewed mark or git step; `esc` brings the changes back.
+The shown commit lists its files under it in the panel (`A` `M` `D` `R`; the review's file in
+accent): `enter` / click / `→` on one puts the review on its box (`enter`: the keys go there); the
+files hide again when the commit is no longer shown (`esc` in the review, another commit, `←` on
+the commit). `u`
 uncommits the picked unpushed commits (else the commit under the cursor): they leave the history,
 the later commits get replayed on top, the files stay as they are (their changes show uncommitted,
 the staged changes stay staged), the commits' messages go into the empty commit message box. A
@@ -173,7 +177,7 @@ In the panel:
 | Key | Action |
 | --- | --- |
 | `j` / `k`, `↑` `↓` | move the cursor |
-| `←` / `→` | on a label: fold / open; `←` on a row: to its label; `→` on a file / comment: jump to it; on a commit: show it, the keys stay |
+| `←` / `→` | on a label: fold / open; `←` on a row: to its label; `→` on a file / comment: jump to it; on a commit: show it, the keys stay; `←` on the shown commit: hide it; on a commit's file: show it, `←`: to its commit |
 | `[` / `]` | the previous / next section |
 | `space`, `shift+click` | pick files, unpushed commits, comments (comments: for the next prompt) |
 | `d` | on a comment: resolved / open again |

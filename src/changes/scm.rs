@@ -76,6 +76,8 @@ pub(super) enum PRow {
     Push(bool, usize),
     /// A commit (index in the read's commits).
     Commit(usize),
+    /// A file of the shown commit: the commit's index, the file's index in the commit's view.
+    CommitFile(usize, usize),
     /// The comments' group (resolved: true): its count.
     CState(bool, usize),
     /// The branch's changes against its base, as 1 view (commits + uncommitted).
@@ -150,6 +152,11 @@ impl Panel {
         matches!(self.rows.get(self.at), Some(PRow::Commit(_)))
     }
 
+    /// The cursor row is a file of the shown commit.
+    pub(super) fn on_commit_file(&self) -> bool {
+        matches!(self.rows.get(self.at), Some(PRow::CommitFile(..)))
+    }
+
     pub fn new() -> Panel {
         let mut msg = TextArea::new(false, "message");
         msg.style = Some(theme::panel());
@@ -185,6 +192,16 @@ pub(super) fn level_color(l: Level) -> Color {
         Level::High => theme::pal().caution(),
         Level::Medium => theme::pal().attention(),
         Level::Low => theme::pal().subtext0,
+    }
+}
+
+/// The 1-letter status of a file with status S: A added, M modified, D deleted, R renamed.
+fn status_letter(s: Status) -> (char, Color) {
+    match s {
+        Status::New => ('A', theme::pal().success()),
+        Status::Deleted => ('D', theme::pal().error()),
+        Status::Renamed => ('R', theme::pal().renamed()),
+        Status::Modified => ('M', theme::pal().info()),
     }
 }
 
@@ -346,8 +363,18 @@ impl View {
                 continue;
             }
             v.push(PRow::Push(pushed, at.len()));
-            if !p.folded.contains(&Fold::Push(pushed)) {
-                v.extend(at.into_iter().map(PRow::Commit));
+            if p.folded.contains(&Fold::Push(pushed)) {
+                continue;
+            }
+
+            // the shown commit: its files under it
+            for i in at {
+                v.push(PRow::Commit(i));
+                let Some(peek) = self.peek.as_ref().filter(|x| x.commit_src.as_ref().is_some_and(|c| c.oid == cs.list[i].oid)) else { continue };
+                if peek.changes.files.is_empty() {
+                    v.push(PRow::Empty(if peek.loaded.is_none() && peek.error.is_none() { "reading the commit…" } else { "0 files" }));
+                }
+                v.extend((0..peek.changes.files.len()).map(|fi| PRow::CommitFile(i, fi)));
             }
         }
         if cs.more {
@@ -376,6 +403,30 @@ impl View {
             self.peek = Some(Box::new(p));
         }
         self.scm.focus = stay;
+        self.sync_rows();
+    }
+
+    /// The review's cursor on file FI of the shown commit.
+    fn open_commit_file(&mut self, ci: usize, fi: usize) {
+        self.open_commit(ci, true);
+        if let Some(p) = self.peek.as_mut() {
+            p.jump_file(fi);
+        }
+    }
+
+    /// The panel's rows again; a cursor on a commit or a commit's file stays on it (the files
+    /// of another commit come and go above it), on its commit when the file left.
+    fn sync_rows(&mut self) {
+        let old = self.scm.rows.get(self.scm.at).cloned();
+        self.scm.rows = self.panel_rows();
+        let to = match old {
+            Some(PRow::Commit(ci)) => self.scm.rows.iter().position(|r| *r == PRow::Commit(ci)),
+            Some(PRow::CommitFile(ci, fi)) => self.scm.rows.iter().position(|r| *r == PRow::CommitFile(ci, fi)).or_else(|| self.scm.rows.iter().position(|r| *r == PRow::Commit(ci))),
+            _ => None,
+        };
+        if let Some(i) = to {
+            self.scm.at = i;
+        }
     }
 
     /// The review shows the branch's changes against its base (STAY: the keys stay on the panel).
@@ -621,7 +672,7 @@ impl View {
 
     /// The panel's list in LIST.
     fn draw_rows(&mut self, f: &mut Frame, list: Rect) {
-        self.scm.rows = self.panel_rows();
+        self.sync_rows();
         let h = usize::from(list.height);
         if h == 0 {
             return;
@@ -811,6 +862,23 @@ impl View {
                 let left = vec![Span::raw("     "), Span::styled(format!("{dot} "), dot_st), Span::styled(format!("{} ", c.short), theme::muted()), Span::styled(subject, sub_st)];
                 right_fill(&left, &right)
             }
+            // a file of the shown commit: the review's file in accent
+            PRow::CommitFile(_, fi) => {
+                let Some(p) = self.peek.as_ref() else { return Line::raw("") };
+                let Some(f) = p.changes.files.get(*fi) else { return Line::raw("") };
+                let here = p.rows.get(p.at).is_some_and(|r| r.file == *fi);
+                let (letter, color) = status_letter(f.status);
+                let (name, dir) = split_path(&f.path);
+                let indent = "       ";
+                let room = w.saturating_sub(indent.len() + 3);
+                let name = crate::nav::fit(name, room);
+                let dir_room = room.saturating_sub(name.width() + 1);
+                let mut left = vec![Span::raw(indent), Span::styled(name, if here { theme::accent_bold() } else { theme::text() })];
+                if dir_room > 3 && !dir.is_empty() {
+                    left.push(Span::styled(format!(" {}", crate::nav::fit(dir, dir_room)), theme::muted()));
+                }
+                right_fill(&left, &[Span::styled(format!("{letter} "), Style::default().fg(color).add_modifier(Modifier::BOLD))])
+            }
             PRow::Pick => {
                 let (text, detail) = self.pick_label(self.pick_index());
                 let left = vec![Span::styled(" ◆ ", theme::accent()), Span::styled(crate::nav::fit(&text, w.saturating_sub(detail.width() + 8)), theme::bold())];
@@ -824,12 +892,7 @@ impl View {
         if !staged && self.changes.untracked.contains(&f.path) {
             return ('U', theme::pal().success());
         }
-        match f.status {
-            Status::New => ('A', theme::pal().success()),
-            Status::Deleted => ('D', theme::pal().error()),
-            Status::Renamed => ('R', theme::pal().renamed()),
-            Status::Modified => ('M', theme::pal().info()),
-        }
+        status_letter(f.status)
     }
 
     /// The review's cursor on file I's head (the filter clears when it hides the file).
@@ -978,6 +1041,10 @@ impl View {
     /// The label row above panel row I.
     fn parent(&self, i: usize) -> Option<usize> {
         let mine = &self.scm.rows.get(i)?;
+        if let PRow::CommitFile(ci, _) = mine {
+            return self.scm.rows.iter().position(|r| *r == PRow::Commit(*ci));
+        }
+
         let is_file_of_level = matches!(mine, PRow::File(_, false));
         let is_comment = matches!(mine, PRow::CommentFile(..) | PRow::Comment(_));
         let is_commit = matches!(mine, PRow::Commit(_));
@@ -1011,7 +1078,7 @@ impl View {
             }
             return Act::None;
         }
-        self.scm.rows = self.panel_rows();
+        self.sync_rows();
         let last = self.scm.rows.len().saturating_sub(1);
         let row = self.scm.rows.get(self.scm.at).cloned();
         match k.code {
@@ -1023,6 +1090,11 @@ impl View {
             KeyCode::End | KeyCode::Char('G') => self.scm.at = last,
             KeyCode::Left => match row.as_ref().and_then(PRow::label) {
                 Some(f) => self.toggle_fold(f, Some(true)),
+                // ← on the shown commit: the changes back, its files hide
+                None if matches!(row, Some(PRow::Commit(ci)) if self.changes.commits.list.get(ci).is_some_and(|c| self.peeked() == Some(c.oid.as_str()))) => {
+                    self.peek = None;
+                    self.sync_rows();
+                }
                 None => {
                     if let Some(p) = self.parent(self.scm.at) {
                         self.scm.at = p;
@@ -1042,6 +1114,7 @@ impl View {
                 Some(PRow::File(i, _)) => self.jump_file(i),
                 Some(PRow::Comment(ci)) => self.jump_comment(ci),
                 Some(PRow::Commit(ci)) => self.open_commit(ci, true),
+                Some(PRow::CommitFile(ci, fi)) => self.open_commit_file(ci, fi),
                 Some(PRow::All) => self.open_all(true),
                 Some(PRow::Stash(si)) => {
                     if let Some(i) = self.stash.get(si).and_then(|e| self.changes.files.iter().position(|f| f.path == e.path)) {
@@ -1066,6 +1139,11 @@ impl View {
                 }
                 // enter on a commit: its files in the review, the keys there
                 Some(PRow::Commit(ci)) => self.open_commit(ci, false),
+                // enter on a commit's file: the review on its box, the keys there
+                Some(PRow::CommitFile(ci, fi)) => {
+                    self.open_commit_file(ci, fi);
+                    self.scm.focus = false;
+                }
                 Some(PRow::All) => self.open_all(false),
                 // enter on another checkout's comments: the view goes there
                 Some(PRow::Elsewhere(root, _)) => return Act::Checkout(root),
@@ -1270,6 +1348,11 @@ impl View {
                 } else {
                     self.open_commit(ci, true);
                 }
+            }
+            // a click on a commit's file: the review on its box
+            Some(PRow::CommitFile(ci, fi)) => {
+                self.scm.at = i;
+                self.open_commit_file(ci, fi);
             }
             Some(PRow::Pick) => {
                 self.scm.at = i;
@@ -1523,6 +1606,75 @@ mod tests {
         press(&mut v, KeyCode::Right);
         assert!(v.peek.is_some() && v.scm.focus);
         assert!(v.peeked() == Some(v.changes.commits.list[2].oid.as_str()));
+        drop(&w);
+    }
+
+    #[test]
+    fn the_shown_commit_lists_its_files_under_it_enter_opens_one_hidden_again_when_unshown() {
+        use super::super::commits::fixture::*;
+        let w = repo("cfiles");
+        sh(&w, "echo a > a.txt && mkdir d && echo b > d/b.txt && git add -A && git commit -qm 'c5 subject'");
+        let mut v = commit_view(&w, "commits-files-1");
+        let panel = |v: &mut View| draw(v, 140, 40).iter().map(|l| l.chars().take(36).collect::<String>()).collect::<Vec<_>>();
+
+        let s = panel(&mut v);
+
+        assert!(!s.iter().any(|l| l.contains("a.txt")), "0 commit shown: 0 files: {s:#?}");
+
+        // → on c5: shown, its files under it (before c4), the keys stay on the panel
+        on_commit(&mut v, "c5 subject");
+        press(&mut v, KeyCode::Right);
+        if let Some(p) = v.peek.as_mut() {
+            wait_read(p);
+        }
+        let s = panel(&mut v);
+        let row = |s: &[String], pat: &str| s.iter().position(|l| l.contains(pat)).unwrap_or_else(|| panic!("{pat}: {s:#?}"));
+
+        assert!(v.scm.focus);
+        assert!(row(&s, "c5 subject") < row(&s, "a.txt") && row(&s, "a.txt") < row(&s, "b.txt") && row(&s, "b.txt") < row(&s, "c4 subject"), "{s:#?}");
+        assert!(s[row(&s, "b.txt")].contains(" d") && s[row(&s, "a.txt")].contains(" A "), "dir + letter: {s:#?}");
+
+        // j onto b.txt (the 2nd file), enter: the review on its box, the keys there
+        press(&mut v, KeyCode::Char('j'));
+        press(&mut v, KeyCode::Char('j'));
+        assert!(v.hints().contains("enter: the file in the review"));
+        press(&mut v, KeyCode::Enter);
+        assert!(!v.scm.focus);
+        let p = v.peek.as_ref().unwrap();
+        assert_eq!(p.changes.files[p.rows[p.at].file].path, "d/b.txt");
+
+        // ← on a file: its commit; → on c3: c5's files hide, the cursor stays on c3
+        v.scm.focus = true;
+        press(&mut v, KeyCode::Left);
+        assert!(matches!(v.scm.rows[v.scm.at], PRow::Commit(i) if v.changes.commits.list[i].subject == "c5 subject"));
+        on_commit(&mut v, "c3 subject");
+        press(&mut v, KeyCode::Right);
+        assert!(matches!(v.scm.rows[v.scm.at], PRow::Commit(i) if v.changes.commits.list[i].subject == "c3 subject"), "{:?}", v.scm.rows);
+        if let Some(p) = v.peek.as_mut() {
+            wait_read(p);
+        }
+        let s = panel(&mut v);
+
+        assert!(!s.iter().any(|l| l.contains("a.txt")) && row(&s, "c3 subject") + 1 == row(&s, "c3.txt"), "{s:#?}");
+
+        // ← on the shown commit: the changes back, its files hide
+        press(&mut v, KeyCode::Left);
+        let s = panel(&mut v);
+
+        assert!(v.peek.is_none() && !s.iter().any(|l| l.contains("c3.txt")), "{s:#?}");
+
+        // a click on a commit's file: the review on it, the keys stay on the panel
+        on_commit(&mut v, "c5 subject");
+        press(&mut v, KeyCode::Right);
+        if let Some(p) = v.peek.as_mut() {
+            wait_read(p);
+        }
+        let s = panel(&mut v);
+        let y = row(&s, "b.txt") as u16;
+        v.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 10, row: y, modifiers: KeyModifiers::NONE });
+        let p = v.peek.as_ref().unwrap();
+
+        assert!(v.scm.focus && p.changes.files[p.rows[p.at].file].path == "d/b.txt");
         drop(&w);
     }
 
