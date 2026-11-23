@@ -524,7 +524,7 @@ fn draw_at(buf: &mut Buffer, area: Rect, s: &Snap, age: Duration, now: u64, next
 }
 
 fn names() -> Names {
-    agents::load()
+    agents::roster_only()
         .into_iter()
         .map(|a| {
             let sp = agents::sprite(&a).desynced(&a.name);

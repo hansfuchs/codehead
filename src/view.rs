@@ -329,7 +329,7 @@ impl View {
                 let _ = tx.send(Msg::Head(store::head(&id, head_end)));
             });
         }
-        let roster = crate::agents::load();
+        let roster = crate::agents::roster_only();
         let mut input = TextArea::new(false, "message the thread · @name for someone else");
         input.style = Some(theme::text());
         let mut command = crate::command::Command::new(cwd);
@@ -4104,7 +4104,7 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
         }
         if roster_at.elapsed() > Duration::from_secs(5) {
             roster_at = Instant::now();
-            v.set_roster(crate::agents::load());
+            v.set_roster(crate::agents::roster_only());
             crate::nav::mark_seen(id);
         }
     }

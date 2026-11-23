@@ -164,9 +164,9 @@ pub fn color(name: Option<&str>) -> Color {
     }
 }
 
-/// Active (not archived) agents, by name.
+/// Active (not archived) agents, by name: the roster files only (boot, menu: 0 thread scan).
 pub fn cached() -> Vec<Agent> {
-    load()
+    roster_only()
 }
 
 fn from_roster(r: &roster::Agent, seen: &HashMap<String, i64>) -> Agent {
@@ -204,6 +204,12 @@ fn last_seen() -> HashMap<String, i64> {
 pub fn load() -> Vec<Agent> {
     let seen = last_seen();
     roster::active().iter().map(|r| from_roster(r, &seen)).collect()
+}
+
+/// `load` without `last_seen` (that reads every thread.json): the roster files only. For screen
+/// opens and ticks; the agents tab reads the full rows in the background.
+pub fn roster_only() -> Vec<Agent> {
+    roster::active().iter().map(|r| from_roster(r, &HashMap::new())).collect()
 }
 
 /// Threads per agent name (open + done).

@@ -570,7 +570,7 @@ fn start(args: Args) {
     let mut all = agents::cached();
     let picks: Vec<String> = args.agent.iter().flat_map(|a| a.split(',')).map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
     if picks.iter().any(|p| !all.iter().any(|a| &a.name == p)) {
-        all = agents::load();
+        all = agents::roster_only();
     }
     let agent = default_agent(&all).unwrap_or_default();
     if let Some(bad) = picks.iter().find(|p| !all.iter().any(|a| &a.name == *p)) {

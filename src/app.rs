@@ -879,10 +879,10 @@ impl App {
         let styles = styles::load(&styles::dir());
         let global_style = styles::global_name();
         // Profile synchronization writes prompts: use current profiles for this step.
-        let mut agents = agents::load();
+        let mut agents = agents::roster_only();
         let synced = agents::sync(&agents, &styles, global_style.as_deref());
         if !synced.is_empty() {
-            agents = agents::load();
+            agents = agents::roster_only();
         }
         let mut picks: Vec<String> = cfg.picks.iter().filter(|n| agents.iter().any(|a| &a.name == *n)).cloned().collect();
         if picks.is_empty() && agents.iter().any(|a| a.name == cfg.agent) {
