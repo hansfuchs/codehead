@@ -47,6 +47,8 @@ enum Msg {
     Done(String, bool),
     /// An import of a harness's server ended: (harness, name, the server + its toast).
     Imported { harness: String, name: String, r: Result<(Server, String), String> },
+    /// The edit form's save ended: (the server, every server).
+    Saved(Result<(Server, Vec<Server>), String>),
 }
 
 /// The add / edit form of a codehead server.
@@ -108,6 +110,8 @@ pub struct McpTab {
     modal_hits: Vec<(Rect, usize)>,
     /// The last esc in the edit form: a 2nd within 2 s drops its edits.
     esc_at: Option<std::time::Instant>,
+    /// The edit form whose save (keychain, file) runs off the UI thread: back on an error.
+    saving: Option<Box<EditForm>>,
 }
 
 fn icon(state: &str) -> (&'static str, Style) {
@@ -153,6 +157,7 @@ impl McpTab {
             hits: Vec::new(),
             modal_hits: Vec::new(),
             esc_at: None,
+            saving: None,
         };
         t.load();
         t
@@ -226,6 +231,16 @@ impl McpTab {
                     self.cli_errors = found.errors;
                 }
                 Msg::Probed => self.probing = false,
+                Msg::Saved(r) => {
+                    self.busy.pop();
+                    if let Some(e) = self.saving.take() {
+                        let m = self.edit_saved(e, r);
+                        // another modal opened meanwhile: it stays
+                        if self.modal.is_none() {
+                            self.modal = m;
+                        }
+                    }
+                }
                 Msg::Imported { harness, name, r } => {
                     self.busy.pop();
                     self.imported(&harness, &name, r);
@@ -655,10 +670,10 @@ impl McpTab {
         match then {
             Then::Delete(name) => {
                 let mut all = self.servers.clone();
-                if let Some(s) = all.iter().find(|s| s.name == name) {
-                    for v in s.env.values().chain(s.headers.values()) {
-                        servers::forget_secret(v);
-                    }
+                // its keychain entries go off the UI thread (tens of ms each)
+                let refs: Vec<String> = all.iter().filter(|s| s.name == name).flat_map(|s| s.env.values().chain(s.headers.values()).cloned()).filter(|v| v.starts_with("keychain:")).collect();
+                if !refs.is_empty() {
+                    std::thread::spawn(move || refs.iter().for_each(|v| servers::forget_secret(v)));
                 }
                 all.retain(|s| s.name != name);
                 if let Err(e) = servers::save(&all) {
@@ -710,7 +725,7 @@ impl McpTab {
     /// picker for a new server. Err: the form stays, the error shows.
     fn save_edit(&mut self, e: Box<EditForm>) -> Option<Modal> {
         let old = e.old.as_ref().and_then(|n| self.servers.iter().find(|s| &s.name == n)).cloned();
-        let mut s = match e.server() {
+        let s = match e.server() {
             Ok(s) => s,
             Err(why) => {
                 self.say(why, true);
@@ -725,28 +740,36 @@ impl McpTab {
             self.say(format!("{}: codehead has a server with this name", s.name), true);
             return Some(Modal::Edit(e));
         }
-        if let Err(why) = secure(&mut s, old.as_ref()) {
-            self.say(why, true);
-            return Some(Modal::Edit(e));
+        // the keychain (tens of ms per secret, a prompt maybe), the file, the agents: off the UI
+        // thread (tests: at once); the form comes back on an error
+        let servers = self.servers.clone();
+        let old_name = e.old.clone();
+        let run = move || commit_edit(s, old, old_name, servers);
+        if cfg!(test) {
+            let r = run();
+            return self.edit_saved(e, r);
         }
-        let mut all: Vec<Server> = self.servers.iter().filter(|x| Some(&x.name) != e.old.as_ref()).cloned().collect();
-        all.push(s.clone());
-        all.sort_by(|a, b| a.name.cmp(&b.name));
-        if let Err(why) = servers::save(&all) {
-            self.say(why, true);
-            return Some(Modal::Edit(e));
-        }
-        // a rename: the agents follow
-        if let Some(o) = &e.old
-            && *o != s.name
-        {
-            for mut a in roster::active().into_iter().filter(|a| a.mcp.contains(o)) {
-                for m in a.mcp.iter_mut().filter(|m| *m == o) {
-                    *m = s.name.clone();
-                }
-                let _ = roster::save(&a);
+        let name = e.name.text().trim().to_string();
+        self.busy.push(name.clone());
+        self.say(format!("saving {name}…"), false);
+        self.saving = Some(e);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::Saved(run()));
+        });
+        None
+    }
+
+    /// The save of form E ended with R (the server, every server): the lists, the agents picker
+    /// for a new server; an error: the form again.
+    fn edit_saved(&mut self, e: Box<EditForm>, r: Result<(Server, Vec<Server>), String>) -> Option<Modal> {
+        let (s, all) = match r {
+            Ok(v) => v,
+            Err(why) => {
+                self.say(why, true);
+                return Some(Modal::Edit(e));
             }
-        }
+        };
         self.servers = all;
         self.say(format!("{}: saved · agents start it at their next message", s.name), false);
         self.probe();
@@ -1140,6 +1163,28 @@ fn import(harness: &str, name: &str, source: &str, servers: Vec<Server>) -> Resu
         Err(e) => format!("{}: imported; {} still has it ({e})", s.name, harness_label(harness)),
     };
     Ok((s, msg))
+}
+
+/// Server S of the edit form (OLD: before the edit, named OLD_NAME) into SERVERS: its secrets
+/// into the keychain, the file saved, a rename's agents follow. (the server, every server).
+fn commit_edit(mut s: Server, old: Option<Server>, old_name: Option<String>, servers: Vec<Server>) -> Result<(Server, Vec<Server>), String> {
+    secure(&mut s, old.as_ref())?;
+    let mut all: Vec<Server> = servers.into_iter().filter(|x| Some(&x.name) != old_name.as_ref()).collect();
+    all.push(s.clone());
+    all.sort_by(|a, b| a.name.cmp(&b.name));
+    servers::save(&all)?;
+    // a rename: the agents follow
+    if let Some(o) = &old_name
+        && *o != s.name
+    {
+        for mut a in roster::active().into_iter().filter(|a| a.mcp.contains(o)) {
+            for m in a.mcp.iter_mut().filter(|m| *m == o) {
+                *m = s.name.clone();
+            }
+            let _ = roster::save(&a);
+        }
+    }
+    Ok((s, all))
 }
 
 fn secure(s: &mut Server, old: Option<&Server>) -> Result<(), String> {

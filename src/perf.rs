@@ -141,7 +141,7 @@ mod cases {
     use ratatui::widgets::Paragraph;
     use ratatui::Terminal;
 
-    use super::{bench, fixture, measure_split, ms, BUDGET};
+    use super::{bench, bench_within, fixture, measure_split, ms, BUDGET};
     use crate::ask::Picker;
     use crate::engine::store::Event;
     use crate::stream::{self, Colors, Fold, Look, Thoughts, Thread};
@@ -333,6 +333,54 @@ mod cases {
         let cat: [(&str, &[&str]); 1] = [("cat", &[])];
         bench("clipboard copy 64 KB", || assert!(crate::clip::copy_with(&cat, &text, false)));
         super::measure("clipboard tool run (off UI)", || crate::clip::copy_with(&cat, &text, true));
+    }
+
+    /// The MCP tab's edit form (budget 50 ms per step): its open (`a` + a frame) and its save
+    /// (ctrl+s + a frame: the file, the agents picker). The secret: a `${VAR}` reference (a
+    /// keychain value: its write runs off the UI thread, 0 write to the owner's keychain here).
+    #[test]
+    #[ignore = "perf: just perf"]
+    fn mcp_edit_form_open_and_save() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::time::Duration;
+
+        const FORM: Duration = Duration::from_millis(50);
+        let key = |t: &mut crate::mcptab::McpTab, c: KeyCode, m: KeyModifiers| t.key(KeyEvent::new(c, m));
+        let typed = |t: &mut crate::mcptab::McpTab, s: &str| s.chars().for_each(|c| {
+            key(t, KeyCode::Char(c), KeyModifiers::NONE);
+        });
+        let mut term = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        let mut frame = |t: &mut crate::mcptab::McpTab| term.draw(|f| t.draw(f, f.area(), true)).map(|_| ()).unwrap();
+        bench_within("mcp form open", FORM, || {
+            let mut t = crate::mcptab::McpTab::new();
+            key(&mut t, KeyCode::Char('a'), KeyModifiers::NONE);
+            frame(&mut t);
+        });
+        let mut n = 0;
+        let worst = super::measure_budget(
+            "mcp form save",
+            FORM,
+            || {
+                n += 1;
+                let mut t = crate::mcptab::McpTab::new();
+                key(&mut t, KeyCode::Char('a'), KeyModifiers::NONE);
+                typed(&mut t, &format!("perf-{n}"));
+                key(&mut t, KeyCode::Tab, KeyModifiers::NONE);
+                key(&mut t, KeyCode::Tab, KeyModifiers::NONE);
+                typed(&mut t, "npx -y perf-server --port 4000");
+                key(&mut t, KeyCode::Tab, KeyModifiers::NONE);
+                typed(&mut t, "TOKEN=${PERF_TOKEN}");
+                t
+            },
+            |mut t| {
+                key(&mut t, KeyCode::Char('s'), KeyModifiers::CONTROL);
+                frame(&mut t);
+                t
+            },
+        );
+        assert!(worst < FORM, "mcp form save: {:.2} ms ≥ budget 50 ms", ms(worst));
+        let saved = crate::engine::servers::load().unwrap();
+        assert!(saved.iter().any(|s| s.name == "perf-1" && s.env.get("TOKEN").map(String::as_str) == Some("${PERF_TOKEN}")), "{saved:?}");
     }
 
     #[test]
