@@ -19,9 +19,16 @@ fn bench<T>(name: &str, f: impl FnMut() -> T) {
 /// `bench` without the assert: the slowest run (several cases in 1 test: each prints its line,
 /// the test asserts at its end).
 fn measure<T>(name: &str, mut f: impl FnMut() -> T) -> Duration {
+    measure_split(name, || (), |_| f())
+}
+
+/// `measure` with an untimed PREP before each run (its value goes to F): a run's background work
+/// (a host's `git worktree add`) never slows the next run.
+fn measure_split<P, T>(name: &str, mut prep: impl FnMut() -> P, mut f: impl FnMut(P) -> T) -> Duration {
     let mut time = || {
+        let p = prep();
         let at = Instant::now();
-        black_box(f());
+        black_box(f(p));
         at.elapsed()
     };
     let cold = time();
@@ -124,7 +131,7 @@ mod cases {
     use ratatui::widgets::Paragraph;
     use ratatui::Terminal;
 
-    use super::{bench, fixture, measure, ms, BUDGET};
+    use super::{bench, fixture, measure_split, ms, BUDGET};
     use crate::ask::Picker;
     use crate::engine::store::Event;
     use crate::stream::{self, Colors, Fold, Look, Thoughts, Thread};
@@ -237,13 +244,14 @@ mod cases {
 
     /// The new-thread form's submit → the thread view's 1st frame: the plan, thread.json, the host
     /// start, the view (as `main.rs` runs it). 1 case per target kind. The host: the release
-    /// binary (`just perf` builds it), 0 roster agent (its delivery fails, 0 harness runs). After
-    /// the timed runs: every host logged its task, every worktree is there.
+    /// binary (`just perf` builds it), 0 roster agent (its delivery fails, 0 harness runs).
+    /// Between runs (untimed): the last host logged its task, made its worktree, pulled main.
     #[test]
     #[ignore = "perf: just perf"]
     fn thread_start_submit_to_1st_frame() {
         use crate::app::Target;
         use crate::engine::{client, store};
+        use std::cell::RefCell;
         use std::path::Path;
         use std::time::{Duration, Instant};
 
@@ -252,22 +260,37 @@ mod cases {
         let root = std::env::temp_dir().join(format!("codehead-perf-start-{}", std::process::id()));
         let repo = fixture::repo_with_origin(&root);
         // the hosts stop, the fixture goes: also after a failed case
-        struct Clean(std::path::PathBuf, Vec<String>);
+        struct Clean(std::path::PathBuf, RefCell<Vec<String>>);
         impl Drop for Clean {
             fn drop(&mut self) {
-                for id in &self.1 {
+                for id in self.1.borrow().iter() {
                     let _ = client::send_within(id, &serde_json::json!({"op": "stop"}), Duration::from_secs(2));
                 }
                 let _ = std::fs::remove_dir_all(&self.0);
             }
         }
-        let mut clean = Clean(root.clone(), Vec::new());
+        let clean = Clean(root.clone(), RefCell::new(Vec::new()));
+        // the work the UI left to the host of thread ID: done
+        let done = |id: &str| {
+            let t = store::load(id).unwrap();
+            let task = store::events(id).iter().any(|e| matches!(&e.kind, store::Kind::Prompt { text, .. } if text.starts_with("perf start")));
+            let wt = !t.branch.as_deref().is_some_and(|b| b.starts_with("perf-")) || t.worktree.as_deref().is_some_and(|w| Path::new(w).is_dir());
+            task && !t.kickoff && t.worktree_pending.is_none() && !t.pull && wt
+        };
+        let settle = || {
+            let Some(id) = clean.1.borrow().last().cloned() else { return };
+            let end = Instant::now() + Duration::from_secs(10);
+            while !done(&id) && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(done(&id), "host of {id}: {:?}", store::load(&id));
+        };
         let agents = vec!["zzperf".to_string()];
         let mut term = Terminal::new(TestBackend::new(160, 50)).unwrap();
         let mut n = 0;
         let mut slow = Vec::new();
         for kind in ["dir (in place)", "main + pull", "new worktree"] {
-            let worst = measure(&format!("thread start: {kind}"), || {
+            let worst = measure_split(&format!("thread start: {kind}"), settle, |()| {
                 n += 1;
                 let target = match kind {
                     "dir (in place)" => Target::Dir(repo.display().to_string()),
@@ -278,7 +301,7 @@ mod cases {
                 let plan = crate::start::plan(&repo, &repo, &target);
                 let s = crate::start::Start { repo: &repo, target: &target, message: &message, agents: &agents, flows: &[] };
                 let (t, note) = crate::start::launch(&s, &plan, |id| client::start_with(id, &exe)).expect("start");
-                clean.1.push(t.id.clone());
+                clean.1.borrow_mut().push(t.id.clone());
                 assert!(note.is_none(), "{note:?}");
                 crate::view::open_1st_frame(&mut term, &t.id, &t.work_dir()).expect("1st frame");
             });
@@ -286,20 +309,7 @@ mod cases {
                 slow.push(format!("{kind}: {:.2} ms", ms(worst)));
             }
         }
-        // the work the UI left to the hosts: done within 10 s
-        let end = Instant::now() + Duration::from_secs(10);
-        for id in &clean.1 {
-            let done = || {
-                let t = store::load(id).unwrap();
-                let task = store::events(id).iter().any(|e| matches!(&e.kind, store::Kind::Prompt { text, .. } if text.starts_with("perf start")));
-                let wt = !t.branch.as_deref().is_some_and(|b| b.starts_with("perf-")) || t.worktree.as_deref().is_some_and(|w| Path::new(w).is_dir());
-                task && !t.kickoff && t.worktree_pending.is_none() && !t.pull && wt
-            };
-            while !done() && Instant::now() < end {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            assert!(done(), "host of {id}: {:?}", store::load(id));
-        }
+        settle();
         assert!(slow.is_empty(), "thread start ≥ budget {} ms: {}", BUDGET.as_millis(), slow.join(", "));
     }
 
