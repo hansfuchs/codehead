@@ -109,17 +109,23 @@ impl Mention {
         }
     }
 
-    /// The open dropdown: `@` position + the matching agents (in order). None: closed.
-    fn open(&self, ta: &TextArea, agents: &[Agent]) -> Option<(Pos, Vec<usize>)> {
+    /// The `@` of TA + its query. A live preview in the text: the query typed before it filters.
+    /// None: 0 `@`, or closed.
+    fn query(&self, ta: &TextArea) -> Option<(Pos, String)> {
         let (at, q) = ta.mention()?;
         if self.closed == Some(at) {
             return None;
         }
-        // a live preview in the text: the query typed before it filters
         let q = match self.preview.typed(ta) {
             Some((p, t)) if p == at => t.chars().skip(1).collect(),
             _ => q,
         };
+        Some((at, q))
+    }
+
+    /// The open dropdown: `@` position + the matching agents (in order). None: closed.
+    fn open(&self, ta: &TextArea, agents: &[Agent]) -> Option<(Pos, Vec<usize>)> {
+        let (at, q) = self.query(ta)?;
         let m = order(&visible(agents, &q));
         (!m.is_empty()).then_some((at, m))
     }
@@ -224,10 +230,7 @@ impl Mention {
     pub fn render(&mut self, f: &mut Frame, ta: &TextArea, agents: &[Agent], bounds: Rect) {
         self.rows.clear();
         self.sync(ta);
-        let Some((at, q)) = ta.mention() else { return };
-        if self.closed == Some(at) {
-            return;
-        }
+        let Some((at, q)) = self.query(ta) else { return };
         let groups = visible(agents, &q);
         let m = order(&groups);
         if m.is_empty() {
@@ -363,6 +366,14 @@ mod tests {
         assert_eq!(ta.text(), "ask @nova ");
         assert_eq!(m.picked.take(), Some(("nova".into(), None)));
         assert!(!m.is_open(&ta, &agents));
+        // ↓ previews `@ramona` in the text: a draw keeps every card, enter picks ramona
+        ta.set_text("ask @");
+        ta.move_end();
+        assert!(key(&mut m, &mut ta, &agents, KeyCode::Down));
+        let s = screen(&mut m, &mut ta, &agents);
+        assert!(s.contains("nova") && s.contains("amon"), "{s}");
+        assert!(key(&mut m, &mut ta, &agents, KeyCode::Enter));
+        assert_eq!(ta.text(), "ask @ramona ");
         // 0 matches: closed, keys pass
         ta.insert("@zz");
         assert!(!key(&mut m, &mut ta, &agents, KeyCode::Enter));
