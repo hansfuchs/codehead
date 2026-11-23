@@ -3,6 +3,7 @@
 //! 1 row, opened by a click or ctrl+o.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -802,11 +803,12 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                 // the owner's message: a bubble on the right, solid hover bg, the time on its left
                 blank(&mut d);
                 let to_note = if to.len() > 1 || last_agent.as_deref() != to.first().map(String::as_str) { format!(" → {}", to.join(", ")) } else { String::new() };
-                let (body, files) = split_attachments(text);
+                let (body, files) = attachments(text);
                 let bw = (w * 3 / 4).max(20).min(w);
                 let bg = Style::default().bg(theme::pal().surface1);
                 // markdown as the agents' text (bold, lists, code); the hover bg under every span
                 let mut rows = memo::markdown(body.trim_end(), bw.saturating_sub(4), &[]);
+                link_markers(&mut rows, &files);
                 for r in &mut rows {
                     for s in &mut r.line.spans {
                         if s.style.bg.is_none() {
@@ -814,7 +816,8 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                         }
                     }
                 }
-                rows.extend(files.iter().map(|f| Row::plain(Line::styled(format!("📎 {f}"), theme::muted().bg(theme::pal().surface1)))));
+                let clip = |a: &Attachment| a.marker.as_ref().map_or_else(|| a.path.clone(), |m| format!("{m} {}", a.path));
+                rows.extend(files.iter().map(|a| clip_row(a, &clip(a), theme::muted().bg(theme::pal().surface1), 0)));
                 let inner = rows.iter().map(|r| r.line.width()).max().unwrap_or(0);
                 let box_w = inner + 4;
                 let left = w.saturating_sub(box_w);
@@ -1195,7 +1198,7 @@ fn run_lines(calls: &[Call], secs: f64) -> (String, String) {
 /// The owner's message TEXT as a bubble on the right of a W wide stream: content-sized (max. 3/4),
 /// the time (+ TO_NOTE) in its top border, attached files below it.
 fn owner_bubble(d: &mut Drawn, w: usize, text: &str, to_note: &str, ts: u64) {
-    let (body, files) = split_attachments(text);
+    let (body, files) = attachments(text);
     let body = body.trim_end();
     let cap = (w * 3 / 4 + 1).min(w);
     let stamp = clock(ts);
@@ -1210,6 +1213,7 @@ fn owner_bubble(d: &mut Drawn, w: usize, text: &str, to_note: &str, ts: u64) {
     let bar = [pad.clone(), Span::styled("│ ", border)];
     // 0 blank row below the top border, 1 above the bottom border
     let mut rows = memo::markdown(body, left + bw - 2, &bar);
+    link_markers(&mut rows, &files);
     rows.push(Row::plain(Line::from(bar.to_vec())));
     for mut r in rows {
         let rw = r.line.width();
@@ -1230,12 +1234,7 @@ fn owner_bubble(d: &mut Drawn, w: usize, text: &str, to_note: &str, ts: u64) {
     } else {
         d.rows.push(Row::plain(Line::from(vec![pad, Span::styled(format!("└{}┘", "─".repeat(bw - 2)), border)])));
     }
-    for f in files {
-        let name = f.rsplit('/').next().unwrap_or(f);
-        let label = format!("📎 {name}");
-        let lw = label.width();
-        d.rows.push(Row::plain(Line::from(vec![Span::raw(" ".repeat(w.saturating_sub(lw))), Span::styled(label, theme::muted())])));
-    }
+    d.rows.extend(files.iter().map(|a| clip_row(a, a.name(), theme::muted(), w)));
 }
 
 /// A box under construction: its 1st row, the style of its border.
@@ -1620,10 +1619,106 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
 
 pub const ATTACHMENTS: &str = "Attachments (read these files):";
 
+/// A file attached to a prompt: its marker in the body (`[Image #1]`), its path.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Attachment {
+    pub marker: Option<String>,
+    pub path: String,
+}
+
+impl Attachment {
+    /// 1 line under ATTACHMENTS: `[Image #1]: /p` (since the marker map), `/p` (older thread
+    /// messages: a clipboard image's marker from its name `image-N.png`).
+    fn parse(line: &str) -> Attachment {
+        if line.starts_with('[')
+            && let Some((m, p)) = line.split_once("]: ")
+        {
+            return Attachment { marker: Some(format!("{m}]")), path: p.trim().to_string() };
+        }
+        let name = line.rsplit('/').next().unwrap_or(line);
+        let n = name.strip_prefix("image-").and_then(|n| n.strip_suffix(".png")).filter(|n| n.parse::<usize>().is_ok());
+        Attachment { marker: n.map(|n| format!("[Image #{n}]")), path: line.to_string() }
+    }
+
+    /// The file name.
+    pub fn name(&self) -> &str {
+        self.path.rsplit('/').next().unwrap_or(&self.path)
+    }
+}
+
+/// The `file://` link of an attachment: None for a gone file (a cleared cache, /tmp).
+fn attach_link(a: &Attachment) -> Option<String> {
+    Path::new(&a.path).is_file().then(|| format!("file://{}", a.path))
+}
+
+/// The `📎` row of attachment A: its LABEL, a link over it (0 link for a gone file: `· missing`).
+/// RIGHT > 0: right-aligned in RIGHT cols.
+fn clip_row(a: &Attachment, label: &str, style: Style, right: usize) -> Row {
+    let link = attach_link(a);
+    let label = if link.is_some() { format!("📎 {label}") } else { format!("📎 {label} · missing") };
+    let lead = right.saturating_sub(label.width());
+    let (from, to) = (lead as u16, (lead + label.width()) as u16);
+    let mut spans = vec![Span::styled(label, style)];
+    if lead > 0 {
+        spans.insert(0, Span::raw(" ".repeat(lead)));
+    }
+    Row { line: Line::from(spans), links: link.map(|l| vec![(from, to, l)]).unwrap_or_default(), ..Default::default() }
+}
+
+/// The markers of ATTS in ROWS (`[Image #1]` in the body): links to their files, underlined in
+/// the link color. A marker cut by a wrap: 0 link.
+fn link_markers(rows: &mut [Row], atts: &[Attachment]) {
+    let links: Vec<(&str, String)> = atts.iter().filter_map(|a| Some((a.marker.as_deref()?, attach_link(a)?))).collect();
+    if links.is_empty() {
+        return;
+    }
+    for r in rows {
+        let text: String = r.line.spans.iter().map(|s| s.content.as_ref()).collect();
+        // byte ranges of the markers in the row's text
+        let mut hits: Vec<(usize, usize, &str)> = Vec::new();
+        for (m, url) in &links {
+            hits.extend(text.match_indices(m).map(|(i, _)| (i, i + m.len(), url.as_str())));
+        }
+        if hits.is_empty() {
+            continue;
+        }
+        hits.sort_by_key(|h| h.0);
+        // split the spans at the marker bounds; the marker pieces underlined
+        let mut out: Vec<Span<'static>> = Vec::new();
+        let mut at = 0;
+        for s in std::mem::take(&mut r.line.spans) {
+            let end = at + s.content.len();
+            let mut cut = at;
+            for &(a, b, _) in &hits {
+                for edge in [a, b] {
+                    if edge > cut && edge < end {
+                        out.push(Span::styled(s.content[cut - at..edge - at].to_string(), s.style));
+                        cut = edge;
+                    }
+                }
+            }
+            out.push(Span::styled(s.content[cut - at..].to_string(), s.style));
+            at = end;
+        }
+        let mut at = 0;
+        for s in &mut out {
+            if hits.iter().any(|&(a, b, _)| at >= a && at < b) {
+                s.style = s.style.fg(theme::pal().info()).add_modifier(Modifier::UNDERLINED);
+            }
+            at += s.content.len();
+        }
+        for &(a, b, url) in &hits {
+            let (from, to) = (text[..a].width() as u16, text[..b].width() as u16);
+            r.links.push((from, to, url.to_string()));
+        }
+        r.line.spans = out;
+    }
+}
+
 /// Prompt TEXT → (its body, the files attached under ATTACHMENTS).
-pub fn split_attachments(text: &str) -> (&str, Vec<&str>) {
+pub fn attachments(text: &str) -> (&str, Vec<Attachment>) {
     match text.rfind(ATTACHMENTS) {
-        Some(i) => (&text[..i], text[i + ATTACHMENTS.len()..].lines().map(|l| l.trim().trim_start_matches("- ")).filter(|l| !l.is_empty()).collect()),
+        Some(i) => (&text[..i], text[i + ATTACHMENTS.len()..].lines().map(|l| l.trim().trim_start_matches("- ")).filter(|l| !l.is_empty()).map(Attachment::parse).collect()),
         None => (text, Vec::new()),
     }
 }
@@ -1821,6 +1916,54 @@ mod tests {
         Event { ts: 1_000_000, agent: agent.map(String::from), kind }
     }
 
+    /// An existing file NAME in a temp dir of test TAG (attachments link only existing files).
+    fn attached_file(tag: &str, name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("codehead-attached-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, b"x").unwrap();
+        p
+    }
+
+    #[test]
+    fn attachments_parse_both_formats() {
+        let (body, a) = attachments("see [Image #2]\n\nAttachments (read these files):\n- [Image #2]: /p/shot.png\n- /q/image-3.png\n- /q/notes.txt\n- [Pasted text #1 +3 lines]: /q/pasted-text-1.txt");
+        assert_eq!(body, "see [Image #2]\n\n");
+        let m: Vec<(Option<&str>, &str)> = a.iter().map(|a| (a.marker.as_deref(), a.path.as_str())).collect();
+        assert_eq!(m, [(Some("[Image #2]"), "/p/shot.png"), (Some("[Image #3]"), "/q/image-3.png"), (None, "/q/notes.txt"), (Some("[Pasted text #1 +3 lines]"), "/q/pasted-text-1.txt")]);
+        assert_eq!(a[0].name(), "shot.png");
+        assert_eq!(attachments("plain").1, []);
+    }
+
+    #[test]
+    fn attachments_link_their_markers_and_clip_rows_to_the_files() {
+        let img = attached_file("links", "shot.png");
+        let gone = img.with_file_name("gone.png");
+        let msg = format!("look at [Image #1] and [Image #2] here\n\nAttachments (read these files):\n- [Image #1]: {}\n- [Image #2]: {}", img.display(), gone.display());
+        let url = format!("file://{}", img.display());
+        for look in [Look::Bubbles, Look::Lines] {
+            let mut t = Thread::default();
+            t.push(&ev(None, Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text: msg.clone() }));
+            let d = draw(&t, look, 70, &Colors::new(), &[], &Fold { runs: &HashSet::new(), all_runs: false, thoughts: Thoughts::Hidden, open_thoughts: &HashSet::new(), all_thoughts: false }, &Picker::default());
+            let s = text(&d);
+            // the marker of the existing file: a link over its cols; the gone file: 0 link, `· missing`
+            let row = d.rows.iter().find(|r| r.links.iter().any(|l| l.2 == url) && !r.line.spans.iter().any(|s| s.content.contains('📎'))).unwrap_or_else(|| panic!("{look:?}\n{s}"));
+            let (a, b, _) = row.links.iter().find(|l| l.2 == url).unwrap();
+            let line: String = row.line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let at = line.find("[Image #1]").unwrap();
+            assert_eq!((*a as usize, *b as usize), (line[..at].width(), line[..at].width() + 10), "{look:?}\n{s}");
+            // markdown splits the brackets off: the marker's pieces underlined, 0 other text
+            let under: String = row.line.spans.iter().filter(|s| s.style.add_modifier.contains(Modifier::UNDERLINED)).map(|s| s.content.as_ref()).collect();
+            assert_eq!(under, "[Image #1]", "{look:?}");
+            assert!(d.rows.iter().all(|r| !r.links.iter().any(|l| l.2.contains("gone.png"))), "{look:?}");
+            assert!(s.contains("· missing"), "{look:?}\n{s}");
+            let clip = d.rows.iter().find(|r| r.line.spans.iter().any(|s| s.content.contains("📎") && s.content.contains("shot.png"))).unwrap();
+            let line: String = clip.line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let start = line.find('📎').map(|i| line[..i].width()).unwrap();
+            assert!(clip.links.iter().any(|(a, _, u)| *u == url && *a as usize == start), "{look:?}\n{s}");
+        }
+    }
+
     fn text(d: &Drawn) -> String {
         d.rows.iter().map(|r| r.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>().trim_end().to_string() + "\n").collect()
     }
@@ -1881,8 +2024,9 @@ mod tests {
 
     #[test]
     fn bubbles_box_turns_and_put_owner_messages_right() {
+        let a = attached_file("bubble", "a.png");
         let mut t = Thread::default();
-        t.push(&ev(None, Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text: "fix it\n\nAttachments (read these files):\n- /tmp/a.png".into() }));
+        t.push(&ev(None, Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text: format!("fix it\n\nAttachments (read these files):\n- {}", a.display()) }));
         t.push(&ev(Some("ada"), Kind::TurnStart));
         t.push(&ev(Some("ada"), Kind::Tool { id: "1".into(), name: "Bash".into(), input: json!({"command": "ls", "description": "List files"}) }));
         t.push(&ev(Some("ada"), Kind::ToolResult { id: "1".into(), ok: true, output: "a".into() }));

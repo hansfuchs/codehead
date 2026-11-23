@@ -977,7 +977,7 @@ impl View {
         {
             text = format!("{text}\n\n{c}");
         }
-        let files: Vec<String> = self.attachments.iter().filter(|(m, _)| text.contains(m.as_str())).map(|(_, p)| format!("- {}", p.display())).collect();
+        let files: Vec<String> = self.attachments.iter().filter(|(m, _)| text.contains(m.as_str())).map(|(m, p)| format!("- {m}: {}", p.display())).collect();
         if !files.is_empty() {
             text = format!("{text}\n\n{}\n{}", stream::ATTACHMENTS, files.join("\n"));
         }
@@ -4522,6 +4522,17 @@ mod ask_tests {
     }
 
     #[test]
+    fn a_pasted_image_goes_out_with_its_marker_next_to_its_path() {
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("asktest-0002", Path::new("/tmp"), "t", tx);
+        v.input.set_text("look at [Image #1]");
+        v.attachments = vec![("[Image #1]".into(), PathBuf::from("/x/shot.png"))];
+        v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        let text = v.ops.borrow().iter().find(|o| o["op"] == "prompt").and_then(|o| o["text"].as_str().map(String::from)).unwrap();
+        assert!(text.ends_with("Attachments (read these files):\n- [Image #1]: /x/shot.png"), "{text}");
+    }
+
+    #[test]
     fn ctrl_s_never_sends_ctrl_enter_does() {
         let (tx, _rx) = mpsc::channel();
         let mut v = View::new("asktest-0001", Path::new("/tmp"), "t", tx);
@@ -5167,6 +5178,32 @@ mod subagent_tests {
 
     fn ev(agent: &str, ts: u64, kind: store::Kind) -> store::Event {
         store::Event { ts, agent: Some(agent.into()), kind }
+    }
+
+    #[test]
+    fn a_click_on_an_attachment_opens_the_files_tab_on_it() {
+        let dir = std::env::temp_dir().join(format!("codehead-attclick-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("shot.png");
+        std::fs::write(&img, b"x").unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new("selecttest-0001", Path::new("/tmp"), "t", tx);
+        v.members = vec!["ada".into()];
+        let text = format!("see [Image #1]\n\nAttachments (read these files):\n- [Image #1]: {}", img.display());
+        v.thread.push(&store::Event { ts: 1, agent: None, kind: store::Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text } });
+        // the marker in the body, then the 📎 row: each opens the files tab on the file
+        for (needle, back) in [("[Image #1]", true), ("📎", false)] {
+            let s = screen(&mut v);
+            let y = s.iter().position(|r| r.contains(needle)).unwrap_or_else(|| panic!("{s:#?}"));
+            let x = s[y].find(needle).map(|b| s[y][..b].chars().count()).unwrap() as u16;
+            click(&mut v, x + 1, y as u16);
+            assert_eq!(v.pane, Pane::Files, "{needle}");
+            assert!(v.files.files.iter().any(|e| e.path == img), "{needle}");
+            if back {
+                v.set_pane(Pane::Chat);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn start(id: &str, parent: Option<&str>, what: &str, background: bool) -> store::Kind {
