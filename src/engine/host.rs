@@ -51,6 +51,8 @@ enum Input {
     Setup(String, bool, String),
     /// The pull of main before the 1st turn ended: ok, its last line.
     Pull(bool, String),
+    /// The new thread's worktree: (its path, its port) or the error.
+    Worktree(Result<(PathBuf, u16), String>),
 }
 
 struct Live {
@@ -264,6 +266,8 @@ impl Host {
         // the worktree setup runs: the message waits for its end
         if self.setup_running {
             self.queue.push((agent.to_string(), text.to_string()));
+            // its session boots meanwhile (a harness takes seconds): only the message waits
+            self.boot_queued();
             return Ok(());
         }
         // a sub-thread works in the same checkout: the message waits for its end (`sub_done`)
@@ -731,6 +735,98 @@ impl Host {
         let _ = store::update(&self.id, |t| t.setup = Some(if ok { "done" } else { "failed" }.into()));
         let note = (!ok).then(|| format!("[codehead: the worktree setup (`{label}`) failed; its output is in the thread. Make the environment work first.]"));
         self.release_queue(note.as_deref());
+    }
+
+    /// A new thread (`kickoff`): its task to its agents, as the owner's `prompt` (the UI started
+    /// the host and opened the view at once, 0 wait for a reply).
+    fn kickoff(&mut self, t: &store::Thread) {
+        if !t.kickoff {
+            return;
+        }
+        // off first: a host that dies after this line never sends the task twice
+        let _ = store::update(&self.id, |t| t.kickoff = false);
+        if let Err(e) = self.cmd(&json!({"op": "prompt", "to": t.agents, "text": t.task})) {
+            self.log(None, Kind::Error { message: format!("task not sent: {e}") });
+        }
+        self.deliver_later();
+    }
+
+    /// A new thread's worktree (`worktree_pending`): `git fetch` + `git worktree add`, the local
+    /// files, a port, off the host loop; messages wait for its end.
+    fn start_worktree(&mut self, t: &store::Thread, tx: Sender<Input>) {
+        let Some(branch) = t.worktree_pending.clone() else { return };
+        self.setup_running = true;
+        self.log(Some("setup"), Kind::Tool { id: "worktree".into(), name: "Bash".into(), input: json!({"command": format!("git worktree add {branch}"), "description": "the thread's worktree: the 1st turn waits for it"}) });
+        let repo = PathBuf::from(&t.dir);
+        std::thread::spawn(move || {
+            let r = crate::threads::add_worktree(&repo, &branch).map(|p| {
+                // local files (.env …), a port block
+                crate::setup::copy_includes(&repo, &p);
+                (p, crate::setup::free_port(&store::all()))
+            });
+            let _ = tx.send(Input::Worktree(r));
+        });
+    }
+
+    /// The worktree is there (or failed): in thread.json, then its setup script, else the waiting
+    /// messages go out (a failed worktree: with a note, the agents are in the main checkout).
+    fn worktree_done(&mut self, r: Result<(PathBuf, u16), String>, tx: Sender<Input>) {
+        let branch = self.thread().ok().and_then(|t| t.worktree_pending).unwrap_or_default();
+        match r {
+            Ok((p, port)) => {
+                self.log(Some("setup"), Kind::ToolResult { id: "worktree".into(), ok: true, output: format!("{} on {branch}", p.display()) });
+                let setup = crate::setup::script(&p, "setup").is_some();
+                let path = p.display().to_string();
+                let t = store::update(&self.id, |t| {
+                    t.worktree = Some(path);
+                    t.branch = Some(branch.clone());
+                    t.port = Some(port);
+                    t.worktree_pending = None;
+                    if setup {
+                        t.setup = Some("pending".into());
+                    }
+                });
+                match t {
+                    Ok(t) if setup => {
+                        self.setup_running = false;
+                        self.start_setup(&t, tx);
+                        if self.setup_running {
+                            // the sessions boot during the setup (the worktree is there)
+                            self.boot_queued();
+                        } else {
+                            self.release_queue(None);
+                        }
+                    }
+                    _ => {
+                        self.setup_running = false;
+                        self.release_queue(None);
+                    }
+                }
+            }
+            Err(e) => {
+                self.log(Some("setup"), Kind::ToolResult { id: "worktree".into(), ok: false, output: e.clone() });
+                let dir = self.thread().map(|t| t.dir).unwrap_or_default();
+                let _ = store::update(&self.id, |t| t.worktree_pending = None);
+                self.setup_running = false;
+                let note = format!("[codehead: the worktree for branch `{branch}` failed ({e}): you are in the main checkout {dir}. Ask the owner before you edit files.]");
+                self.release_queue(Some(&note));
+            }
+        }
+    }
+
+    /// The agents of the waiting messages: their sessions start now (a harness boots for seconds),
+    /// the messages still wait. 0 boot while the worktree is not there (the session's dir).
+    fn boot_queued(&mut self) {
+        if self.thread().is_ok_and(|t| t.worktree_pending.is_some()) {
+            return;
+        }
+        let mut agents: Vec<String> = self.queue.iter().map(|(a, _)| a.clone()).collect();
+        agents.sort();
+        agents.dedup();
+        for a in agents {
+            // an error shows at the delivery (the message's own error event)
+            let _ = self.ensure(&a);
+        }
     }
 
     /// A thread on main: `git pull --ff-only` off the host loop; messages wait for its end.
@@ -1307,11 +1403,14 @@ pub fn run(id: &str) -> ! {
     for (a, k) in lost {
         h.log(Some(&a), k);
     }
-    if t.setup.as_deref() == Some("pending") {
+    if t.worktree_pending.is_some() {
+        h.start_worktree(&t, tx.clone());
+    } else if t.setup.as_deref() == Some("pending") {
         h.start_setup(&t, tx.clone());
     } else if t.pull {
         h.start_pull(&t, tx.clone());
     }
+    h.kickoff(&t);
     loop {
         // 1 s: a signal ends the host within a second
         match rx.recv_timeout(Duration::from_secs(1)) {
@@ -1330,6 +1429,7 @@ pub fn run(id: &str) -> ! {
             Ok(Input::Harness(a, o)) => h.harness(a, o),
             Ok(Input::Setup(label, ok, out)) => h.setup_done(label, ok, out),
             Ok(Input::Pull(ok, out)) => h.pull_done(ok, out),
+            Ok(Input::Worktree(r)) => h.worktree_done(r, tx.clone()),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -1603,6 +1703,63 @@ mod tests {
         let rev = |d: &str| String::from_utf8(std::process::Command::new("git").args(["-C", d, "rev-parse", "HEAD"]).current_dir(&base).output().unwrap().stdout).unwrap();
         assert_eq!(rev("a"), rev("b"), "main pulled");
         let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A new thread (`kickoff`, `worktree_pending`): the host logs the task at once, the task waits
+    /// for the worktree; the worktree lands in thread.json (path, branch, port), then the task goes
+    /// out. A failed worktree: the task goes with a note on it.
+    #[test]
+    fn a_kickoff_logs_the_task_and_a_pending_worktree_holds_it() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("codehead-host-kickoff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let sh = |c: &str| assert!(std::process::Command::new("sh").arg("-c").arg(c).current_dir(&base).output().unwrap().status.success(), "{c}");
+        sh("git init -q -b main r && cd r && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m 1");
+        let repo = base.join("r");
+        let branch = format!("kick-{}", std::process::id());
+        let mut t = store::Thread::new("kickoff test", "do the thing", &repo, vec!["nobody-agent".into()]);
+        t.kickoff = true;
+        t.worktree_pending = Some(branch.clone());
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (htx, _hrx) = mpsc::channel();
+        let mut h = Host { id: t.id.clone(), exe: PathBuf::new(), sessions: HashMap::new(), asks: HashMap::new(), harness_tx: htx, last: Instant::now(), stopping: false, subs: Default::default(), live: HashMap::new(), turn_use: HashMap::new(), setup_running: false, queue: Vec::new(), later: Vec::new(), subagents: Default::default(), sub_scan: Instant::now(), held: Vec::new(), kid: Default::default(), kids_at: Instant::now(), resume: HashMap::new() };
+        let (tx, rx) = mpsc::channel();
+        h.start_worktree(&t, tx.clone());
+        h.kickoff(&t);
+        let prompts = |id: &str| store::events(id).into_iter().filter(|e| matches!(&e.kind, Kind::Prompt { text, .. } if text == "do the thing")).count();
+        assert_eq!(prompts(&t.id), 1, "the task in the log at once");
+        assert!(!store::load(&t.id).unwrap().kickoff);
+        assert_eq!((h.later.len(), h.queue.len()), (0, 1), "the task waits for the worktree");
+        // a 2nd host start (a crash, a restart): 0 2nd copy
+        h.kickoff(&store::load(&t.id).unwrap());
+        assert_eq!(prompts(&t.id), 1);
+        let Ok(Input::Worktree(r)) = rx.recv_timeout(Duration::from_secs(20)) else { panic!("0 worktree end") };
+        h.worktree_done(r, tx.clone());
+        let after = store::load(&t.id).unwrap();
+        let wt = PathBuf::from(after.worktree.clone().expect("worktree in thread.json"));
+        assert!(wt.join(".git").is_file());
+        assert_eq!((after.branch.as_deref(), after.worktree_pending.as_deref(), after.port.is_some()), (Some(branch.as_str()), None, true));
+        assert!(!h.setup_running && h.queue.is_empty(), "the task went out (its delivery failed: 0 such agent)");
+        // the branch's worktree is there: a 2nd one fails, the task goes with a note
+        let mut t2 = store::Thread::new("kickoff test 2", "again", &repo, vec!["nobody-agent".into()]);
+        t2.worktree_pending = Some(branch.clone());
+        std::fs::create_dir_all(store::thread_dir(&t2.id)).unwrap();
+        t2.save().unwrap();
+        h.id = t2.id.clone();
+        h.start_worktree(&t2, tx.clone());
+        h.queue.push(("nobody-agent".into(), "again".into()));
+        let Ok(Input::Worktree(r)) = rx.recv_timeout(Duration::from_secs(20)) else { panic!("0 worktree end") };
+        assert!(r.is_err());
+        h.worktree_done(r, tx);
+        assert!(!h.setup_running && h.queue.is_empty() && store::load(&t2.id).unwrap().worktree_pending.is_none());
+        let failed = store::events(&t2.id).into_iter().any(|e| matches!(&e.kind, Kind::ToolResult { id, ok: false, .. } if id == "worktree"));
+        assert!(failed);
+        let _ = std::process::Command::new("git").args(["-C", &repo.display().to_string(), "worktree", "remove", "--force", &wt.display().to_string()]).output();
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t2.id));
         let _ = std::fs::remove_dir_all(base);
     }
 

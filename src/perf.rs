@@ -11,7 +11,14 @@ const BUDGET: Duration = Duration::from_millis(20);
 const RUNS: usize = 5;
 
 /// Time F: 1 cold run, RUNS warm runs. Fail if the slowest run reaches BUDGET.
-fn bench<T>(name: &str, mut f: impl FnMut() -> T) {
+fn bench<T>(name: &str, f: impl FnMut() -> T) {
+    let worst = measure(name, f);
+    assert!(worst < BUDGET, "{name}: {:.2} ms ≥ budget {} ms", ms(worst), BUDGET.as_millis());
+}
+
+/// `bench` without the assert: the slowest run (several cases in 1 test: each prints its line,
+/// the test asserts at its end).
+fn measure<T>(name: &str, mut f: impl FnMut() -> T) -> Duration {
     let mut time = || {
         let at = Instant::now();
         black_box(f());
@@ -22,7 +29,7 @@ fn bench<T>(name: &str, mut f: impl FnMut() -> T) {
     let worst = cold.max(warm);
     let mark = if worst < BUDGET { "ok  " } else { "SLOW" };
     eprintln!("{mark} {name:<28} cold {:>7.2} ms  warm max {:>7.2} ms", ms(cold), ms(warm));
-    assert!(worst < BUDGET, "{name}: {:.2} ms ≥ budget {} ms", ms(worst), BUDGET.as_millis());
+    worst
 }
 
 fn ms(d: Duration) -> f64 {
@@ -84,6 +91,26 @@ mod fixture {
         s
     }
 
+    /// A repo on main with an origin (bare, local: 0 network), 50 files, an ignored `.env`: ROOT
+    /// holds `repo/` and `origin.git/`.
+    pub fn repo_with_origin(root: &std::path::Path) -> std::path::PathBuf {
+        let _ = std::fs::remove_dir_all(root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        for i in 0..50 {
+            std::fs::write(repo.join(format!("src/f{i}.rs")), format!("fn f{i}() {{}}\n")).unwrap();
+        }
+        std::fs::write(repo.join(".gitignore"), ".env*\n").unwrap();
+        std::fs::write(repo.join(".env"), "KEY=1\n").unwrap();
+        let sh = |dir: &std::path::Path, c: &str| {
+            let ok = std::process::Command::new("sh").arg("-c").arg(c).current_dir(dir).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap().success();
+            assert!(ok, "{c}");
+        };
+        sh(root, "git init -q --bare origin.git");
+        sh(&repo, "git init -q -b main && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m 0 && git add -A && git -c user.email=t@t -c user.name=t commit -qm init && git remote add origin ../origin.git && git push -q -u origin main && git remote set-head origin main");
+        repo
+    }
+
     pub fn paths(n: usize) -> Vec<String> {
         let dirs = ["src", "src/engine", "src/changes", "site/src/content/docs", "vendor/hyperpolyglot/src"];
         (0..n).map(|i| format!("{}/module_{i}/file_{}.rs", dirs[i % dirs.len()], i * 7 % 101)).collect()
@@ -97,7 +124,7 @@ mod cases {
     use ratatui::widgets::Paragraph;
     use ratatui::Terminal;
 
-    use super::{bench, fixture};
+    use super::{bench, fixture, measure, ms, BUDGET};
     use crate::ask::Picker;
     use crate::engine::store::Event;
     use crate::stream::{self, Colors, Fold, Look, Thoughts, Thread};
@@ -206,6 +233,74 @@ mod cases {
         let old: Vec<char> = "let value = compute(alpha, beta, gamma); ".repeat(40).chars().collect();
         let new: Vec<char> = "let value = compute(alpha, delta, gamma); ".repeat(40).chars().collect();
         bench("word marks 1.6k chars", || crate::changes::word_marks(&old, &new));
+    }
+
+    /// The new-thread form's submit → the thread view's 1st frame: the plan, thread.json, the host
+    /// start, the view (as `main.rs` runs it). 1 case per target kind. The host: the release
+    /// binary (`just perf` builds it), 0 roster agent (its delivery fails, 0 harness runs). After
+    /// the timed runs: every host logged its task, every worktree is there.
+    #[test]
+    #[ignore = "perf: just perf"]
+    fn thread_start_submit_to_1st_frame() {
+        use crate::app::Target;
+        use crate::engine::{client, store};
+        use std::path::Path;
+        use std::time::{Duration, Instant};
+
+        let exe = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/release/codehead");
+        assert!(exe.is_file(), "{}: missing, `just perf` builds it", exe.display());
+        let root = std::env::temp_dir().join(format!("codehead-perf-start-{}", std::process::id()));
+        let repo = fixture::repo_with_origin(&root);
+        // the hosts stop, the fixture goes: also after a failed case
+        struct Clean(std::path::PathBuf, Vec<String>);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                for id in &self.1 {
+                    let _ = client::send_within(id, &serde_json::json!({"op": "stop"}), Duration::from_secs(2));
+                }
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let mut clean = Clean(root.clone(), Vec::new());
+        let agents = vec!["zzperf".to_string()];
+        let mut term = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        let mut n = 0;
+        let mut slow = Vec::new();
+        for kind in ["dir (in place)", "main + pull", "new worktree"] {
+            let worst = measure(&format!("thread start: {kind}"), || {
+                n += 1;
+                let target = match kind {
+                    "dir (in place)" => Target::Dir(repo.display().to_string()),
+                    "main + pull" => Target::Checkout { branch: "main".into(), switch: false, stash: false },
+                    _ => Target::Branch(format!("perf-{n}")),
+                };
+                let message = format!("perf start {n}");
+                let plan = crate::start::plan(&repo, &repo, &target);
+                let s = crate::start::Start { repo: &repo, target: &target, message: &message, agents: &agents, flows: &[] };
+                let (t, note) = crate::start::launch(&s, &plan, |id| client::start_with(id, &exe)).expect("start");
+                clean.1.push(t.id.clone());
+                assert!(note.is_none(), "{note:?}");
+                crate::view::open_1st_frame(&mut term, &t.id, &t.work_dir()).expect("1st frame");
+            });
+            if worst >= BUDGET {
+                slow.push(format!("{kind}: {:.2} ms", ms(worst)));
+            }
+        }
+        // the work the UI left to the hosts: done within 10 s
+        let end = Instant::now() + Duration::from_secs(10);
+        for id in &clean.1 {
+            let done = || {
+                let t = store::load(id).unwrap();
+                let task = store::events(id).iter().any(|e| matches!(&e.kind, store::Kind::Prompt { text, .. } if text.starts_with("perf start")));
+                let wt = !t.branch.as_deref().is_some_and(|b| b.starts_with("perf-")) || t.worktree.as_deref().is_some_and(|w| Path::new(w).is_dir());
+                task && !t.kickoff && t.worktree_pending.is_none() && !t.pull && wt
+            };
+            while !done() && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(done(), "host of {id}: {:?}", store::load(id));
+        }
+        assert!(slow.is_empty(), "thread start ≥ budget {} ms: {}", BUDGET.as_millis(), slow.join(", "));
     }
 
     #[test]

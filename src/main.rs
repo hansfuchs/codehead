@@ -65,6 +65,7 @@ mod shortcuts;
 mod setup;
 mod skills;
 mod sprites;
+mod start;
 mod stream;
 mod subagents;
 mod subthreads;
@@ -81,7 +82,7 @@ mod view;
 
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use ratatui::Terminal;
@@ -764,6 +765,7 @@ fn start(args: Args) {
         }
         Outcome::New { message, target, agents: picked, clone, flows } => {
             engine::trace("start: submit");
+            engine::transition_begin("start: submit → thread view");
             // a home repo not on disk yet: clone it first
             if let Some((url, path)) = &clone {
                 let _ = term.draw(|f| app::draw_status(f, &format!("cloning {url}…"), 0));
@@ -772,132 +774,37 @@ fn start(args: Args) {
                     fail(&e, 1)
                 }
             }
-            let a = &app.cfg;
-            // git first: switch the main checkout (existing branch not checked out anywhere, new branch)
-            let mut prep: Option<Vec<String>> = None;
-            // the switch fails on conflicting local changes: git stash, then switch again
-            let mut stash = false;
-            // a new linked worktree for the branch
-            let mut worktree: Option<String> = None;
-            let repo = a.repo.clone().unwrap_or(cwd.clone());
-            let (dir, label) = match &target {
-                Target::Checkout { branch: b, switch, stash: s } => {
-                    let dir = match threads::checkouts(&repo).get(b) {
-                        Some(p) => PathBuf::from(p),
-                        None => {
-                            if *switch {
-                                prep = Some(["git", "-C", &repo.display().to_string(), "switch", b].map(String::from).to_vec());
-                                stash = *s;
-                            }
-                            repo.clone()
-                        }
-                    };
-                    (dir, b.clone())
-                }
-                Target::NewBranch(b) => {
-                    prep = Some(["git", "-C", &repo.display().to_string(), "switch", "-c", b].map(String::from).to_vec());
-                    (repo.clone(), b.clone())
-                }
-                Target::Branch(b) => {
-                    worktree = Some(b.clone());
-                    (repo.clone(), b.clone())
-                }
-                Target::Worktree { path, branch } => (PathBuf::from(path), branch.clone()),
-                Target::Dir(d) => {
-                    let p = PathBuf::from(d);
-                    let label = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    (p, label)
-                }
-                Target::InPlace => (cwd.clone(), cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
-            };
-            let title = message.lines().next().unwrap_or_default().to_string();
+            let repo = app.cfg.repo.clone().unwrap_or(cwd.clone());
+            let plan = start::plan(&repo, &cwd, &target);
             if args.dry {
                 tty.leave(&mut out);
-                if let Some(g) = &prep {
+                if let Some(g) = &plan.prep {
                     let line = g.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ");
-                    if stash {
+                    if plan.stash {
                         println!("{line} || {{ git -C {} stash push --include-untracked -m 'codehead: before switch' && {line}; }}", quote(&repo.display().to_string()));
                     } else {
                         println!("{line}");
                     }
                 }
-                if let Some(b) = &worktree {
+                if let Some(b) = &plan.worktree {
                     println!("git -C {} worktree add <codehead data>/worktrees/{} {}", quote(&repo.display().to_string()), quote(b), quote(b));
                 }
-                if worktree.is_none() && matches!(target, Target::Checkout { .. } | Target::Worktree { .. }) {
-                    println!("git -C {} pull --ff-only    # on main / master with an upstream", quote(&dir.display().to_string()));
+                if plan.worktree.is_none() && matches!(target, Target::Checkout { .. } | Target::Worktree { .. }) {
+                    println!("git -C {} pull --ff-only    # on main / master with an upstream", quote(&plan.dir.display().to_string()));
                 }
-                println!("thread in {} · agents {} · task:\n{message}", dir.display(), picked.join(", "));
+                println!("thread in {} · agents {} · task:\n{message}", plan.dir.display(), picked.join(", "));
                 return;
             }
-            if let Some(g) = &prep {
-                let run = |g: &[String]| match Command::new(&g[0]).args(&g[1..]).stdin(Stdio::null()).output() {
-                    Ok(o) if o.status.success() => Ok(()),
-                    Ok(o) => Err(format!("{}: {}", g.join(" "), String::from_utf8_lossy(&o.stderr).trim())),
-                    Err(e) => Err(format!("{}: {e}", g.join(" "))),
-                };
-                let mut res = run(g);
-                if res.is_err() && stash {
-                    let label = target_label(&target);
-                    let st: Vec<String> = ["git", "-C", &repo.display().to_string(), "stash", "push", "--include-untracked", "-m", &format!("codehead: before switch to {label}")].map(String::from).to_vec();
-                    res = run(&st).and_then(|_| run(g));
-                }
-                if let Err(e) = res {
+            let _ = term.draw(|f| app::draw_status(f, &format!("starting {} · {}…", plan.label, picked.join(", ")), 0));
+            let s = start::Start { repo: &repo, target: &target, message: &message, agents: &picked, flows: &flows };
+            let (t, note) = match start::launch(&s, &plan, engine::client::start) {
+                Ok(r) => r,
+                Err(e) => {
                     tty.leave(&mut out);
                     fail(&e, 1)
                 }
-            }
-            engine::trace("start: git ready");
-            let _ = term.draw(|f| app::draw_status(f, &format!("starting {label} · {}…", picked.join(", ")), 0));
-            let mut t = engine::store::Thread::new(&title, &message, &dir, picked.clone());
-            // a thread on main in an existing checkout: the host pulls main (ff only) before the
-            // 1st turn, the view opens at once; a failed pull: the agents get a note on it
-            t.pull = worktree.is_none() && matches!(target, Target::Checkout { .. } | Target::Worktree { .. }) && (label == "main" || label == "master");
-            if let Some(b) = &worktree {
-                match threads::add_worktree(&repo, b) {
-                    Ok(p) => {
-                        // local files (.env …), a port block, the setup script before the 1st turn
-                        crate::setup::copy_includes(&repo, &p);
-                        t.port = Some(crate::setup::free_port(&engine::store::all()));
-                        if crate::setup::script(&p, "setup").is_some() {
-                            t.setup = Some("pending".into());
-                        }
-                        t.worktree = Some(p.display().to_string());
-                        t.branch = Some(b.clone());
-                    }
-                    Err(e) => {
-                        tty.leave(&mut out);
-                        fail(&e, 1)
-                    }
-                }
-            } else if !label.is_empty() && repo.join(".git").exists() {
-                t.branch = Some(threads::current_branch(&dir)).filter(|b| !b.is_empty());
-            }
-            // each agent's flow: its start step (the 1st, else the owner's pick) goes to the agent
-            // with the task (the host's `prompt`)
-            if !flows.is_empty() {
-                let lib = engine::flows::Library::load(Some(&t.work_dir()));
-                for (agent, slug, start) in &flows {
-                    if let Some(fl) = lib.flow(slug) {
-                        t.set_flow(agent, Some(engine::flows::run::FlowState::new(fl, &lib, *start, engine::now_ms())));
-                    }
-                }
-            }
-            if let Err(e) = t.save() {
-                tty.leave(&mut out);
-                fail(&e, 1)
-            }
-            engine::trace("start: thread saved");
-            // the task to every picked agent; the host starts with it. 0 host (a failed start):
-            // the thread opens with the task as its prompt draft, never lost
-            let note = match engine::client::call(&t.id, &serde_json::json!({"op": "prompt", "to": picked, "text": message})) {
-                Ok(_) => None,
-                Err(e) => {
-                    view::save_prompt_draft(&t.id, &message);
-                    Some(format!("task not sent: {} · the task waits in the prompt · ctrl+enter: send", e.lines().next().unwrap_or_default()))
-                }
             };
-            engine::trace("start: task sent");
+            let title = t.title.clone();
             // the thread has the message (or its draft): the form starts empty again
             app.clear_task();
             open_view(&mut term, &mut tty, &mut out, &t.id, &t.work_dir(), &title, &cwd, note)
@@ -921,10 +828,3 @@ fn start(args: Args) {
     }
 }
 
-/// Branch name of a checkout target (stash message).
-fn target_label(t: &Target) -> String {
-    match t {
-        Target::Checkout { branch, .. } => branch.clone(),
-        _ => String::new(),
-    }
-}

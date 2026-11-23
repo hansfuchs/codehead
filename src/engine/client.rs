@@ -3,6 +3,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -15,26 +16,18 @@ pub fn alive(id: &str) -> bool {
     UnixStream::connect(socket(id)).is_ok()
 }
 
-/// Start the host of thread ID (detached: it outlives this terminal) unless one runs.
+/// Start the host of thread ID (detached: it outlives this terminal) unless one runs; wait
+/// until it serves.
 pub fn ensure(id: &str) -> Result<(), String> {
+    ensure_with(id, &super::exe())
+}
+
+/// `ensure` with the host binary EXE (perf suite: the release binary, not the test binary).
+pub fn ensure_with(id: &str, exe: &Path) -> Result<(), String> {
     if alive(id) {
         return Ok(());
     }
-    let exe = super::exe();
-    let logs = super::logs_dir();
-    std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
-    let log = logs.join(format!("host-{id}.log"));
-    let file = std::fs::OpenOptions::new().create(true).append(true).open(&log).map_err(|e| format!("{}: {e}", log.display()))?;
-    let mut c = Command::new(exe);
-    c.args(["host", id]).stdin(Stdio::null()).stdout(file.try_clone().map_err(|e| e.to_string())?).stderr(file);
-    // SAFETY: setsid is async-signal-safe; runs in the child before exec.
-    unsafe {
-        c.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    let mut child = c.spawn().map_err(|e| format!("codehead host: {e}"))?;
+    let (mut child, log) = spawn_host(id, exe)?;
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
         if alive(id) {
@@ -45,9 +38,50 @@ pub fn ensure(id: &str) -> Result<(), String> {
         if let Ok(Some(s)) = child.try_wait() {
             return Err(format!("codehead host exited ({s}). log: {}", log.display()));
         }
-        std::thread::sleep(Duration::from_millis(30));
+        // a host binds its socket in a few ms: short steps, 0 lost frame budget
+        std::thread::sleep(Duration::from_millis(2));
     }
     Err(format!("codehead host did not start. log: {}", log.display()))
+}
+
+/// Start the host of thread ID unless one runs, 0 wait for it (a new thread: the host sends the
+/// task itself, the view subscribes once the socket is there).
+pub fn start(id: &str) -> Result<(), String> {
+    start_with(id, &super::exe())
+}
+
+/// `start` with the host binary EXE.
+pub fn start_with(id: &str, exe: &Path) -> Result<(), String> {
+    if alive(id) {
+        return Ok(());
+    }
+    let (mut child, _) = spawn_host(id, exe)?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
+/// The host process of thread ID (detached, in its own session), its log file.
+fn spawn_host(id: &str, exe: &Path) -> Result<(std::process::Child, std::path::PathBuf), String> {
+    let logs = super::logs_dir();
+    std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
+    let log = logs.join(format!("host-{id}.log"));
+    let file = std::fs::OpenOptions::new().create(true).append(true).open(&log).map_err(|e| format!("{}: {e}", log.display()))?;
+    let mut c = Command::new(exe);
+    c.args(["host", id]).stdin(Stdio::null()).stdout(file.try_clone().map_err(|e| e.to_string())?).stderr(file);
+    // a test's host: the test's data and run dirs (0 env var in prod: an agent's own `cargo
+    // test` would inherit them and write into the owner's data dir)
+    if cfg!(test) {
+        c.env("CODEHEAD_HOME", super::data_dir()).env("CODEHEAD_RUN", super::run_dir());
+    }
+    // SAFETY: setsid is async-signal-safe; runs in the child before exec.
+    unsafe {
+        c.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let child = c.spawn().map_err(|e| format!("codehead host: {e}"))?;
+    Ok((child, log))
 }
 
 /// Command C to the host of thread ID, which is up. Err: 0 host, or the host's error.

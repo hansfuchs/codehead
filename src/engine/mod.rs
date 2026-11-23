@@ -75,6 +75,10 @@ pub fn run_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("CODEHEAD_RUN").filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }
+    // tests never bind sockets in the owner's run dir (short: a socket path holds max. 104 bytes)
+    if cfg!(test) {
+        return PathBuf::from(format!("/tmp/codehead-test-{}", std::process::id()));
+    }
     match std::env::var_os("XDG_RUNTIME_DIR").filter(|p| !p.is_empty()) {
         Some(p) => PathBuf::from(p).join("codehead"),
         // SAFETY: getuid has 0 failure modes.
@@ -168,6 +172,23 @@ pub fn first_frame() {
     let took = start_instant().elapsed();
     if took > BUDGET {
         trace(&format!("SLOW {} cpu {} boot (1st frame)", took.as_millis(), thread_cpu().as_millis()));
+    }
+}
+
+static TRANSITION: std::sync::Mutex<Option<(std::time::Instant, &'static str)>> = std::sync::Mutex::new(None);
+
+/// A screen change LABEL starts (e.g. the new-thread form's submit): the next screen's 1st frame
+/// ends it ([`transition_end`]).
+pub fn transition_begin(label: &'static str) {
+    *TRANSITION.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), label));
+}
+
+/// A screen's 1st frame: the screen change under way, longer than BUDGET → `SLOW <ms> <label>`.
+pub fn transition_end() {
+    let Some((at, label)) = TRANSITION.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    let took = at.elapsed();
+    if took > BUDGET {
+        trace(&format!("SLOW {} {label}", took.as_millis()));
     }
 }
 

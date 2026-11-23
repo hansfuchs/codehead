@@ -40,5 +40,7 @@ demo *flows:
     ~/.cache/codehead-demo/venv/bin/python scripts/demo/demo.py {{flows}}
 
 # Perf suite (src/perf.rs): every case under 20 ms, cold call included. Release build, 1 thread.
+# The release binary first: the thread start case starts real hosts with it.
 perf *filter:
+    cargo build --release --locked
     cargo test --release --locked --bin codehead perf::cases::{{filter}} -- --ignored --test-threads=1 --nocapture

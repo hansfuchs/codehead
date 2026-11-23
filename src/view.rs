@@ -680,8 +680,16 @@ impl View {
             early.extend(evs.iter().cloned());
         }
         let asks = self.thread.asks.first().map(|a| a.id.clone());
+        let mut worktree = false;
         for e in &evs {
             self.thread.push(e);
+            // the host made the thread's worktree: the view moves there
+            if let store::Kind::ToolResult { id, ok: true, .. } = &e.kind
+                && id == "worktree"
+                && e.agent.as_deref() == Some("setup")
+            {
+                worktree = true;
+            }
             // the logged text (or the turn's end) replaces the live chunks of its agent
             if matches!(e.kind, store::Kind::Text { .. } | store::Kind::Tool { .. } | store::Kind::TurnEnd { .. })
                 && let Some(a) = &e.agent
@@ -706,6 +714,9 @@ impl View {
                 self.sync_flowbars();
             }
         }
+        if worktree {
+            self.worktree_landed();
+        }
         self.place_flow_ask();
         if self.thread.asks.first().map(|a| a.id.clone()) != asks {
             self.sync_ask();
@@ -713,6 +724,36 @@ impl View {
         self.history = self.thread.sent();
         self.dirty = true;
         true
+    }
+
+    /// The thread's work dir changed (the host made its worktree after the view opened): the
+    /// shell, files, paths and changes views move there.
+    fn worktree_landed(&mut self) {
+        let Some(dir) = store::load(&self.id).map(|t| t.work_dir()).filter(|d| d.is_dir()) else { return };
+        if dir == self.cwd {
+            return;
+        }
+        let _ = std::env::set_current_dir(&dir);
+        self.files = crate::files::View::new(&self.id, &dir);
+        self.paths = crate::paths::Paths::new(&dir);
+        if self.shell_cwd == self.cwd {
+            self.shell_cwd = dir.clone();
+        }
+        self.cwd = dir;
+        self.checkouts.clear();
+        self.load_checkouts();
+    }
+
+    /// A new thread's host never came (its task not logged): the task waits in the prompt.
+    fn kickoff_failed(&mut self, task: &str) {
+        let _ = store::update(&self.id, |t| t.kickoff = false);
+        if self.input.text().trim().is_empty() {
+            self.input.set_text(task);
+            self.input.move_end();
+            self.save_prompt();
+        }
+        self.toast("the thread's host did not start · the task waits in the prompt · ctrl+enter: send");
+        self.dirty = true;
     }
 
     /// The log's head is in: the stream again from the 1st event (head, then the tail so far).
@@ -3796,6 +3837,7 @@ fn subscribe(id: &str, tx: Sender<Msg>) -> Unsub {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let done = stop.clone();
     let path = crate::engine::host::socket(id);
+    let born = Instant::now();
     std::thread::spawn(move || {
         while !done.load(Ordering::Relaxed) {
             if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&path)
@@ -3831,7 +3873,8 @@ fn subscribe(id: &str, tx: Sender<Msg>) -> Unsub {
                 }
                 continue;
             }
-            std::thread::sleep(Duration::from_secs(1));
+            // a new thread's host binds within ms of the view's open: short tries first
+            std::thread::sleep(if born.elapsed() < Duration::from_secs(3) { Duration::from_millis(20) } else { Duration::from_secs(1) });
         }
     });
     Unsub(stop)
@@ -3859,6 +3902,17 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
     run_with(term, id, cwd, title, note, first, None).map(|e| e.unwrap_or(Exit::Back))
 }
 
+/// Perf suite: the view of thread ID up to its 1st frame on TERM, as `run_with` opens it.
+#[cfg(test)]
+pub fn open_1st_frame<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path) -> Result<(), String> {
+    let (tx, _rx) = mpsc::channel();
+    let _sub = subscribe(id, tx.clone());
+    let mut v = View::new(id, cwd, "", tx);
+    v.save_prompt();
+    crate::nav::mark_seen_now(id);
+    term.draw(|f| v.draw(f)).map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// EXIT of a sub-thread's view (MAIN: the thread it runs for): back (esc esc) goes to MAIN, not
 /// to the start screen.
 fn to_main(exit: Exit, main: Option<&str>) -> Exit {
@@ -3882,6 +3936,8 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
     };
     // a sub-thread: esc esc and its end go back to the thread it runs for
     let of = me.of;
+    // a new thread: its host logs the task within ms; 0 host after 5 s → the task in the prompt
+    let mut kick_at = me.kickoff.then(Instant::now);
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
     let _sub = subscribe(id, tx.clone());
     crate::engine::trace("view new …");
@@ -3942,6 +3998,7 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
                 if took > crate::engine::BUDGET {
                     crate::engine::trace(&format!("SLOW {} view open → 1st frame", took.as_millis()));
                 }
+                crate::engine::transition_end();
             }
         }
         crate::all_keys(v.all_keys());
@@ -4093,6 +4150,15 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
             if let Some(t) = store::load(id) {
                 for b in &mut v.flowbars {
                     flows_changed |= b.sync(&t, false);
+                }
+                if !t.kickoff {
+                    kick_at = None;
+                } else if kick_at.is_some_and(|at| at.elapsed() > Duration::from_secs(5)) {
+                    kick_at = None;
+                    if !client::alive(id) {
+                        v.kickoff_failed(&t.task);
+                        dirty = true;
+                    }
                 }
             }
         }

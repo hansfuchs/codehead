@@ -37,6 +37,14 @@ pub struct Thread {
     /// before the 1st turn; false once done.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pull: bool,
+    /// A new thread's linked worktree on this branch: the host makes it (`git fetch`, `git
+    /// worktree add`, local files, port) before the 1st turn; None once done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_pending: Option<String>,
+    /// The task goes to the agents when the host starts (the UI never waits for a host): false
+    /// once the host logged it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kickoff: bool,
     /// The thread this one continues (`> handoff`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
