@@ -2045,6 +2045,7 @@ impl View {
     /// The thread's checkouts (more of them: an agent edited in another repo / worktree).
     fn load_checkouts(&mut self) {
         if let Some(t) = store::load(&self.id) {
+            let t = crate::engine::checkouts::prune(&t).unwrap_or(t);
             let mut all: Vec<store::Checkout> = t.all_checkouts().into_iter().filter(|c| Path::new(&c.dir).is_dir()).collect();
             // a work dir without git (codehead started outside of a repo), agents in a repo: the
             // changes of the repos only
@@ -4328,6 +4329,7 @@ mod ask_tests {
         // codehead started in a dir without git; an agent edited in the repo below it
         let mut t = store::Thread::new("no git", "task", &plain, vec!["ada".into()]);
         t.checkouts.push(store::Checkout { dir: repo.display().to_string(), branch: None });
+        t.checkouts_pruned = true;
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (tx, _rx) = mpsc::channel();
@@ -4399,6 +4401,7 @@ mod ask_tests {
         // the thread's work dir: the main checkout; its agent moved to the worktree
         let mut t = store::Thread::new("moved", "task", &repo, vec!["ada".into()]);
         t.checkouts.push(store::Checkout { dir: wt.display().to_string(), branch: Some("feat".into()) });
+        t.checkouts_pruned = true;
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (tx, _rx) = mpsc::channel();
@@ -4419,6 +4422,7 @@ mod ask_tests {
         let mut t = store::Thread::new("own worktree", "task", &repo, vec!["ada".into()]);
         t.worktree = Some(wt.display().to_string());
         t.checkouts.push(store::Checkout { dir: repo.display().to_string(), branch: None });
+        t.checkouts_pruned = true;
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
         let (tx, _rx) = mpsc::channel();
@@ -5724,6 +5728,7 @@ mod ide_tests {
         // 2 repos: the picker above the repos line; ↓ enter: the 2nd
         let mut t = store::load(&t.id).unwrap();
         t.checkouts.push(store::Checkout { dir: b.display().to_string(), branch: None });
+        t.checkouts_pruned = true;
         t.save().unwrap();
         v.set_pane(Pane::Chat);
         v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));

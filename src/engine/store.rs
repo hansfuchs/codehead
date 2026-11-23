@@ -82,6 +82,10 @@ pub struct Thread {
     /// there add them. The 1st checkout: DIR / WORKTREE / BRANCH.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkouts: Vec<Checkout>,
+    /// CHECKOUTS checked against the edits in the thread's events (`checkouts::prune`): older
+    /// versions added a checkout per `cd DIR` / `git -C DIR`, reads too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checkouts_pruned: bool,
     /// The flow of each agent (`flows::run`): agent → its flow. Read it with `flow_map` /
     /// `flow_of`, write it with `set_flow`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
