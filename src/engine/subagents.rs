@@ -11,6 +11,9 @@ use serde_json::Value;
 
 use super::store::{Event, Kind};
 
+/// A session's `subagents` dir: found again after this (a resume in another dir moves it).
+const REDIR: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A task tool: its call starts a subagent.
 pub fn is_sub_tool(name: &str) -> bool {
     matches!(name, "Agent" | "Task") || matches!(name.to_ascii_lowercase().as_str(), "task" | "subagent" | "spawn_agent" | "delegate_task" | "dispatch_agent")
@@ -39,8 +42,8 @@ pub struct Tracker {
     pub running: HashMap<String, Run>,
     /// Ended ids: a later scan never starts them again.
     ended: HashSet<String>,
-    /// Claude Code session id → its `subagents` dir.
-    dirs: HashMap<String, PathBuf>,
+    /// Claude Code session id → its `subagents` dir, when found (found again after `REDIR`).
+    dirs: HashMap<String, (PathBuf, std::time::Instant)>,
     /// Meta files older than this (ms) belong to earlier processes.
     since: u64,
 }
@@ -243,13 +246,15 @@ impl Tracker {
     }
 
     /// The `subagents` dir of Claude Code session SID under ROOT (`~/.claude/projects`).
+    /// A session resumed in another dir (the thread moved repo): the newest transcript copy, found
+    /// again after REDIR.
     fn dir_of(&mut self, root: &Path, sid: &str) -> Option<PathBuf> {
-        if let Some(d) = self.dirs.get(sid) {
+        if let Some((d, _)) = self.dirs.get(sid).filter(|(_, at)| at.elapsed() < REDIR) {
             return Some(d.clone());
         }
-        let project = std::fs::read_dir(root).ok()?.flatten().map(|d| d.path()).find(|p| p.join(format!("{sid}.jsonl")).is_file())?;
-        let d = project.join(sid).join("subagents");
-        self.dirs.insert(sid.to_string(), d.clone());
+        let file = crate::claude::session_file(root, sid)?;
+        let d = file.parent()?.join(sid).join("subagents");
+        self.dirs.insert(sid.to_string(), (d.clone(), std::time::Instant::now()));
         Some(d)
     }
 

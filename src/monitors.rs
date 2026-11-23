@@ -262,7 +262,13 @@ fn completed(path: &str) -> HashSet<String> {
     if let Some(end) = entry.tail.rfind('\n') {
         for line in entry.tail[..=end].lines() {
             let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-            let text = if v["type"] == "queue-operation" { v["content"].as_str() } else if v["type"] == "attachment" { v["attachment"]["prompt"].as_str() } else { None };
+            // the notice: queued, attached, or (delivered at once) a user message
+            let text = match v["type"].as_str() {
+                Some("queue-operation") => v["content"].as_str(),
+                Some("attachment") => v["attachment"]["prompt"].as_str(),
+                Some("user") if v["origin"]["kind"] == "task-notification" => v["message"]["content"].as_str(),
+                _ => None,
+            };
             let Some(text) = text.filter(|t| t.contains("<task-notification>")) else { continue };
             if ["completed", "failed", "killed", "cancelled", "stopped"].iter().any(|status| text.contains(&format!("<status>{status}</status>")))
                 && let Some(id) = text.split_once("<task-id>").and_then(|(_, t)| t.split_once("</task-id>")).map(|(id,_)| id)
@@ -301,6 +307,11 @@ pub fn watching(id: &str, live: &[String]) -> bool {
 /// Watches of thread T: its LIVE agents' Monitor calls and background commands, from the event
 /// log, minus the tasks their Claude transcripts report ended.
 fn watches_of(t: &crate::engine::store::Thread, live: &[String]) -> Vec<Watch> {
+    watches_at(t, live, &crate::config::home().join(".claude/projects"))
+}
+
+/// `watches_of`, the Claude transcripts under ROOT.
+fn watches_at(t: &crate::engine::store::Thread, live: &[String], root: &std::path::Path) -> Vec<Watch> {
     use crate::engine::store::{self, Kind};
     let mut rows: Vec<Value> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
@@ -323,11 +334,7 @@ fn watches_of(t: &crate::engine::store::Thread, live: &[String]) -> Vec<Watch> {
         }
     }
     let mut watches = parse(&rows, crate::engine::now_ms());
-    let root = crate::config::home().join(".claude/projects");
-    let transcript = |agent: &str| -> Option<String> {
-        let sid = t.sessions.get(agent)?;
-        std::fs::read_dir(&root).ok()?.flatten().map(|d| d.path().join(format!("{sid}.jsonl"))).find(|p| p.is_file()).map(|p| p.display().to_string())
-    };
+    let transcript = |agent: &str| -> Option<String> { crate::claude::session_file(root, t.sessions.get(agent)?).map(|p| p.display().to_string()) };
     let ended: HashMap<String, HashSet<String>> = watches.iter().map(|w| w.session.clone()).collect::<HashSet<_>>().into_iter().filter_map(|a| Some((a.clone(), completed(&transcript(&a)?)))).collect();
     watches.retain(|w| !ended.get(&w.session).is_some_and(|ids| ids.contains(&w.id)));
     watches
@@ -371,6 +378,58 @@ mod tests {
         assert!(watching(&t.id, &["ada".into()]));
         assert!(!watching(&t.id, &[]));
         let _ = store::delete(&t.id);
+    }
+
+    /// A session resumed in another dir: 2 transcript copies, the end notice only in the newer one
+    /// (the older one sorts 1st by name). The watch ends: 0 stale monitors row, the host may exit.
+    #[test]
+    fn a_background_task_ends_by_the_newest_transcript_copy() {
+        use crate::engine::store::{self, Event, Kind};
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut t = store::Thread::new("moved", "x", std::path::Path::new("/tmp"), vec!["ada".into()]);
+        t.sessions.insert("ada".into(), "sid-moved".into());
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let ev = |kind| Event { ts: crate::engine::now_ms(), agent: Some("ada".into()), kind };
+        store::append(&t.id, &ev(Kind::Tool { id: "c1".into(), name: "Bash".into(), input: json!({"command":"run ci","description":"local CI","run_in_background":true}) })).unwrap();
+        store::append(&t.id, &ev(Kind::ToolResult { id: "c1".into(), output: "Command running in background with ID: bg1. Output is being written to: /tmp/bg1.output".into(), ok: true })).unwrap();
+
+        // the stale copy: 1st dir by name, 1 h old, 0 notice; the live copy: the end notice
+        let root = std::env::temp_dir().join(format!("codehead-moved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (old, new) = (root.join("-a-codehead-x"), root.join("-b-platform-x"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let notice = json!({"type":"queue-operation","content":"<task-notification>\n<task-id>bg1</task-id>\n<status>completed</status>\n</task-notification>"});
+        std::fs::write(new.join("sid-moved.jsonl"), format!("{notice}\n")).unwrap();
+        std::fs::write(old.join("sid-moved.jsonl"), "{\"type\":\"user\"}\n").unwrap();
+        let file = std::fs::File::options().write(true).open(old.join("sid-moved.jsonl")).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600)).unwrap();
+
+        assert!(watches_at(&t, &["ada".into()], &root).is_empty());
+
+        // 0 transcript of the session: the watch stays
+        t.sessions.insert("ada".into(), "sid-none".into());
+
+        assert_eq!(watches_at(&t, &["ada".into()], &root).len(), 1);
+
+        let _ = store::delete(&t.id);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A notice delivered at once (0 queue): only a `user` line with origin task-notification.
+    #[test]
+    fn a_user_line_notice_ends_the_task() {
+        let dir = std::env::temp_dir().join(format!("codehead-user-notice-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let plain = json!({"type":"user","message":{"content":"<task-notification><task-id>fake</task-id><status>completed</status></task-notification>"}});
+        let notice = json!({"type":"user","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>\n<task-id>m1</task-id>\n<status>completed</status>\n</task-notification>"}});
+        std::fs::write(&path, format!("{plain}\n{notice}\n")).unwrap();
+
+        assert_eq!(completed(path.to_str().unwrap()), HashSet::from(["m1".into()]));
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
