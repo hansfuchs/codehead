@@ -273,12 +273,35 @@ fn completed(path: &str) -> HashSet<String> {
     entry.ended.clone()
 }
 
-/// Watches of THREAD: its agents' Monitor calls and background commands, from the event log,
-/// minus the tasks their Claude transcripts report ended.
+/// Watches of THREAD and of its running sub-threads (their agents marked `(sub)`).
 fn load(thread: &str) -> Vec<Watch> {
-    use crate::engine::store::{self, Kind};
-    let Some(t) = store::load(thread) else { return Vec::new() };
+    let Some(t) = crate::engine::store::load(thread) else { return Vec::new() };
     let (live, _) = crate::engine::client::state(&t.id);
+    let mut out = watches_of(&t, &live);
+    for kid in &t.kids {
+        let mut w = watches(kid);
+        for x in &mut w { x.agent = format!("{} (sub)", x.agent); }
+        out.extend(w);
+    }
+    out
+}
+
+/// Watches of thread ID alone (0 sub-thread), its live agents from its host.
+pub fn watches(id: &str) -> Vec<Watch> {
+    let Some(t) = crate::engine::store::load(id) else { return Vec::new() };
+    let (live, _) = crate::engine::client::state(&t.id);
+    watches_of(&t, &live)
+}
+
+/// Thread ID's host itself: 1+ watch of its LIVE agents runs (a ping of its own socket: 0 answer).
+pub fn watching(id: &str, live: &[String]) -> bool {
+    crate::engine::store::load(id).is_some_and(|t| !watches_of(&t, live).is_empty())
+}
+
+/// Watches of thread T: its LIVE agents' Monitor calls and background commands, from the event
+/// log, minus the tasks their Claude transcripts report ended.
+fn watches_of(t: &crate::engine::store::Thread, live: &[String]) -> Vec<Watch> {
+    use crate::engine::store::{self, Kind};
     let mut rows: Vec<Value> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
     for e in store::events(&t.id) {
@@ -332,6 +355,22 @@ mod tests {
         let stop = json!({"session":"session","content":{"title":"TaskStop","raw_input":{"task_id":"watch1"}}});
         assert!(parse(&[row, stop], 2000).is_empty());
         assert!(parse(&[json!({"content":{"title":"ToolSearch","raw_input":{"query":"select:Monitor"}}})], 2000).is_empty());
+    }
+
+    /// A sub-thread's host: a Monitor of a live agent keeps it from its end; 0 live agent: 0 watch.
+    #[test]
+    fn a_thread_host_sees_the_monitors_of_its_live_agents() {
+        use crate::engine::store::{self, Event, Kind};
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t = store::Thread::new("kid", "x", std::path::Path::new("/tmp"), vec!["ada".into()]);
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let ev = |kind| Event { ts: crate::engine::now_ms(), agent: Some("ada".into()), kind };
+        store::append(&t.id, &ev(Kind::Tool { id: "c1".into(), name: "Monitor".into(), input: json!({"command":"gh run watch","description":"CI run"}) })).unwrap();
+        store::append(&t.id, &ev(Kind::ToolResult { id: "c1".into(), output: "Monitor started (task w1, expires in 30m)".into(), ok: true })).unwrap();
+        assert!(watching(&t.id, &["ada".into()]));
+        assert!(!watching(&t.id, &[]));
+        let _ = store::delete(&t.id);
     }
 
     #[test]

@@ -304,7 +304,10 @@ fn scan(full: bool) -> Vec<Thread> {
     };
     par_map(&list, |t| {
             let t = t.clone();
-            let (live, busy) = if crate::engine::client::alive(&t.id) { crate::engine::client::state(&t.id) } else { (Vec::new(), Vec::new()) };
+            let alive = crate::engine::client::alive(&t.id);
+            let (live, busy) = if alive { crate::engine::client::state(&t.id) } else { (Vec::new(), Vec::new()) };
+            // work goes on without a turn: a running sub-thread, a monitor or background command
+            let busy = !busy.is_empty() || !t.kids.is_empty() || (alive && crate::monitors::watching(&t.id, &live));
             let (ask, error, notes) = activity(&t.id);
             let needs = if ask {
                 Some("question".to_string())
@@ -315,7 +318,7 @@ fn scan(full: bool) -> Vec<Thread> {
             };
             Thread {
                 live: live.len(),
-                busy: !busy.is_empty(),
+                busy,
                 needs,
                 stat: stats.get(&t.work_dir()).copied().flatten(),
                 agents: t.agents.clone(),

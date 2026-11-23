@@ -1043,7 +1043,7 @@ impl View {
         }
         let who = format!("@{}", agents.join(" @"));
         self.host("sub_start", json!({"op": "sub_start", "id": t.id, "title": title, "text": format!("{who} · {first}")}));
-        self.subthreads.started(crate::subthreads::Kid { id: t.id.clone(), title: title.clone(), agents: agents.clone(), start: t.created, busy: false, asking: false, steps: Vec::new() });
+        self.subthreads.started(crate::subthreads::Kid { id: t.id.clone(), title: title.clone(), agents: agents.clone(), start: t.created, busy: false, asking: false, watches: 0, steps: Vec::new() });
         let context = format!(
             "[codehead: you run in a sub-thread of the thread “{}”: the same checkout ({}), 0 history of it. The message below is your whole task. Do it, then end with your result as your last message: the thread waits for you; it gets that message.]",
             main.title.lines().next().unwrap_or_default(),

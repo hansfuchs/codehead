@@ -887,6 +887,11 @@ impl Host {
         if since.elapsed() < KID_DONE {
             return;
         }
+        // a monitor or background command of its agents runs: not done (its result comes later)
+        if crate::monitors::watching(&self.id, &self.sessions.keys().cloned().collect::<Vec<_>>()) {
+            self.kid.idle_at = None;
+            return;
+        }
         let events = store::events_tail(&self.id, 1 << 20);
         // its result: the last message of its agents (the agent that wrote it: the message's)
         let last = events.iter().rev().find_map(|e| match &e.kind {
@@ -1340,7 +1345,11 @@ pub fn run(id: &str) -> ! {
         let busy = h.sessions.values().any(|l| l.busy);
         // running subagents keep the host (and their harness process) alive; a resume waits too
         if !busy && !h.subagents.any() && !h.setup_running && h.asks.is_empty() && h.resume.is_empty() && h.last.elapsed() >= IDLE && !h.has_kids() {
-            break;
+            // a monitor or background command runs: the host (and its harness) stays
+            if !crate::monitors::watching(&h.id, &h.sessions.keys().cloned().collect::<Vec<_>>()) {
+                break;
+            }
+            h.last = Instant::now();
         }
         // the thread was deleted: end with it
         if !store::thread_dir(&h.id).join("thread.json").is_file() {

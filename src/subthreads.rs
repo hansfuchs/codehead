@@ -28,6 +28,8 @@ pub struct Kid {
     pub busy: bool,
     /// An agent of it asks (permission, question): enter in the box opens it to answer.
     pub asking: bool,
+    /// Its running watches (monitors, background commands): it waits for them.
+    pub watches: usize,
     /// Its last steps, oldest first: agent texts (1st line), tool calls.
     pub steps: Vec<String>,
 }
@@ -91,7 +93,7 @@ fn read(main: &str) -> Vec<Kid> {
         let alive = crate::engine::client::alive(id);
         let busy = alive && !crate::engine::client::state(id).1.is_empty();
         let events = store::events_tail(id, 1 << 16);
-        out.push(Kid { id: id.clone(), title: k.title.clone(), agents: k.agents.clone(), start: k.created, busy, asking: asking(&events), steps: steps(&events) });
+        out.push(Kid { id: id.clone(), title: k.title.clone(), agents: k.agents.clone(), start: k.created, busy, asking: asking(&events), watches: if alive { crate::monitors::watches(id).len() } else { 0 }, steps: steps(&events) });
     }
     out
 }
@@ -213,11 +215,13 @@ impl SubThreads {
             }
             let sel = cur.as_deref() == Some(k.id.as_str());
             let state = if k.asking {
-                "asks you · enter: open"
+                "asks you · enter: open".to_string()
             } else if k.busy {
-                "working"
+                "working".to_string()
+            } else if k.watches > 0 {
+                format!("waits on {} monitor{}", k.watches, if k.watches == 1 { "" } else { "s" })
             } else {
-                "starting"
+                "starting".to_string()
             };
             let tail = format!(" · @{} · {} · {state}", k.agents.join(" @"), took(k.start));
             let what = fit(format!("{}{}", if sel { "› " } else { "  " }, k.title), width.saturating_sub(tail.chars().count()));
@@ -295,7 +299,7 @@ mod tests {
     use ratatui::crossterm::event::KeyModifiers;
 
     fn kid(id: &str) -> Kid {
-        Kid { id: id.into(), title: format!("job {id}"), agents: vec!["ADA".into()], start: crate::engine::now_ms(), busy: true, asking: false, steps: vec!["ADA: Bash git status".into()] }
+        Kid { id: id.into(), title: format!("job {id}"), agents: vec!["ADA".into()], start: crate::engine::now_ms(), busy: true, asking: false, watches: 0, steps: vec!["ADA: Bash git status".into()] }
     }
 
     #[test]
@@ -341,6 +345,15 @@ mod tests {
         let text: Vec<String> = s.lines(90).iter().map(|l| l.spans.iter().map(|x| x.content.to_string()).collect()).collect();
         assert!(text[0].contains("asks you · enter: open"), "{text:?}");
         assert_eq!(s.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), Some(Act::Open("a".into())));
+    }
+
+    #[test]
+    fn a_sub_thread_that_waits_on_a_monitor_says_so() {
+        let mut s = SubThreads::default();
+        s.started(Kid { busy: false, watches: 1, ..kid("a") });
+        s.open = true;
+        let text: Vec<String> = s.lines(90).iter().map(|l| l.spans.iter().map(|x| x.content.to_string()).collect()).collect();
+        assert!(text[0].contains("waits on 1 monitor"), "{text:?}");
     }
 
     #[test]
