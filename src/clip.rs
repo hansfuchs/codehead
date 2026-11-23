@@ -13,7 +13,11 @@ fn wayland() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
-/// Copy TEXT. false = 0 clipboard tools found.
+/// The copy tools, in order: (binary, args). Wayland first.
+const TOOLS: [(&str, &[&str]); 4] = [("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["-ib"]), ("pbcopy", &[])];
+
+/// Copy TEXT. false = 0 clipboard tools found. The tool runs off the UI thread (a spawn and its
+/// wait: 5-15 ms); the text is in the clipboard a few ms after the return.
 pub fn copy(text: &str) -> bool {
     // tests: 0 writes to the owner's clipboard; the text for asserts
     #[cfg(test)]
@@ -22,7 +26,13 @@ pub fn copy(text: &str) -> bool {
         return true;
     }
     #[allow(unreachable_code)]
-    copy_tools(text)
+    copy_with(&TOOLS, text, false)
+}
+
+/// `copy` that waits for the tool: the process ends right after (`codehead -c`). false = 0 tool,
+/// or it failed.
+pub fn copy_wait(text: &str) -> bool {
+    copy_with(&TOOLS, text, true)
 }
 
 #[cfg(test)]
@@ -31,21 +41,23 @@ thread_local! {
     pub static LAST: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
-fn copy_tools(text: &str) -> bool {
-    let tools: [(&str, &[&str]); 4] = [("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["-ib"]), ("pbcopy", &[])];
-    for (bin, args) in tools {
-        if !have(bin) || (bin == "wl-copy" && !wayland()) {
-            continue;
+/// TEXT to the 1st of TOOLS on $PATH. WAIT: the tool's end (its exit status), else off the
+/// calling thread (true: a tool runs). false = 0 tool.
+pub fn copy_with(tools: &[(&str, &[&str])], text: &str, wait: bool) -> bool {
+    let Some((bin, args)) = tools.iter().find(|(bin, _)| have(bin) && (*bin != "wl-copy" || wayland())) else { return false };
+    let (bin, args, text) = (bin.to_string(), args.iter().map(|a| a.to_string()).collect::<Vec<_>>(), text.to_string());
+    let run = move || {
+        let Ok(mut c) = Command::new(&bin).args(&args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { return false };
+        if let Some(mut stdin) = c.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
         }
-        let child = Command::new(bin).args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
-        if let Ok(mut c) = child {
-            if let Some(mut stdin) = c.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            return c.wait().is_ok_and(|s| s.success());
-        }
+        c.wait().is_ok_and(|s| s.success())
+    };
+    if wait {
+        return run();
     }
-    false
+    std::thread::spawn(run);
+    true
 }
 
 pub fn paste() -> Option<String> {

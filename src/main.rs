@@ -755,7 +755,7 @@ fn start(args: Args) {
                 return;
             }
             let text: String = paths.iter().map(|p| format!("{}\n", p.display())).collect();
-            if clip::copy(&text) {
+            if clip::copy_wait(&text) {
                 println!("copied {} path(s)", paths.len());
             } else {
                 print!("{text}");

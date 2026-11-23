@@ -12,8 +12,13 @@ const RUNS: usize = 5;
 
 /// Time F: 1 cold run, RUNS warm runs. Fail if the slowest run reaches BUDGET.
 fn bench<T>(name: &str, f: impl FnMut() -> T) {
-    let worst = measure(name, f);
-    assert!(worst < BUDGET, "{name}: {:.2} ms ≥ budget {} ms", ms(worst), BUDGET.as_millis());
+    bench_within(name, BUDGET, f);
+}
+
+/// `bench` with its own budget (a 1-off action, e.g. a form's save: 50 ms).
+fn bench_within<T>(name: &str, budget: Duration, mut f: impl FnMut() -> T) {
+    let worst = measure_budget(name, budget, || (), |_| f());
+    assert!(worst < budget, "{name}: {:.2} ms ≥ budget {} ms", ms(worst), budget.as_millis());
 }
 
 /// `bench` without the assert: the slowest run (several cases in 1 test: each prints its line,
@@ -24,7 +29,12 @@ fn measure<T>(name: &str, mut f: impl FnMut() -> T) -> Duration {
 
 /// `measure` with an untimed PREP before each run (its value goes to F): a run's background work
 /// (a host's `git worktree add`) never slows the next run.
-fn measure_split<P, T>(name: &str, mut prep: impl FnMut() -> P, mut f: impl FnMut(P) -> T) -> Duration {
+fn measure_split<P, T>(name: &str, prep: impl FnMut() -> P, f: impl FnMut(P) -> T) -> Duration {
+    measure_budget(name, BUDGET, prep, f)
+}
+
+/// `measure_split` against BUDGET (the ok / SLOW mark).
+fn measure_budget<P, T>(name: &str, budget: Duration, mut prep: impl FnMut() -> P, mut f: impl FnMut(P) -> T) -> Duration {
     let mut time = || {
         let p = prep();
         let at = Instant::now();
@@ -34,7 +44,7 @@ fn measure_split<P, T>(name: &str, mut prep: impl FnMut() -> P, mut f: impl FnMu
     let cold = time();
     let warm = (0..RUNS).map(|_| time()).max().unwrap_or_default();
     let worst = cold.max(warm);
-    let mark = if worst < BUDGET { "ok  " } else { "SLOW" };
+    let mark = if worst < budget { "ok  " } else { "SLOW" };
     eprintln!("{mark} {name:<28} cold {:>7.2} ms  warm max {:>7.2} ms", ms(cold), ms(warm));
     worst
 }
@@ -311,6 +321,18 @@ mod cases {
         }
         settle();
         assert!(slow.is_empty(), "thread start ≥ budget {} ms: {}", BUDGET.as_millis(), slow.join(", "));
+    }
+
+    /// A copy key (selection, path, code block): the UI thread's part of `clip::copy` with 64 KB.
+    /// The tool: `cat` (the same spawn, pipe and wait as pbcopy / wl-copy, 0 write to the
+    /// owner's clipboard). The tool's own run (off the UI thread) prints for reference.
+    #[test]
+    #[ignore = "perf: just perf"]
+    fn clipboard_copy_64k() {
+        let text = fixture::RUST.chars().cycle().take(64 << 10).collect::<String>();
+        let cat: [(&str, &[&str]); 1] = [("cat", &[])];
+        bench("clipboard copy 64 KB", || assert!(crate::clip::copy_with(&cat, &text, false)));
+        super::measure("clipboard tool run (off UI)", || crate::clip::copy_with(&cat, &text, true));
     }
 
     #[test]
