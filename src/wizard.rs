@@ -624,7 +624,7 @@ pub fn run(dry: bool) -> ! {
     if let Err(e) = tty.enter(&mut out) {
         crate::fail(&format!("terminal: {e}"), 1);
     }
-    let mut term = match ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout())) {
+    let mut term = match ratatui::Terminal::new(crate::frames::backend()) {
         Ok(t) => t,
         Err(e) => {
             tty.leave(&mut out);

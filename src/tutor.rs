@@ -560,7 +560,7 @@ fn size() -> (u16, u16) {
 
 /// The whole screen blank, TOP's buffers reset to the size now. Not `Terminal::clear`: it asks
 /// the terminal for the cursor (up to 2 s without an answer, keys typed then get lost).
-fn wipe(top: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>) {
+fn wipe(top: &mut Terminal<ratatui::backend::CrosstermBackend<crate::frames::Frames>>) {
     let (w, h) = size();
     let _ = top.resize(Rect::new(0, 0, w, h));
 }
@@ -568,7 +568,7 @@ fn wipe(top: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>) {
 /// A window under MIN_W x MIN_H: a screen that asks for a bigger one, until it is (the size is
 /// read again on each resize). None: go on (big enough, or enter: anyway); Some(code): esc
 /// back, ctrl+c quit.
-fn size_gate(top: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>) -> Option<i32> {
+fn size_gate(top: &mut Terminal<ratatui::backend::CrosstermBackend<crate::frames::Frames>>) -> Option<i32> {
     use ratatui::crossterm::event::{Event as Ev, KeyCode, KeyEventKind, KeyModifiers};
     loop {
         let (w, h) = size();
@@ -753,7 +753,7 @@ fn show(main: &str, seeded: &str, repo: &Path, spec: &Spec, root: &Path) -> i32 
     if tty.enter(&mut out).is_err() {
         return BACK;
     }
-    let Ok(mut top) = Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout())) else {
+    let Ok(mut top) = Terminal::new(crate::frames::backend()) else {
         tty.leave(&mut out);
         return BACK;
     };
@@ -783,7 +783,7 @@ fn show(main: &str, seeded: &str, repo: &Path, spec: &Spec, root: &Path) -> i32 
             }
             continue;
         };
-        let Ok(mut term) = Terminal::with_options(ratatui::backend::CrosstermBackend::new(io::stdout()), TerminalOptions { viewport: Viewport::Fixed(view) }) else { break BACK };
+        let Ok(mut term) = Terminal::with_options(crate::frames::backend(), TerminalOptions { viewport: Viewport::Fixed(view) }) else { break BACK };
         let dir = store::load(&id).map(|t| t.work_dir()).unwrap_or_else(|| repo.to_path_buf());
         let title = store::load(&id).map(|t| t.title).unwrap_or_default();
         let tail = tails.entry(id.clone()).or_insert_with(|| store::Tail::new(&id));
@@ -835,7 +835,7 @@ enum Form {
 
 /// The real new-thread form in the frame, the prompt ready: a flow picked, started → the new
 /// thread (with its flow; 0 flow picked: chore). None: the terminal failed.
-fn new_thread(top: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>, coach: &mut Coach, spec: &Spec, repo: &Path, root: &Path) -> Option<Form> {
+fn new_thread(top: &mut Terminal<ratatui::backend::CrosstermBackend<crate::frames::Frames>>, coach: &mut Coach, spec: &Spec, repo: &Path, root: &Path) -> Option<Form> {
     let notes = root.join("home-repo/notes");
     let cfg = crate::app::Config {
         notes,
@@ -852,7 +852,7 @@ fn new_thread(top: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>
     let mut app = crate::app::App::new(cfg, "");
     app.go_home(crate::menu::Home::New);
     app.set_prompt(FLOW_TASK);
-    let fixed = |view: Rect| Terminal::with_options(ratatui::backend::CrosstermBackend::new(io::stdout()), TerminalOptions { viewport: Viewport::Fixed(view) }).ok();
+    let fixed = |view: Rect| Terminal::with_options(crate::frames::backend(), TerminalOptions { viewport: Viewport::Fixed(view) }).ok();
     let mut wh = size();
     let (mut view, mut side) = layout(wh.0, wh.1);
     let mut term = fixed(view)?;

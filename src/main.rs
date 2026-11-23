@@ -31,6 +31,7 @@ mod files;
 mod graphics;
 mod flowbar;
 mod flowrail;
+mod frames;
 mod flows;
 mod fuzzy;
 mod engine;
@@ -252,7 +253,7 @@ menu:    ctrl+p on every screen (setting keys.menu: 1 key codehead binds to noth
          agents: the agents of the thread in view (enter, enter: remove = it leaves the thread), add,
          edit → the agents tab of the start screen.";
 
-type Term = Terminal<CrosstermBackend<Stdout>>;
+type Term = Terminal<CrosstermBackend<frames::Frames>>;
 
 #[derive(Default)]
 struct Args {
@@ -619,7 +620,7 @@ fn start(args: Args) {
         tty.leave(&mut out);
         fail(&format!("terminal: {e}"), 1);
     }
-    let mut term = match Terminal::new(CrosstermBackend::new(io::stdout())) {
+    let mut term = match Terminal::new(frames::backend()) {
         Ok(t) => t,
         Err(e) => {
             tty.leave(&mut out);
@@ -799,7 +800,11 @@ fn start(args: Args) {
                 println!("thread in {} · agents {} · task:\n{message}", plan.dir.display(), picked.join(", "));
                 return;
             }
-            let _ = term.draw(|f| app::draw_status(f, &format!("starting {} · {}…", plan.label, picked.join(", ")), 0));
+            // a status frame only for a `git switch` (ms to s): else the start takes ~1 ms and a
+            // blank frame between the form and the view only flashes
+            if plan.prep.is_some() {
+                let _ = term.draw(|f| app::draw_status(f, &format!("starting {} · {}…", plan.label, picked.join(", ")), 0));
+            }
             let s = start::Start { repo: &repo, target: &target, message: &message, agents: &picked, flows: &flows };
             let (t, note) = match start::launch(&s, &plan, engine::client::start) {
                 Ok(r) => r,
