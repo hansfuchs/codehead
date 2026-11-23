@@ -4747,6 +4747,34 @@ mod pane_tests {
         assert_eq!((label.as_str(), on), (" ⌂ home ?2 ", true));
     }
 
+    /// ctrl+p → threads → the card of this thread → ctrl+o → a → y: archived, the view goes to
+    /// the start screen's threads tab; the prompt's draft stays.
+    #[test]
+    fn archiving_this_thread_from_the_menu_goes_home() {
+        let t = crate::engine::store::Thread::new("archive from view", "task", Path::new("/tmp"), vec!["ada".into()]);
+        t.save().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(&t.id, Path::new("/tmp"), "archive from view", tx);
+        v.input.set_text("half a message");
+        v.open_menu();
+        v.menu.as_mut().unwrap().list.set_cards(vec![crate::nav::Card { id: t.id.clone(), title: "archive from view".into(), state: "open".into(), ..Default::default() }]);
+        // quick → threads (tab bar), ↓ repos, ↓ views, ↓ the list
+        for k in [KeyCode::Right, KeyCode::Down, KeyCode::Down, KeyCode::Down] {
+            press(&mut v, k, KeyModifiers::NONE);
+        }
+        press(&mut v, KeyCode::Char('o'), KeyModifiers::CONTROL);
+        let s = screen(&mut v);
+        assert!(s.contains("archive: worktree goes"), "{s}");
+        press(&mut v, KeyCode::Char('a'), KeyModifiers::NONE);
+        let s = screen(&mut v);
+        assert!(s.contains("archive 1 thread(s)?"), "{s}");
+        assert!(press(&mut v, KeyCode::Char('y'), KeyModifiers::NONE), "the view ends");
+        assert!(matches!(v.exit, Exit::Home(crate::menu::Home::Threads)));
+        assert_eq!(crate::engine::store::load(&t.id).unwrap().state, "archived");
+        assert_eq!(v.input.text(), "half a message");
+        let _ = crate::engine::store::delete(&t.id);
+    }
+
     /// A spawn under way (the thread just opened): the `>` dropdown stays over its goo.
     #[test]
     fn spawn_never_draws_over_the_command_dropdown() {
