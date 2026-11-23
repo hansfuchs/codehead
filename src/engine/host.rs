@@ -217,6 +217,9 @@ impl Host {
         let roster = roster::active();
         let system = harness::system_prompt(&a, &t, &roster);
         let dir = t.work_dir();
+        if let Some(p) = super::checkouts::prune(&t) {
+            t = p;
+        }
         let extra: Vec<PathBuf> = t.all_checkouts().into_iter().skip(1).map(|c| PathBuf::from(c.dir)).filter(|d| d.is_dir()).collect();
         let spec = harness::Spec { agent: &a, thread: &self.id, dir: &dir, resume: t.sessions.get(agent).map(String::as_str), fork: t.fork.iter().any(|a| a == agent), system: &system, exe: &self.exe, extra: &extra };
         let session = harness::spawn(&spec, self.harness_tx.clone())?;

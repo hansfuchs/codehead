@@ -3,8 +3,9 @@
 //! its branch. The merge tab finds the PRs of every checkout's branch; Claude agents get each
 //! checkout as `--add-dir`.
 //!
-//! Edits only (Edit / Write / MultiEdit / NotebookEdit, ACP `edit` tools, Bash `cd DIR` /
-//! `git -C DIR`): reads of other repos (research) add 0 checkouts.
+//! Edits only (Edit / Write / MultiEdit / NotebookEdit, ACP `edit` tools, Bash commands that
+//! write: `git commit`, `sed -i`, `> file`, `mv` …, in their `cd DIR` / `git -C DIR`): reads of
+//! other repos (research: `cd DIR && grep`, `git -C DIR status`) add 0 checkouts.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -38,17 +39,134 @@ pub fn edited(name: &str, input: &Value) -> Vec<PathBuf> {
     out
 }
 
-/// Dirs of shell command CMD: `cd DIR`, `git -C DIR`.
-fn work_dirs(cmd: &str) -> Vec<PathBuf> {
-    let words: Vec<&str> = cmd.split(|c: char| c.is_whitespace() || c == ';' || c == '&' || c == '|' || c == '(' || c == ')').filter(|w| !w.is_empty()).collect();
-    let mut out = Vec::new();
-    for w in words.windows(2) {
-        if w[0] == "cd" || w[0] == "-C" {
-            let d = w[1].trim_matches(|c| c == '"' || c == '\'');
-            let d = d.strip_prefix("~/").map_or_else(|| PathBuf::from(d), |r| crate::config::home().join(r));
-            out.push(d);
+/// Git subcommands that change the checkout (its files, index or branch) or publish it.
+const GIT_WRITES: &[&str] = &["add", "am", "apply", "checkout", "cherry-pick", "commit", "merge", "mv", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash", "switch"];
+
+/// Shell commands that write their path arguments.
+const SHELL_WRITES: &[&str] = &["chmod", "cp", "install", "ln", "mkdir", "mv", "patch", "rm", "rmdir", "tee", "touch", "truncate"];
+
+/// CMD without the bodies of its heredocs (`<<EOF` … `EOF`): their lines are text, not commands.
+fn strip_heredocs(cmd: &str) -> String {
+    let mut out = String::new();
+    let mut end: Option<String> = None;
+    for line in cmd.lines() {
+        if let Some(e) = &end {
+            if line.trim() == e {
+                end = None;
+            }
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+        if let Some(i) = line.find("<<") {
+            let rest = line[i + 2..].trim_start_matches(['-', '~']).trim_start();
+            let word: String = rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, ';' | '&' | '|' | ')')).collect();
+            let word = word.trim_matches(|c| c == '"' || c == '\'');
+            if !word.is_empty() && !word.starts_with('<') {
+                end = Some(word.to_string());
+            }
         }
     }
+    out
+}
+
+/// Word W without its surrounding quotes.
+fn unquote(w: &str) -> &str {
+    for q in ['"', '\''] {
+        if w.len() >= 2 && w.starts_with(q) && w.ends_with(q) {
+            return &w[1..w.len() - 1];
+        }
+    }
+    w
+}
+
+/// Path word W, absolute or under CWD (`~/` → home); 0 path: None.
+fn path_of(w: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    let w = unquote(w);
+    if w.is_empty() || w.starts_with('-') || w.starts_with('$') {
+        return None;
+    }
+    if let Some(r) = w.strip_prefix("~/") {
+        return Some(crate::config::home().join(r));
+    }
+    let p = PathBuf::from(w);
+    if p.is_absolute() {
+        return Some(p);
+    }
+    cwd.map(|c| c.join(p))
+}
+
+/// The dirs and files shell command CMD writes in: per segment (`&&`, `;`, `|` …) that writes,
+/// its dir (`cd DIR` before it, `git -C DIR`) and its absolute targets (`> /x`, `mv a /x`).
+/// Segments that only read (`cd DIR && grep`, `git -C DIR status`): 0 paths.
+fn work_dirs(cmd: &str) -> Vec<PathBuf> {
+    let cmd = strip_heredocs(cmd);
+    let mut out = Vec::new();
+    let mut cwd: Option<PathBuf> = None;
+    let segments = cmd.split([';', '&', '|', '(', ')', '\n']);
+    for seg in segments {
+        let words: Vec<&str> = seg.split_whitespace().collect();
+        // leading `VAR=x` assignments, `sudo`, `command`: not the command
+        let Some(at) = words.iter().position(|w| !(w.contains('=') && !w.starts_with('-')) && !matches!(*w, "sudo" | "command" | "time" | "env")) else { continue };
+        let (verb, args) = (words[at], &words[at + 1..]);
+        if verb == "cd" {
+            cwd = args.first().and_then(|w| path_of(w, cwd.as_deref()));
+            continue;
+        }
+        let mut dir = cwd.clone();
+        let mut targets = Vec::new();
+        let mut writes = false;
+        // redirects: `> f`, `>> f`, `2> f`, `>f`; 0 for `>&2`, `/dev/…`
+        for (i, w) in words.iter().enumerate() {
+            let Some(r) = w.find('>') else { continue };
+            if !w[..r].chars().all(|c| c.is_ascii_digit() || c == '&') {
+                continue;
+            }
+            let rest = w[r..].trim_start_matches('>');
+            let target = if rest.is_empty() { words.get(i + 1).copied().unwrap_or_default() } else { rest };
+            if target.starts_with('&') || unquote(target).starts_with("/dev/") || target.is_empty() {
+                continue;
+            }
+            writes = true;
+            targets.extend(path_of(target, None));
+        }
+        match verb {
+            "git" => {
+                let mut i = 0;
+                while i < args.len() && args[i].starts_with('-') {
+                    if args[i] == "-C" {
+                        dir = args.get(i + 1).and_then(|w| path_of(w, cwd.as_deref()));
+                    }
+                    i += if matches!(args[i], "-C" | "-c") { 2 } else { 1 };
+                }
+                writes |= args.get(i).is_some_and(|s| GIT_WRITES.contains(s));
+            }
+            "sed" | "perl" => {
+                // `-i`, `-i.bak`, `--in-place`; perl: `-pi`, `-pie` (lower-case flag clusters)
+                let perl_flags = |w: &str| w.len() > 1 && w[1..].chars().all(|c| c.is_ascii_lowercase()) && w.contains('i');
+                let in_place = |w: &&str| *w == "--in-place" || (w.starts_with('-') && !w.starts_with("--") && (w.starts_with("-i") || (verb == "perl" && perl_flags(w))));
+                if args.iter().any(in_place) {
+                    writes = true;
+                    targets.extend(args.iter().filter(|w| unquote(w).starts_with('/') || w.starts_with("~/")).filter_map(|w| path_of(w, None)));
+                }
+            }
+            v if SHELL_WRITES.contains(&v) => {
+                writes = true;
+                let paths: Vec<PathBuf> = args.iter().filter_map(|w| path_of(w, None)).collect();
+                // a copy writes its last argument only, the sources stay
+                match v {
+                    "cp" | "install" | "ln" => targets.extend(paths.last().cloned()),
+                    _ => targets.extend(paths),
+                }
+            }
+            _ => {}
+        }
+        if writes {
+            out.extend(dir);
+            out.extend(targets);
+        }
+    }
+    out.retain(|p| !p.starts_with("/dev"));
     out
 }
 
@@ -76,9 +194,11 @@ pub fn note(t: &store::Thread, name: &str, input: &Value) {
     static SEEN: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
     let have: Vec<PathBuf> = t.all_checkouts().iter().map(|c| PathBuf::from(&c.dir)).collect();
     let data = super::data_dir();
+    // codehead's own files: 0 checkout; its worktrees (`worktrees/<repo>/<task>`): checkouts
+    let own = |p: &Path| p.starts_with(&data) && !p.starts_with(data.join("worktrees"));
     for p in edited(name, input) {
         // a worktree / repo inside a checkout (`.claude/worktrees/x`): a checkout of its own
-        if have.iter().any(|c| p.starts_with(c) && !nested(&p, c)) || p.starts_with(&data) {
+        if have.iter().any(|c| p.starts_with(c) && !nested(&p, c)) || own(&p) {
             continue;
         }
         let dir = if p.is_dir() { p.clone() } else { p.parent().map(Path::to_path_buf).unwrap_or_default() };
@@ -99,6 +219,47 @@ pub fn note(t: &store::Thread, name: &str, input: &Value) {
     }
 }
 
+/// CHECKOUTS of T that 0 edit in EVENTS falls in (added by a read of an older version).
+fn unedited(t: &store::Thread, events: &[store::Event]) -> Vec<String> {
+    let paths: Vec<PathBuf> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            store::Kind::Tool { name, input, .. } => Some(edited(name, input)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    t.checkouts.iter().filter(|c| !paths.iter().any(|p| p.starts_with(&c.dir))).map(|c| c.dir.clone()).collect()
+}
+
+/// Thread T once: drops the checkouts its events hold 0 edit in. Changed: the thread as saved.
+/// 0 checkouts: 0 write (the checkouts of later edits hold their edit).
+pub fn prune(t: &store::Thread) -> Option<store::Thread> {
+    if t.checkouts_pruned || t.checkouts.is_empty() {
+        return None;
+    }
+    // a handoff thread (`parent`) took its checkouts over: their edits sit in the parents' events
+    let mut events = store::events(&t.id);
+    let mut up = t.parent.clone();
+    let mut seen = HashSet::from([t.id.clone()]);
+    while let Some(id) = up.filter(|id| seen.insert(id.clone())) {
+        events.extend(store::events(&id));
+        up = store::load(&id).and_then(|p| p.parent);
+    }
+    let gone = unedited(t, &events);
+    // under the thread's lock, not `store::update`: the thread's `updated` time stays (0 jump to
+    // the top of the thread list); a checkout added since the read stays, only GONE goes
+    super::locked(&store::thread_dir(&t.id).join("thread.lock"), || {
+        let mut t = store::load(&t.id)?;
+        t.checkouts.retain(|c| !gone.contains(&c.dir));
+        t.checkouts_pruned = true;
+        t.save().ok()?;
+        Some(t)
+    })
+    .ok()
+    .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,9 +269,60 @@ mod tests {
     fn edits_and_work_dirs_count_reads_do_not() {
         assert_eq!(edited("Edit", &json!({"file_path": "/r/a.rs"})), vec![PathBuf::from("/r/a.rs")]);
         assert!(edited("Read", &json!({"file_path": "/r/a.rs"})).is_empty());
-        assert_eq!(edited("Bash", &json!({"command": "cd /other/repo && git status; git -C /third log"})), vec![PathBuf::from("/other/repo"), PathBuf::from("/third")]);
-        assert!(edited("Bash", &json!({"command": "cd rel/dir"})).is_empty());
+        assert!(edited("Bash", &json!({"command": "cd rel/dir && git commit -m x"})).is_empty());
         assert_eq!(edited("fs", &json!({"_kind": "edit", "locations": [{"path": "/x/y"}]})), vec![PathBuf::from("/x/y")]);
+    }
+
+    fn bash(cmd: &str) -> Vec<PathBuf> {
+        edited("Bash", &json!({ "command": cmd }))
+    }
+
+    fn paths(v: &[&str]) -> Vec<PathBuf> {
+        v.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn shell_reads_add_0_dirs() {
+        assert!(bash("cd /other/repo && git status; git -C /third log").is_empty());
+        assert!(bash("cd /r/notes && ls; echo ---; cat INDEX.md; grep -i deploy x.md").is_empty());
+        assert!(bash("git -C ~/.cache/x/platform status -sb | head -2 2>/dev/null").is_empty());
+        assert!(bash("cd /r && cargo test 2>&1 | tail -5 >/dev/null").is_empty());
+        assert!(bash("cd /r && git -c a=b fetch --quiet origin main").is_empty());
+        assert!(bash("cd /r && echo 'a -> b' && perl -Mstrict -ne 'print' x").is_empty());
+        assert!(bash("cd /r && git worktree add -b feat $W/r/task origin/main").is_empty());
+    }
+
+    #[test]
+    fn shell_writes_add_their_dirs() {
+        assert_eq!(bash("cd /other/repo && git status; git commit -m x"), paths(&["/other/repo"]));
+        assert_eq!(bash("git -C /third commit -am x"), paths(&["/third"]));
+        assert_eq!(bash("cd /a && cd sub && sed -i '' s/x/y/ f.rs"), paths(&["/a/sub"]));
+        assert_eq!(bash("cd /a; cd /b && git rm -rq lib"), paths(&["/b"]));
+        assert_eq!(bash("echo x >> /n/notes/INDEX.md && tail -1 /n/notes/INDEX.md"), paths(&["/n/notes/INDEX.md"]));
+        assert_eq!(bash("cd /a && echo x > out.txt"), paths(&["/a"]));
+        assert_eq!(bash("cp /src/a.rs /dst/a.rs"), paths(&["/dst/a.rs"]));
+        assert_eq!(bash("cd /a && perl -pi -e 's/x/y/' f"), paths(&["/a"]));
+        assert_eq!(bash("cd /a && FOO=1 git push origin x"), paths(&["/a"]));
+    }
+
+    #[test]
+    fn checkouts_without_an_edit_go() {
+        let co = |d: &str| store::Checkout { dir: d.into(), branch: None };
+        let t = store::Thread { dir: "/w".into(), checkouts: vec![co("/notes"), co("/read"), co("/cache/clone"), co("/wt")], ..Default::default() };
+        let tool = |name: &str, input: Value| store::Event::new(Some("A"), store::Kind::Tool { id: "1".into(), name: name.into(), input });
+        let events = [
+            tool("Bash", json!({"command": "cd /read && grep -rn x .; git -C /cache/clone status"})),
+            tool("Write", json!({"file_path": "/notes/plans/p.md"})),
+            tool("Bash", json!({"command": "cd /wt && git commit -m x"})),
+            tool("Read", json!({"file_path": "/read/a.rs"})),
+        ];
+        assert_eq!(unedited(&t, &events), vec!["/read".to_string(), "/cache/clone".to_string()]);
+    }
+
+    #[test]
+    fn heredoc_bodies_are_text() {
+        assert!(bash("cd /a && cat <<'EOF'\nrm -rf /b\ngit commit\nEOF\ngit log").is_empty());
+        assert_eq!(bash("cd /a && cat > f.md <<EOF\nrm x\nEOF"), paths(&["/a"]));
     }
 
     #[test]
