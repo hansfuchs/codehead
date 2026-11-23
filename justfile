@@ -36,6 +36,10 @@ demo *flows:
     cargo build --release --locked
     ~/.cache/codehead-demo/venv/bin/python scripts/demo/demo.py {{flows}}
 
+# ASCII lab (examples/lab): moai, avatars, loaders, regi, spawn, monolith. Hero: just lab monolith-frames 6 64 34 21 > site/public/monolith.json; favicon: python3 scripts/favicon.py 15 > site/public/favicon.svg
+lab *args:
+    cargo run --release --quiet --example lab -- {{args}}
+
 # Perf suite (src/perf/mod.rs): every case under 20 ms, cold call included. Release build, 1 thread.
 # The release binary first: the thread start case starts real hosts with it.
 perf *filter:
