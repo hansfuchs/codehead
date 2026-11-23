@@ -196,6 +196,8 @@ struct View {
     ide_pick: Option<(usize, usize)>,
     ide_rows: Vec<(Rect, usize)>,
     hint_rect: Rect,
+    /// The setup tutorial: an IDE open was asked (0 IDE opens there, a toast says so).
+    tutor_ide: bool,
     #[cfg(test)]
     ide_opened: Vec<PathBuf>,
     mention: Mention,
@@ -385,6 +387,7 @@ impl View {
             ide_pick: None,
             ide_rows: Vec::new(),
             hint_rect: Rect::default(),
+            tutor_ide: false,
             #[cfg(test)]
             ide_opened: Vec::new(),
             mention: Mention::default(),
@@ -2411,6 +2414,12 @@ impl View {
 
     /// [`Self::open_editor`] for the checkout WT.
     fn open_editor_in(&mut self, wt: &Path, args: impl Fn(crate::editor::Kind) -> Vec<std::ffi::OsString>, target: Option<(&str, u32)>, what: String) {
+        // the setup tutorial: 0 IDE opens, the toast shows what would open
+        if crate::tutor::active().is_some() {
+            self.tutor_ide = true;
+            self.toast(format!("IDE: {what} · tutorial: your IDE opens here"));
+            return;
+        }
         let Some(e) = crate::editor::find() else {
             self.toast("IDE: 0 found · setting editor (code, cursor, zed, idea …)");
             return;
@@ -3859,6 +3868,9 @@ fn word_at(text: &str, col: u16) -> (u16, u16) {
 }
 
 fn open_url(url: &str) {
+    if crate::tutor::active().is_some() {
+        return;
+    }
     let bin = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     let _ = std::process::Command::new(bin).arg(url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
 }
@@ -3977,7 +3989,13 @@ fn prompt_path(id: &str) -> PathBuf {
 
 /// TEXT as the prompt draft of thread ID: its next view opens with it.
 pub fn save_prompt_draft(id: &str, text: &str) {
-    let _ = crate::engine::write_atomic(&prompt_path(id), json!({"text": text, "attachments": []}).to_string().as_bytes());
+    save_prompt_draft_files(id, text, &[]);
+}
+
+/// The unsent prompt of thread ID: TEXT with FILES attached (marker, path), as a paste leaves it.
+pub fn save_prompt_draft_files(id: &str, text: &str, files: &[(String, PathBuf)]) {
+    let files: Vec<Value> = files.iter().map(|(m, p)| json!([m, p.display().to_string()])).collect();
+    let _ = crate::engine::write_atomic(&prompt_path(id), json!({"text": text, "attachments": files}).to_string().as_bytes());
 }
 
 pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str, note: Option<&str>, first: &str) -> Result<Exit, String> {
@@ -4004,10 +4022,12 @@ fn to_main(exit: Exit, main: Option<&str>) -> Exit {
     }
 }
 
-/// What a hook of `run_with` sees each loop: the open pane, the menu open.
+/// What a hook of `run_with` sees each loop: the open pane, the menu open, an IDE open asked
+/// (the tutorial's mock).
 pub struct Peek {
     pub pane: Pane,
     pub menu: bool,
+    pub ide: bool,
 }
 
 /// `run` with HOOK: called each loop (the setup tutorial's coach watches the view); true from
@@ -4085,7 +4105,7 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
         }
         crate::all_keys(v.all_keys());
         if let Some(h) = hook.as_mut()
-            && h(&Peek { pane: v.pane, menu: v.menu.is_some() })
+            && h(&Peek { pane: v.pane, menu: v.menu.is_some(), ide: std::mem::take(&mut v.tutor_ide) })
         {
             return Ok(None);
         }

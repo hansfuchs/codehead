@@ -348,6 +348,10 @@ fn gh(args: &[&str], stdin: Option<&str>) -> Result<String, String> {
     if cfg!(test) && std::env::var_os("CODEHEAD_GH_LIVE").is_none() {
         return Err("gh: 0 calls in tests".into());
     }
+    // the setup tutorial: 0 GitHub calls (fetch, diff, run, labels: its mock PR)
+    if crate::tutor::active().is_some() {
+        return Err("tutorial: 0 GitHub calls".into());
+    }
     let mut c = Command::new("gh").args(args).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("gh: {e}"))?;
     if let (Some(text), Some(mut i)) = (stdin, c.stdin.take()) {
         let _ = i.write_all(text.as_bytes());
@@ -394,6 +398,9 @@ last:commits(last:1){{nodes{{commit{{statusCheckRollup{{contexts(first:100){{nod
 
 /// Everything of PR R (1 GraphQL call).
 pub fn fetch(r: &PrRef) -> Result<Pr, String> {
+    if let Some(repo) = crate::tutor::active() {
+        return Ok(crate::tutor::mock_pr(r, &repo));
+    }
     let (o, n) = r.owner_name();
     let d = graphql(&detail_query(), &[("o", json!(o)), ("r", json!(n)), ("n", json!(r.number))])?;
     parse_detail(r, &d).ok_or_else(|| format!("{}: 0 such pull request", r.label()))
@@ -547,6 +554,9 @@ pub fn for_branch(repo: &str, branch: &str) -> Result<Vec<u64>, String> {
 
 /// The labels of REPO.
 pub fn labels(repo: &str) -> Result<Vec<Label>, String> {
+    if crate::tutor::active().is_some() {
+        return Ok(vec![Label { name: "docs".into(), color: "0075ca".into() }, Label { name: "crew".into(), color: "7057ff".into() }]);
+    }
     let out = gh(&["label", "list", "-R", repo, "--limit", "500", "--json", "name,color"], None)?;
     let v: Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
     Ok(v.as_array().into_iter().flatten().map(|l| Label { name: l["name"].as_str().unwrap_or_default().into(), color: l["color"].as_str().unwrap_or_default().into() }).collect())
@@ -554,6 +564,9 @@ pub fn labels(repo: &str) -> Result<Vec<Label>, String> {
 
 /// The diff of R: COMMIT's own, else the whole PR against the merge base.
 pub fn diff(r: &PrRef, commit: Option<&str>) -> Result<String, String> {
+    if let Some(repo) = crate::tutor::active() {
+        return crate::tutor::mock_diff(&repo, commit);
+    }
     match commit {
         Some(c) => gh(&["api", &format!("repos/{}/commits/{c}", r.repo), "-H", "Accept: application/vnd.github.diff"], None),
         None => gh(&["pr", "diff", &r.number.to_string(), "-R", &r.repo], None),
@@ -606,6 +619,9 @@ impl Op {
 
 /// Run OP on R.
 pub fn run(r: &PrRef, op: &Op) -> Result<(), String> {
+    if let Some(repo) = crate::tutor::active() {
+        return crate::tutor::mock_run(&repo, op);
+    }
     let n = r.number.to_string();
     let pr = |args: &[&str], stdin: Option<&str>| -> Result<(), String> {
         let mut a = vec!["pr"];

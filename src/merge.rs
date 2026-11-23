@@ -262,7 +262,7 @@ fn secs(s: u64) -> String {
 }
 
 pub fn open_url(url: &str) {
-    if cfg!(test) || url.is_empty() {
+    if cfg!(test) || url.is_empty() || crate::tutor::active().is_some() {
         return;
     }
     let bin = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
