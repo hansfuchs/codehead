@@ -46,6 +46,8 @@ pub enum Kind {
     Context,
     /// Every agent on the thread reported done.
     Done,
+    /// Every PR of the thread is merged or closed (1 merged at least): archive it.
+    Merged,
 }
 
 impl Kind {
@@ -63,6 +65,7 @@ impl Kind {
             Kind::Reply => "↳",
             Kind::Context => "◔",
             Kind::Done => "✓",
+            Kind::Merged => "⇲",
         }
     }
 
@@ -80,6 +83,7 @@ impl Kind {
             Kind::Reply => "reply",
             Kind::Context => "context",
             Kind::Done => "done",
+            Kind::Merged => "merged",
         }
     }
 
@@ -90,7 +94,7 @@ impl Kind {
             Kind::Ask | Kind::Blocked | Kind::Gate => p.attention(),
             Kind::Limit | Kind::Context => p.caution(),
             Kind::Review | Kind::Mention | Kind::Reply => p.info(),
-            Kind::Done => p.success(),
+            Kind::Done | Kind::Merged => p.success(),
         }
     }
 }
@@ -275,7 +279,22 @@ fn reply_notes(t: &store::Thread) -> Vec<Note> {
 }
 
 static NOTES: Mutex<Vec<Note>> = Mutex::new(Vec::new());
-static LAST: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+/// Threads whose PRs are all merged / closed (1 merged at least): the thread lists offer an
+/// archive. From the last PR pass.
+static MERGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Threads whose PRs are all merged / closed, 1 merged at least (the last PR pass).
+pub fn merged() -> Vec<String> {
+    MERGED.lock().map(|m| m.clone()).unwrap_or_default()
+}
+
+/// Every PR of a thread done, 1 merged at least: STATES of its PRs (several repos too).
+pub fn all_merged(states: &[crate::gh::State]) -> bool {
+    use crate::gh::State;
+    states.iter().any(|s| *s == State::Merged) && states.iter().all(|s| matches!(s, State::Merged | State::Closed))
+}
+
+static LAST:OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 static SEEN: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 /// Up with each change of the notes or the seen marks: the views redraw.
 static VERSION: AtomicU64 = AtomicU64::new(0);
@@ -403,10 +422,18 @@ fn pr_pass(threads: &[store::Thread], c: &mut Cache) {
     let now = crate::engine::now_ms();
     let mut live: HashSet<String> = HashSet::new();
     c.prs.clear();
+    let mut merged = Vec::new();
     for t in threads {
         let mut notes = Vec::new();
-        for r in crate::prlist::remembered(&t.id) {
-            let Ok(p) = gh::fetch(&r) else { continue };
+        let prs = crate::prlist::remembered(&t.id);
+        let mut states = Vec::new();
+        for r in &prs {
+            let Ok(p) = gh::fetch(r) else {
+                // a PR not read: 0 verdict on the thread
+                states.push(gh::State::Open);
+                continue;
+            };
+            states.push(p.state);
             if !matches!(p.state, gh::State::Open | gh::State::Draft) {
                 continue;
             }
@@ -427,9 +454,20 @@ fn pr_pass(threads: &[store::Thread], c: &mut Cache) {
                 add(Kind::Review, String::new(), Some(m.created * 1000), format!("{}: {}: {}", r.label(), m.author, first_line(&m.body)));
             }
         }
+        if all_merged(&states) {
+            let key = format!("merged:{}", t.id);
+            let ts = *c.first.entry(key.clone()).or_insert(now);
+            live.insert(key);
+            let text = if prs.len() == 1 { format!("{} merged: archive the thread?", prs[0].label()) } else { format!("all {} PRs merged / closed: archive the thread?", prs.len()) };
+            notes.push(Note { thread: t.id.clone(), title: t.title.clone(), dir: t.work_dir(), kind: Kind::Merged, agents: Vec::new(), ts, text, comment: String::new() });
+            merged.push(t.id.clone());
+        }
         if !notes.is_empty() {
             c.prs.insert(t.id.clone(), notes);
         }
+    }
+    if let Ok(mut m) = MERGED.lock() {
+        *m = merged;
     }
     let before = c.first.len();
     c.first.retain(|k, _| live.contains(k));

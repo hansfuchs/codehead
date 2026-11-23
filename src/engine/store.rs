@@ -55,9 +55,14 @@ pub struct Thread {
     /// The running sub-threads of this thread (ids): its agents' messages wait while any runs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kids: Vec<String>,
-    /// `open` or `done`.
+    /// `open`, `done` or `archived` (0 worktree: `threads::archive` removed it, the branch stays;
+    /// `worktree_pending` holds the branch for the next host start).
     #[serde(default = "open")]
     pub state: String,
+    /// The thread's repo (main checkout), set by the owner (edit form) or by an archive: it wins
+    /// over the repo of DIR / WORKTREE. None: the repo of DIR / WORKTREE.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     pub created: u64,
     pub updated: u64,
     /// Agents on the thread, lead first: an owner message without @name goes to the lead.
@@ -252,8 +257,9 @@ pub fn latest() -> Option<Thread> {
     let rd = std::fs::read_dir(threads_dir()).ok()?;
     let mut by_time: Vec<(std::time::SystemTime, PathBuf)> = rd.flatten().map(|e| e.path().join("thread.json")).filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p))).collect();
     by_time.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
-    // the newest that is no sub-thread (a running sub-thread writes its thread.json often)
-    by_time.iter().filter_map(|(_, p)| serde_json::from_slice::<Thread>(&std::fs::read(p).ok()?).ok()).find(|t| t.of.is_none())
+    // the newest that is no sub-thread (a running sub-thread writes its thread.json often), not
+    // archived (an archive writes its thread.json last)
+    by_time.iter().filter_map(|(_, p)| serde_json::from_slice::<Thread>(&std::fs::read(p).ok()?).ok()).find(|t| t.of.is_none() && t.state != "archived")
 }
 
 pub fn all() -> Vec<Thread> {

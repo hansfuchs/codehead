@@ -76,6 +76,7 @@ mod tabgroup;
 mod textarea;
 mod theme;
 mod threads;
+mod threadlist;
 mod workspot;
 mod update;
 mod urls;

@@ -2657,6 +2657,10 @@ impl View {
         match a {
             Action::None => return false,
             Action::Close => {}
+            Action::Back => {
+                self.exit = Exit::Back;
+                return true;
+            }
             Action::Home(h) => {
                 self.exit = Exit::Home(h);
                 return true;

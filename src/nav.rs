@@ -29,6 +29,18 @@ pub struct Card {
     pub repo: Option<PathBuf>,
     /// The prompt holds an unsent message (the thread view's draft on disk).
     pub draft: bool,
+    /// Every PR of the thread is merged / closed (1 merged at least): ready to archive.
+    #[serde(default)]
+    pub merged: bool,
+    /// DIR is a linked worktree codehead made (delete / archive remove it).
+    #[serde(default)]
+    pub worktree: bool,
+}
+
+impl Card {
+    pub fn archived(&self) -> bool {
+        self.state == "archived"
+    }
 }
 
 impl Card {
@@ -114,14 +126,15 @@ fn last_item(id: &str) -> Option<u64> {
     })
 }
 
-/// Every thread (archived ones: 0), newest activity first.
+/// Every thread (archived ones too: `Card::archived`), newest activity first.
 pub fn load() -> Vec<Card> {
     let threads = crate::threads::all_threads_lite();
+    let merged = crate::notify::merged();
     let mut seen = read_seen();
     let mut new_seen = false;
     let mut cards: Vec<Card> = threads
         .into_iter()
-        .filter(|t| t.state != "archived" && t.state != "deleted")
+        .filter(|t| t.state != "deleted")
         .map(|t| {
             let last = last_item(&t.id);
             let unread = match (last, seen.get(&t.id)) {
@@ -145,6 +158,8 @@ pub fn load() -> Vec<Card> {
                 dir,
                 branch: t.branch.clone().unwrap_or_default(),
                 draft: has_draft(&t.id),
+                merged: merged.contains(&t.id),
+                worktree: t.worktree.as_deref().is_some_and(|p| std::path::Path::new(p).is_dir()),
                 id: t.id,
                 title: t.title,
                 state: t.state,
@@ -227,11 +242,15 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
     block.render(r, buf);
     let w = inner.width.saturating_sub(2) as usize;
     let title_st = if c.unread || cur { theme::bold() } else { theme::text() };
-    let mut status: Vec<Span> = if c.blocked {
+    let mut status: Vec<Span> = if c.archived() {
+        vec![Span::styled("▣ archived", theme::muted())]
+    } else if c.blocked {
         vec![Span::styled("? blocked", theme::fg(theme::pal().attention()))]
     } else if c.busy {
         let word = if c.monitoring { "monitoring…" } else { "working…" };
         vec![Span::styled(format!("{} ", WAVE[tick % WAVE.len()]), theme::fg(theme::pal().progress())), Span::styled(word, theme::muted())]
+    } else if c.merged {
+        vec![Span::styled("⇲ PRs merged", theme::fg(theme::pal().success()))]
     } else if c.live == 0 {
         vec![Span::styled("◦ ended", theme::muted())]
     } else {

@@ -2469,6 +2469,7 @@ impl App {
         self.switch_tab(match h {
             Home::New => Tab::New,
             Home::Settings => Tab::Settings,
+            Home::Threads => Tab::Threads,
             Home::Merge(_) => Tab::Merge,
             Home::Flows(_) => Tab::Flows,
         });
@@ -2514,7 +2515,8 @@ impl App {
         use crate::menu::Action;
         match a {
             Action::None => return,
-            Action::Close => {}
+            // home: the start screen is home
+            Action::Close | Action::Back => {}
             Action::Home(h) => self.go_home(h),
             Action::Open(c) => self.outcome = Some(Outcome::Resume(Box::new(worktree_of(&c)))),
             Action::Pr(e) => match e.thread {
