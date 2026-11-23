@@ -383,6 +383,81 @@ mod cases {
         assert!(saved.iter().any(|s| s.name == "perf-1" && s.env.get("TOKEN").map(String::as_str) == Some("${PERF_TOKEN}")), "{saved:?}");
     }
 
+    /// Archive from the ctrl+p menu: the yes (enter) + 1 frame, the card gone from the list in
+    /// that step. The thread: a worktree with 5k ignored files (a node_modules); the job (host
+    /// stop, stash, worktree out) runs on its own thread, its time prints for reference.
+    #[test]
+    #[ignore = "perf: just perf"]
+    fn archive_yes_to_card_gone() {
+        use crate::engine::store;
+        use crate::nav::Card;
+        use crate::threadlist::{Mode, ThreadList};
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::cell::RefCell;
+        use std::path::PathBuf;
+        use std::time::{Duration, Instant};
+
+        let root = std::env::temp_dir().join(format!("codehead-perf-archive-{}", std::process::id()));
+        let repo = fixture::repo_with_origin(&root);
+        std::fs::write(repo.join(".git/info/exclude"), "node_modules/\n").unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&repo).args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap().success(), "{args:?}");
+        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        // the archived threads of earlier runs: their job's end
+        let jobs: RefCell<Vec<(String, PathBuf, Instant)>> = RefCell::new(Vec::new());
+        let mut job_max = Duration::ZERO;
+        let mut settle = |jobs: &RefCell<Vec<(String, PathBuf, Instant)>>| {
+            for (id, wt, at) in jobs.borrow_mut().drain(..) {
+                let end = Instant::now() + Duration::from_secs(30);
+                let done = || store::load(&id).is_some_and(|t| t.state == "archived" && t.worktree_pending.is_some()) && !wt.exists();
+                while !done() && Instant::now() < end {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                assert!(done(), "archive job of {id}: {:?}", store::load(&id));
+                job_max = job_max.max(at.elapsed());
+                let _ = store::delete(&id);
+            }
+        };
+        let mut n = 0;
+        let worst = measure_split(
+            "archive: yes → card gone",
+            || {
+                settle(&jobs);
+                n += 1;
+                let wt = root.join(format!("wt-{n}"));
+                git(&["worktree", "add", "-q", "-b", &format!("perf-archive-{n}"), &wt.display().to_string()]);
+                for d in 0..50 {
+                    let dir = wt.join(format!("node_modules/p{d}"));
+                    std::fs::create_dir_all(&dir).unwrap();
+                    for f in 0..100 {
+                        std::fs::write(dir.join(format!("f{f}.js")), "module.exports = 1;\n").unwrap();
+                    }
+                }
+                let mut t = store::Thread::new(&format!("perf archive {n}"), "task", &repo, vec!["zzperf".into()]);
+                t.worktree = Some(wt.display().to_string());
+                t.branch = Some(format!("perf-archive-{n}"));
+                t.save().unwrap();
+                let card = Card { id: t.id.clone(), title: t.title.clone(), state: "open".into(), ..Default::default() };
+                let mut l = ThreadList::new(Mode::Switch, None, None, vec![card]);
+                l.inline = false;
+                l.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+                l.key(key(KeyCode::Char('a')));
+                (l, t.id, wt)
+            },
+            |(mut l, id, wt): (ThreadList, String, PathBuf)| {
+                let at = Instant::now();
+                l.key(key(KeyCode::Enter));
+                term.draw(|f| l.draw(f, f.area(), 0)).unwrap();
+                assert!(l.visible().iter().all(|&i| l.cards[i].id != id), "card of {id} still in the active list");
+                jobs.borrow_mut().push((id, wt, at));
+            },
+        );
+        settle(&jobs);
+        eprintln!("     archive job (off UI)         max {:>7.2} ms", ms(job_max));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(worst < BUDGET,"archive yes → card gone: {:.2} ms ≥ budget {} ms", ms(worst), BUDGET.as_millis());
+    }
+
     #[test]
     #[ignore = "perf: just perf"]
     fn fuzzy_rank_10k_paths() {
