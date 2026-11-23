@@ -2520,6 +2520,14 @@ impl View {
     }
 
     fn open_menu(&mut self) {
+        let items = self.menu_items();
+        // cards: read in the background by the menu (0 wait on open)
+        self.menu = Some(crate::menu::Menu::new(items, Some(self.id.clone()), self.roster.clone(), Vec::new()));
+    }
+
+    /// The quick commands of the menu (per agent: its flow, remove, replace). Also sets
+    /// `menu_agents`, the agents the per-agent ids point to.
+    fn menu_items(&mut self) -> Vec<crate::menu::Item> {
         use crate::menu::Item;
         let items = vec![
             Item { label: "back to the start screen".into(), key: "esc esc".into(), id: 3, section: "thread" },
@@ -2549,9 +2557,7 @@ impl View {
             Item { label: "commands: files, notes, threads, skills, branch".into(), key: crate::config::command_key().to_string(), id: 5, section: "prompt" },
             Item { label: "paste a clipboard image".into(), key: "ctrl+v".into(), id: 7, section: "prompt" },
         ]);
-        // cards: read in the background by the menu (0 wait on open)
-        let cards = Vec::new();
-        self.menu = Some(crate::menu::Menu::new(items, Some(self.id.clone()), self.roster.clone(), cards));
+        items
     }
 
     fn menu_action(&mut self, a: crate::menu::Action) -> bool {
@@ -3628,6 +3634,13 @@ impl View {
             }
         }
         self.draw_ide_pick(f, area);
+        if self.menu.is_some() {
+            // live: an agent came or left, a flow moved on
+            let items = self.menu_items();
+            if let Some(m) = self.menu.as_mut() {
+                m.set_items(items);
+            }
+        }
         if let Some(m) = self.menu.as_mut() {
             f.render_widget(Clear, Rect::default());
             // a command palette: below the view bar, centered on the screen's width

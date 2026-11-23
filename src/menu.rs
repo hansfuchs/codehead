@@ -506,6 +506,20 @@ impl Menu {
         }
     }
 
+    /// The host's quick commands again (they changed while the menu is open: an agent came,
+    /// left, its flow moved on). The cursor stays on its command.
+    pub fn set_items(&mut self, items: Vec<Item>) {
+        let same = self.items.len() == builtins().len() + items.len()
+            && self.items.iter().skip(builtins().len()).zip(&items).all(|(a, b)| (a.id, &a.label, &a.key, a.section) == (b.id, &b.label, &b.key, b.section));
+        if same {
+            return;
+        }
+        let picked = self.items.get(self.qcursor).map(|it| it.id);
+        self.items = builtins();
+        self.items.extend(items);
+        self.qcursor = picked.and_then(|id| self.items.iter().position(|it| it.id == id)).unwrap_or(0).min(self.items.len() - 1);
+    }
+
     fn quick_key(&mut self, k: KeyEvent) -> Action {
         let n = self.items.len();
         match k.code {
@@ -1079,6 +1093,20 @@ mod tests {
         m.set_msgs(vec![Msg::new("t1", "a", "owner", 10, "deploy one"), Msg::new("t2", "b", "ada", 20, "deploy two"), Msg::new("t3", "c", "ada", 30, "deploy three")]);
         assert_eq!(m.hits.len(), 3);
         assert!(matches!(m.key(k(KeyCode::Enter)), Action::Jump(d, t) if d.id == c.id && t == ts));
+    }
+
+    #[test]
+    fn live_quick_items_keep_the_cursor_on_its_command() {
+        let it = |label: &str, id| Item { label: label.into(), key: String::new(), id, section: "agents" };
+        let mut m = Menu::new(vec![it("@a: flow (0 flow)", 100), it("@b: flow (0 flow)", 103)], None, Vec::new(), vec![card("t1", "a")]);
+        for _ in 0..4 {
+            m.key(k(KeyCode::Down));
+        }
+        assert_eq!(m.key(k(KeyCode::Enter)), Action::Command(103));
+        // @a leaves, @b's flow moves on: the cursor stays on @b's row, the label is new
+        m.set_items(vec![it("@b: flow (fix · step 2)", 103)]);
+        assert_eq!(m.items.last().map(|i| i.label.as_str()), Some("@b: flow (fix · step 2)"));
+        assert_eq!(m.key(k(KeyCode::Enter)), Action::Command(103));
     }
 
     #[test]
