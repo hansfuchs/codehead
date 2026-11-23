@@ -520,6 +520,10 @@ impl View {
         self.input.set_text(&text);
         self.input.move_end();
         self.attachments = v["attachments"].as_array().into_iter().flatten().filter_map(|a| Some((a[0].as_str()?.to_string(), PathBuf::from(a[1].as_str()?)))).collect();
+        // new pastes: numbers after the draft's markers (a dropped image: 0 file in the paste dir)
+        for (m, _) in &self.attachments {
+            self.paster.seen(m);
+        }
         self.prompt_saved = raw;
     }
 

@@ -50,8 +50,31 @@ pub struct Paster {
 }
 
 impl Paster {
+    /// The counters go on after the files already in DIR (`image-N.png`, `pasted-text-N.txt`):
+    /// a new paste never overwrites the file of an earlier message.
     pub fn new(dir: PathBuf) -> Paster {
-        Paster { dir, images: 0, texts: 0 }
+        let mut p = Paster { dir, images: 0, texts: 0 };
+        for e in std::fs::read_dir(&p.dir).into_iter().flatten().flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let n = |pre: &str, ext: &str| name.strip_prefix(pre)?.strip_suffix(ext)?.parse::<usize>().ok();
+            if let Some(n) = n("image-", ".png") {
+                p.images = p.images.max(n);
+            } else if let Some(n) = n("pasted-text-", ".txt") {
+                p.texts = p.texts.max(n);
+            }
+        }
+        p
+    }
+
+    /// MARKER (`[Image #3]`, `[Pasted text #2 +5 lines]`) is in use: new pastes number after it.
+    pub fn seen(&mut self, marker: &str) {
+        let n = |pre: &str| marker.strip_prefix(pre)?.split([']', ' ']).next()?.parse::<usize>().ok();
+        if let Some(n) = n("[Image #") {
+            self.images = self.images.max(n);
+        } else if let Some(n) = n("[Pasted text #") {
+            self.texts = self.texts.max(n);
+        }
     }
 
     /// A paste event's text. Empty (cmd+v on an image in some terminals): the clipboard image.
@@ -125,6 +148,26 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_paster_numbers_after_the_files_and_markers_in_use() {
+        let dir = std::env::temp_dir().join(format!("codehead-paste-again-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("image-1.png"), b"first").unwrap();
+        std::fs::write(dir.join("image-3.png"), b"third").unwrap();
+        std::fs::write(dir.join("pasted-text-2.txt"), b"x").unwrap();
+        std::fs::write(dir.join("image-x.png"), b"x").unwrap();
+        let mut p = Paster::new(dir.clone());
+        assert_eq!((p.images, p.texts), (3, 2));
+        p.seen("[Image #5]");
+        p.seen("[Pasted text #4 +9 lines]");
+        p.seen("[Image #2]");
+        assert_eq!((p.images, p.texts), (5, 4));
+        let long = "y\n".repeat(600);
+        assert!(matches!(p.paste(&long), Pasted::File { marker, .. } if marker == "[Pasted text #5 +600 lines]"));
+        assert_eq!(std::fs::read(dir.join("image-1.png")).unwrap(), b"first");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
