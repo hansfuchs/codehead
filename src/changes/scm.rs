@@ -102,6 +102,8 @@ enum Btn {
     Restore(String),
     Drop(String),
     Clear,
+    /// The UNPUSHED row's push: every unpushed commit, after the question.
+    Push,
 }
 
 pub(super) struct Panel {
@@ -508,6 +510,37 @@ impl View {
     pub(super) fn ask_push_to(&mut self) -> Act {
         let Some((top, _)) = self.push_pick() else { return Act::Toast("0 commits picked".into()) };
         let oid = top.oid.clone();
+        self.ask_push(oid)
+    }
+
+    /// P / the UNPUSHED row's push: every unpushed commit to the upstream, after the question
+    /// (picks: up to the newest pick, as the ship menu).
+    pub(super) fn ask_push_all(&mut self) -> Act {
+        if self.pr_src.is_some() || self.commit_src.is_some() || self.all {
+            return self.start_op(Op::Push);
+        }
+        if self.changes.stopped.is_some() {
+            return Act::Toast("a rebase stopped: finish it first (S)".into());
+        }
+        let cs = &self.changes.commits;
+        if cs.remote_only > 0 {
+            return Act::Toast(format!("↓{} on the remote: fetch + rebase first (S)", cs.remote_only));
+        }
+        if let Some((top, _)) = self.push_pick() {
+            let oid = top.oid.clone();
+            return self.ask_push(oid);
+        }
+        match cs.list.iter().find(|c| !c.pushed) {
+            Some(c) => {
+                let oid = c.oid.clone();
+                self.ask_push(oid)
+            }
+            None => Act::Toast("0 unpushed commits".into()),
+        }
+    }
+
+    /// The question of a push up to unpushed commit OID: it lists every commit that goes.
+    fn ask_push(&mut self, oid: String) -> Act {
         let cs = &self.changes.commits;
         let un: Vec<String> = cs.list.iter().filter(|c| !c.pushed).map(|c| c.oid.clone()).collect();
         let k = un.iter().position(|o| *o == oid).unwrap_or(0);
@@ -837,7 +870,15 @@ impl View {
                 if !*pushed && cs.remote_only > 0 {
                     right = format!("{n} · ↓{} on the remote ", cs.remote_only);
                 }
-                right_fill(&[Span::styled(format!("   {} {label}", fold(Fold::Push(*pushed))), st)], &[Span::styled(crate::nav::fit(&right, w / 2), theme::muted())])
+                let mut spans = vec![Span::styled(crate::nav::fit(&right, w / 2), theme::muted())];
+                // unpushed, 0 remote-only commits: a push button (P)
+                if !*pushed && cs.remote_only == 0 && *n > 0 {
+                    let label = "↑ push ";
+                    let bw = label.width() as u16;
+                    self.scm.buttons.push((Rect { x: rect.right().saturating_sub(bw), width: bw, ..rect }, Btn::Push));
+                    spans.push(Span::styled(label, theme::accent()));
+                }
+                right_fill(&[Span::styled(format!("   {} {label}", fold(Fold::Push(*pushed))), st)], &spans)
             }
             PRow::All => {
                 let on = self.peek.as_ref().is_some_and(|p| p.all);
@@ -1187,6 +1228,8 @@ impl View {
             KeyCode::Char('[') => self.jump_section(false),
             KeyCode::Char(']') => self.jump_section(true),
             KeyCode::Char('u') => return self.ask_uncommit(),
+            // P: every unpushed commit to the upstream (picks: up to the newest pick), asked
+            KeyCode::Char('P') => return self.ask_push_all(),
             // d on a comment: resolved / open again
             KeyCode::Char('d') => {
                 if let Some(PRow::Comment(ci)) = row {
@@ -1289,6 +1332,7 @@ impl View {
                     self.modal = Some(Modal::Confirm { question: format!("remove “{t}” from the stash? its lines are gone for good"), yes: false, then: Then::DropStash(id) });
                 }
                 Btn::Clear => self.modal = Some(Modal::Confirm { question: format!("clear the stash? {} entries, their lines gone for good", self.stash.len()), yes: false, then: Then::ClearStash }),
+                Btn::Push => return self.ask_push_all(),
             }
             return Act::None;
         }
@@ -1744,6 +1788,35 @@ mod tests {
 
         assert!(note.contains("pushed up to"), "{note}");
         assert_eq!(oid(&w, "origin/feat"), c3);
+        drop(&w);
+    }
+
+    #[test]
+    fn p_pushes_every_unpushed_commit_after_a_question() {
+        use super::super::commits::fixture::*;
+        let w = repo("pushall");
+        let mut v = commit_view(&w, "commits-pushall-1");
+        let head = oid(&w, "HEAD");
+
+        // the UNPUSHED row: a push button
+        let all = draw(&mut v, 140, 40).join("\n");
+        assert!(all.contains("↑ push"), "{all}");
+
+        v.scm.focus = true;
+        press(&mut v, KeyCode::Char('P'));
+        let all = draw(&mut v, 140, 40).join("\n");
+        assert!(all.contains("push 2 commits to origin/feat?") && all.contains("c3 subject") && all.contains("c4 subject"), "{all}");
+        assert!(v.op.is_none());
+
+        press(&mut v, KeyCode::Char('y'));
+        let note = wait_op(&mut v);
+        assert!(note.contains("pushed up to"), "{note}");
+        assert_eq!(oid(&w, "origin/feat"), head);
+
+        // 0 unpushed: 0 question
+        wait_read(&mut v);
+        assert!(matches!(press(&mut v, KeyCode::Char('P')), Act::Toast(t) if t.contains("0 unpushed")));
+        assert!(v.modal.is_none());
         drop(&w);
     }
 

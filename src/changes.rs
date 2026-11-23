@@ -3568,7 +3568,7 @@ impl View {
         }
 
         if self.scm.focus && !self.scm.msg_focus && self.scm.on_commit() {
-            return "j k · space: pick · enter: show · u: uncommit · S: ship (push picked) · [ ]: sections · esc: 0 picks ";
+            return "j k · space: pick · enter: show · u: uncommit · P: push (picked: up to) · S: ship · [ ]: sections · esc: 0 picks ";
         }
 
         if self.scm.focus && !self.scm.msg_focus && self.scm.on_commit_file() {
@@ -3587,13 +3587,13 @@ impl View {
         if self.scm.focus && self.scm.msg_focus {
             "commit message · ctrl+⏎: commit the staged files · ctrl+g: draft by model · esc: back "
         } else if self.scm.focus {
-            "j k · [ ]: sections · space: pick · e: IDE · s: stage / unstage · p: stash · →: open · x: remove · enter: restore · S: ship · ctrl+b: review "
+            "j k · [ ]: sections · space: pick · e: IDE · s: stage / unstage · p: stash · →: open · x: remove · enter: restore · P: push · S: ship · ctrl+b: review "
         } else if self.filtering {
             "type to filter · enter: 1st hit · esc: clear "
         } else if self.row_comment(self.at).is_some() {
             "comment · enter: unfold · c: reply · e: edit · C: fold · d: resolve · x: delete · ctrl+⏎: send the batch · i: IDE "
         } else {
-            "j k: file · space: select · s: stage · c: comment · v: reviewed · ctrl+m: prompt · i: IDE · S: ship · ctrl+b: git · d: resolve · C: comments "
+            "j k: file · space: select · s: stage · c: comment · v: reviewed · ctrl+m: prompt · i: IDE · P: push · S: ship · ctrl+b: git · d: resolve · C: comments "
         }
     }
 
@@ -4109,6 +4109,8 @@ impl View {
             KeyCode::Char('m') => self.focus_message(),
             // S: the ship menu (push, rebase, PR, merge, CI log; a stopped rebase: its steps)
             KeyCode::Char('S') => return self.open_ship(),
+            // P: the unpushed commits to the upstream, asked
+            KeyCode::Char('P') => return self.ask_push_all(),
             // c: the comment modal on the selected lines, else on the cursor's line
             // c on a comment / reply (0 selection): a reply on that comment
             KeyCode::Char('c') if self.sel.is_empty() && self.row_comment(self.at).is_some() => {
