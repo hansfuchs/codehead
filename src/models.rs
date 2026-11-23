@@ -1,7 +1,7 @@
 //! Model lists of the harnesses, for the model dropdown of the agent form.
 //! - Claude Code: the aliases (`models` setting) with their exact ids, then the exact ids.
 //! - Codex: `~/.codex/models_cache.json` (the codex CLI's server list: models of the picker,
-//!   by priority) merged with an ACP probe.
+//!   by priority). The CLI refreshes it; codehead runs the same CLI (`codex app-server`).
 //! - OpenCode: `opencode models`, else an ACP probe.
 //! - Other ACP harnesses: a probe: the ACP command, `initialize`, `session/new` in a temp dir,
 //!   the models of the session (config option `model`, else `models.availableModels`), kill.
@@ -104,11 +104,7 @@ pub fn read(harness: &str) -> Result<Vec<Model>, String> {
         ("codex", _) => {
             let home = crate::config::home();
             let cached = std::fs::read_to_string(home.join(".codex/models_cache.json")).map(|t| codex_cache(&t)).unwrap_or_default();
-            match probe() {
-                Ok(p) => Ok(merge(cached, p)),
-                Err(_) if !cached.is_empty() => Ok(cached),
-                Err(e) => Err(e),
-            }
+            if cached.is_empty() { Err("0 models in ~/.codex/models_cache.json: run `codex` once".into()) } else { Ok(cached) }
         }
         ("opencode", _) => match run(&["opencode".into(), "models".into()], TIMEOUT).map(|t| lines(&t)) {
             Ok(m) if !m.is_empty() => Ok(m),
@@ -116,16 +112,6 @@ pub fn read(harness: &str) -> Result<Vec<Model>, String> {
         },
         _ => probe(),
     }
-}
-
-/// A, then the models of B that A lacks.
-fn merge(mut a: Vec<Model>, b: Vec<Model>) -> Vec<Model> {
-    for m in b {
-        if !a.iter().any(|x| x.id == m.id) {
-            a.push(m);
-        }
-    }
-    a
 }
 
 /// `~/.codex/models_cache.json`: the models the codex picker lists (`visibility: list`), by priority.
@@ -306,7 +292,6 @@ mod tests {
             {"slug": "a", "display_name": "A", "visibility": "list", "priority": 1}]}"#;
         assert_eq!(ids(&codex_cache(t)), ["a", "b"]);
         assert!(codex_cache("not json").is_empty());
-        assert_eq!(ids(&merge(codex_cache(t), vec![Model { id: "b".into(), ..Default::default() }, Model { id: "c".into(), ..Default::default() }])), ["a", "b", "c"]);
     }
 
     #[test]

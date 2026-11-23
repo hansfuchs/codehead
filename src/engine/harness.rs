@@ -1,7 +1,8 @@
 //! 1 harness process per agent and thread. Claude Code: `claude -p` with stream-json in and out;
 //! prompts go in as user messages on stdin (the process queues them while a turn runs),
 //! permission requests and questions come out as `control_request`s, answered on stdin with a
-//! `control_response` once the owner picks. Every other harness: ACP (`engine::acp`).
+//! `control_response` once the owner picks. Codex: `codex app-server` (`engine::codex`). Every
+//! other harness: ACP (`engine::acp`).
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -279,10 +280,46 @@ pub(super) fn stderr_tail(stderr: std::process::ChildStderr) -> std::sync::Arc<s
 /// Start the session; its events go to TX, tagged with the agent's name.
 pub fn spawn(s: &Spec, tx: Sender<(String, Out)>) -> Result<Session, String> {
     let h = super::harnesses::get(&s.agent.harness).ok_or_else(|| format!("unknown harness {:?}", s.agent.harness))?;
-    match super::harnesses::acp_command(h, s.agent.command.as_deref()) {
-        None => spawn_claude(s, tx),
-        Some(cmd) => spawn_acp(s, h, &cmd, tx),
+    match (super::harnesses::acp_command(h, s.agent.command.as_deref()), &h.drive) {
+        (Some(cmd), _) => spawn_acp(s, h, &cmd, tx),
+        (None, super::harnesses::Drive::Codex) => spawn_codex(s, h, tx),
+        (None, _) => spawn_claude(s, tx),
     }
+}
+
+/// The agent's own value of KEY (model, effort), else the harness tab's.
+fn own_or_harness(own: &Option<String>, harness: &str, key: &str) -> Option<String> {
+    own.clone().filter(|v| !v.is_empty() && v != "default").or_else(|| crate::config::harness_opt(harness, key))
+}
+
+fn spawn_codex(s: &Spec, h: &super::harnesses::Harness, tx: Sender<(String, Out)>) -> Result<Session, String> {
+    let mut child = harness_command("codex", s)
+        .arg("app-server")
+        .spawn()
+        .map_err(|e| format!("{} (codex app-server): {e}. install: {}", h.label, h.install))?;
+
+    let stdin = child.stdin.take().ok_or("0 stdin")?;
+    let stdout = child.stdout.take().ok_or("0 stdout")?;
+    let tail = stderr_tail(child.stderr.take().ok_or("0 stderr")?);
+
+    // the app server runs every MCP transport
+    let (servers, errors) = super::servers::acp_config(&super::servers::for_agent(s.agent), true, true);
+    report_mcp_errors(h.name, &errors, &tx, &s.agent.name);
+
+    let env = [("CODEHEAD_THREAD".to_string(), s.thread.to_string()), ("CODEHEAD_AGENT".to_string(), s.agent.name.clone())];
+    let setup = super::codex::Setup {
+        cwd: s.dir.display().to_string(),
+        resume: s.resume.map(String::from),
+        fork: s.fork,
+        model: own_or_harness(&s.agent.model, h.name, "model"),
+        effort: own_or_harness(&s.agent.effort, h.name, "effort"),
+        instructions: s.system.to_string(),
+        config: json!({"mcp_servers": super::codex::mcp_config(&s.exe.display().to_string(), &env, &servers)}),
+        sandbox: if s.agent.mode == "plan" { "read-only" } else { "danger-full-access" },
+    };
+
+    let conn = super::codex::start(stdin, stdout, tail, setup, s.agent.name.clone(), tx);
+    Ok(Session { child, driver: Box::new(conn) })
 }
 
 fn spawn_acp(s: &Spec, h: &super::harnesses::Harness, cmd: &[String], tx: Sender<(String, Out)>) -> Result<Session, String> {
