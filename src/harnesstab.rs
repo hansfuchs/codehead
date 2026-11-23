@@ -20,6 +20,11 @@ fn fields(h: &Harness) -> Vec<Spec> {
             Spec::new(key("effort"), "effort", "low, medium, high, xhigh or max, for agents with 0 effort of their own", ""),
             Spec::new(key("args"), "arguments", "extra arguments of every `claude` session, e.g. --add-dir ~/x", ""),
         ],
+        Drive::Codex => vec![
+            Spec::new(key("model"), "model", "model of agents with 0 model of their own", ""),
+            Spec::new(key("effort"), "effort", "reasoning effort of the model (low, medium, high, …), for agents with 0 effort of their own", ""),
+            Spec::new(key("command"), "command", "an ACP command instead of the app server, for agents with 0 command of their own", ""),
+        ],
         Drive::Acp(_) => vec![
             Spec::new(key("model"), "model", "model of agents with 0 model of their own", ""),
             Spec::new(key("command"), "command", "ACP command (args included) of agents with 0 command of their own", ""),
@@ -39,6 +44,7 @@ pub fn form(path: PathBuf) -> Form {
     for h in shown() {
         let how = match h.drive {
             Drive::Claude => "stream-json",
+            Drive::Codex => "app server",
             Drive::Acp(_) => "ACP",
         };
         let at = which(h.bin).unwrap_or_else(|| h.bin.to_string());
@@ -59,6 +65,7 @@ pub fn default_of(key: &str) -> Option<String> {
     let h = harnesses::get(name)?;
     Some(match (field, &h.drive) {
         ("command", Drive::Acp(cmd)) => cmd.join(" "),
+        ("command", Drive::Codex) => "codex app-server".into(),
         ("args", _) => "none".into(),
         _ => format!("{}'s own", h.label),
     })
@@ -75,7 +82,8 @@ mod tests {
 
     #[test]
     fn defaults_name_the_harness_and_its_command() {
-        assert_eq!(default_of("harness.codex.command").as_deref(), Some("codex-acp"));
+        assert_eq!(default_of("harness.codex.command").as_deref(), Some("codex app-server"));
+        assert_eq!(default_of("harness.opencode.command").as_deref(), Some("opencode acp"));
         assert_eq!(default_of("harness.claude.model").as_deref(), Some("Claude Code's own"));
         assert_eq!(default_of("harness.claude.args").as_deref(), Some("none"));
         assert_eq!(default_of("notes"), None);

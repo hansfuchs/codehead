@@ -1,10 +1,13 @@
 //! The harnesses codehead runs agents on: the coding agents' own CLIs. Claude Code goes over
-//! its stream-json mode; every other harness over the Agent Client Protocol (`engine::acp`).
-//! `$CODEHEAD_ACP_<NAME>` (or `command` in the agent file) replaces the ACP command.
+//! its stream-json mode, Codex over `codex app-server` (`engine::codex`), every other harness
+//! over the Agent Client Protocol (`engine::acp`). `$CODEHEAD_ACP_<NAME>` (or `command` in the
+//! agent file) replaces the ACP command; for Codex it runs that ACP agent instead.
 
 pub enum Drive {
     /// `claude -p`, stream-json.
     Claude,
+    /// `codex app-server`: the CLI's own JSON-RPC protocol.
+    Codex,
     /// An ACP agent on stdio: its command.
     Acp(&'static [&'static str]),
 }
@@ -20,7 +23,7 @@ pub struct Harness {
 
 pub const ALL: [Harness; 13] = [
     Harness { name: "claude", label: "Claude Code", bin: "claude", drive: Drive::Claude, install: "curl -fsSL https://claude.ai/install.sh | bash" },
-    Harness { name: "codex", label: "Codex", bin: "codex", drive: Drive::Acp(&["codex-acp"]), install: "npm i -g @openai/codex @zed-industries/codex-acp" },
+    Harness { name: "codex", label: "Codex", bin: "codex", drive: Drive::Codex, install: "npm i -g @openai/codex" },
     Harness { name: "opencode", label: "OpenCode", bin: "opencode", drive: Drive::Acp(&["opencode", "acp"]), install: "npm i -g opencode-ai" },
     Harness { name: "goose", label: "Goose", bin: "goose", drive: Drive::Acp(&["goose", "acp"]), install: "https://goose-docs.ai/docs/getting-started/installation/" },
     Harness { name: "cursor", label: "Cursor", bin: "cursor-agent", drive: Drive::Acp(&["cursor-agent", "acp"]), install: "curl https://cursor.com/install -fsS | bash" },
@@ -49,12 +52,18 @@ pub fn installed() -> Vec<&'static Harness> {
 }
 
 /// The ACP command of harness H for an agent: the agent's own `command`, else
-/// `$CODEHEAD_ACP_<NAME>`, else `[harness.<name>] command`, else the default. None: Claude Code.
+/// `$CODEHEAD_ACP_<NAME>`, else `[harness.<name>] command`, else the default. None: Claude Code,
+/// Codex without an ACP command of its own (the app server).
 pub fn acp_command(h: &Harness, own: Option<&str>) -> Option<Vec<String>> {
-    let Drive::Acp(default) = h.drive else { return None };
+    let default: &[&str] = match h.drive {
+        Drive::Claude => return None,
+        Drive::Codex => &[],
+        Drive::Acp(d) => d,
+    };
     let env = std::env::var(format!("CODEHEAD_ACP_{}", h.name.to_uppercase())).ok();
     match own.map(String::from).or(env).or_else(|| crate::config::harness_opt(h.name, "command")).filter(|c| !c.trim().is_empty()) {
         Some(c) => Some(split(&c)),
+        None if default.is_empty() => None,
         None => Some(default.iter().map(|s| s.to_string()).collect()),
     }
 }
@@ -96,6 +105,9 @@ mod tests {
     fn registry_and_commands() {
         assert_eq!(ALL.len(), 13);
         assert!(acp_command(get("claude").unwrap(), None).is_none());
+        // codex: the app server, an ACP agent only on an own command
+        assert!(acp_command(get("codex").unwrap(), None).is_none());
+        assert_eq!(acp_command(get("codex").unwrap(), Some("codex-acp")).unwrap(), ["codex-acp"]);
         assert_eq!(acp_command(get("grok").unwrap(), None).unwrap(), ["grok", "agent", "stdio"]);
         assert_eq!(acp_command(get("pi").unwrap(), Some("npx 'pi-acp' --x")).unwrap(), ["npx", "pi-acp", "--x"]);
         assert_eq!(split(r#"a "b c" ''"#), ["a", "b c", ""]);

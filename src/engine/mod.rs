@@ -12,6 +12,7 @@
 pub mod acp;
 pub mod checkouts;
 pub mod client;
+pub mod codex;
 pub mod edits;
 pub mod flows;
 pub mod guard;
