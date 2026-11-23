@@ -9,7 +9,7 @@
 //! Archive and delete ask first (1 row). Edit: a form (title, repo, linked repos, agents). The
 //! jobs run off the UI thread; their result shows on the list's last row.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
@@ -213,6 +213,13 @@ pub struct ThreadList {
     actions: Option<usize>,
     pending: Option<Pending>,
     job: Option<Receiver<(String, bool)>>,
+    /// Jobs run on their own thread (tests: at once, the perf case: on their thread).
+    pub inline: bool,
+    /// Cards a job acts on, as the job leaves them (Some: their new state; None: gone): shown at
+    /// once, over every read until the 1st read after the job's end.
+    moved: HashMap<String, Option<String>>,
+    /// A job ended: the next read clears `moved`.
+    settle: bool,
     status: Option<(String, bool, Instant)>,
     /// A job ended: the host reads its own rows again (`take_changed`).
     changed: bool,
@@ -255,6 +262,9 @@ impl ThreadList {
             actions: None,
             pending: None,
             job: None,
+            inline: cfg!(test),
+            moved: HashMap::new(),
+            settle: false,
             status: None,
             changed: false,
             form: None,
@@ -294,6 +304,10 @@ impl ThreadList {
             && let Ok(c) = rx.try_recv()
         {
             self.loading = None;
+            // the 1st read after the job's end: the store holds what the job did
+            if std::mem::take(&mut self.settle) {
+                self.moved.clear();
+            }
             self.set_cards(c);
         }
         let due = self.cards_at.is_none_or(|t| t.elapsed() >= CARDS_EVERY);
@@ -314,11 +328,23 @@ impl ThreadList {
     fn done(&mut self, text: String, err: bool) {
         self.status = Some((text, err, Instant::now()));
         self.changed = true;
+        // a read from before the end: dropped, a new one ends the moved cards
+        self.loading = None;
+        self.settle = true;
         self.reload();
     }
 
-    /// New cards (a read): the cursor stays on its thread.
-    pub fn set_cards(&mut self, c: Vec<Card>) {
+    /// New cards (a read): the cursor stays on its thread. Moved cards (a job on its way) as
+    /// the job leaves them.
+    pub fn set_cards(&mut self, mut c: Vec<Card>) {
+        if !self.moved.is_empty() {
+            c.retain(|k| !matches!(self.moved.get(&k.id), Some(None)));
+            for k in &mut c {
+                if let Some(Some(s)) = self.moved.get(&k.id) {
+                    k.state = s.clone();
+                }
+            }
+        }
         if c == self.cards {
             return;
         }
@@ -567,6 +593,18 @@ impl ThreadList {
     /// ACT on IDS, off the UI thread (tests: at once).
     fn start(&mut self, act: Act, ids: Vec<String>) {
         self.sel.clear();
+        for id in &ids {
+            let to = match act {
+                Act::Archive => Some("archived".to_string()),
+                Act::Unarchive => Some("open".to_string()),
+                _ => None,
+            };
+            self.moved.insert(id.clone(), to);
+        }
+        let cards = self.cards.clone();
+        self.set_cards(cards);
+        // the next list (menu closed, opened again) starts from the moved cards too
+        crate::background::save("cards", &self.cards);
         let work = move || {
             let mut ok = Vec::new();
             let mut errs = Vec::new();
@@ -594,7 +632,7 @@ impl ThreadList {
                 (n, Some(e)) => (format!("{n} threads {verb} · {} failed: {e}", errs.len()), true),
             }
         };
-        if cfg!(test) {
+        if self.inline {
             let (text, err) = work();
             self.done(text, err);
             return;

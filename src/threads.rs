@@ -562,6 +562,49 @@ pub fn delete_thread(id: &str) -> bool {
     store::delete(id).is_ok()
 }
 
+/// Dir of worktree dirs on their way out (`drop_worktree`): their files go in the background.
+fn trash_dir() -> PathBuf {
+    crate::engine::data_dir().join("trash")
+}
+
+/// Linked worktree WT of repo MAIN out, in ms: the dir moves to the trash (1 rename), git forgets
+/// it (its admin dir under `.git/worktrees/` goes), `rm -rf` deletes the files in its own process
+/// (a 3 GB node_modules: ~30 s; it outlives the UI). Another file system (rename fails): `git
+/// worktree remove --force`, the slow way. Uncommitted files: the caller's (stash first).
+pub fn drop_worktree(main: &Path, wt: &Path) -> Result<(), String> {
+    let admin = std::fs::read_to_string(wt.join(".git"))
+        .ok()
+        .and_then(|s| s.strip_prefix("gitdir:").map(|p| wt.join(p.trim())))
+        .filter(|a| a.parent().and_then(Path::file_name).is_some_and(|n| n == "worktrees") && a.is_dir());
+    let trash = trash_dir();
+    let _ = std::fs::create_dir_all(&trash);
+    let name = wt.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let to = trash.join(format!("{name}-{nanos}"));
+    let Some(admin) = admin.filter(|_| std::fs::rename(wt, &to).is_ok()) else {
+        let (ok, _, err) = git(main, &["worktree", "remove", "--force", &wt.display().to_string()]);
+        return if ok { Ok(()) } else { Err(format!("git worktree remove: {}", err.trim())) };
+    };
+    std::fs::remove_dir_all(&admin).map_err(|e| format!("{}: {e}", admin.display()))?;
+    empty_trash();
+    Ok(())
+}
+
+/// Delete the trash's dirs (left over ones too) in 1 `rm -rf` of its own process group: a
+/// closed terminal or a quit UI never stops it.
+pub fn empty_trash() {
+    use std::os::unix::process::CommandExt;
+    let Ok(rd) = std::fs::read_dir(trash_dir()) else { return };
+    let dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    if dirs.is_empty() {
+        return;
+    }
+    let child = Command::new("rm").arg("-rf").args(&dirs).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn();
+    if let Ok(mut c) = child {
+        std::thread::spawn(move || c.wait());
+    }
+}
+
 /// Delete thread, remove worktree (uncommitted files → git stash), delete branch with 0 unpushed commits.
 pub fn remove(repo: &Path, items: &[Worktree], logs: &Path) -> Vec<Line<'static>> {
     let mut out = Vec::new();
@@ -618,9 +661,8 @@ pub fn remove(repo: &Path, items: &[Worktree], logs: &Path) -> Vec<Line<'static>
             out.push(Line::styled(format!("  skip: detached HEAD with {up} unpushed commits. commits would be lost."), danger));
             continue;
         }
-        let (ok, _, err) = git(repo, &["worktree", "remove", &w.path]);
-        if !ok {
-            out.push(Line::styled(format!("  worktree: {err}"), danger));
+        if let Err(e) = drop_worktree(repo, p) {
+            out.push(Line::styled(format!("  worktree: {e}"), danger));
             continue;
         }
         out.push(Line::raw("  worktree removed"));
@@ -674,12 +716,15 @@ pub fn archive(id: &str) -> Result<String, String> {
         }
         None => None,
     };
-    if client::alive(&t.id) {
-        let _ = client::send_within(&t.id, &serde_json::json!({"op": "stop"}), std::time::Duration::from_secs(3));
-    }
+    // archived at once: every list read from now on shows it there (a failure below: back)
+    store::update(&t.id, |s| s.state = "archived".into())?;
     let mut done = Vec::new();
     let repo = repo_root(Path::new(&t.dir)).or_else(|| wt.as_deref().and_then(|p| repo_of(Path::new(p))));
-    if let (Some(p), Some(b)) = (&wt, &branch) {
+    let out = (|| {
+        if client::alive(&t.id) {
+            let _ = client::send_within(&t.id, &serde_json::json!({"op": "stop"}), std::time::Duration::from_secs(3));
+        }
+        let (Some(p), Some(b)) = (&wt, &branch) else { return Ok(()) };
         let path = Path::new(p);
         if let Some((label, ok, _)) = crate::setup::run_teardown(&t) {
             done.push(format!("{label}: {}", if ok { "ran" } else { "failed" }));
@@ -695,11 +740,13 @@ pub fn archive(id: &str) -> Result<String, String> {
             done.push(format!("{n} uncommitted files → git stash \"{msg}\""));
         }
         let main = repo_of(path).or_else(|| repo.clone()).ok_or_else(|| format!("{p}: 0 git repo"))?;
-        let (ok, _, err) = git(&main, &["worktree", "remove", "--force", p]);
-        if !ok {
-            return Err(format!("git worktree remove: {}", err.trim()));
-        }
+        drop_worktree(&main, path)?;
         done.push(format!("worktree removed · branch {b} kept"));
+        Ok(())
+    })();
+    if let Err(e) = out {
+        let _ = store::update(&t.id, |s| s.state = t.state.clone());
+        return Err(e);
     }
     let repo_s = repo.map(|r| r.display().to_string());
     store::update(&t.id, |s| {
@@ -819,6 +866,10 @@ mod tests {
         assert!(out.contains("worktree removed") && out.contains("git stash"), "{out}");
         assert!(!wt.exists());
         assert!(git(&repo, &["rev-parse", "--verify", "--quiet", "refs/heads/feat"]).0, "branch kept");
+        // git forgot the worktree: its branch takes a new one (the unarchive's)
+        assert!(!git(&repo, &["worktree", "list"]).1.contains("/w "), "{}", git(&repo, &["worktree", "list"]).1);
+        let again = base.join("w2");
+        assert!(git(&repo, &["worktree", "add", "-q", &again.display().to_string(), "feat"]).0, "feat: free for a new worktree");
         let a = store::load(&t.id).unwrap();
         assert_eq!((a.state.as_str(), a.worktree.as_deref(), a.worktree_pending.as_deref(), a.port), ("archived", None, Some("feat"), None));
         assert_eq!(a.repo.as_deref().map(PathBuf::from).and_then(|p| std::fs::canonicalize(p).ok()), std::fs::canonicalize(&repo).ok());
