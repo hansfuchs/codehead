@@ -217,6 +217,8 @@ pub struct View {
     image_order: Vec<ImageKey>,
     /// The image the preview shows now, since when (an encode starts once it rests).
     image_want: Option<(ImageKey, Instant)>,
+    /// A wanted image not polled yet: the 1st poll after its rest wakes a draw (1x, not per tick).
+    image_kick: bool,
     /// Data versions (a list read in, a preview in): their areas dissolve to the new rows.
     list_version: u64,
     preview_version: u64,
@@ -256,6 +258,7 @@ impl View {
             picker: crate::graphics::picker,
             image_order: Vec::new(),
             image_want: None,
+            image_kick: false,
             list_version: 0,
             preview_version: 0,
             list_fx: Default::default(),
@@ -386,9 +389,11 @@ impl View {
             self.drop_image(&old);
         }
 
-        // the cursor rested on an image: its encode starts (a draw requests it)
-        if self.image_want.as_ref().is_some_and(|(k, at)| at.elapsed() >= IMAGE_REST && !self.images.contains_key(k) && !self.image_reads.waiting(k)) {
-            changed = true;
+        // the cursor rested on an image: 1 draw, which requests its encode (1x: 0 redraw per tick
+        // after yazi, a pane change, `previews = off`)
+        if self.image_kick && self.image_want.as_ref().is_some_and(|(_, at)| at.elapsed() >= IMAGE_REST) {
+            self.image_kick = false;
+            changed |= self.image_want.as_ref().is_some_and(|(k, _)| !self.images.contains_key(k) && !self.image_reads.waiting(k));
         }
 
         changed
@@ -418,11 +423,14 @@ impl View {
     /// The image preview of P in BODY (cols × rows): drawn (true), or a line while it encodes or
     /// why 0 image. False: 0 image preview for P (a text file, 0 graphics terminal, 0 room).
     fn draw_image(&mut self, f: &mut Frame, p: &Path, head: Rect, body: Rect) -> bool {
-        let Some(kind) = crate::graphics::kind(p) else { return false };
-        if body.width == 0 || body.height == 0 {
+        let kind = crate::graphics::kind(p);
+        let picker = if kind.is_some() && body.width > 0 && body.height > 0 { (self.picker)() } else { None };
+        let (Some(kind), Some(picker)) = (kind, picker) else {
+            // 0 image wanted: 0 wake-ups for one
+            self.image_want = None;
+            self.image_kick = false;
             return false;
-        }
-        let Some(picker) = (self.picker)() else { return false };
+        };
 
         let key: ImageKey = (p.to_path_buf(), mtime(p), body.width, body.height);
         let hints = "y: yazi · o: IDE · c: copy path · ctrl+f: filter";
@@ -432,10 +440,19 @@ impl View {
         // a new file or area: wait for the cursor (or the resize) to rest
         if self.image_want.as_ref().is_none_or(|(k, _)| *k != key) {
             self.image_want = Some((key.clone(), Instant::now()));
+            self.image_kick = true;
         }
 
         match self.images.get_mut(&key) {
-            Some(Ok(pre)) => {
+            Some(Ok(_)) => {
+                // in use: the newest of the kept encodes (LRU)
+                if self.image_order.last() != Some(&key) {
+                    self.image_order.retain(|k| *k != key);
+                    self.image_order.push(key.clone());
+                }
+
+                let Some(Ok(pre)) = self.images.get_mut(&key) else { return true };
+
                 // kitty: the image data 1x straight to the terminal, the cells: placeholders
                 if let Some(t) = pre.transmit.take() {
                     crate::graphics::send(&t);
@@ -1054,8 +1071,18 @@ mod view_tests {
         assert_eq!(v.image_reads.pending(), 0);
         assert_eq!(v.images.len(), 1);
 
-        // after yazi: encoded again, at once (0 wait for the 5 s read throttle)
+        // the image in: 0 wake-up per tick
+        for _ in 0..3 {
+            assert!(!v.poll());
+        }
+
+        // after yazi, before a draw (another pane): 0 wake-up per tick either
         v.forget_images();
+        for _ in 0..3 {
+            assert!(!v.poll());
+        }
+
+        // the next draw: encoded again, at once (0 wait for the 5 s read throttle)
         let (s, _) = full(&mut v);
         assert!(s.iter().any(|r| r.contains("reading…")), "{s:#?}");
         assert_eq!(v.image_reads.pending(), 1);
@@ -1105,6 +1132,14 @@ mod view_tests {
         assert_eq!(v.image_order.len(), MAX_IMAGES);
         let shown = v.image_want.as_ref().map(|(k, _)| k.clone()).unwrap();
         assert!(v.images.contains_key(&shown));
+
+        // a cached one shown again: the newest of the kept (LRU, not FIFO)
+        v.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        full(&mut v);
+        let back = v.image_want.as_ref().map(|(k, _)| k.clone()).unwrap();
+        assert_ne!(back, shown);
+        assert_eq!(v.image_order.last(), Some(&back));
+        assert_eq!(v.image_reads.pending(), 0, "from the cache");
 
         // back to the 1st file: dropped, a new read at once
         v.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));

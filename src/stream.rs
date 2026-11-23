@@ -2008,6 +2008,7 @@ mod tests {
             assert!(clip.links.iter().any(|(a, _, u)| *u == url && *a as usize == start), "{look:?}\n{s}");
         }
     }
+
     fn text(d: &Drawn) -> String {
         d.rows.iter().map(|r| r.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>().trim_end().to_string() + "\n").collect()
     }

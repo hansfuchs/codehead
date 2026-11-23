@@ -210,8 +210,10 @@ fn decode(p: &Path) -> Result<DynamicImage, String> {
     limits.max_alloc = Some(MAX_ALLOC);
 
     let mut reader = image::ImageReader::open(p).and_then(|r| r.with_guessed_format()).map_err(|e| e.to_string())?;
-    reader.limits(limits);
+    reader.limits(limits.clone());
     let mut decoder = reader.into_decoder().map_err(|e| e.to_string())?;
+    // the pixel buffer counts too (from_decoder reserves 0 of it): 16384² RGBA = 1 GiB
+    limits.reserve(decoder.total_bytes()).map_err(|e| e.to_string())?;
     let turn = decoder.orientation().map_err(|e| e.to_string())?;
     let mut img = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
     img.apply_orientation(turn);
@@ -322,6 +324,31 @@ mod tests {
         p
     }
 
+    /// A png of W×H RGBA8 with 0 pixel data: signature, IHDR, an empty IDAT (the decoder reads
+    /// the header up to it), IEND.
+    fn png_header(w: u32, h: u32) -> Vec<u8> {
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut c = !0u32;
+            for b in bytes {
+                c ^= u32::from(*b);
+                for _ in 0..8 {
+                    c = if c & 1 == 1 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+                }
+            }
+            !c
+        }
+
+        let chunk = |kind: &[u8], data: &[u8]| {
+            let body = [kind, data].concat();
+            [&(data.len() as u32).to_be_bytes()[..], &body, &crc32(&body).to_be_bytes()].concat()
+        };
+
+        // 8 bits, RGBA, deflate, 0 filter, 0 interlace
+        let ihdr = [&w.to_be_bytes()[..], &h.to_be_bytes(), &[8, 6, 0, 0, 0]].concat();
+
+        [&b"\x89PNG\r\n\x1a\n"[..], &chunk(b"IHDR", &ihdr), &chunk(b"IDAT", &[]), &chunk(b"IEND", &[])].concat()
+    }
+
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("codehead-graphics-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -407,8 +434,14 @@ mod tests {
         let p = dir.join("tall.png");
         // 1×20000: 80 KB of pixels, over the side limit
         image::GrayImage::from_pixel(1, MAX_SIDE + 1, image::Luma([0])).save(&p).unwrap();
+        // 16384×16384 RGBA: inside the side limit, 1 GiB of pixels; only the header (IHDR) is
+        // needed: the limit stops the decode before the pixel data
+        let big = dir.join("square.png");
+        std::fs::write(&big, png_header(MAX_SIDE, MAX_SIDE)).unwrap();
 
         assert!(decode(&p).is_err());
+        let e = decode(&big).err();
+        assert!(e.as_deref().is_some_and(|e| e.to_lowercase().contains("limit")), "over MAX_ALLOC: {e:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
