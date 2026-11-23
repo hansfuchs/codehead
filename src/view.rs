@@ -268,6 +268,8 @@ struct View {
     outside: Option<Vec<std::ffi::OsString>>,
     prompt_focus: bool,
     bar_rects: Vec<(Rect, Pane)>,
+    /// The `⌂ home` pill left of the view bar (a click: the start screen).
+    home_rect: Rect,
     /// The changes view with the chat right of it (wide terminals; alt+\ toggles); the view's area.
     split: bool,
     /// The view follows the width (changes + chat when wide, chat when narrow) until the owner
@@ -429,6 +431,7 @@ impl View {
             outside: None,
             prompt_focus: false,
             bar_rects: Vec::new(),
+            home_rect: Rect::default(),
             split: true,
             auto_pane: true,
             wide_split: false,
@@ -2622,7 +2625,6 @@ impl View {
     fn menu_items(&mut self) -> Vec<crate::menu::Item> {
         use crate::menu::Item;
         let items = vec![
-            Item { label: "back to the start screen".into(), key: "esc esc".into(), id: 3, section: "thread" },
             Item { label: "IDE on the repo root (several repos: pick 1)".into(), key: "ctrl+i · ⌘i".into(), id: 2, section: "thread" },
             Item { label: "interrupt the agents".into(), key: "esc".into(), id: 12, section: "thread" },
             Item { label: "yazi on the worktree (its pick: into the prompt)".into(), key: "files view: y".into(), id: 14, section: "thread" },
@@ -2857,6 +2859,12 @@ impl View {
                 None => self.open_flow(&agent, false),
             }
             self.dirty = true;
+            return;
+        }
+        // home: the start screen
+        if click && self.home_rect.contains(at) {
+            self.exit = Exit::Back;
+            self.mouse_exit = true;
             return;
         }
         // the view bar
@@ -3506,6 +3514,14 @@ impl View {
         let mut spans: Vec<Span<'static>> = Vec::new();
         self.bar_rects.clear();
         let mut x = top.x + 2;
+        // home (the start screen), with the count of the other threads that need the owner
+        let (home, waiting) = home_label(&crate::notify::unseen(Some(&self.id)));
+        let hw = unicode_width::UnicodeWidthStr::width(home.as_str()) as u16;
+        self.home_rect = Rect { x, y: top.y, width: hw, height: 1 };
+        x += hw + 1;
+        spans.push(Span::styled(home, if waiting { theme::fg(theme::pal().attention()).add_modifier(Modifier::BOLD) } else { theme::muted() }));
+        spans.push(Span::styled("│ ", theme::line()));
+        x += 2;
         for p in Pane::ALL {
             let label = match p {
                 Pane::Chat if !self.thread.asks.is_empty() => format!(" chat ?{} ", self.thread.asks.len()),
@@ -3773,6 +3789,16 @@ fn back_for(starts: &[usize], total: usize, (item, off): (usize, usize), h: usiz
 /// 4 gap columns hold 3 of those). 0 cards: 0.
 fn cards_w(cards: &[Card]) -> u16 {
     if cards.is_empty() { 0 } else { cards.iter().map(|c| c.3).sum::<u16>() + 1 }
+}
+
+/// The home pill of the view bar: ` ⌂ home ` + ` ?N` (N: other threads that need the owner: an
+/// ask, a blocked agent, a gate, an error). True: N > 0.
+fn home_label(notes: &[crate::notify::Note]) -> (String, bool) {
+    use crate::notify::Kind;
+    let mut ids: Vec<&str> = notes.iter().filter(|n| matches!(n.kind, Kind::Ask | Kind::Blocked | Kind::Gate | Kind::Error)).map(|n| n.thread.as_str()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() { (" ⌂ home ".into(), false) } else { (format!(" ⌂ home ?{} ", ids.len()), true) }
 }
 
 /// Header rows (inside its frame + its top border) for N agents.
@@ -4703,6 +4729,22 @@ mod pane_tests {
         t.draw(|f| v.draw(f)).unwrap();
         let b = t.backend().buffer().clone();
         (0..30).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Row 0: `⌂ home` left of the views; a click on it: the start screen (the view ends).
+    #[test]
+    fn the_home_pill_goes_to_the_start_screen() {
+        let mut v = view();
+        let s = screen(&mut v);
+        let row0 = s.lines().next().unwrap_or_default();
+        assert!(row0.contains("⌂ home") && row0.find("⌂ home") < row0.find(" chat "), "{row0}");
+        let r = v.home_rect;
+        v.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
+        assert!(v.mouse_exit && matches!(v.exit, Exit::Back));
+        // other threads that need the owner: their count on the pill
+        let note = |t: &str, kind| crate::notify::Note { thread: t.into(), title: t.into(), dir: PathBuf::new(), kind, agents: vec![], ts: 1, text: String::new(), comment: String::new() };
+        let (label, on) = home_label(&[note("a", crate::notify::Kind::Ask), note("a", crate::notify::Kind::Error), note("b", crate::notify::Kind::Blocked), note("c", crate::notify::Kind::Done)]);
+        assert_eq!((label.as_str(), on), (" ⌂ home ?2 ", true));
     }
 
     /// A spawn under way (the thread just opened): the `>` dropdown stays over its goo.

@@ -194,7 +194,7 @@ pub struct ThreadList {
     version: u64,
     fx: crate::dissolve::Dissolve,
     pub filter: TextArea,
-    /// Manage: the filter takes the keys (f / ctrl+f; enter / esc: back to the list).
+    /// Manage: the filter takes the keys (ctrl+f; enter / esc: back to the list).
     pub filtering: bool,
     pub cursor: usize,
     /// 1st virtual row in view.
@@ -230,7 +230,7 @@ impl ThreadList {
     pub fn new(mode: Mode, here: Option<String>, home_repo: Option<PathBuf>, cards: Vec<Card>) -> ThreadList {
         let loading = (cards.is_empty() && !cfg!(test)).then(read_cards);
         let cards = if cards.is_empty() && !cfg!(test) { crate::background::snapshot("cards").unwrap_or_default() } else { cards };
-        let mut filter = TextArea::new(true, if mode == Mode::Switch { "filter threads" } else { "f: fuzzy search thread names" });
+        let mut filter = TextArea::new(true, if mode == Mode::Switch { "filter threads" } else { "ctrl+f: fuzzy search thread names" });
         filter.style = Some(theme::text());
         ThreadList {
             mode,
@@ -730,8 +730,8 @@ impl ThreadList {
         // the host's views: the host moves its rows (↑ on its top row: `focus_views`)
         if !cards {
             return match k.code {
-                KeyCode::Char('f') if self.mode == Mode::Manage => {
-                    self.filtering = true;
+                KeyCode::Esc if !self.filter.text().is_empty() => {
+                    self.filter.set_text("");
                     Out::None
                 }
                 _ => Out::Pass,
@@ -773,7 +773,6 @@ impl ThreadList {
             KeyCode::Char('u') if !ctrl => return self.run(Act::Unarchive),
             KeyCode::Char('e') if !ctrl => return self.run(Act::Edit),
             KeyCode::Char('d') if !ctrl => return self.run(Act::Delete),
-            KeyCode::Char('f') if !ctrl => self.filtering = true,
             KeyCode::Esc if !self.filter.text().is_empty() => {
                 self.filter.set_text("");
                 self.cursor = 0;
@@ -896,7 +895,7 @@ impl ThreadList {
                 if self.filtering || !self.filter.text().is_empty() {
                     self.filter.render(f, input, self.filtering);
                 } else {
-                    f.render_widget(Paragraph::new(Span::styled("f: fuzzy search thread names", theme::fg(theme::pal().overlay0))), input);
+                    f.render_widget(Paragraph::new(Span::styled("ctrl+f: fuzzy search thread names", theme::fg(theme::pal().overlay0))), input);
                 }
             }
         }
@@ -1313,7 +1312,7 @@ mod tests {
     #[test]
     fn switch_mode_archives_by_ctrl_o_and_a_after_a_yes() {
         let dir = std::env::temp_dir();
-        let mut t = crate::engine::store::Thread::new("archive from menu", "task", &dir, vec!["ada".into()]);
+        let t = crate::engine::store::Thread::new("archive from menu", "task", &dir, vec!["ada".into()]);
         t.save().unwrap();
         let mut l = ThreadList::new(Mode::Switch, None, None, vec![card(&t.id, |c| c.title = "archive from menu".into())]);
         l.key(k(KeyCode::Char('a')));
@@ -1338,7 +1337,7 @@ mod tests {
     #[test]
     fn archiving_the_thread_in_view_goes_home() {
         let dir = std::env::temp_dir();
-        let mut t = crate::engine::store::Thread::new("here", "task", &dir, vec!["ada".into()]);
+        let t = crate::engine::store::Thread::new("here", "task", &dir, vec!["ada".into()]);
         t.save().unwrap();
         let mut l = ThreadList::new(Mode::Switch, Some(t.id.clone()), None, vec![card(&t.id, |_| {})]);
         l.key(ctrl('o'));
@@ -1352,7 +1351,7 @@ mod tests {
     #[test]
     fn manage_mode_selects_asks_and_edits() {
         let dir = std::env::temp_dir();
-        let mut t = crate::engine::store::Thread::new("old title", "task", &dir, vec!["ada".into()]);
+        let t = crate::engine::store::Thread::new("old title", "task", &dir, vec!["ada".into()]);
         t.save().unwrap();
         let mut l = ThreadList::new(Mode::Manage, None, None, vec![card(&t.id, |_| {}), card("other", |_| {})]);
         l.roster = vec!["ada".into(), "bob".into()];

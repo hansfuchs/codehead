@@ -291,7 +291,7 @@ pub fn merged() -> Vec<String> {
 /// Every PR of a thread done, 1 merged at least: STATES of its PRs (several repos too).
 pub fn all_merged(states: &[crate::gh::State]) -> bool {
     use crate::gh::State;
-    states.iter().any(|s| *s == State::Merged) && states.iter().all(|s| matches!(s, State::Merged | State::Closed))
+    states.contains(&State::Merged) && states.iter().all(|s| matches!(s, State::Merged | State::Closed))
 }
 
 static LAST:OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();

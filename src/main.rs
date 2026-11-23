@@ -58,7 +58,6 @@ mod screensel;
 mod search;
 mod review;
 mod render;
-mod repofilter;
 mod repopick;
 mod settings;
 mod shellcomp;

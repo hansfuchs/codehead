@@ -129,7 +129,7 @@ const HOME: usize = usize::MAX - 3;
 fn builtins() -> Vec<Item> {
     vec![
         Item { label: "new thread: start screen, new tab".into(), key: "n".into(), id: NEW, section: "codehead" },
-        Item { label: "home: the start screen".into(), key: "h".into(), id: HOME, section: "codehead" },
+        Item { label: "home: the start screen (thread view: esc esc, ⌂ home)".into(), key: "h".into(), id: HOME, section: "codehead" },
         Item { label: "settings: start screen, settings tab".into(), key: String::new(), id: SETTINGS, section: "codehead" },
         Item { label: "search: the messages of every thread".into(), key: "f".into(), id: SEARCH, section: "codehead" },
     ]
