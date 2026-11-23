@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# The checks of CI (.github/workflows/ci.yml) on each pushed commit, in a clean worktree of that
+# commit: 0 uncommitted or untracked files in the build, as on the runner. Stable worktree path +
+# own target dir (target/pre-push): warm builds, 0 rebuilds of the main checkout's target.
+# Skip once: git push --no-verify. Install: just hooks.
+set -euo pipefail
+
+root=$(git rev-parse --show-toplevel)
+zero=0000000000000000000000000000000000000000
+checked=" "
+
+while read -r _ local_sha _ _; do
+    [[ $local_sha == "$zero" || $checked == *" $local_sha "* ]] && continue
+    checked+="$local_sha "
+    dir="$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)/pre-push-worktree"
+    git -C "$root" worktree remove --force "$dir" >/dev/null 2>&1 || rm -rf "$dir"
+    git -C "$root" worktree prune
+    trap 'git -C "$root" worktree remove --force "$dir" >/dev/null 2>&1 || true' EXIT
+    git -C "$root" worktree add --detach --quiet "$dir" "$local_sha"
+    echo "pre-push: CI checks on ${local_sha:0:9}"
+    (
+        # git sets GIT_DIR & co. for hooks: tests that run git must see the worktree, not this repo
+        unset $(git rev-parse --local-env-vars)
+        cd "$dir"
+        export CARGO_TARGET_DIR="$root/target/pre-push"
+        cargo clippy --all-targets --locked -- -D warnings
+        cargo test --locked
+    ) || { echo "pre-push: checks failed on ${local_sha:0:9}; push blocked (skip: --no-verify)" >&2; exit 1; }
+    git -C "$root" worktree remove --force "$dir"
+    trap - EXIT
+done

@@ -7,6 +7,10 @@ check:
     cargo clippy --all-targets --locked -- -D warnings
     cargo test --locked
 
+# Git hooks of .githooks: pre-push runs the CI checks on each pushed commit.
+hooks:
+    git config core.hooksPath .githooks
+
 # Build a release binary and link it into ~/.local/bin. Later release builds take effect at once.
 install:
     #!/usr/bin/env bash
