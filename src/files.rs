@@ -17,7 +17,7 @@ use crate::engine::store::{self, Kind};
 use crate::theme;
 
 /// Where a file comes from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     /// An agent's Write / Edit call.
     Agent,
@@ -25,6 +25,8 @@ pub enum Source {
     Note,
     /// A file a message named (a click on its link).
     Named,
+    /// A file the owner attached to a message (a paste, a drop), with its marker (`[Image #1]`).
+    Attached(Option<String>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -38,21 +40,41 @@ pub struct Entry {
 /// Tool inputs that name the file they write.
 const WRITE_TOOLS: [&str; 5] = ["Write", "Edit", "MultiEdit", "NotebookEdit", "str_replace_based_edit_tool"];
 
-/// Files the agents of thread ID wrote or edited (absolute; relative ones from DIR), each once.
-pub fn agent_files(id: &str, dir: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
+/// The files of thread ID's log, 1 read: the agents wrote or edited (absolute; relative ones
+/// from DIR), the owner attached to messages (with markers); each once.
+pub fn log_files(id: &str, dir: &Path) -> (Vec<PathBuf>, Vec<(PathBuf, Option<String>)>) {
+    let mut wrote: Vec<PathBuf> = Vec::new();
+    let mut attached: Vec<(PathBuf, Option<String>)> = Vec::new();
     for e in store::events(id) {
-        if let Kind::Tool { name, input, .. } = e.kind
-            && (WRITE_TOOLS.contains(&name.as_str()) || input["_kind"] == "edit")
-            && let Some(p) = input["file_path"].as_str().or_else(|| input["path"].as_str()).or_else(|| input["notebook_path"].as_str())
-        {
-            let p = if Path::new(p).is_absolute() { PathBuf::from(p) } else { dir.join(p) };
-            if !out.contains(&p) {
-                out.push(p);
+        match e.kind {
+            Kind::Tool { name, input, .. }
+                if WRITE_TOOLS.contains(&name.as_str()) || input["_kind"] == "edit" =>
+            {
+                if let Some(p) = input["file_path"].as_str().or_else(|| input["path"].as_str()).or_else(|| input["notebook_path"].as_str()) {
+                    let p = if Path::new(p).is_absolute() { PathBuf::from(p) } else { dir.join(p) };
+                    if !wrote.contains(&p) {
+                        wrote.push(p);
+                    }
+                }
             }
+            Kind::Prompt { from, text, .. } if from == "owner" => {
+                for a in crate::stream::attachments(&text).1 {
+                    let p = PathBuf::from(&a.path);
+                    if !attached.iter().any(|(q, _)| *q == p) {
+                        attached.push((p, a.marker));
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    out
+    (wrote, attached)
+}
+
+/// Files the agents of thread ID wrote or edited (absolute; relative ones from DIR), each once.
+#[cfg(test)]
+pub fn agent_files(id: &str, dir: &Path) -> Vec<PathBuf> {
+    log_files(id, dir).0
 }
 
 /// Markdown files under ROOT whose line 1 names thread ID (`thread: <id>`), at most 4 dirs deep.
@@ -87,12 +109,19 @@ fn mtime(p: &Path) -> u64 {
 
 /// The files of thread ID (DIR: its work dir): existing ones, newest first.
 pub fn load(id: &str, dir: &Path) -> Vec<Entry> {
-    let mut v: Vec<Entry> = agent_files(id, dir).into_iter().filter(|p| p.is_file()).map(|p| Entry { at: mtime(&p), path: p, source: Source::Agent }).collect();
+    let (wrote, attached) = log_files(id, dir);
+    let mut v: Vec<Entry> = wrote.into_iter().filter(|p| p.is_file()).map(|p| Entry { at: mtime(&p), path: p, source: Source::Agent }).collect();
     if let Some(home) = crate::config::home_repo() {
         for p in notes_of(&home, id) {
             if !v.iter().any(|e| e.path == p) {
                 v.push(Entry { at: mtime(&p), path: p, source: Source::Note });
             }
+        }
+    }
+    // attachments: a file in another section too stays there (1 row per file)
+    for (p, marker) in attached {
+        if p.is_file() && !v.iter().any(|e| e.path == p) {
+            v.push(Entry { at: mtime(&p), path: p, source: Source::Attached(marker) });
         }
     }
     v.sort_by_key(|e| std::cmp::Reverse(e.at));
@@ -123,6 +152,8 @@ pub enum Sec {
     Other,
     /// A file a message named.
     Named,
+    /// A file the owner attached to a message: last.
+    Attached,
 }
 
 impl Sec {
@@ -133,6 +164,7 @@ impl Sec {
             Sec::Home => "home repo",
             Sec::Other => "other files",
             Sec::Named => "named in messages",
+            Sec::Attached => "attachments",
         }
     }
 }
@@ -216,6 +248,7 @@ impl View {
         match e.source {
             Source::Note => Sec::Notes,
             Source::Named => Sec::Named,
+            Source::Attached(_) => Sec::Attached,
             Source::Agent if e.path.starts_with(&self.dir) => Sec::Repo,
             Source::Agent if crate::config::home_repo().is_some_and(|h| e.path.starts_with(h)) => Sec::Home,
             Source::Agent => Sec::Other,
@@ -241,7 +274,7 @@ impl View {
         self.visible = if q.trim().is_empty() {
             order.into_iter().map(|i| (i, Vec::new())).collect()
         } else {
-            let names: Vec<String> = order.iter().map(|&i| self.shown(&self.files[i].path)).collect();
+            let names: Vec<String> = order.iter().map(|&i| self.label(&self.files[i])).collect();
             let bodies: Vec<String> = order.iter().map(|&i| self.text_of(i)).collect();
             let idx: Vec<usize> = (0..order.len()).collect();
             crate::fuzzy::rank(&idx, &q, |&k| names[k].clone(), |&k| bodies[k].clone()).into_iter().map(|(k, marks)| (order[k], marks)).collect()
@@ -353,6 +386,19 @@ impl View {
         self.files.len()
     }
 
+    /// E's name in the list: an attachment's marker + file name (its paste dir says 0), else
+    /// its path as shown.
+    fn label(&self, e: &Entry) -> String {
+        match &e.source {
+            Source::Attached(m) => {
+                let name = e.path.file_name().map_or_else(|| e.path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                // `[Pasted text #1 +40 lines]`: `[Pasted text #1]`
+                m.as_ref().map_or(name.clone(), |m| format!("{}] {name}", m.split(" +").next().unwrap_or(m).trim_end_matches(']')))
+            }
+            _ => self.shown(&e.path),
+        }
+    }
+
     /// PATH as shown: relative to the work dir, else `~/…`.
     fn shown(&self, p: &Path) -> String {
         if let Ok(r) = p.strip_prefix(&self.dir) {
@@ -462,9 +508,10 @@ impl View {
                         Source::Agent => Span::styled("✎ ", theme::fg(theme::pal().info())),
                         Source::Note => Span::styled("◆ ", theme::muted()),
                         Source::Named => Span::styled("↗ ", theme::muted()),
+                        Source::Attached(_) => Span::styled("⧉ ", theme::muted()),
                     };
                     let age = crate::notes::ago(SystemTime::UNIX_EPOCH + Duration::from_secs(e.at.min(now)));
-                    let name = self.shown(&e.path);
+                    let name = self.label(e);
                     let room = usize::from(lw).saturating_sub(age.chars().count() + 5);
                     let sel = k == self.at;
                     let st = if sel { theme::pill() } else { Style::default() };
@@ -779,6 +826,40 @@ mod view_tests {
 
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)), Act::Yazi(PathBuf::from("/tmp/fileskeys")));
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)), Act::None, "0 file: 0 IDE");
+    }
+
+    #[test]
+    fn attachments_get_their_own_section_last_once_per_file() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let d = std::env::temp_dir().join(format!("codehead-fattach-{}", std::process::id()));
+        let paste = d.join("paste");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(&paste).unwrap();
+        std::fs::write(d.join("src/a.rs"), "fn a() {}").unwrap();
+        std::fs::write(paste.join("image-1.png"), b"\x89PNG").unwrap();
+        std::fs::write(paste.join("pasted-text-1.txt"), "long").unwrap();
+        let t = store::Thread::new("f", "t", &d, vec!["ada".into()]);
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (img, txt, code) = (paste.join("image-1.png"), paste.join("pasted-text-1.txt"), d.join("src/a.rs"));
+        let prompt = |text: String| store::Event::new(None, Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text });
+        store::append(&t.id, &prompt(format!("see [Image #1]\n\nAttachments (read these files):\n- [Image #1]: {}\n- {}", img.display(), code.display()))).unwrap();
+        store::append(&t.id, &prompt(format!("again\n\nAttachments (read these files):\n- [Image #1]: {}\n- [Pasted text #1 +1 lines]: {}", img.display(), txt.display()))).unwrap();
+        store::append(&t.id, &store::Event::new(Some("ada"), Kind::Tool { id: "1".into(), name: "Write".into(), input: serde_json::json!({"file_path": code}) })).unwrap();
+        // the agent's file stays in its section; the 2 attachments once each, after it
+        let files = load(&t.id, &d);
+        assert_eq!(files.len(), 3, "{files:?}");
+        assert_eq!(files.iter().find(|e| e.path == code).map(|e| &e.source), Some(&Source::Agent));
+        assert_eq!(files.iter().find(|e| e.path == img).map(|e| &e.source), Some(&Source::Attached(Some("[Image #1]".into()))));
+        let mut v = View::new(&t.id, &d);
+        let (s, _) = screen(&mut v);
+        let at = |s: &[String], x: &str| s.iter().position(|r| r.contains(x)).unwrap_or_else(|| panic!("{x}: {s:#?}"));
+        let (repo, att) = (at(&s, "repo changes"), at(&s, "attachments"));
+        assert!(repo < att && at(&s, "src/a.rs") < att, "{s:#?}");
+        assert!(at(&s, "[Image #1] image-1.png") > att && at(&s, "pasted-text-1.txt") > att, "{s:#?}");
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
