@@ -412,3 +412,86 @@ fn edge_cell(at: &impl Fn(f32, f32) -> Px, fx: f32, fy: f32, o: Opts) -> Cell {
     let ch = if p.mat == EYE { '@' } else { ramp(mean.powf(0.85).max(0.09)) };
     Cell { ch, fg: color(o.tint, &p), bg: None }
 }
+
+/// Braille outline of the view in a W x H cell grid (2x4 dots per cell): only the edges on, the
+/// areas empty (the regi look). A dot is on when it hits and: a 4-neighbor misses (the
+/// silhouette), or a neighbor sits across a fold (normals apart by more than O.crease, min.
+/// 0.2; the nearer of the 2 on), or it is the near side of a depth step. Eye dots: all on. Then lone dots and 1-dot spurs out.
+pub fn outline(view: &View, w: usize, h: usize, o: Opts) -> Vec<Cell> {
+    let (dw, dh) = (w * 2, h * 4);
+    let px: Vec<Px> = (0..dw * dh)
+        .map(|i| {
+            let (x, y) = ((i % dw) as f32, (i / dw) as f32);
+            let u = ((x + 0.5) / 2.0 - w as f32 / 2.0) / h as f32;
+            let v = 1.0 - 2.0 * ((y + 0.5) / 4.0) / h as f32;
+            view.sample(u, v)
+        })
+        .collect();
+    let hit = |x: i32, y: i32| x >= 0 && y >= 0 && (x as usize) < dw && (y as usize) < dh && px[y as usize * dw + x as usize].hit;
+    let mut dots = vec![0u8; dw * dh];
+    let fold = 1.0 - o.crease.max(0.2);
+    for y in 0..dh as i32 {
+        for x in 0..dw as i32 {
+            let i = y as usize * dw + x as usize;
+            let p = &px[i];
+            if !p.hit {
+                continue;
+            }
+            if p.mat == EYE {
+                dots[i] = 2;
+                continue;
+            }
+            if [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(ox, oy)| !hit(x + ox, y + oy)) {
+                dots[i] = 1;
+            }
+            for (ox, oy) in [(1, 0), (0, 1)] {
+                if !hit(x + ox, y + oy) {
+                    continue;
+                }
+                let j = (y + oy) as usize * dw + (x + ox) as usize;
+                let q = &px[j];
+                if q.mat == EYE {
+                    continue;
+                }
+                if p.n.dot(q.n) < fold {
+                    let k = if p.depth <= q.depth { i } else { j };
+                    dots[k] = dots[k].max(1);
+                }
+            }
+            // a depth step: the depth bends (2nd difference) toward the viewer here; a plane
+            // seen at a slant keeps a straight depth (0 dots on it), the near side of a step on
+            for (ox, oy) in [(1, 0), (0, 1)] {
+                if hit(x - ox, y - oy) && hit(x + ox, y + oy) {
+                    let d = |k: i32| px[(y + oy * k) as usize * dw + (x + ox * k) as usize].depth;
+                    if d(-1) + d(1) - 2.0 * p.depth > 0.12 {
+                        dots[i] = 1;
+                    }
+                }
+            }
+        }
+    }
+    super::regi::clean_in(&mut dots, dw, dh, true);
+    const BIT: [[u32; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+    let mut out = vec![Cell::BLANK; w * h];
+    for cy in 0..h {
+        for cx in 0..w {
+            let (mut bits, mut eye, mut sum, mut n) = (0u32, false, 0.0, 0);
+            for dy in 0..4 {
+                for dx in 0..2 {
+                    let i = (cy * 4 + dy) * dw + cx * 2 + dx;
+                    if dots[i] != 0 {
+                        bits |= BIT[dy][dx];
+                        eye |= dots[i] == 2;
+                        sum += px[i].lum;
+                        n += 1;
+                    }
+                }
+            }
+            if bits != 0 {
+                let p = Px { hit: true, lum: 0.45 + 0.55 * sum / n as f32, mat: if eye { EYE } else { 0 }, ..Px::default() };
+                out[cy * w + cx] = Cell { ch: char::from_u32(0x2800 + bits).unwrap_or(' '), fg: color(o.tint, &p), bg: None };
+            }
+        }
+    }
+    out
+}

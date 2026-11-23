@@ -1,6 +1,5 @@
 //! Successors of the regi sprites (sprites/regi.sprites): the 3 eye patterns of the regis, 7 dots
 //! each, in 2 kinds of avatar:
-//! - flat: a 1-dot braille frame (square, round, dotted, dashed, sparse), the 7 dots inside
 //! - 3d: a 1-dot braille wireframe solid that floats, hovers or nods, the 7 dots on its front
 //!
 //! The dots talk as the regis do: they blink in patterns and rhythms, 1 rhythm per avatar.
@@ -200,35 +199,6 @@ fn braille(bits: u32) -> char {
     if bits == 0 { ' ' } else { char::from_u32(0x2800 + bits).unwrap_or(' ') }
 }
 
-// ─── flat ────────────────────────────────────────────────────────────────────
-
-/// Braille frames: 1 dot wide, the rectangle x 1..13, y 2..14 of the 14x16 dots.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Frame {
-    Square,
-    Round,
-}
-
-impl Frame {
-    pub fn name(self) -> &'static str {
-        match self {
-            Frame::Square => "square",
-            Frame::Round => "round",
-        }
-    }
-
-    /// Dot (X, Y) of the frame line on.
-    fn on(self, x: usize, y: usize) -> bool {
-        let (x0, x1, y0, y1) = (1, 13, 2, 14);
-        let edge_x = (x == x0 || x == x1) && (y0..=y1).contains(&y);
-        let edge_y = (y == y0 || y == y1) && (x0..=x1).contains(&x);
-        match self {
-            Frame::Square => edge_x || edge_y,
-            Frame::Round => (edge_x || edge_y) && !(edge_x && edge_y),
-        }
-    }
-}
-
 // ─── 3d ──────────────────────────────────────────────────────────────────────
 
 /// Wireframe solids, in dot units (the 7x4 cells: 14x16 dots). The front face looks at +z.
@@ -266,6 +236,10 @@ pub enum Solid {
     Crystal,
     Kite,
     Gem,
+    // the 3rd round
+    Star4,
+    Ellipse,
+    WideTrapezoid,
 }
 
 pub const SOLIDS: [Solid; 19] = [
@@ -289,6 +263,9 @@ pub const SOLIDS: [Solid; 19] = [
     Solid::Oct,
     Solid::Disk,
 ];
+
+/// The 3rd round: 1 avatar each, after the kept ones.
+pub const MORE_SOLIDS: [Solid; 3] = [Solid::Star4, Solid::Ellipse, Solid::WideTrapezoid];
 
 pub const NEW_SOLIDS: [Solid; 12] = [
     Solid::TrapPrism,
@@ -417,6 +394,9 @@ impl Solid {
             Solid::Crystal => "crystal",
             Solid::Kite => "kite crystal",
             Solid::Gem => "gem",
+            Solid::Star4 => "4-point star",
+            Solid::Ellipse => "ellipse",
+            Solid::WideTrapezoid => "wide trapezoid",
         }
     }
 
@@ -485,21 +465,32 @@ impl Solid {
             }
             Solid::Kite => (Mesh::prism(&[(0.0, 7.6), (-6.4, 1.5), (0.0, -7.6), (6.4, 1.5)], 4.0, 0.55, (0.0, 0.8), 0.0), (3.5, 2.0), 0.8),
             Solid::Gem => (p(ngon(8, 5.4, 5.4, PI / 8.0), 3.0, 1.3), e, 0.0),
+            Solid::Star4 => {
+                // 4 points (up, down, left, right), the inner corners on the diagonals; the
+                // loop starts on an inner corner: the 2nd vertex convex (the front normal +z)
+                let o: Vec<(f32, f32)> = (0..8)
+                    .map(|i| {
+                        let a = -PI / 4.0 + PI / 4.0 * i as f32;
+                        let (rx, ry) = if i % 2 == 1 { (6.8, 7.6) } else { (3.9, 3.9) };
+                        (rx * a.cos(), ry * a.sin())
+                    })
+                    .collect();
+                (p(o, 1.8, 1.0), (2.0, 1.5), 0.0)
+            }
+            Solid::Ellipse => (p(ngon(20, 7.0, 5.2, 0.0), 3.0, 1.0), e, 0.0),
+            Solid::WideTrapezoid => (p(vec![(7.0, -4.8), (3.6, 4.8), (-3.6, 4.8), (-7.0, -4.8)], 3.0, 1.0), e, 1.0),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
-    Flat(Frame),
     Solid(Solid, Motion),
 }
 
 pub struct Regi {
     pub kind: Kind,
     pub pattern: Pattern,
-    /// Flat: rows of the eyes 3 dots apart, not 2.
-    pub tall: bool,
     pub talk: Talk,
     pub blink: usize,
     pub phase: f32,
@@ -514,7 +505,6 @@ pub struct Regi {
 impl Regi {
     pub fn name(&self, look: &Look) -> String {
         let body = match self.kind {
-            Kind::Flat(f) => format!("flat · {}{}", f.name(), if self.tall { " · tall" } else { "" }),
             Kind::Solid(s, m) => format!("3d · {} · {:?}", s.name(), m).to_lowercase(),
         };
         let pat = look.pattern.unwrap_or(self.pattern);
@@ -538,23 +528,12 @@ impl Default for Look {
 
 const YAWS: [f32; 4] = [0.35, -0.35, 0.15, -0.5];
 
-/// The kept ones of the 1st sets (by their old number), then the new angular solids.
+/// The kept ones of the 1st sets (by their old number), then the new angular solids, then the
+/// 3rd round. Out: the flat frames, the obelisks, the arches.
 pub fn catalog() -> Vec<Regi> {
     let mut out = Vec::new();
-    let mut k = 0u64;
-    // flat: square and round, the others dropped
-    for (p, &pattern) in PATTERNS[..3].iter().enumerate() {
-        for tall in [false, true] {
-            // steel: only the tall ones stay
-            if p == 2 && !tall {
-                continue;
-            }
-            for (f, frame) in [Frame::Square, Frame::Round].into_iter().enumerate() {
-                out.push(Regi { kind: Kind::Flat(frame), pattern, tall, talk: TALKS[(f + p * 3 + tall as usize * 5) % 8], blink: (f + p) % 3, phase: hash(k) * 10.0, yaw: 0.0, star: false, new: false });
-                k += 1;
-            }
-        }
-    }
+    // k: the phase seed, as before the flat frames went out (the kept ones keep their phase)
+    let mut k = 10u64;
     // 3d: 1 per solid and pattern of the regis, the dropped ones out (old 032, 039-044, 051-053)
     const DROP: [usize; 10] = [0, 7, 8, 9, 10, 11, 12, 19, 20, 21];
     let mut n = 0;
@@ -568,9 +547,12 @@ pub fn catalog() -> Vec<Regi> {
             if DROP.contains(&(n - 1)) {
                 continue;
             }
-            let kind = Kind::Solid(solid, MOTIONS[(si + pi * 2) % 5]);
-            out.push(Regi { kind, pattern, tall: false, talk: TALKS[(idx * 5 + si) % 8], blink: idx % 3, phase: hash(k) * 10.0, yaw: YAWS[(si + pi) % 4], star: false, new: false });
             k += 1;
+            if matches!(solid, Solid::Obelisk | Solid::Arch) {
+                continue;
+            }
+            let kind = Kind::Solid(solid, MOTIONS[(si + pi * 2) % 5]);
+            out.push(Regi { kind, pattern, talk: TALKS[(idx * 5 + si) % 8], blink: idx % 3, phase: hash(k - 1) * 10.0, yaw: YAWS[(si + pi) % 4], star: false, new: false });
         }
     }
     // new: 2 per angular solid, the sprite patterns spread over them; kept: old 066, 076-080
@@ -582,16 +564,23 @@ pub fn catalog() -> Vec<Regi> {
             }
             let kind = Kind::Solid(solid, MOTIONS[(si + j * 3 + 1) % 5]);
             let pattern = PATTERNS[(idx * 7 + 3) % 11];
-            out.push(Regi { kind, pattern, tall: false, talk: TALKS[(idx * 3 + j) % 8], blink: idx % 3, phase: hash(k) * 10.0, yaw: YAWS[(si + j) % 4], star: false, new: false });
+            out.push(Regi { kind, pattern, talk: TALKS[(idx * 3 + j) % 8], blink: idx % 3, phase: hash(k) * 10.0, yaw: YAWS[(si + j) % 4], star: false, new: false });
             k += 1;
         }
+    }
+    // 3rd round: a star, an ellipse, a wide trapezoid
+    // (eyes, motion, talk, turn)
+    let more = [(Pattern::Steel, Motion::Nod, Talk::Chase, 0.3), (Pattern::Steel, Motion::Hover, Talk::Morse, 0.35), (Pattern::Rock, Motion::Nod, Talk::Halves, 0.0)];
+    for (si, (&solid, (pattern, motion, talk, yaw))) in MORE_SOLIDS.iter().zip(more).enumerate() {
+        out.push(Regi { kind: Kind::Solid(solid, motion), pattern, talk, blink: si % 3, phase: hash(k) * 10.0, yaw, star: false, new: true });
+        k += 1;
     }
     out
 }
 
 /// The pick: 074 of the 1st set, as it was (the spawn page's agent).
 pub fn star() -> Regi {
-    Regi { kind: Kind::Solid(Solid::Disk, Motion::Nod), pattern: Pattern::Ice, tall: false, talk: Talk::Stutter, blink: 1, phase: hash(73) * 10.0, yaw: 0.35, star: true, new: false }
+    Regi { kind: Kind::Solid(Solid::Disk, Motion::Nod), pattern: Pattern::Ice, talk: Talk::Stutter, blink: 1, phase: hash(73) * 10.0, yaw: 0.35, star: true, new: false }
 }
 
 pub fn all() -> &'static [Regi] {
@@ -614,7 +603,6 @@ fn render_with(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn
 /// (only its anchor moves), a blink only takes dots out of it.
 fn dots_with(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn(usize) -> bool) -> Vec<u8> {
     match r.kind {
-        Kind::Flat(f) => flat_dots(r, f, pat, on),
         Kind::Solid(solid, motion) => {
             let t = t + r.phase;
             let (pitch, roll, bob) = pose(motion, s, t * speed);
@@ -654,26 +642,6 @@ pub fn cells(dots: &[u8], eye_c: super::glyph::Rgb, frame_c: super::glyph::Rgb) 
         }
     }
     out
-}
-
-fn flat_dots(r: &Regi, f: Frame, pat: Pattern, on: impl Fn(usize) -> bool) -> Vec<u8> {
-    let mut dots = vec![0u8; DW * DH];
-    for y in 0..DH {
-        for x in 0..DW {
-            if f.on(x, y) {
-                dots[y * DW + x] = 1;
-            }
-        }
-    }
-    // the eyes around (7, 8): x 3..11, rows 2 (or 3) dots apart
-    let ay = if r.tall { 3.0 } else { 2.0 };
-    for (k, (x, y)) in pat.dots().iter().enumerate() {
-        if on(k) {
-            let (dx, dy) = ((7.0 + x * 4.0).round() as usize, (8.0 + y * ay).round() as usize);
-            dots[dy.min(DH - 1) * DW + dx.min(DW - 1)] = 2;
-        }
-    }
-    dots
 }
 
 fn rot(p: P3, yaw: f32, pitch: f32, roll: f32) -> P3 {
@@ -785,11 +753,28 @@ pub fn draw3d_in(mesh: &Mesh, wires: &[(P3, P3)], anchor: (f32, f32), marks: &[(
             dots[i] = dots[i].max(v);
         }
     };
+    // Bresenham between the rounded ends: 1 dot per step, 0 doubled dots at the steps, and the
+    // edges of 1 vertex all end on the same dot (sharp corners)
     let line = |a: (f32, f32), b: (f32, f32), set: &mut dyn FnMut(f32, f32, u8)| {
-        let n = ((b.0 - a.0).hypot(b.1 - a.1) * 1.6).ceil().max(1.0) as usize;
-        for i in 0..=n {
-            let u = i as f32 / n as f32;
-            set(a.0 + (b.0 - a.0) * u, a.1 + (b.1 - a.1) * u, 1);
+        let (mut x, mut y) = (a.0.round() as i32, a.1.round() as i32);
+        let (x1, y1) = (b.0.round() as i32, b.1.round() as i32);
+        let (dx, dy) = ((x1 - x).abs(), -(y1 - y).abs());
+        let (sx, sy) = ((x1 - x).signum(), (y1 - y).signum());
+        let mut err = dx + dy;
+        loop {
+            set(x as f32, y as f32, 1);
+            if x == x1 && y == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
         }
     };
     let mut edges: Vec<(usize, usize, usize)> = Vec::new();
@@ -811,14 +796,59 @@ pub fn draw3d_in(mesh: &Mesh, wires: &[(P3, P3)], anchor: (f32, f32), marks: &[(
     for &(a, b) in wires {
         line(proj(rot(a, yaw, pitch, roll)), proj(rot(b, yaw, pitch, roll)), &mut set);
     }
+    clean(&mut dots, wires.is_empty());
     if norms[0].2 > 0.2 {
         let (ax, ay) = proj(rot((anchor.0, anchor.1, mesh.front_z(anchor.0, anchor.1)), yaw, pitch, roll));
-        let (ax, ay) = (ax.round(), ay.round());
+        let (ax, ay) = (ax.round() as i32, ay.round() as i32);
         for &(x, y, v) in marks {
-            set(ax + x as f32, ay + y as f32, v);
+            let (x, y) = (ax + x, ay + y);
+            if x >= 0 && y >= 0 && (x as usize) < DW && (y as usize) < DH {
+                let i = y as usize * DW + x as usize;
+                dots[i] = dots[i].max(v);
+            }
         }
     }
     dots
+}
+
+/// The line dots (1) of DOTS, cleaned: lone dots out, then (SPURS) 1-dot spurs off a line
+/// (a dot with 1 neighbor that has 4+ neighbors).
+pub fn clean(dots: &mut [u8], spurs: bool) {
+    clean_in(dots, DW, DH, spurs);
+}
+
+/// [`clean`] on a DW x DH grid of dots.
+pub fn clean_in(dots: &mut [u8], dw: usize, dh: usize, spurs: bool) {
+    let on = |d: &[u8], x: i32, y: i32| x >= 0 && y >= 0 && (x as usize) < dw && (y as usize) < dh && d[y as usize * dw + x as usize] == 1;
+    let around = |d: &[u8], x: i32, y: i32| -> Vec<(i32, i32)> {
+        let mut v = Vec::new();
+        for (ox, oy) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+            if on(d, x + ox, y + oy) {
+                v.push((x + ox, y + oy));
+            }
+        }
+        v
+    };
+    for _ in 0..3 {
+        let mut changed = false;
+        for y in 0..dh as i32 {
+            for x in 0..dw as i32 {
+                if !on(dots, x, y) {
+                    continue;
+                }
+                let n = around(dots, x, y);
+                let lone = n.is_empty();
+                let spur = spurs && n.len() == 1 && around(dots, n[0].0, n[0].1).len() >= 4;
+                if lone || spur {
+                    dots[y as usize * dw + x as usize] = 0;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -828,7 +858,7 @@ mod tests {
     #[test]
     fn floating_solids_stay_inside_the_canvas() {
         // every solid, every motion, a range of turns: each vertex of each frame on a dot of the canvas
-        for solid in SOLIDS.iter().chain(&NEW_SOLIDS) {
+        for solid in SOLIDS.iter().chain(&NEW_SOLIDS).chain(&MORE_SOLIDS) {
             let (mesh, _, _) = solid.mesh();
             for motion in MOTIONS {
                 for yaw in [-0.5f32, -0.2, 0.0, 0.3, 0.6] {
@@ -842,6 +872,35 @@ mod tests {
                                 let (x, y) = (f.cx + x * f.scale, f.cy + y * f.scale);
                                 assert!((-0.5..DW as f32 - 0.5).contains(&x) && (-0.5..DH as f32 - 0.5).contains(&y), "{solid:?} {motion:?} yaw {yaw} s {s}: ({x}, {y})");
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lines_have_no_loose_ends() {
+        // every regi, every status, 20 s at 10 fps: each line dot touches 2+ dots (a closed
+        // wireframe: 0 lone dots, 0 spurs off a corner)
+        for (i, r) in all().iter().enumerate() {
+            for s in 0..5 {
+                for f in 0..200 {
+                    let t = f as f32 / 10.0;
+                    let d = dots_with(r, r.pattern, s, t, 1.0, |_| true);
+                    for y in 0..DH as i32 {
+                        for x in 0..DW as i32 {
+                            if d[y as usize * DW + x as usize] != 1 {
+                                continue;
+                            }
+                            let n = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
+                                .iter()
+                                .filter(|&&(ox, oy)| {
+                                    let (a, b) = (x + ox, y + oy);
+                                    a >= 0 && b >= 0 && (a as usize) < DW && (b as usize) < DH && d[b as usize * DW + a as usize] != 0
+                                })
+                                .count();
+                            assert!(n >= 2, "regi {i} s{s} t{t}: a loose dot at ({x}, {y})");
                         }
                     }
                 }

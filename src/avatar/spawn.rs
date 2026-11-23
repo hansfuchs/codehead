@@ -480,7 +480,8 @@ fn spray(fam: Family, v: usize, tau: f32, end: f32, i: usize, put: &mut impl FnM
     };
     for k in 0..n {
         let s = tau - at - (k % 3) as f32 * 0.06;
-        if !(0.0..0.5).contains(&s) {
+        // gone before the snap: 0 droplets over the sprite's first frame
+        if !(0.0..0.5).contains(&s) || tau > end - 0.05 {
             continue;
         }
         let h = (i * 97 + k) as u64 * 31;

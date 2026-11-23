@@ -1,5 +1,5 @@
-//! Agent sprites: animated 7x4 braille avatars (avatar/), 2 categories: regi (the default) and
-//! geo. Choice per agent: its profile (agents::Profile), else a stable regi pick by name. New
+//! Agent sprites: animated 7x4 braille avatars (avatar/), 3 categories: regi (the default), geo
+//! and geob. Choice per agent: its profile (agents::Profile), else a stable regi pick by name. New
 //! agent: a random regi avatar. ROWS: the rest frame (every eye on, idle), the text an agent's
 //! prompt shows; the screens draw the live frame (`frame`, `lines`).
 

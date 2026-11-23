@@ -93,7 +93,7 @@ impl Picker {
         let mut tabs = vec![];
         for (i, c) in CATS.iter().enumerate() {
             let st = if i == self.cat { theme::bold().bg(theme::pal().surface0) } else { theme::muted() };
-            tabs.push(Span::styled(format!(" {} {} ", c.name(), c.count()), st));
+            tabs.push(Span::styled(format!(" {} {} ", c.label(), c.count()), st));
             tabs.push(Span::raw(" "));
         }
         f.render_widget(Paragraph::new(Line::from(tabs)), Rect { height: 1, ..inner });

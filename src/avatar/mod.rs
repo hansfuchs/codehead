@@ -1,11 +1,12 @@
-//! Agent avatars: animated 7x4 braille portraits, 2 categories (the files are shared with the lab,
+//! Agent avatars: animated 7x4 braille portraits, 3 categories (the files are shared with the lab,
 //! examples/lab):
-//! - regi: the regi successors (regi.rs): a 1-dot braille frame or wireframe solid, eye dots
-//!   that talk and blink by status, the solids float
-//! - geo: ray marched solids (sdf.rs, geo.rs) in braille, each with its own motion
+//! - REGI: the regi successors (regi.rs): a 1-dot braille wireframe solid, eye dots that talk
+//!   and blink by status, the solids float
+//! - GEO A: ray marched solids (sdf.rs, geo.rs) in braille, each with its own motion
+//! - GEO B: the GEO A solids as outlines: only the silhouette and the folds on, the areas empty
 //!
 //! An avatar: a category, an index, an eye pattern (regi; None: its own) and a float speed.
-//! Saved as `regi:12`, `regi:12 eyes=3 speed=0.5`, `geo:40 speed=2`.
+//! Saved as `regi:12`, `regi:12 eyes=3 speed=0.5`, `geo:40 speed=2`, `geob:40`.
 //! Spawn: spawn.rs, the agent forming out of braille goo on a 13x6 canvas.
 #![allow(dead_code)]
 
@@ -27,22 +28,34 @@ pub const H: usize = 4;
 pub enum Cat {
     Regi,
     Geo,
+    GeoB,
 }
 
-pub const CATS: [Cat; 2] = [Cat::Regi, Cat::Geo];
+pub const CATS: [Cat; 3] = [Cat::Regi, Cat::Geo, Cat::GeoB];
 
 impl Cat {
+    /// The key in an avatar id.
     pub fn name(self) -> &'static str {
         match self {
             Cat::Regi => "regi",
             Cat::Geo => "geo",
+            Cat::GeoB => "geob",
+        }
+    }
+
+    /// The name the picker shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Cat::Regi => "REGI",
+            Cat::Geo => "GEO A",
+            Cat::GeoB => "GEO B",
         }
     }
 
     pub fn count(self) -> usize {
         match self {
             Cat::Regi => regi::all().len(),
-            Cat::Geo => sdf::AVATARS.len() + geo::all().len(),
+            Cat::Geo | Cat::GeoB => sdf::AVATARS.len() + geo::all().len(),
         }
     }
 
@@ -134,7 +147,7 @@ impl Avatar {
     pub fn name(&self) -> String {
         match self.cat {
             Cat::Regi => regi::all()[self.idx].name(&self.look()),
-            Cat::Geo => geo_at(self.idx).1,
+            Cat::Geo | Cat::GeoB => geo_at(self.idx).1,
         }
     }
 
@@ -153,6 +166,10 @@ impl Avatar {
             Cat::Geo => {
                 let (v, o) = geo_view(geo_at(self.idx).0, s, t * self.speed, self.idx as f32 * 1.7, (t * 30.0) as usize);
                 glyph::render(&v, W, H, o)
+            }
+            Cat::GeoB => {
+                let (v, o) = geo_view(geo_at(self.idx).0, s, t * self.speed, self.idx as f32 * 1.7, (t * 30.0) as usize);
+                glyph::outline(&v, W, H, o)
             }
         }
     }
@@ -343,6 +360,9 @@ mod tests {
         let a = Avatar { cat: Cat::Geo, idx: 40, eyes: None, speed: 2.0 };
         assert_eq!(a.id(), "geo:40 speed=2");
         assert_eq!(Avatar::parse(&a.id()), Some(a));
+        let g = Avatar { cat: Cat::GeoB, idx: 7, eyes: None, speed: 1.0 };
+        assert_eq!(g.id(), "geob:7");
+        assert_eq!(Avatar::parse(&g.id()), Some(g));
         let b = Avatar { cat: Cat::Regi, idx: 3, eyes: Some(5), speed: 0.5 };
         assert_eq!(Avatar::parse(&b.id()), Some(b));
         assert_eq!(Avatar::parse("pcb-042"), None);
