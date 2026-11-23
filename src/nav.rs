@@ -14,6 +14,9 @@ pub struct Card {
     pub live: usize,
     /// An agent works (session running / starting, or a Claude transcript mid-turn).
     pub busy: bool,
+    /// BUSY only by a monitor or background command: `monitoring…`, not `working…`.
+    #[serde(default)]
+    pub monitoring: bool,
     /// A question (an ask) waits on the owner: blocked, also while its turn runs.
     pub blocked: bool,
     pub unread: bool,
@@ -135,6 +138,7 @@ pub fn load() -> Vec<Card> {
             Card {
                 repo: crate::threads::repo_of_thread(&t),
                 busy: t.busy,
+                monitoring: t.watching,
                 blocked: t.needs.as_deref() == Some("question"),
                 unread,
                 activity: last.unwrap_or(0).max(t.updated * 1000),
@@ -226,7 +230,8 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
     let mut status: Vec<Span> = if c.blocked {
         vec![Span::styled("? blocked", theme::fg(theme::pal().attention()))]
     } else if c.busy {
-        vec![Span::styled(format!("{} ", WAVE[tick % WAVE.len()]), theme::fg(theme::pal().progress())), Span::styled("working…", theme::muted())]
+        let word = if c.monitoring { "monitoring…" } else { "working…" };
+        vec![Span::styled(format!("{} ", WAVE[tick % WAVE.len()]), theme::fg(theme::pal().progress())), Span::styled(word, theme::muted())]
     } else if c.live == 0 {
         vec![Span::styled("◦ ended", theme::muted())]
     } else {
@@ -272,6 +277,17 @@ mod tests {
         draw_card(&mut buf, area, &c, false, false, false, 0);
         let text: String = (0..CARD_H).flat_map(|y| (0..40).map(move |x| (x, y))).map(|p| buf[p].symbol().to_string()).collect();
         assert!(text.contains("? blocked") && !text.contains("working"), "{text}");
+    }
+
+    /// A monitor or background command runs, 0 turn: `monitoring…`, not `idle` or `working…`.
+    #[test]
+    fn a_card_with_a_running_monitor_shows_monitoring() {
+        let c = Card { busy: true, monitoring: true, live: 1, ..card("t", "open", 0) };
+        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, CARD_H));
+        let area = buf.area;
+        draw_card(&mut buf, area, &c, false, false, false, 0);
+        let text: String = (0..CARD_H).flat_map(|y| (0..40).map(move |x| (x, y))).map(|p| buf[p].symbol().to_string()).collect();
+        assert!(text.contains("monitoring…") && !text.contains("idle") && !text.contains("working"), "{text}");
     }
 
     /// An unsent message in the thread's prompt: the card says so (bottom border).

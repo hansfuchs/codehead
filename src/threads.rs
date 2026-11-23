@@ -26,6 +26,9 @@ pub struct Thread {
     /// An agent works now.
     #[serde(default)]
     pub busy: bool,
+    /// BUSY only by a monitor or background command of a live agent (0 turn, 0 sub-thread).
+    #[serde(default)]
+    pub watching: bool,
     /// Why the owner is needed: `question`, `error: …`, `setup failed`.
     #[serde(default)]
     pub needs: Option<String>,
@@ -307,7 +310,9 @@ fn scan(full: bool) -> Vec<Thread> {
             let alive = crate::engine::client::alive(&t.id);
             let (live, busy) = if alive { crate::engine::client::state(&t.id) } else { (Vec::new(), Vec::new()) };
             // work goes on without a turn: a running sub-thread, a monitor or background command
-            let busy = !busy.is_empty() || !t.kids.is_empty() || (alive && crate::monitors::watching(&t.id, &live));
+            let turn = !busy.is_empty() || !t.kids.is_empty();
+            let watching = !turn && alive && crate::monitors::watching(&t.id, &live);
+            let busy = turn || watching;
             let (ask, error, notes) = activity(&t.id);
             let needs = if ask {
                 Some("question".to_string())
@@ -319,6 +324,7 @@ fn scan(full: bool) -> Vec<Thread> {
             Thread {
                 live: live.len(),
                 busy,
+                watching,
                 needs,
                 stat: stats.get(&t.work_dir()).copied().flatten(),
                 agents: t.agents.clone(),
