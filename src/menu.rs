@@ -83,6 +83,8 @@ pub struct Menu {
     filter: TextArea,
     cards: Vec<Card>,
     loading: Option<Receiver<Vec<Card>>>,
+    /// Start of the last cards read: the threads tab reads again every 2s (busy, unread, blocked live).
+    cards_at: Option<Instant>,
     /// Data version of the cards: up with each read that brings new cards (they dissolve in).
     cards_version: u64,
     cards_fx: crate::dissolve::Dissolve,
@@ -108,6 +110,8 @@ pub struct Menu {
     search: TextArea,
     msgs: Option<Vec<crate::search::Msg>>,
     msgs_rx: Option<Receiver<Vec<crate::search::Msg>>>,
+    /// Start of the last messages read: the search tab reads again every 5s (new messages).
+    msgs_at: Option<Instant>,
     hits: Vec<usize>,
     hits_for: String,
     scursor: usize,
@@ -119,6 +123,21 @@ pub struct Menu {
     /// Merge tab: the owner's PRs.
     prs: crate::prlist::PrList,
 }
+
+/// Thread cards, read in the background (also saved: the next menu shows them at once).
+fn read_cards() -> Receiver<Vec<Card>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let cards = nav::load();
+        crate::background::save("cards", &cards);
+        let _ = tx.send(cards);
+    });
+    rx
+}
+
+/// Time between 2 reads of the cards (threads tab) / the messages (search tab) while they show.
+const CARDS_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+const MSGS_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn builtins() -> Vec<Item> {
     vec![
@@ -133,15 +152,7 @@ impl Menu {
     /// CARDS: thread cards the host has (empty: read in the background now).
     pub fn new(items: Vec<Item>, thread: Option<String>, roster: Vec<Agent>, cards: Vec<Card>) -> Menu {
         // tests: 0 thread reads (they write the seen file)
-        let loading = (cards.is_empty() && !cfg!(test)).then(|| {
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let cards = nav::load();
-                crate::background::save("cards", &cards);
-                let _ = tx.send(cards);
-            });
-            rx
-        });
+        let loading = (cards.is_empty() && !cfg!(test)).then(read_cards);
         // the cards of the last read at once; the read's new cards dissolve in
         let cards = if cards.is_empty() && !cfg!(test) { crate::background::snapshot("cards").unwrap_or_default() } else { cards };
         let mut all = builtins();
@@ -157,6 +168,7 @@ impl Menu {
             qcursor: 0,
             filter,
             cards,
+            cards_at: loading.is_some().then(Instant::now),
             loading,
             cards_version: 0,
             cards_fx: Default::default(),
@@ -174,6 +186,7 @@ impl Menu {
             search,
             msgs: None,
             msgs_rx: None,
+            msgs_at: None,
             hits: Vec::new(),
             hits_for: String::new(),
             scursor: 0,
@@ -220,35 +233,58 @@ impl Menu {
         if let Some(rx) = &self.loading
             && let Ok(c) = rx.try_recv()
         {
-            if c != self.cards {
-                self.cards_version += 1;
-            }
-            self.cards = c;
             self.loading = None;
+            self.set_cards(c);
+        }
+        // the threads tab: a new read every 2s while it shows
+        let due = |at: Option<Instant>, every| at.is_none_or(|t| t.elapsed() >= every);
+        if self.tab == Tab::Threads && self.loading.is_none() && due(self.cards_at, CARDS_EVERY) && !cfg!(test) {
+            self.loading = Some(read_cards());
+            self.cards_at = Some(Instant::now());
         }
         if let Some(rx) = &self.msgs_rx
             && let Ok(m) = rx.try_recv()
         {
-            self.msgs = Some(m);
             self.msgs_rx = None;
-            self.hits_for = String::from("\0");
+            self.set_msgs(m);
         }
-        // the search tab: the messages read once, on its 1st show
-        if self.tab == Tab::Search && self.msgs.is_none() && self.msgs_rx.is_none() && !cfg!(test) {
+        // the search tab: a new read on its 1st show, then every 5s while it shows
+        if self.tab == Tab::Search && self.msgs_rx.is_none() && due(self.msgs_at, MSGS_EVERY) && !cfg!(test) {
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
                 let _ = tx.send(crate::search::load());
             });
             self.msgs_rx = Some(rx);
+            self.msgs_at = Some(Instant::now());
         }
         self.refresh_hits();
     }
 
-    /// Tests: messages to search (0 read of the real threads).
-    #[cfg(test)]
+    /// New cards (a read): the cursor stays on its thread (a busy thread moves up the list).
+    fn set_cards(&mut self, c: Vec<Card>) {
+        if c == self.cards {
+            return;
+        }
+        let picked = self.visible().get(self.tcursor).map(|&i| self.cards[i].id.clone());
+        self.cards = c;
+        self.cards_version += 1;
+        if let Some(id) = picked
+            && let Some(p) = self.visible().iter().position(|&i| self.cards[i].id == id)
+        {
+            self.tcursor = p;
+        }
+    }
+
+    /// New messages (a read): the hits again, the cursor stays on its message.
     pub fn set_msgs(&mut self, m: Vec<crate::search::Msg>) {
+        let key = |m: &crate::search::Msg| (m.thread.clone(), m.ts, m.from.clone());
+        let picked = self.hits.get(self.scursor).and_then(|&i| self.msgs.as_ref()?.get(i)).map(key);
         self.msgs = Some(m);
-        self.hits_for = String::from("\0");
+        let q = self.search.text();
+        let msgs = self.msgs.as_deref().unwrap_or_default();
+        self.hits = crate::search::find(msgs, &q);
+        self.hits_for = q;
+        self.scursor = picked.and_then(|k| self.hits.iter().position(|&i| key(&msgs[i]) == k)).unwrap_or(0);
     }
 
     /// The hits of the query, if it changed (or the messages came).
@@ -1013,6 +1049,36 @@ mod tests {
         assert!(s.contains(" search ") && s.contains("you · this thread") && s.contains("ada · deploy fix") && s.contains("fix the deploy"), "{s}");
         m.key(k(KeyCode::Char('x')));
         assert!(matches!(m.key(k(KeyCode::Enter)), Action::None));
+    }
+
+    #[test]
+    fn live_cards_keep_the_cursor_on_its_thread() {
+        let mut m = Menu::new(Vec::new(), None, Vec::new(), vec![card("t1", "a"), card("t2", "b"), card("t3", "c")]);
+        m.tab = Tab::Threads;
+        m.key(k(KeyCode::Down));
+        // a read: t3 works now, it moves to the top; the cursor stays on t2
+        let mut busy = card("t3", "c");
+        busy.busy = true;
+        m.set_cards(vec![busy, card("t1", "a"), card("t2", "b")]);
+        assert!(m.cards[0].busy);
+        assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "t2"));
+    }
+
+    #[test]
+    fn live_messages_keep_the_cursor_on_its_message() {
+        use crate::search::Msg;
+        let mut m = menu();
+        m.key(k(KeyCode::Char('f')));
+        m.set_msgs(vec![Msg::new("t1", "a", "owner", 10, "deploy one"), Msg::new("t2", "b", "ada", 20, "deploy two")]);
+        for c in "deploy".chars() {
+            m.key(k(KeyCode::Char(c)));
+        }
+        m.key(k(KeyCode::Down));
+        let Action::Jump(c, ts) = m.key(k(KeyCode::Enter)) else { panic!("0 hit") };
+        // a read with a new message: the cursor stays on the same message
+        m.set_msgs(vec![Msg::new("t1", "a", "owner", 10, "deploy one"), Msg::new("t2", "b", "ada", 20, "deploy two"), Msg::new("t3", "c", "ada", 30, "deploy three")]);
+        assert_eq!(m.hits.len(), 3);
+        assert!(matches!(m.key(k(KeyCode::Enter)), Action::Jump(d, t) if d.id == c.id && t == ts));
     }
 
     #[test]
