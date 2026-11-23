@@ -2054,9 +2054,9 @@ impl App {
         self.target = None;
         self.files = d.files.iter().map(|(m, p)| (m.clone(), PathBuf::from(p))).collect();
         // new pastes: numbers after the draft's markers
-        let count = |pre: &str| self.files.iter().filter(|(m, _)| m.starts_with(pre)).count();
-        self.paster.images = self.paster.images.max(count("[Image #"));
-        self.paster.texts = self.paster.texts.max(count("[Pasted text #"));
+        for (m, _) in &self.files {
+            self.paster.seen(m);
+        }
         self.carry = d
             .carry
             .iter()

@@ -14,10 +14,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::engine::store::{self, Kind};
+use crate::graphics::Preview;
 use crate::theme;
 
 /// Where a file comes from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     /// An agent's Write / Edit call.
     Agent,
@@ -25,6 +26,8 @@ pub enum Source {
     Note,
     /// A file a message named (a click on its link).
     Named,
+    /// A file the owner attached to a message (a paste, a drop), with its marker (`[Image #1]`).
+    Attached(Option<String>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -38,21 +41,43 @@ pub struct Entry {
 /// Tool inputs that name the file they write.
 const WRITE_TOOLS: [&str; 5] = ["Write", "Edit", "MultiEdit", "NotebookEdit", "str_replace_based_edit_tool"];
 
-/// Files the agents of thread ID wrote or edited (absolute; relative ones from DIR), each once.
-pub fn agent_files(id: &str, dir: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
+/// The files of thread ID's log, 1 read: the agents wrote or edited (absolute; relative ones
+/// from DIR), the owner attached to messages (with markers); each once.
+pub fn log_files(id: &str, dir: &Path) -> (Vec<PathBuf>, Vec<(PathBuf, Option<String>)>) {
+    let mut wrote: Vec<PathBuf> = Vec::new();
+    let mut attached: Vec<(PathBuf, Option<String>)> = Vec::new();
+
     for e in store::events(id) {
-        if let Kind::Tool { name, input, .. } = e.kind
-            && (WRITE_TOOLS.contains(&name.as_str()) || input["_kind"] == "edit")
-            && let Some(p) = input["file_path"].as_str().or_else(|| input["path"].as_str()).or_else(|| input["notebook_path"].as_str())
-        {
-            let p = if Path::new(p).is_absolute() { PathBuf::from(p) } else { dir.join(p) };
-            if !out.contains(&p) {
-                out.push(p);
+        match e.kind {
+            Kind::Tool { name, input, .. }
+                if WRITE_TOOLS.contains(&name.as_str()) || input["_kind"] == "edit" =>
+            {
+                if let Some(p) = input["file_path"].as_str().or_else(|| input["path"].as_str()).or_else(|| input["notebook_path"].as_str()) {
+                    let p = if Path::new(p).is_absolute() { PathBuf::from(p) } else { dir.join(p) };
+                    if !wrote.contains(&p) {
+                        wrote.push(p);
+                    }
+                }
             }
+            Kind::Prompt { from, text, .. } if from == "owner" => {
+                for a in crate::stream::attachments(&text).1 {
+                    let p = PathBuf::from(&a.path);
+                    if !attached.iter().any(|(q, _)| *q == p) {
+                        attached.push((p, a.marker));
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    out
+
+    (wrote, attached)
+}
+
+/// Files the agents of thread ID wrote or edited (absolute; relative ones from DIR), each once.
+#[cfg(test)]
+pub fn agent_files(id: &str, dir: &Path) -> Vec<PathBuf> {
+    log_files(id, dir).0
 }
 
 /// Markdown files under ROOT whose line 1 names thread ID (`thread: <id>`), at most 4 dirs deep.
@@ -87,7 +112,8 @@ fn mtime(p: &Path) -> u64 {
 
 /// The files of thread ID (DIR: its work dir): existing ones, newest first.
 pub fn load(id: &str, dir: &Path) -> Vec<Entry> {
-    let mut v: Vec<Entry> = agent_files(id, dir).into_iter().filter(|p| p.is_file()).map(|p| Entry { at: mtime(&p), path: p, source: Source::Agent }).collect();
+    let (wrote, attached) = log_files(id, dir);
+    let mut v: Vec<Entry> = wrote.into_iter().filter(|p| p.is_file()).map(|p| Entry { at: mtime(&p), path: p, source: Source::Agent }).collect();
     if let Some(home) = crate::config::home_repo() {
         for p in notes_of(&home, id) {
             if !v.iter().any(|e| e.path == p) {
@@ -95,9 +121,24 @@ pub fn load(id: &str, dir: &Path) -> Vec<Entry> {
             }
         }
     }
+    // attachments: a file in another section too stays there (1 row per file)
+    for (p, marker) in attached {
+        if p.is_file() && !v.iter().any(|e| e.path == p) {
+            v.push(Entry { at: mtime(&p), path: p, source: Source::Attached(marker) });
+        }
+    }
     v.sort_by_key(|e| std::cmp::Reverse(e.at));
     v
 }
+
+/// An image preview: path, mtime, cols, rows.
+type ImageKey = (PathBuf, u64, u16, u16);
+
+/// Image encodes kept (back and forth between files: 0 new encode).
+const MAX_IMAGES: usize = 4;
+/// The cursor (or a resize) rests this long before an encode starts: fast j k over 20 photos
+/// starts 1 encode, not 20.
+const IMAGE_REST: Duration = if cfg!(test) { Duration::ZERO } else { Duration::from_millis(80) };
 
 /// What a key asks the thread view to do.
 #[derive(Clone, Debug, PartialEq)]
@@ -123,6 +164,8 @@ pub enum Sec {
     Other,
     /// A file a message named.
     Named,
+    /// A file the owner attached to a message: last.
+    Attached,
 }
 
 impl Sec {
@@ -133,6 +176,7 @@ impl Sec {
             Sec::Home => "home repo",
             Sec::Other => "other files",
             Sec::Named => "named in messages",
+            Sec::Attached => "attachments",
         }
     }
 }
@@ -163,6 +207,18 @@ pub struct View {
     reads: crate::background::Reads<(), Vec<Entry>>,
     /// Preview renders (markdown, code highlight): off the UI thread.
     renders: crate::background::Reads<(PathBuf, u16, u64), Vec<Line<'static>>>,
+    /// Image + pdf previews, encoded for the terminal per (path, mtime, cols, rows): off the UI
+    /// thread; the last MAX_IMAGES kept. Err: a line why 0 image.
+    images: HashMap<ImageKey, Result<Preview, String>>,
+    image_reads: crate::background::Reads<ImageKey, Result<Preview, String>>,
+    /// The terminal's image picker (tests: a fixed one).
+    picker: fn() -> Option<ratatui_image::picker::Picker>,
+    /// The cached encodes, oldest first.
+    image_order: Vec<ImageKey>,
+    /// The image the preview shows now, since when (an encode starts once it rests).
+    image_want: Option<(ImageKey, Instant)>,
+    /// A wanted image not polled yet: the 1st poll after its rest wakes a draw (1x, not per tick).
+    image_kick: bool,
     /// Data versions (a list read in, a preview in): their areas dissolve to the new rows.
     list_version: u64,
     preview_version: u64,
@@ -199,6 +255,12 @@ impl View {
             loaded: None,
             reads: crate::background::Reads::default(),
             renders: crate::background::Reads::default(),
+            images: HashMap::new(),
+            image_reads: crate::background::Reads::default(),
+            picker: crate::graphics::picker,
+            image_order: Vec::new(),
+            image_want: None,
+            image_kick: false,
             list_version: 0,
             preview_version: 0,
             list_fx: Default::default(),
@@ -219,6 +281,7 @@ impl View {
         match e.source {
             Source::Note => Sec::Notes,
             Source::Named => Sec::Named,
+            Source::Attached(_) => Sec::Attached,
             Source::Agent if e.path.starts_with(&self.dir) => Sec::Repo,
             Source::Agent if crate::config::home_repo().is_some_and(|h| e.path.starts_with(h)) => Sec::Home,
             Source::Agent => Sec::Other,
@@ -244,7 +307,7 @@ impl View {
         self.visible = if q.trim().is_empty() {
             order.into_iter().map(|i| (i, Vec::new())).collect()
         } else {
-            let names: Vec<String> = order.iter().map(|&i| self.shown(&self.files[i].path)).collect();
+            let names: Vec<String> = order.iter().map(|&i| self.label(&self.files[i])).collect();
             let bodies: Vec<String> = order.iter().map(|&i| self.text_of(i)).collect();
             let idx: Vec<usize> = (0..order.len()).collect();
             crate::fuzzy::rank(&idx, &q, |&k| names[k].clone(), |&k| bodies[k].clone()).into_iter().map(|(k, marks)| (order[k], marks)).collect()
@@ -317,7 +380,110 @@ impl View {
             self.preview_version += 1;
             changed = true;
         }
+        // encodes in: only the wanted one (fast j k, a resize drag: the others are stale)
+        for (key, pre) in self.image_reads.poll() {
+            if self.image_want.as_ref().is_some_and(|(k, _)| *k == key) {
+                self.images.insert(key.clone(), pre);
+                self.image_order.retain(|k| *k != key);
+                self.image_order.push(key);
+                changed = true;
+            } else {
+                // stale: 0 kept, 0 sent; back on it later: a new read at once
+                self.image_reads.forget(&key);
+            }
+        }
+
+        // the last 4 encodes stay (back and forth between files: 0 new encode); the oldest out
+        while self.image_order.len() > MAX_IMAGES {
+            let old = self.image_order.remove(0);
+            self.drop_image(&old);
+        }
+
+        // the cursor rested on an image: 1 draw, which requests its encode (1x: 0 redraw per tick
+        // after yazi, a pane change, `previews = off`)
+        if self.image_kick && self.image_want.as_ref().is_some_and(|(_, at)| at.elapsed() >= IMAGE_REST) {
+            self.image_kick = false;
+            changed |= self.image_want.as_ref().is_some_and(|(k, _)| !self.images.contains_key(k) && !self.image_reads.waiting(k));
+        }
+
         changed
+    }
+
+    /// The encode of KEY out (the cache, the terminal's kitty store); a new request runs at once.
+    fn drop_image(&mut self, key: &ImageKey) {
+        if let Some(Ok(Preview { kitty: Some(id), transmit: None, .. })) = self.images.remove(key) {
+            crate::graphics::delete_kitty(id);
+        }
+
+        self.image_order.retain(|k| k != key);
+        self.image_reads.forget(key);
+    }
+
+    /// The encoded images out: the next draw encodes (and sends) them again. After another
+    /// program had the terminal (yazi, an editor): it may have deleted them.
+    pub fn forget_images(&mut self) {
+        for key in std::mem::take(&mut self.image_order) {
+            self.drop_image(&key);
+        }
+
+        self.images.clear();
+        self.image_reads.invalidate();
+    }
+
+    /// The image preview of P in BODY (cols × rows): drawn (true), or a line while it encodes or
+    /// why 0 image. False: 0 image preview for P (a text file, 0 graphics terminal, 0 room).
+    fn draw_image(&mut self, f: &mut Frame, p: &Path, head: Rect, body: Rect) -> bool {
+        let kind = crate::graphics::kind(p);
+        let picker = if kind.is_some() && body.width > 0 && body.height > 0 { (self.picker)() } else { None };
+        let (Some(kind), Some(picker)) = (kind, picker) else {
+            // 0 image wanted: 0 wake-ups for one
+            self.image_want = None;
+            self.image_kick = false;
+            return false;
+        };
+
+        let key: ImageKey = (p.to_path_buf(), mtime(p), body.width, body.height);
+        let hints = "y: yazi · o: IDE · c: copy path · ctrl+f: filter";
+        let shown = self.shown(p);
+        let line = |info: &str| Line::from(vec![Span::styled(format!(" {shown} "), theme::bold()), Span::styled(format!("{info} · {hints}"), theme::muted())]);
+
+        // a new file or area: wait for the cursor (or the resize) to rest
+        if self.image_want.as_ref().is_none_or(|(k, _)| *k != key) {
+            self.image_want = Some((key.clone(), Instant::now()));
+            self.image_kick = true;
+        }
+
+        match self.images.get_mut(&key) {
+            Some(Ok(_)) => {
+                // in use: the newest of the kept encodes (LRU)
+                if self.image_order.last() != Some(&key) {
+                    self.image_order.retain(|k| *k != key);
+                    self.image_order.push(key.clone());
+                }
+
+                let Some(Ok(pre)) = self.images.get_mut(&key) else { return true };
+
+                // kitty: the image data 1x straight to the terminal, the cells: placeholders
+                if let Some(t) = pre.transmit.take() {
+                    crate::graphics::send(&t);
+                }
+
+                f.render_widget(Paragraph::new(line(&pre.info)), head);
+                f.render_widget(ratatui_image::Image::new(&pre.protocol), body);
+            }
+            Some(Err(why)) => f.render_widget(Paragraph::new(line(why)), head),
+            None => {
+                let rested = self.image_want.as_ref().is_some_and(|(_, at)| at.elapsed() >= IMAGE_REST);
+                if rested && !self.image_reads.waiting(&key) {
+                    let (path, cols, rows) = (p.to_path_buf(), body.width, body.height);
+                    self.image_reads.request(key, move || crate::graphics::build(&path, kind, &picker, cols, rows));
+                }
+
+                f.render_widget(Paragraph::new(line("reading…")), head);
+            }
+        }
+
+        true
     }
 
     /// FILES (a read of the list) + the named files: the list; the cursor stays on its file.
@@ -361,6 +527,19 @@ impl View {
 
     pub fn count(&self) -> usize {
         self.files.len()
+    }
+
+    /// E's name in the list: an attachment's marker + file name (its paste dir says 0), else
+    /// its path as shown.
+    fn label(&self, e: &Entry) -> String {
+        match &e.source {
+            Source::Attached(m) => {
+                let name = e.path.file_name().map_or_else(|| e.path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                // `[Pasted text #1 +40 lines]`: `[Pasted text #1]`
+                m.as_ref().map_or(name.clone(), |m| format!("{}] {name}", m.split(" +").next().unwrap_or(m).trim_end_matches(']')))
+            }
+            _ => self.shown(&e.path),
+        }
     }
 
     /// PATH as shown: relative to the work dir, else `~/…`.
@@ -472,9 +651,10 @@ impl View {
                         Source::Agent => Span::styled("✎ ", theme::fg(theme::pal().info())),
                         Source::Note => Span::styled("◆ ", theme::muted()),
                         Source::Named => Span::styled("↗ ", theme::muted()),
+                        Source::Attached(_) => Span::styled("⧉ ", theme::muted()),
                     };
                     let age = crate::notes::ago(SystemTime::UNIX_EPOCH + Duration::from_secs(e.at.min(now)));
-                    let name = self.shown(&e.path);
+                    let name = self.label(e);
                     let room = usize::from(lw).saturating_sub(age.chars().count() + 5);
                     let sel = k == self.at;
                     let st = if sel { theme::pill() } else { Style::default() };
@@ -496,6 +676,11 @@ impl View {
         }
         self.list_fx.apply(f, list, self.list_version);
         let Some(p) = self.cur().map(|e| e.path.clone()) else { return };
+        // images + pdfs: drawn by the terminal (0 dissolve over graphics)
+        let body = Rect { x: preview.x + 1, y: preview.y + 2, height: preview.height.saturating_sub(2), width: preview.width.saturating_sub(1) };
+        if self.draw_image(f, &p, Rect { height: 1, ..preview }, body) {
+            return;
+        }
         let Some(lines) = self.preview_lines(&p, preview.width.saturating_sub(1)) else {
             f.render_widget(Paragraph::new(Line::styled(format!(" {} · reading…", self.shown(&p)), theme::muted())), Rect { height: 1, ..preview });
             return;
@@ -798,6 +983,193 @@ mod view_tests {
 
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)), Act::Yazi(PathBuf::from("/tmp/fileskeys")));
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)), Act::None, "0 file: 0 IDE");
+    }
+
+    #[test]
+    fn attachments_get_their_own_section_last_once_per_file() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let d = std::env::temp_dir().join(format!("codehead-fattach-{}", std::process::id()));
+        let paste = d.join("paste");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(&paste).unwrap();
+        std::fs::write(d.join("src/a.rs"), "fn a() {}").unwrap();
+        std::fs::write(paste.join("image-1.png"), b"\x89PNG").unwrap();
+        std::fs::write(paste.join("pasted-text-1.txt"), "long").unwrap();
+        let t = store::Thread::new("f", "t", &d, vec!["ada".into()]);
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (img, txt, code) = (paste.join("image-1.png"), paste.join("pasted-text-1.txt"), d.join("src/a.rs"));
+        let prompt = |text: String| store::Event::new(None, Kind::Prompt { from: "owner".into(), to: vec!["ada".into()], text });
+        store::append(&t.id, &prompt(format!("see [Image #1]\n\nAttachments (read these files):\n- [Image #1]: {}\n- {}", img.display(), code.display()))).unwrap();
+        store::append(&t.id, &prompt(format!("again\n\nAttachments (read these files):\n- [Image #1]: {}\n- [Pasted text #1 +1 lines]: {}", img.display(), txt.display()))).unwrap();
+        store::append(&t.id, &store::Event::new(Some("ada"), Kind::Tool { id: "1".into(), name: "Write".into(), input: serde_json::json!({"file_path": code}) })).unwrap();
+
+        // the agent's file stays in its section; the 2 attachments once each, after it
+        let files = load(&t.id, &d);
+        assert_eq!(files.len(), 3, "{files:?}");
+        assert_eq!(files.iter().find(|e| e.path == code).map(|e| &e.source), Some(&Source::Agent));
+        assert_eq!(files.iter().find(|e| e.path == img).map(|e| &e.source), Some(&Source::Attached(Some("[Image #1]".into()))));
+
+        // on screen: the section last, marker + name per row
+        let mut v = View::new(&t.id, &d);
+        let (s, _) = screen(&mut v);
+        let at = |s: &[String], x: &str| s.iter().position(|r| r.contains(x)).unwrap_or_else(|| panic!("{x}: {s:#?}"));
+        let (repo, att) = (at(&s, "repo changes"), at(&s, "attachments"));
+        assert!(repo < att && at(&s, "src/a.rs") < att, "{s:#?}");
+        assert!(at(&s, "[Image #1] image-1.png") > att && at(&s, "pasted-text-1.txt") > att, "{s:#?}");
+
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A thread in a temp dir whose agent wrote NAMES (png: an image of 2000×1000 px).
+    fn image_thread(tag: &str, names: &[&str]) -> (store::Thread, PathBuf) {
+        let d = std::env::temp_dir().join(format!("codehead-fimage-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let t = store::Thread::new("f", "t", &d, vec!["ada".into()]);
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+
+        for (i, name) in names.iter().enumerate() {
+            let p = d.join(name);
+            if name.ends_with(".png") {
+                image::RgbaImage::from_pixel(2000, 1000, image::Rgba([10, 200, 10, 255])).save(&p).unwrap();
+            } else {
+                std::fs::write(&p, b"\x89PNG\0binary").unwrap();
+            }
+            store::append(&t.id, &store::Event::new(Some("ada"), Kind::Tool { id: i.to_string(), name: "Write".into(), input: serde_json::json!({"file_path": p}) })).unwrap();
+        }
+
+        (t, d)
+    }
+
+    fn iterm2() -> Option<ratatui_image::picker::Picker> {
+        #[allow(deprecated)]
+        let mut p = ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(10, 20));
+        p.set_protocol_type(ratatui_image::picker::ProtocolType::Iterm2);
+        Some(p)
+    }
+
+    /// All 100 cols (the `screen` helper: the list's 40).
+    fn full(v: &mut View) -> (Vec<String>, ratatui::buffer::Buffer) {
+        let (_, b) = screen(v);
+        let s: Vec<String> = (0..16).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect();
+        (s, b)
+    }
+
+    /// Polls until an encode is in (max 10 s).
+    fn encoded(v: &mut View) {
+        let end = Instant::now() + Duration::from_secs(10);
+        while !v.poll() {
+            assert!(Instant::now() < end, "0 encode in 10 s");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn an_image_previews_as_an_image_encoded_off_the_ui_thread_once() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (t, d) = image_thread("once", &["shot.png"]);
+        let mut v = View::new(&t.id, &d);
+        v.picker = iterm2;
+
+        // 1st draw: the encode starts
+        let (s, _) = full(&mut v);
+        assert!(s.iter().any(|r| r.contains("shot.png") && r.contains("reading…")), "{s:#?}");
+
+        // the encode in: the size line, 1 image (the iTerm2 sequence in the buffer)
+        encoded(&mut v);
+        let (s, b) = full(&mut v);
+        assert!(s.iter().any(|r| r.contains("2000×1000 px") && r.contains("y: yazi")), "{s:#?}");
+        assert!(b.content().iter().any(|c| c.symbol().contains("\x1b]1337;File=")), "an iTerm2 image");
+
+        // a 2nd draw: from the cache, 0 new read
+        screen(&mut v);
+        assert_eq!(v.image_reads.pending(), 0);
+        assert_eq!(v.images.len(), 1);
+
+        // the image in: 0 wake-up per tick
+        for _ in 0..3 {
+            assert!(!v.poll());
+        }
+
+        // after yazi, before a draw (another pane): 0 wake-up per tick either
+        v.forget_images();
+        for _ in 0..3 {
+            assert!(!v.poll());
+        }
+
+        // the next draw: encoded again, at once (0 wait for the 5 s read throttle)
+        let (s, _) = full(&mut v);
+        assert!(s.iter().any(|r| r.contains("reading…")), "{s:#?}");
+        assert_eq!(v.image_reads.pending(), 1);
+
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_image_without_a_graphics_terminal_keeps_the_text_preview() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (t, d) = image_thread("text", &["shot.png"]);
+        let mut v = View::new(&t.id, &d);
+
+        // the tests' default: 0 graphics terminal
+        assert!((v.picker)().is_none());
+        let (s, _) = full(&mut v);
+
+        // the head of the text preview (`N lines`), 0 encode
+        assert!(s.iter().any(|r| r.contains("shot.png") && r.contains("lines ·")), "{s:#?}");
+        assert!(!s.iter().any(|r| r.contains("reading…") || r.contains(" px ·")), "{s:#?}");
+        assert_eq!(v.image_reads.pending(), 0);
+
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn at_most_4_encodes_stay_and_the_shown_one_is_never_dropped() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let names = ["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"];
+        let (t, d) = image_thread("lru", &names);
+        let mut v = View::new(&t.id, &d);
+        v.picker = iterm2;
+        full(&mut v);
+
+        // each file in turn, its encode in
+        for _ in names {
+            full(&mut v);
+            encoded(&mut v);
+            full(&mut v);
+            v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+
+        // 4 kept; the one on screen among them
+        assert_eq!(v.images.len(), MAX_IMAGES);
+        assert_eq!(v.image_order.len(), MAX_IMAGES);
+        let shown = v.image_want.as_ref().map(|(k, _)| k.clone()).unwrap();
+        assert!(v.images.contains_key(&shown));
+
+        // a cached one shown again: the newest of the kept (LRU, not FIFO)
+        v.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        full(&mut v);
+        let back = v.image_want.as_ref().map(|(k, _)| k.clone()).unwrap();
+        assert_ne!(back, shown);
+        assert_eq!(v.image_order.last(), Some(&back));
+        assert_eq!(v.image_reads.pending(), 0, "from the cache");
+
+        // back to the 1st file: dropped, a new read at once
+        v.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        for _ in names {
+            v.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        }
+        full(&mut v);
+        assert_eq!(v.image_reads.pending(), 1);
+
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

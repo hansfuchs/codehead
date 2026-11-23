@@ -29,7 +29,7 @@ const fn spec(key: &'static str, label: &'static str, help: &'static str, env: &
 }
 
 /// The plain fields, then the alias boxes.
-const SPECS: [Spec; 33] = [
+const SPECS: [Spec; 34] = [
     spec("notes", "notes", "directory of Markdown notes, ~ expands to home", "CODEHEAD_NOTES"),
     spec("styles", "styles", "directory of agent output styles", "CODEHEAD_STYLES"),
     spec("home", "home repo", "git repo with AGENTS.md (notes, other repos): every agent reads it", "CODEHEAD_HOME_REPO"),
@@ -44,6 +44,7 @@ const SPECS: [Spec; 33] = [
     spec("rank", "review order", "changes view: claude:<model> when 0 classifier agent is found, off: path rules", "CODEHEAD_RANK"),
     spec("review", "reviewer", "changes view V: claude:<model> reviews the diff (read-only tools), off: 0 reviews", "CODEHEAD_REVIEW"),
     spec("editor", "editor", "IDE for ctrl+i and the changes view e: auto, or code, codium, cursor, zed, idea, flow …, terminal ($EDITOR), or a path", "CODEHEAD_EDITOR"),
+    spec("previews", "previews", "files view: images + pdf drawn as images: auto (Ghostty, kitty, Rio, iTerm2, WezTerm, sixel terminals), kitty, iterm2, sixel, or off", "CODEHEAD_PREVIEWS"),
     spec("keys.menu", "menu", "opens the menu: F7-F12, ctrl+<letter>, alt+<letter> (not 1 codehead binds already)", "CODEHEAD_MENU_KEY"),
     spec("keys.command", "commands", "opens the command dropdown in a prompt: 1 symbol", "CODEHEAD_COMMAND_KEY"),
     spec("colors.scheme", "scheme", "preset: lavender, coral or amber", "CODEHEAD_SCHEME"),
@@ -70,9 +71,9 @@ pub(crate) const PLAIN: usize = SPECS.len();
 const SECTIONS: [(usize, &str, &str); 5] = [
     (0, "paths", "where codehead reads notes, output styles and the home repo"),
     (3, "new threads", "defaults of the new tab and the agent form"),
-    (7, "thread view", "how messages and thoughts look, your edits, the review order, the IDE"),
-    (14, "keys", "keys of every screen"),
-    (16, "colors", "a preset; a set field below overrides 1 of its colors"),
+    (7, "thread view", "how messages and thoughts look, your edits, the review order, the IDE, previews"),
+    (15, "keys", "keys of every screen"),
+    (17, "colors", "a preset; a set field below overrides 1 of its colors"),
 ];
 /// The alias group, after the plain fields.
 const ALIASES: (&str, &str) = ("path aliases", "short names for directories: name/ → target/ · enter: edit / done · d: delete · enter on + add: add");
@@ -1070,10 +1071,10 @@ mod tests {
     #[test]
     fn fields_sit_in_groups_under_a_heading() {
         let (dir, mut form) = fixture("groups");
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 120)).unwrap();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 130)).unwrap();
         terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
         let buffer = terminal.backend().buffer().clone();
-        let lines: Vec<String> = (0..120).map(|y| (0..90).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect();
+        let lines: Vec<String> = (0..130).map(|y| (0..90).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect();
         let at = |s: &str| lines.iter().position(|l| l.trim_start().starts_with(s)).unwrap_or_else(|| panic!("{s}:\n{}", lines.join("\n")));
         // headings in order, each with a rule; its fields below it, indented
         let heads: Vec<usize> = ["paths ─", "new threads ─", "thread view ─", "keys ─", "colors ─", "path aliases ─"].iter().map(|h| at(h)).collect();
@@ -1100,13 +1101,13 @@ mod tests {
         // a click on ↺ of the scheme field
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 100)).unwrap();
         terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
-        let (r, _) = *form.rows.iter().find(|(_, h)| *h == Hit::Reset(16)).expect("↺ on the set scheme field");
+        let (r, _) = *form.rows.iter().find(|(_, h)| *h == Hit::Reset(17)).expect("↺ on the set scheme field");
         form.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x, row: r.y, modifiers: KeyModifiers::NONE });
         assert_eq!(config::read_file(&file).unwrap().1.scheme, None);
         assert!(!form.rows.iter().any(|(_, h)| *h == Hit::Reset(7)));
         // an invalid value: 0 write, the error shows
-        form.focus = 17;
-        form.fields[17].set_text("red");
+        form.focus = 18;
+        form.fields[18].set_text("red");
         form.commit();
         assert!(form.error && form.status.contains("#RRGGBB"));
         let _ = std::fs::remove_dir_all(dir);
