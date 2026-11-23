@@ -251,8 +251,53 @@ pub fn update_default(dir: &Path) -> Option<Result<String, String>> {
     Some(if ok { Ok(b) } else { Err(last) })
 }
 
-/// Checkouts (main checkout included) by branch: branch → path.
+/// Checkouts (main checkout included) by branch: branch → path. The file system first (the
+/// repo's `HEAD`, `worktrees/*/{HEAD,gitdir}`: 0 git spawn on the UI thread), else `git
+/// worktree list`.
 pub fn checkouts(repo: &Path) -> std::collections::HashMap<String, String> {
+    checkouts_fs(repo).unwrap_or_else(|| checkouts_git(repo))
+}
+
+/// The common git dir of the checkout at REPO (a linked worktree: its main repo's). None: 0 git
+/// repo there, or a layout the file system read does not know.
+fn common_dir(repo: &Path) -> Option<PathBuf> {
+    let top = toplevel(repo)?;
+    let g = top.join(".git");
+    if g.is_dir() {
+        return Some(g);
+    }
+    let text = std::fs::read_to_string(&g).ok()?;
+    let dir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+    let dir = if dir.is_relative() { top.join(dir) } else { dir };
+    let common = std::fs::read_to_string(dir.join("commondir")).ok()?;
+    let common = PathBuf::from(common.trim());
+    Some(if common.is_relative() { dir.join(common) } else { common })
+}
+
+fn checkouts_fs(repo: &Path) -> Option<std::collections::HashMap<String, String>> {
+    let common = std::fs::canonicalize(common_dir(repo)?).ok()?;
+    // a bare repo (0 `.git` dir name): git knows it better
+    if common.file_name()? != ".git" {
+        return None;
+    }
+    let branch = |head: &Path| std::fs::read_to_string(head).ok().and_then(|h| h.trim().strip_prefix("ref: refs/heads/").map(String::from));
+    let mut map = std::collections::HashMap::new();
+    if let Some(b) = branch(&common.join("HEAD")) {
+        map.insert(b, common.parent()?.display().to_string());
+    }
+    if let Ok(rd) = std::fs::read_dir(common.join("worktrees")) {
+        for e in rd.flatten() {
+            let d = e.path();
+            let Some(b) = branch(&d.join("HEAD")) else { continue };
+            let Ok(gitdir) = std::fs::read_to_string(d.join("gitdir")) else { continue };
+            let Some(wt) = Path::new(gitdir.trim()).parent() else { continue };
+            map.insert(b, wt.display().to_string());
+        }
+    }
+    Some(map)
+}
+
+fn checkouts_git(repo: &Path) -> std::collections::HashMap<String, String> {
     let (_, out, _) = git(repo, &["worktree", "list", "--porcelain"]);
     let mut map = std::collections::HashMap::new();
     let mut path = None;
@@ -345,11 +390,16 @@ fn scan(full: bool) -> Vec<Thread> {
     })
 }
 
+/// The path of REPO's codehead worktree on BRANCH.
+pub fn worktree_path(repo: &Path, branch: &str) -> PathBuf {
+    let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
+    crate::engine::data_dir().join("worktrees").join(name).join(branch.replace('/', "-"))
+}
+
 /// A new linked worktree of REPO on BRANCH (made from HEAD when it does not exist):
 /// `<data>/worktrees/<repo>/<branch>`. Returns its path.
 pub fn add_worktree(repo: &Path, branch: &str) -> Result<PathBuf, String> {
-    let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
-    let path = crate::engine::data_dir().join("worktrees").join(name).join(branch.replace('/', "-"));
+    let path = worktree_path(repo, branch);
     if path.exists() {
         return Err(format!("{} exists", path.display()));
     }
@@ -606,6 +656,26 @@ mod tests {
         // diverged: Err with git's line
         sh("cd a && git branch -q -u origin/main && git commit -q --allow-empty -m local && cd ../b && git commit -q --allow-empty -m 3 && git push -q origin main");
         assert!(matches!(update_default(&a), Some(Err(e)) if !e.is_empty()));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// The file system read of the checkouts: the same map as `git worktree list`, from the main
+    /// checkout and from a linked worktree (a detached worktree: 0 entry in both).
+    #[test]
+    fn checkouts_by_the_file_system_match_git() {
+        let base = std::env::temp_dir().join(format!("codehead-checkouts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let sh = |c: &str| assert!(std::process::Command::new("sh").arg("-c").arg(c).current_dir(&base).output().unwrap().status.success(), "{c}");
+        sh("git init -q -b main r && cd r && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m 1 && git worktree add -q -b feat ../w && git worktree add -q --detach ../d");
+        for dir in [base.join("r"), base.join("w"), base.join("r/sub")] {
+            let _ = std::fs::create_dir_all(&dir);
+            let fs = checkouts_fs(&dir).expect("fs read");
+            let canon = |m: std::collections::HashMap<String, String>| m.into_iter().map(|(b, p)| (b, std::fs::canonicalize(p).unwrap())).collect::<std::collections::BTreeMap<_, _>>();
+            assert_eq!(canon(fs.clone()), canon(checkouts_git(&dir)), "{}", dir.display());
+            assert_eq!(fs.len(), 2);
+        }
+        assert!(checkouts_fs(&base).is_none(), "0 repo");
         let _ = std::fs::remove_dir_all(base);
     }
 }
