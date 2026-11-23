@@ -4695,25 +4695,33 @@ mod pane_tests {
         v.members = vec!["ada".into()];
         v.sync_order();
         let key = crate::config::command_key().to_string();
-        let (calm, calm_menu) = (buffer(&mut v, ""), buffer(&mut v, &key));
-        let areas = v.command.areas().to_vec();
-        assert!(!areas.is_empty(), "the dropdown shows");
+        // frozen clocks, not the process clock: just before the snap the goo inside the sprite's
+        // slot can match the idle sprite of that moment (28 % of clock values), so the goo's
+        // mark is checked over its whole canvas (header rows); several clocks, each the same
+        // every run
+        for now in [3.0, 7.4, 8.14, 9.99, 42.0, 77.7] {
+            crate::avatar::freeze(Some(now));
+            v.spawns.clear();
+            let (calm, calm_menu) = (buffer(&mut v, ""), buffer(&mut v, &key));
+            let areas = v.command.areas().to_vec();
+            assert!(!areas.is_empty(), "the dropdown shows");
 
-        // the goo at its densest: just before the snap
-        // a frozen clock: a slow CI runner never moves the spawn past the snap between draws
-        let now = crate::avatar::now();
-        crate::avatar::freeze(Some(now));
-        let start = now - crate::avatar::spawn::timing(0).2 * 0.95;
-        v.spawns.insert("ada".into(), crate::avatar::Spawn { anim: 0, start });
-        let (goo, goo_menu) = (buffer(&mut v, ""), buffer(&mut v, &key));
-        let slot = v.slots.borrow()[0].1;
-        assert!(slot.intersects(areas[0]), "the dropdown covers the sprite");
-        let differs = (slot.top()..slot.bottom()).any(|y| (slot.left()..slot.right()).any(|x| calm[(x, y)].symbol() != goo[(x, y)].symbol()));
-        assert!(differs, "the spawn draws");
-        for r in &areas {
-            for y in r.top()..r.bottom() {
-                for x in r.left()..r.right() {
-                    assert_eq!(calm_menu[(x, y)].symbol(), goo_menu[(x, y)].symbol(), "spawn over the dropdown at {x},{y}");
+            // the goo at its densest: just before the snap
+            let start = now - crate::avatar::spawn::timing(0).2 * 0.95;
+            v.spawns.insert("ada".into(), crate::avatar::Spawn { anim: 0, start });
+            let (goo, goo_menu) = (buffer(&mut v, ""), buffer(&mut v, &key));
+            let slot = v.slots.borrow()[0].1;
+            assert!(slot.intersects(areas[0]), "the dropdown covers the sprite");
+            let (ax, ay) = crate::avatar::SPAWN_AT;
+            let (x0, y0) = (slot.x.saturating_sub(ax as u16), slot.y.saturating_sub(ay as u16));
+            let x1 = (x0 + crate::avatar::SPAWN_W as u16).min(calm.area.right());
+            let differs = (y0..slot.bottom()).any(|y| (x0..x1).any(|x| calm[(x, y)].symbol() != goo[(x, y)].symbol()));
+            assert!(differs, "the spawn draws (clock {now})");
+            for r in &areas {
+                for y in r.top()..r.bottom() {
+                    for x in r.left()..r.right() {
+                        assert_eq!(calm_menu[(x, y)].symbol(), goo_menu[(x, y)].symbol(), "spawn over the dropdown at {x},{y} (clock {now})");
+                    }
                 }
             }
         }
