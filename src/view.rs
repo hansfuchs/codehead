@@ -3988,6 +3988,8 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
                 Ok(s) => v.toast(format!("editor exited with {s}")),
                 Err(e) => v.toast(format!("editor: {e}")),
             }
+            // the terminal ran another program: its images (kitty: sent once) maybe gone
+            v.files.forget_images();
             dirty = true;
         }
         if let Some(target) = v.yazi.take() {
@@ -3995,6 +3997,7 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
                 Ok(picked) => v.yazi_picked(&picked),
                 Err(e) => v.toast(e),
             }
+            v.files.forget_images();
             dirty = true;
         }
         // a sub-thread that ended while in view (it deletes itself): its thread, the end there

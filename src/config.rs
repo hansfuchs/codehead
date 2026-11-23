@@ -38,6 +38,8 @@ pub struct File {
     pub editor: Option<String>,
     /// Dev server ports: `auto` (default: portless when on PATH), `portless`, `block`.
     pub ports: Option<String>,
+    /// Files view image + pdf previews: `auto` (default: when the terminal draws images) or `off`.
+    pub previews: Option<String>,
     /// `[keys] menu`: the menu key (ctrl+p, on every screen).
     pub menu_key: Option<String>,
     /// `[keys] command`: the char that opens the command dropdown (`>`).
@@ -164,6 +166,10 @@ fn parse(text: &str) -> Result<File, String> {
                 f.edits = Some(s);
             }
             "editor" => f.editor = Some(s),
+            "previews" => {
+                validate("previews".into(), &s)?;
+                f.previews = Some(s);
+            }
             "ports" => {
                 validate("ports".into(), &s)?;
                 f.ports = Some(s);
@@ -204,8 +210,8 @@ fn get() -> File {
 }
 
 /// The plain keys of a settings file (the tables: colors, aliases, harness).
-const PLAIN_KEYS: [&str; 19] = [
-    "notes", "home", "device", "repo", "styles", "agent", "prefix", "models", "messages", "thoughts", "edits", "rank", "classify", "review", "editor", "ports", "keys.menu", "keys.command",
+const PLAIN_KEYS: [&str; 20] = [
+    "notes", "home", "device", "repo", "styles", "agent", "prefix", "models", "messages", "thoughts", "edits", "rank", "classify", "review", "editor", "ports", "previews", "keys.menu", "keys.command",
     "colors.scheme",
 ];
 
@@ -222,7 +228,7 @@ pub fn scope(key: &str) -> Scope {
     match key {
         "home" | "device" => Scope::Local,
         // paths and programs of this machine
-        "notes" | "styles" | "repo" | "editor" | "ports" => Scope::Device,
+        "notes" | "styles" | "repo" | "editor" | "ports" | "previews" => Scope::Device,
         k if k.starts_with("aliases.") => Scope::Device,
         k if k.starts_with("harness.") && k.ends_with(".command") => Scope::Device,
         _ => Scope::Shared,
@@ -393,6 +399,7 @@ pub fn validate(key: String, v: &str) -> Result<(), String> {
         "thoughts" if crate::stream::Thoughts::parse(v).is_none() => Err(format!("thoughts: hidden, folded or open, not {v}")),
         "edits" if crate::engine::edits::Mode::parse(v).is_none() => Err(format!("edits: off, files or diff, not {v}")),
         "ports" if crate::portless::Mode::parse(v).is_none() => Err(format!("ports: auto, portless or block, not {v}")),
+        "previews" if !matches!(v, "auto" | "off") => Err(format!("previews: auto or off, not {v}")),
         "rank" | "review" if v != "off" && !v.strip_prefix("claude:").is_some_and(|m| !m.is_empty()) => Err(format!("{key}: off or claude:<model>, not {v}")),
         "classify" if !v.is_empty() && v != "off" && !crate::engine::roster::valid_name(v) => Err(format!("classify: an agent's name or off, not {v}")),
         "keys.menu" => menu_bind(v).map(|_| ()).ok_or_else(|| format!("keys.menu: F7-F12, ctrl+<letter> or alt+<letter> codehead binds to nothing else (free: ctrl+l, ctrl+p …), not {v}")),
@@ -533,6 +540,7 @@ fn document(base: &str, file: &File) -> Result<String, String> {
         ("review", &file.review),
         ("editor", &file.editor),
         ("ports", &file.ports),
+        ("previews", &file.previews),
     ] {
         if let Some(value) = value {
             if doc.get(key).and_then(|v| v.as_str()) != Some(value) {
@@ -699,6 +707,7 @@ impl File {
             "review" => self.review.clone(),
             "editor" => self.editor.clone(),
             "ports" => self.ports.clone(),
+            "previews" => self.previews.clone(),
             "keys.menu" => self.menu_key.clone(),
             "keys.command" => self.command_key.clone(),
             "colors.scheme" => self.scheme.clone(),
@@ -728,6 +737,7 @@ impl File {
             "review" => self.review = v,
             "editor" => self.editor = v,
             "ports" => self.ports = v,
+            "previews" => self.previews = v,
             "keys.menu" => self.menu_key = v,
             "keys.command" => self.command_key = v,
             "colors.scheme" => self.scheme = v,
@@ -847,6 +857,7 @@ pub fn defaults() -> File {
         review: Some("claude:sonnet".into()),
         editor: Some("auto".into()),
         ports: Some("auto".into()),
+        previews: Some("auto".into()),
         menu_key: Some("ctrl+p".into()),
         command_key: Some(">".into()),
         scheme: Some(crate::theme::PRESETS[0].0.into()),
@@ -934,6 +945,12 @@ pub fn edits() -> crate::engine::edits::Mode {
 pub fn review_model() -> Option<String> {
     let v = env("CODEHEAD_REVIEW").or_else(|| get().review.clone()).unwrap_or_else(|| "claude:sonnet".into());
     v.strip_prefix("claude:").filter(|m| !m.is_empty()).map(str::to_string)
+}
+
+/// Image + pdf previews in the files view: $CODEHEAD_PREVIEWS, else `previews`, else auto.
+/// False: `off` (0 terminal query, text previews only).
+pub fn previews() -> bool {
+    env("CODEHEAD_PREVIEWS").or_else(|| get().previews.clone()).is_none_or(|v| v.trim() != "off")
 }
 
 /// Dev server ports: $CODEHEAD_PORTS, else `ports`, else auto.

@@ -128,6 +128,9 @@ pub fn load(id: &str, dir: &Path) -> Vec<Entry> {
     v
 }
 
+/// An image preview: path, mtime, cols, rows.
+type ImageKey = (PathBuf, u64, u16, u16);
+
 /// What a key asks the thread view to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Act {
@@ -195,6 +198,12 @@ pub struct View {
     reads: crate::background::Reads<(), Vec<Entry>>,
     /// Preview renders (markdown, code highlight): off the UI thread.
     renders: crate::background::Reads<(PathBuf, u16, u64), Vec<Line<'static>>>,
+    /// Image + pdf previews, encoded for the terminal per (path, mtime, cols, rows): off the UI
+    /// thread; the last 4 kept. Err: a line why 0 image.
+    images: HashMap<ImageKey, Result<crate::graphics::Preview, String>>,
+    image_reads: crate::background::Reads<ImageKey, Result<crate::graphics::Preview, String>>,
+    /// The terminal's image picker (tests: a fixed one).
+    picker: fn() -> Option<ratatui_image::picker::Picker>,
     /// Data versions (a list read in, a preview in): their areas dissolve to the new rows.
     list_version: u64,
     preview_version: u64,
@@ -229,6 +238,9 @@ impl View {
             loaded: None,
             reads: crate::background::Reads::default(),
             renders: crate::background::Reads::default(),
+            images: HashMap::new(),
+            image_reads: crate::background::Reads::default(),
+            picker: crate::graphics::picker,
             list_version: 0,
             preview_version: 0,
             list_fx: Default::default(),
@@ -340,7 +352,51 @@ impl View {
             self.preview_version += 1;
             changed = true;
         }
+        let images = self.image_reads.poll();
+        if !images.is_empty() {
+            // the last 4 encodes stay (back and forth between files: 0 new encode)
+            if self.images.len() + images.len() > 4 {
+                self.images.clear();
+                // 0 5 s wait for a new read of a dropped key
+                self.image_reads.invalidate();
+            }
+            self.images.extend(images);
+            changed = true;
+        }
         changed
+    }
+
+    /// The encoded images out: the next draw encodes (and sends) them again. After another
+    /// program had the terminal (yazi, an editor): it may have deleted them.
+    pub fn forget_images(&mut self) {
+        self.images.clear();
+        self.image_reads.invalidate();
+    }
+
+    /// The image preview of P in BODY (cols × rows): drawn (true), or a line while it encodes or
+    /// why 0 image. False: 0 image preview for P (a text file, 0 graphics terminal).
+    fn draw_image(&mut self, f: &mut Frame, p: &Path, head: Rect, body: Rect) -> bool {
+        let Some(kind) = crate::graphics::kind(p) else { return false };
+        let Some(picker) = (self.picker)() else { return false };
+        let key: ImageKey = (p.to_path_buf(), mtime(p), body.width, body.height);
+        let hints = "y: yazi · o: IDE · c: copy path · ctrl+f: filter";
+        let shown = self.shown(p);
+        let line = |info: &str| Line::from(vec![Span::styled(format!(" {shown} "), theme::bold()), Span::styled(format!("{info} · {hints}"), theme::muted())]);
+        match self.images.get(&key) {
+            Some(Ok(pre)) => {
+                f.render_widget(Paragraph::new(line(&pre.info)), head);
+                f.render_widget(ratatui_image::Image::new(&pre.protocol), body);
+            }
+            Some(Err(why)) => f.render_widget(Paragraph::new(line(why)), head),
+            None => {
+                if !self.image_reads.waiting(&key) {
+                    let (path, cols, rows) = (p.to_path_buf(), body.width, body.height);
+                    self.image_reads.request(key, move || crate::graphics::build(&path, kind, &picker, cols, rows));
+                }
+                f.render_widget(Paragraph::new(line("reading…")), head);
+            }
+        }
+        true
     }
 
     /// FILES (a read of the list) + the named files: the list; the cursor stays on its file.
@@ -533,6 +589,11 @@ impl View {
         }
         self.list_fx.apply(f, list, self.list_version);
         let Some(p) = self.cur().map(|e| e.path.clone()) else { return };
+        // images + pdfs: drawn by the terminal (0 dissolve over graphics)
+        let body = Rect { x: preview.x + 1, y: preview.y + 2, height: preview.height.saturating_sub(2), width: preview.width.saturating_sub(1) };
+        if self.draw_image(f, &p, Rect { height: 1, ..preview }, body) {
+            return;
+        }
         let Some(lines) = self.preview_lines(&p, preview.width.saturating_sub(1)) else {
             f.render_widget(Paragraph::new(Line::styled(format!(" {} · reading…", self.shown(&p)), theme::muted())), Rect { height: 1, ..preview });
             return;
@@ -858,6 +919,57 @@ mod view_tests {
         let (repo, att) = (at(&s, "repo changes"), at(&s, "attachments"));
         assert!(repo < att && at(&s, "src/a.rs") < att, "{s:#?}");
         assert!(at(&s, "[Image #1] image-1.png") > att && at(&s, "pasted-text-1.txt") > att, "{s:#?}");
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_image_previews_as_an_image_encoded_off_the_ui_thread_once() {
+        let _env = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let d = std::env::temp_dir().join(format!("codehead-fimage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let img = d.join("shot.png");
+        image::RgbaImage::from_pixel(2000, 1000, image::Rgba([10, 200, 10, 255])).save(&img).unwrap();
+        let t = store::Thread::new("f", "t", &d, vec!["ada".into()]);
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        store::append(&t.id, &store::Event::new(Some("ada"), Kind::Tool { id: "1".into(), name: "Write".into(), input: serde_json::json!({"file_path": img}) })).unwrap();
+        let mut v = View::new(&t.id, &d);
+        // 0 graphics terminal (the tests' default): 0 image preview
+        assert!((v.picker)().is_none());
+        fn iterm2() -> Option<ratatui_image::picker::Picker> {
+            #[allow(deprecated)]
+            let mut p = ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(10, 20));
+            p.set_protocol_type(ratatui_image::picker::ProtocolType::Iterm2);
+            Some(p)
+        }
+        v.picker = iterm2;
+        // all 100 cols (the helper: the list's 40)
+        let full = |v: &mut View| {
+            let (_, b) = screen(v);
+            let s: Vec<String> = (0..16).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect();
+            (s, b)
+        };
+        let (s, _) = full(&mut v);
+        assert!(s.iter().any(|r| r.contains("shot.png") && r.contains("reading…")), "{s:#?}");
+        // the encode in: the size line, 1 image (the iTerm2 sequence in the buffer)
+        let end = Instant::now() + Duration::from_secs(10);
+        while !v.poll() {
+            assert!(Instant::now() < end, "0 encode in 10 s");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (s, b) = full(&mut v);
+        assert!(s.iter().any(|r| r.contains("2000×1000 px") && r.contains("y: yazi")), "{s:#?}");
+        assert!(b.content().iter().any(|c| c.symbol().contains("\x1b]1337;File=")), "an iTerm2 image");
+        // a 2nd draw: from the cache, 0 new read
+        screen(&mut v);
+        assert_eq!(v.image_reads.pending(), 0);
+        assert_eq!(v.images.len(), 1);
+        // after yazi: encoded again
+        v.forget_images();
+        let (s, _) = full(&mut v);
+        assert!(s.iter().any(|r| r.contains("reading…")), "{s:#?}");
         let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
         let _ = std::fs::remove_dir_all(&d);
     }
