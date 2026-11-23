@@ -6554,10 +6554,13 @@ mod render_tests {
         a.paste("new-one");
         let screen = dump(&mut a, 100, 30);
         assert!(screen.contains("add MCP server") && screen.contains("new-one"), "{screen}");
+        // 1 read time for both escs: a slow CI runner never puts 2 s between them
+        crate::textarea::stamp(Some(std::time::Instant::now()));
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         assert!(dump(&mut a, 100, 30).contains("add MCP server"), "1 esc: the edits stay");
 
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        crate::textarea::stamp(None);
         let screen = dump(&mut a, 100, 30);
         assert!(!screen.contains("add MCP server"), "{screen}");
         assert_eq!(crate::engine::servers::load().unwrap().len(), 1);
@@ -6672,10 +6675,11 @@ mod render_tests {
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
         assert!(a.tabs_focus);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        // alt+digit in the prompt: tabs; ctrl / alt+←→: word jumps
+        // alt+digit in the prompt: tabs; ctrl / ⌥+←→ (alt on macOS; off macOS alt+←: row start): word jumps
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         type_text(&mut a, "one two");
-        key(&mut a, KeyCode::Left, KeyModifiers::ALT);
+        let word = if cfg!(target_os = "macos") { KeyModifiers::ALT } else { KeyModifiers::CONTROL };
+        key(&mut a, KeyCode::Left, word);
         type_text(&mut a, "X");
         assert_eq!(a.prompt.text(), "one Xtwo");
         // ctrl+←: a word jump too, 0 tab switch

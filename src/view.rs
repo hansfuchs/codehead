@@ -4544,7 +4544,10 @@ mod pane_tests {
         assert!(!areas.is_empty(), "the dropdown shows");
 
         // the goo at its densest: just before the snap
-        let start = crate::avatar::now() - crate::avatar::spawn::timing(0).2 * 0.95;
+        // a frozen clock: a slow CI runner never moves the spawn past the snap between draws
+        let now = crate::avatar::now();
+        crate::avatar::freeze(Some(now));
+        let start = now - crate::avatar::spawn::timing(0).2 * 0.95;
         v.spawns.insert("ada".into(), crate::avatar::Spawn { anim: 0, start });
         let (goo, goo_menu) = (buffer(&mut v, ""), buffer(&mut v, &key));
         let slot = v.slots.borrow()[0].1;
@@ -4558,6 +4561,7 @@ mod pane_tests {
                 }
             }
         }
+        crate::avatar::freeze(None);
     }
 
     #[test]

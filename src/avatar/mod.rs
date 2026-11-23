@@ -164,8 +164,24 @@ fn rows(cells: &[glyph::Cell]) -> [String; H] {
 
 /// Seconds since the first call: the clock of every avatar.
 pub fn now() -> f32 {
+    #[cfg(test)]
+    if let Some(t) = FROZEN.with(|c| c.get()) {
+        return t;
+    }
     static T0: OnceLock<Instant> = OnceLock::new();
     T0.get_or_init(Instant::now).elapsed().as_secs_f32()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Clock of [`now`] in tests (None: the real clock): a slow CI runner never moves an animation on.
+    static FROZEN: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Freeze [`now`] of this thread at T (None: the real clock again).
+#[cfg(test)]
+pub fn freeze(t: Option<f32>) {
+    FROZEN.with(|c| c.set(t));
 }
 
 fn geo_at(i: usize) -> (sdf::Shape, String) {

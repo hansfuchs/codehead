@@ -242,13 +242,14 @@ pub fn is_filter_key(k: &KeyEvent) -> bool {
 
 /// Esc on unsaved edits (esc never drops edits unasked): DIRTY and 0 esc within 2 s before → false
 /// (the caller warns: "esc again: drop"); a 2nd esc in time or 0 edits → true (drop / close now).
-/// AT: the caller's last esc.
+/// AT: the caller's last esc. Times: the read time of the key ([`stamp`]), not its handle time.
 pub fn esc_drops(at: &mut Option<std::time::Instant>, dirty: bool) -> bool {
-    if !dirty || at.take().is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
+    let now = KEY_AT.with(|c| c.get()).unwrap_or_else(Instant::now);
+    if !dirty || at.take().is_some_and(|t| now.saturating_duration_since(t) < std::time::Duration::from_secs(2)) {
         return true;
     }
 
-    *at = Some(std::time::Instant::now());
+    *at = Some(now);
     false
 }
 
@@ -961,7 +962,8 @@ impl TextArea {
         let p = match self.vis.get(vrow) {
             Some(s) if end => Pos { row: s.row, col: if s.last { s.end } else { s.end.saturating_sub(1).max(s.start) } },
             Some(s) => Pos { row: s.row, col: s.start },
-            None => self.cur,
+            // 0 layout yet (0 render): the logical row
+            None => Pos { row: self.cur.row, col: if end { self.lines[self.cur.row].len() } else { 0 } },
         };
         self.move_to(p, select);
     }
