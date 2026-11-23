@@ -175,6 +175,8 @@ pub struct View {
     filtering: bool,
     /// A 1st S (share: commit + push) at: a 2nd within 3 s shares.
     share_armed: Option<std::time::Instant>,
+    /// S S: the share (git add, commit) off the UI thread; its toast.
+    shared: Option<std::sync::mpsc::Receiver<String>>,
     list: Rect,
     /// The drawn rows of the list: (y, row).
     drawn: Vec<(u16, Row)>,
@@ -205,6 +207,7 @@ impl View {
             filter,
             filtering: false,
             share_armed: None,
+            shared: None,
             list: Rect::default(),
             drawn: Vec::new(),
             preview: Rect::default(),
@@ -289,6 +292,13 @@ impl View {
     }
 
     /// A finished read of the list: in. True: the list changed.
+    /// The S S share ended: its toast.
+    pub fn take_toast(&mut self) -> Option<String> {
+        let m = self.shared.as_ref()?.try_recv().ok()?;
+        self.shared = None;
+        Some(m)
+    }
+
     pub fn poll(&mut self) -> bool {
         let reads = self.reads.poll();
         let mut changed = false;
@@ -570,8 +580,17 @@ impl View {
                 }
                 let paths: Vec<PathBuf> = self.files.iter().map(|e| e.path.clone()).collect();
                 let title = store::load(&self.id).map(|t| t.title).unwrap_or_default();
-                let r = share(&home, &paths, &title);
-                return Act::Toast(r.unwrap_or_else(|e| format!("share: {e}")));
+                let run = move || share(&home, &paths, &title).unwrap_or_else(|e| format!("share: {e}"));
+                // 4 git runs: off the UI thread (tests: at once)
+                if cfg!(test) {
+                    return Act::Toast(run());
+                }
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.shared = Some(rx);
+                std::thread::spawn(move || {
+                    let _ = tx.send(run());
+                });
+                return Act::Toast("sharing…".into());
             }
             _ => {}
         }

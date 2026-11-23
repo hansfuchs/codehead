@@ -107,6 +107,8 @@ enum Msg {
     /// The log's events before the tail the view opened with (a big log: read in the
     /// background).
     Head(Vec<store::Event>),
+    /// A 1-off action off the UI thread ended: its toast.
+    Toast(String),
 }
 
 /// ctrl+q: the agents box above the prompt has the keys. AT: the highlighted agent (index in
@@ -286,6 +288,8 @@ struct View {
     mini_rect: Rect,
     /// `> handoff`: the document on its way.
     handing: Option<Receiver<Result<String, String>>>,
+    /// `>branch`: the copy of the thread (its log: up to MBs) off the UI thread; its end opens it.
+    forking: Option<Receiver<Result<store::Thread, String>>>,
     // chrome
     monitors: crate::monitors::Monitors,
     subagents: crate::subagents::Subagents,
@@ -436,6 +440,7 @@ impl View {
             mini_chat: true,
             mini_rect: Rect::default(),
             handing: None,
+            forking: None,
             // tests: 0 shared state between parallel views
             monitors: crate::monitors::Monitors::new(id),
             subagents: Default::default(),
@@ -1121,9 +1126,18 @@ impl View {
     /// Stop sub-thread KID: its host ends, its end reported as stopped, the thread deleted.
     fn stop_sub(&mut self, kid: &str) {
         let (title, agent) = self.subthreads.kids.iter().find(|k| k.id == kid).map(|k| (k.title.clone(), k.agents.first().cloned().unwrap_or_default())).unwrap_or_default();
-        let _ = crate::engine::client::send_within(kid, &json!({"op": "stop"}), Duration::from_secs(2));
         self.host("sub_done", json!({"op": "sub_done", "id": kid, "title": title, "agent": agent, "state": "stopped", "text": "stopped by the owner"}));
-        let _ = store::delete(kid);
+        // its host stops (2 s max), then its records go: off the UI thread
+        let k = kid.to_string();
+        let gone = move || {
+            let _ = crate::engine::client::send_within(&k, &json!({"op": "stop"}), Duration::from_secs(2));
+            let _ = store::delete(&k);
+        };
+        if cfg!(test) {
+            gone();
+        } else {
+            std::thread::spawn(gone);
+        }
         self.subthreads.gone(kid);
         self.toast(format!("sub-thread “{title}” stopped"));
     }
@@ -1151,24 +1165,25 @@ impl View {
     fn run_replace(&mut self, new: String, old: String, text: String) {
         let convo = self.thread.last_of(&old, HANDOFF_CHARS);
         let task = store::load(&self.id).map(|t| t.task).unwrap_or_default();
-        let changed = crate::threads::git(&self.cwd, &["status", "--short"]).1;
-        let changed: String = changed.lines().take(80).map(|l| format!("{l}\n")).collect();
         let dir = crate::config::home().join(".cache/codehead/handoff");
-        let _ = std::fs::create_dir_all(&dir);
         let file = dir.join(format!("{}-{}-{new}.md", &self.id[..self.id.len().min(12)], crate::engine::now_ms() / 1000));
-        let doc = format!(
-            "# Handoff: {old} → {new}\n\n{old} worked on this thread before you. It left the thread; you take over.\n\n## Task of the thread\n\n{task}\n\n## Recent messages of {old}\n\n{convo}\n\n## Changed files (git status --short in {})\n\n```\n{}```\n",
-            self.cwd.display(),
-            if changed.is_empty() { "0 changes\n".to_string() } else { changed }
-        );
-        if let Err(e) = std::fs::write(&file, doc) {
-            self.toast(format!("handoff file: {e}"));
-            return;
-        }
         let body = text.strip_prefix(&format!("@{new}")).map(str::trim_start).unwrap_or(&text).to_string();
         let prompt = format!("{body}\n\n(You take over this thread from {old}. Read {} first: the task, the recent messages, the changed files.)", file.display());
-        let (id, tx) = (self.id.clone(), self.tx.clone());
+        let (id, tx, cwd) = (self.id.clone(), self.tx.clone(), self.cwd.clone());
+        // git status, the handoff file, the host calls: off the UI thread
         std::thread::spawn(move || {
+            let changed = crate::threads::git(&cwd, &["status", "--short"]).1;
+            let changed: String = changed.lines().take(80).map(|l| format!("{l}\n")).collect();
+            let doc = format!(
+                "# Handoff: {old} → {new}\n\n{old} worked on this thread before you. It left the thread; you take over.\n\n## Task of the thread\n\n{task}\n\n## Recent messages of {old}\n\n{convo}\n\n## Changed files (git status --short in {})\n\n```\n{}```\n",
+                cwd.display(),
+                if changed.is_empty() { "0 changes\n".to_string() } else { changed }
+            );
+            let _ = std::fs::create_dir_all(&dir);
+            if let Err(e) = std::fs::write(&file, doc) {
+                let _ = tx.send(Msg::Done("replace", Err(format!("handoff file: {e}"))));
+                return;
+            }
             let r = client::call(&id, &json!({"op": "leave", "agent": old, "to": new})).and_then(|_| client::call(&id, &json!({"op": "prompt", "to": [new], "text": prompt})));
             let _ = tx.send(Msg::Done("replace", r));
         });
@@ -1329,7 +1344,32 @@ impl View {
             self.toast("branch: wait for the turn to end");
             return false;
         }
-        match store::fork(&self.id) {
+        if self.forking.is_some() {
+            self.toast("branch: on its way");
+            return false;
+        }
+        let (tx, rx) = mpsc::channel();
+        let id = self.id.clone();
+        let copy = move || {
+            let _ = tx.send(store::fork(&id));
+        };
+        self.forking = Some(rx);
+        // tests: at once
+        if cfg!(test) {
+            copy();
+            return self.fork_due();
+        }
+        self.toast("branch: copying the thread…");
+        std::thread::spawn(copy);
+        false
+    }
+
+    /// The `>branch` copy is done: true → the view opens it (EXIT).
+    fn fork_due(&mut self) -> bool {
+        let Some(rx) = &self.forking else { return false };
+        let Ok(r) = rx.try_recv() else { return false };
+        self.forking = None;
+        match r {
             Ok(t) => {
                 self.exit = Exit::Open { id: t.id.clone(), dir: t.work_dir(), title: t.title.clone(), note: format!("branched from {}", &self.id[..self.id.len().min(12)]) };
                 true
@@ -1348,22 +1388,26 @@ impl View {
     /// of now. A busy agent: after its turn.
     fn reload_sessions(&mut self) {
         let Some(t) = store::load(&self.id) else { return };
-        let (mut done, mut busy) = (Vec::new(), Vec::new());
-        for a in &t.agents {
-            if self.thread.busy.contains(a) {
-                busy.push(a.clone());
-                continue;
-            }
+        let (idle, busy): (Vec<String>, Vec<String>) = t.agents.iter().cloned().partition(|a| !self.thread.busy.contains(a));
+        let id = self.id.clone();
+        // a host call per agent (5 s max each): off the UI thread, the result as a toast
+        let run = move || {
             // 0 host: 0 session runs, the next message starts a new one anyway
-            if crate::engine::client::send_within(&self.id, &serde_json::json!({"op": "reload", "agent": a}), Duration::from_secs(5)).is_ok() {
-                done.push(a.clone());
+            let done: Vec<String> = idle.into_iter().filter(|a| crate::engine::client::send_within(&id, &serde_json::json!({"op": "reload", "agent": a}), Duration::from_secs(5)).is_ok()).collect();
+            let mut msg = if done.is_empty() { "reload: 0 sessions ran · the next message starts new ones".to_string() } else { format!("reload: {} · the next message starts a new session", done.join(", ")) };
+            if !busy.is_empty() {
+                msg.push_str(&format!(" · mid-turn: {} (>reload after the turn)", busy.join(", ")));
             }
+            msg
+        };
+        if cfg!(test) {
+            let m = run();
+            return self.toast(m);
         }
-        let mut msg = if done.is_empty() { "reload: 0 sessions ran · the next message starts new ones".to_string() } else { format!("reload: {} · the next message starts a new session", done.join(", ")) };
-        if !busy.is_empty() {
-            msg.push_str(&format!(" · mid-turn: {} (>reload after the turn)", busy.join(", ")));
-        }
-        self.toast(msg);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::Toast(run()));
+        });
     }
 
     fn handoff(&mut self) {
@@ -4057,7 +4101,7 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
         {
             return Ok(Some(Exit::Open { id: t.id.clone(), dir: t.work_dir(), title: t.title.clone(), note: "the sub-thread ended: its result is in the stream".into() }));
         }
-        if v.handoff_due() {
+        if v.handoff_due() || v.fork_due() {
             crate::nav::mark_seen_now(id);
             return Ok(Some(to_main(std::mem::replace(&mut v.exit, Exit::Back), of.as_deref())));
         }
@@ -4067,6 +4111,10 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
         dirty |= v.comp.poll();
         dirty |= v.merge.poll(v.pane == Pane::Merge);
         dirty |= v.files.poll();
+        if let Some(m) = v.files.take_toast() {
+            v.toast(m);
+            dirty = true;
+        }
         dirty |= v.poll_merge_sources();
         while let Ok(m) = rx.try_recv() {
             dirty = true;
@@ -4103,6 +4151,7 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
                     wake = true;
                 }
                 Msg::Head(head) => v.take_head(head),
+                Msg::Toast(m) => v.toast(m),
                 Msg::ShellCwd(dir) => {
                     v.shell_cwd = dir;
                     v.dirty = true;

@@ -45,6 +45,8 @@ enum Msg {
     Refreshed(mcplist::Found),
     Probed,
     Done(String, bool),
+    /// An import of a harness's server ended: (harness, name, the server + its toast).
+    Imported { harness: String, name: String, r: Result<(Server, String), String> },
 }
 
 /// The add / edit form of a codehead server.
@@ -224,6 +226,10 @@ impl McpTab {
                     self.cli_errors = found.errors;
                 }
                 Msg::Probed => self.probing = false,
+                Msg::Imported { harness, name, r } => {
+                    self.busy.pop();
+                    self.imported(&harness, &name, r);
+                }
                 Msg::Done(text, error) => {
                     self.busy.pop();
                     self.say(text, error);
@@ -666,39 +672,37 @@ impl McpTab {
                 self.agents = roster::active();
                 self.say(format!("{name}: deleted"), false);
             }
+            // the harness CLI (`codex mcp list`, `claude mcp remove`), the keychain: seconds, off
+            // the UI thread (tests: at once)
             Then::Import { harness, name, source } => {
-                let mut s = match mcplist::import(&harness, &name) {
-                    Ok(s) => s,
-                    Err(e) => return self.say(e, true),
-                };
-                // a name codehead cannot use as a server name: its safe form
-                if !servers::valid_name(&s.name) {
-                    s.name = s.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+                let servers = self.servers.clone();
+                let (h, n) = (harness.clone(), name.clone());
+                let run = move || import(&h, &n, &source, servers);
+                if cfg!(test) {
+                    let r = run();
+                    return self.imported(&harness, &name, r);
                 }
-                if self.servers.iter().any(|x| x.name == s.name) {
-                    return self.say(format!("{}: codehead has a server with this name", s.name), true);
-                }
-                if let Err(e) = secure(&mut s, None) {
-                    return self.say(e, true);
-                }
-                let mut all = self.servers.clone();
-                all.push(s.clone());
-                if let Err(e) = servers::save(&all) {
-                    return self.say(e, true);
-                }
-                self.servers = all;
-                let gone = mcplist::remove(&harness, &name, &source);
-                self.natives.retain(|n| !(n.harness == harness && n.name == name));
-                self.say(
-                    match gone {
-                        Ok(()) => format!("{}: imported, gone from {}", s.name, harness_label(&harness)),
-                        Err(e) => format!("{}: imported; {} still has it ({e})", s.name, harness_label(&harness)),
-                    },
-                    false,
-                );
+                self.busy.push(name.clone());
+                self.say(format!("importing {name}…"), false);
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(Msg::Imported { harness, name, r: run() });
+                });
+            }
+        }
+    }
+
+    /// The import of HARNESS's server NAME ended: R (the server, the toast) in the lists.
+    fn imported(&mut self, harness: &str, name: &str, r: Result<(Server, String), String>) {
+        match r {
+            Ok((s, msg)) => {
+                self.load();
+                self.natives.retain(|x| !(x.harness == harness && x.name == name));
+                self.say(msg, false);
                 self.probe();
                 self.open_agents(&s.name);
             }
+            Err(e) => self.say(e, true),
         }
     }
 
@@ -1116,6 +1120,28 @@ fn harness_order(h: &str) -> usize {
 
 /// The env / header values of S in the keychain: plain values move in (OLD's entries a new value
 /// replaces go). 0 keychain: Err, the owner writes `${VAR}` instead.
+/// Import HARNESS's server NAME (from SOURCE) into codehead's SERVERS: saved, secrets in the
+/// keychain, gone from the harness. (the server, the toast).
+fn import(harness: &str, name: &str, source: &str, servers: Vec<Server>) -> Result<(Server, String), String> {
+    let mut s = mcplist::import(harness, name)?;
+    // a name codehead cannot use as a server name: its safe form
+    if !servers::valid_name(&s.name) {
+        s.name = s.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+    }
+    if servers.iter().any(|x| x.name == s.name) {
+        return Err(format!("{}: codehead has a server with this name", s.name));
+    }
+    secure(&mut s, None)?;
+    let mut all = servers;
+    all.push(s.clone());
+    servers::save(&all)?;
+    let msg = match mcplist::remove(harness, name, source) {
+        Ok(()) => format!("{}: imported, gone from {}", s.name, harness_label(harness)),
+        Err(e) => format!("{}: imported; {} still has it ({e})", s.name, harness_label(harness)),
+    };
+    Ok((s, msg))
+}
+
 fn secure(s: &mut Server, old: Option<&Server>) -> Result<(), String> {
     let name = s.name.clone();
     let olds: Vec<String> = old.map(|o| o.env.values().chain(o.headers.values()).cloned().collect()).unwrap_or_default();

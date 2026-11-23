@@ -577,6 +577,16 @@ struct Regions {
 
 type AgentSnapshot = (Vec<Agent>, String, HashMap<String, Vec<Use>>);
 
+/// The result of a 1-off action that ran off the UI thread.
+enum Job {
+    /// Threads deleted: the report.
+    Threads(Vec<Line<'static>>),
+    /// An agent deleted: the report.
+    AgentDeleted(Vec<Line<'static>>),
+    /// An agent saved: its live sessions restarted (the toast's text).
+    Restarted(String),
+}
+
 pub struct App {
     pub cfg: Config,
     /// The merge tab: the owner's pull requests, 1 open.
@@ -622,6 +632,10 @@ pub struct App {
     thread_reads: Reads<(), Vec<Worktree>>,
     session_reads: Reads<(), Vec<Session>>,
     agent_reads: Reads<(), AgentSnapshot>,
+    /// 1-off actions off the UI thread (thread delete, agent delete, session restarts): their
+    /// results, 1 key per job.
+    jobs: Reads<u64, Job>,
+    job_n: u64,
     detail_reads: Reads<String, Vec<Line<'static>>>,
     extra_reads: Reads<String, Vec<String>>,
     note_reads: Reads<(), Notes>,
@@ -971,6 +985,8 @@ impl App {
             thread_reads: Reads::default(),
             session_reads: Reads::default(),
             agent_reads: Reads::default(),
+            jobs: Reads::default(),
+            job_n: 0,
             detail_reads: Reads::default(),
             extra_reads: Reads::default(),
             note_reads: Reads::default(),
@@ -1112,6 +1128,36 @@ impl App {
         self.agent_reads.invalidate();
         self.extra_reads.invalidate();
         self.refresh_agents();
+    }
+
+    /// Run 1-off action RUN off the UI thread; its Job comes back in `tick` (tests: at once).
+    fn job(&mut self, run: impl FnOnce() -> Job + Send + 'static) {
+        if cfg!(test) {
+            let j = run();
+            self.job_done(j);
+            return;
+        }
+        self.job_n += 1;
+        self.jobs.request(self.job_n, run);
+    }
+
+    fn job_done(&mut self, j: Job) {
+        match j {
+            Job::Threads(lines) => {
+                self.load_threads();
+                self.modal = Some(Modal::Info { title: "delete threads".into(), lines, scroll: 0 });
+            }
+            Job::AgentDeleted(lines) => {
+                self.load_agents();
+                self.worktrees = None;
+                self.modal = Some(Modal::Info { title: "delete agent".into(), lines, scroll: 0 });
+            }
+            Job::Restarted(msg) => {
+                self.usage = None;
+                self.load_agents();
+                self.toast(msg, false);
+            }
+        }
     }
 
     fn refresh_agents(&mut self) {
@@ -1350,6 +1396,10 @@ impl App {
             self.tcursor = keep.and_then(|key| vis.iter().position(|&i| {
                 if i < nw { self.worktrees.as_ref().unwrap()[i].key() == key } else { self.sessions[i - nw].key() == key }
             })).unwrap_or_else(|| self.tcursor.min(vis.len().saturating_sub(1)));
+        }
+        for (_, j) in self.jobs.poll() {
+            dirty = true;
+            self.job_done(j);
         }
         for (_, (rows, effort, usage)) in self.agent_reads.poll() {
             dirty = true;
@@ -2669,20 +2719,20 @@ impl App {
                 }
                 Err(e) => self.toast(format!("{path}: {e}"), true),
             },
+            // teardown scripts, git, host stops: seconds; the report comes as a modal
             ConfirmAction::Threads(items) => {
                 let repo = self.cfg.repo.clone().unwrap_or_else(|| self.cfg.cwd.clone());
-                let lines = threads::remove(&repo, &items, &self.cfg.logs);
+                let logs = self.cfg.logs.clone();
+                self.toast(format!("deleting {} threads…", items.len()), false);
                 self.tsel.clear();
-                self.load_threads();
-                self.modal = Some(Modal::Info { title: "delete threads".into(), lines, scroll: 0 });
+                self.job(move || Job::Threads(threads::remove(&repo, &items, &logs)));
             }
             ConfirmAction::Agent(a) => {
                 let Some(fallback) = self.agents.iter().find(|x| x.name == self.cfg.agent).cloned() else { return };
                 let uses = self.uses(&a);
-                let lines = agents::delete(&a, &fallback, &uses, &self.cfg.logs);
-                self.load_agents();
-                self.worktrees = None;
-                self.modal = Some(Modal::Info { title: "delete agent".into(), lines, scroll: 0 });
+                let logs = self.cfg.logs.clone();
+                self.toast(format!("deleting {}…", a.name), false);
+                self.job(move || Job::AgentDeleted(agents::delete(&a, &fallback, &uses, &logs)));
             }
         }
     }
@@ -2712,20 +2762,23 @@ impl App {
                 if let Some(i) = self.agents.iter().position(|a| a.name == spec.name) {
                     self.acursor = i;
                 }
-                let mut msg = format!("{} {}", spec.name, if old_name.is_some() { "saved" } else { "created" });
+                let msg = format!("{} {}", spec.name, if old_name.is_some() { "saved" } else { "created" });
+                self.toast(msg.clone(), false);
                 // live sessions keep the profile they started with: restart them on the new one
+                // (a socket per thread: off the UI thread; the toast with the restarts comes after)
                 // `load_agents` reads in the background: `self.agents` still holds the old list
-                if let Some(old) = &form.edit
-                    && let Some(new) = agents::load().into_iter().find(|a| a.name == spec.name)
-                    && agents::profile_changed(old, &new)
+                if let Some(old) = form.edit.clone()
+                    && let Some(new) = agents::roster_only().into_iter().find(|a| a.name == spec.name)
+                    && agents::profile_changed(&old, &new)
                 {
-                    let uses = agents::usage().remove(&new.name).unwrap_or_default();
-                    let r = agents::restart(&new, old.harness == new.harness, &uses, &self.cfg.logs);
-                    msg.push_str(&restart_note(&r));
-                    self.usage = None;
-                    self.load_agents();
+                    let logs = self.cfg.logs.clone();
+                    let head = msg;
+                    self.job(move || {
+                        let uses = agents::usage().remove(&new.name).unwrap_or_default();
+                        let r = agents::restart(&new, old.harness == new.harness, &uses, &logs);
+                        Job::Restarted(format!("{head}{}", restart_note(&r)))
+                    });
                 }
-                self.toast(msg, false);
             }
             Err(e) => {
                 form.error = Some(e.lines().last().unwrap_or("failed").to_string());
