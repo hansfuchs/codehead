@@ -288,8 +288,8 @@ fn next_cost(s: &Snap, n: &Next) -> Option<(u64, f64)> {
 /// Window L as a bar of WIDTH cells: the used % a solid bg, the share of the next message `▒`,
 /// the rest dithered (`░`).
 fn bar(pct: f64, next: f64, width: usize) -> Vec<Span<'static>> {
-    // used: the line gray (dimmer than text), warn / danger near the limit
-    let col = if pct >= 90.0 { theme::pal().danger } else if pct >= 70.0 { theme::pal().warn } else { theme::pal().line };
+    // used: the line gray (dimmer than text), caution / error near the limit
+    let col = if pct >= 90.0 { theme::pal().error() } else if pct >= 70.0 { theme::pal().caution() } else { theme::pal().overlay0 };
     let cells = |p: f64| ((p.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
     let used = cells(pct).min(width);
     // a share > 0: 1 cell at least (visible)
@@ -297,7 +297,7 @@ fn bar(pct: f64, next: f64, width: usize) -> Vec<Span<'static>> {
     let rest = width - used - share;
     vec![
         Span::styled(" ".repeat(used), Style::default().bg(col)),
-        Span::styled("▒".repeat(share), theme::accent()),
+        Span::styled("▒".repeat(share), theme::fg(theme::pal().info())),
         Span::styled("░".repeat(rest), theme::line()),
     ]
 }
@@ -432,7 +432,7 @@ fn draw_at(buf: &mut Buffer, area: Rect, s: &Snap, age: Duration, now: u64, next
             Span::styled(format!("{:>9}", format!("${:.2}", a.usd)), theme::text()),
             Span::styled(format!("{:>5}", a.ctx.map_or("·".into(), |c| format!("{c}%"))), theme::text()),
             Span::raw("  "),
-            Span::styled(spark(&a.samples, spark_w, now), theme::accent()),
+            Span::styled(spark(&a.samples, spark_w, now), theme::fg(theme::pal().info())),
         ]));
     }
     if s.agents.len() != 1 {
@@ -505,7 +505,7 @@ fn draw_at(buf: &mut Buffer, area: Rect, s: &Snap, age: Duration, now: u64, next
             for l in &s.limits {
                 let share = l.usd_per_pct.filter(|r| *r > 0.0).map_or("?".into(), |r| format!("+{:.1}%", usd / r));
                 spans.push(Span::styled(format!(" · {} ", window(&l.window)), theme::muted()));
-                spans.push(Span::styled(share, theme::accent()));
+                spans.push(Span::styled(share, theme::fg(theme::pal().info())));
             }
         }
         None => spans.push(Span::styled("· (0 context yet)", theme::muted())),
@@ -690,7 +690,7 @@ mod tests {
         // the bars: used part solid (bg), the next message's share ▒, the rest dithered ░
         let row = text.lines().position(|l| l.starts_with(" 5h")).expect("5h row");
         let cells: Vec<_> = (0..w).map(|x| b[(x, row as u16)].clone()).collect();
-        assert!(cells.iter().any(|c| c.symbol() == " " && c.bg == theme::pal().line), "used part");
+        assert!(cells.iter().any(|c| c.symbol() == " " && c.bg == theme::pal().overlay0), "used part");
         assert!(text.lines().nth(row).unwrap().contains('▒') && text.contains('░'), "{text}");
         // the windows side by side: 5h and 7d on 1 row
         assert!(text.lines().nth(row).unwrap().contains(" 7d "), "{text}");
@@ -815,7 +815,7 @@ fn spark_over(samples: &[(u64, u64)], buckets: usize, span: u64, now: u64) -> St
 pub fn detail_lines(d: &Detail, here: Option<&str>, names: &HashMap<String, (String, Option<String>)>, titles: &HashMap<String, String>, w: usize) -> Vec<Line<'static>> {
     let now = now();
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let head = |t: &str| Line::styled(t.to_string(), theme::accent_bold());
+    let head = |t: &str| Line::styled(t.to_string(), theme::bold());
     let kv = |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<10}"), theme::muted()), Span::styled(v, theme::text())]);
     if let Some(id) = here {
         let title = titles.get(id).cloned().unwrap_or_else(|| "this thread".into());
@@ -831,8 +831,8 @@ pub fn detail_lines(d: &Detail, here: Option<&str>, names: &HashMap<String, (Str
         }
         let all: Vec<(u64, u64)> = d.agents.iter().flat_map(|a| a.samples.iter().copied()).collect();
         let sw = w.saturating_sub(10).min(48);
-        lines.push(Line::from(vec![Span::styled(format!("{:<10}", "last 24h"), theme::muted()), Span::styled(spark_over(&all, sw, 86_400, now), theme::accent())]));
-        lines.push(Line::from(vec![Span::styled(format!("{:<10}", "last hour"), theme::muted()), Span::styled(spark_over(&all, sw, 3_600, now), theme::accent())]));
+        lines.push(Line::from(vec![Span::styled(format!("{:<10}", "last 24h"), theme::muted()), Span::styled(spark_over(&all, sw, 86_400, now), theme::fg(theme::pal().info()))]));
+        lines.push(Line::from(vec![Span::styled(format!("{:<10}", "last hour"), theme::muted()), Span::styled(spark_over(&all, sw, 3_600, now), theme::fg(theme::pal().info()))]));
         lines.push(Line::raw(""));
         lines.push(head("agents"));
         let nw = d.agents.iter().map(|a| names.get(&a.agent).map_or(8, |n| n.0.chars().count())).max().unwrap_or(5).max(5) + 1;
@@ -878,7 +878,7 @@ pub fn detail_lines(d: &Detail, here: Option<&str>, names: &HashMap<String, (Str
         lines.push(Line::raw(""));
         lines.push(head("plan limits"));
         for (h, win, pct, resets) in &d.limits {
-            let col = if *pct >= 90.0 { theme::pal().danger } else if *pct >= 70.0 { theme::pal().warn } else { theme::pal().ok };
+            let col = if *pct >= 90.0 { theme::pal().error() } else if *pct >= 70.0 { theme::pal().caution() } else { theme::pal().text };
             let reset = match resets {
                 Some(r) if *r <= now => " · new window".to_string(),
                 Some(r) => format!(" · resets in {}", until(*r, now)),

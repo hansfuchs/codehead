@@ -258,7 +258,7 @@ impl SubThreads {
         self.bar = anchor;
         f.render_widget(Clear, anchor);
         let wave = ["◐", "◓", "◑", "◒"][tick % 4];
-        let style = if self.hover { theme::accent().bg(theme::pal().hover) } else { theme::accent() };
+        let style = if self.hover { theme::accent().bg(theme::pal().surface1) } else { theme::accent() };
         let what = self.kids.iter().map(|k| line(&k.title, 40)).collect::<Vec<_>>().join(" · ");
         let hint = if self.open { "click: close" } else { "click: details" };
         // the thread's messages to its agents wait for the end (same checkout): said here, 0 chat row

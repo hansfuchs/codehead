@@ -44,7 +44,7 @@ pub struct File {
     pub command_key: Option<String>,
     /// `[colors] scheme`: a preset (coral, amber).
     pub scheme: Option<String>,
-    /// `[colors]` overrides: color name (theme::NAMES) → `#RRGGBB`.
+    /// `[colors]` overrides: color name (theme::NAMES, or an old name of theme::ALIASES) → `#RRGGBB`.
     pub colors: BTreeMap<String, String>,
     pub aliases: BTreeMap<String, String>,
     /// `[harness.<name>]`: defaults of a harness's agents (HARNESS_FIELDS) → value.
@@ -108,7 +108,8 @@ fn parse(text: &str) -> Result<File, String> {
                 if name == "scheme" {
                     f.scheme = Some(v);
                 } else {
-                    f.colors.insert(name.clone(), v);
+                    // an old name (`panel`, `ok`, …): kept under its slot's name
+                    f.colors.insert(crate::theme::slot_name(name).to_string(), v);
                 }
             }
             continue;
@@ -415,7 +416,7 @@ pub fn validate(key: String, v: &str) -> Result<(), String> {
         }
         k if k.starts_with("colors.") && k != "colors.scheme" => {
             let name = &k["colors.".len()..];
-            if !crate::theme::NAMES.contains(&name) {
+            if !crate::theme::NAMES.contains(&crate::theme::slot_name(name)) {
                 return Err(format!("unknown key {k}"));
             }
             crate::theme::parse_hex(v).map(|_| ()).ok_or_else(|| format!("{k}: #RRGGBB, not {v}"))

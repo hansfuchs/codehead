@@ -86,10 +86,11 @@ impl Kind {
     pub fn color(self) -> Color {
         let p = theme::pal();
         match self {
-            Kind::Error | Kind::Conflict | Kind::Ci => p.danger,
-            Kind::Ask | Kind::Blocked | Kind::Gate | Kind::Limit | Kind::Context => p.warn,
-            Kind::Review | Kind::Mention | Kind::Reply => p.accent,
-            Kind::Done => p.ok,
+            Kind::Error | Kind::Conflict | Kind::Ci => p.error(),
+            Kind::Ask | Kind::Blocked | Kind::Gate => p.attention(),
+            Kind::Limit | Kind::Context => p.caution(),
+            Kind::Review | Kind::Mention | Kind::Reply => p.info(),
+            Kind::Done => p.success(),
         }
     }
 }
@@ -546,7 +547,7 @@ impl Panel {
         f.render_widget(Clear, r);
         let block = Block::new()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .border_type(BorderType::Plain)
             .border_style(theme::accent())
             .title(Span::styled(format!(" notifications {} ", self.notes.len()), theme::accent_bold()))
             .title_bottom(Span::styled(" ↑↓ move · enter jump · x seen · esc close ", theme::muted()))
@@ -567,7 +568,7 @@ impl Panel {
             let row = Rect { x: inner.x, y, width: inner.width, height: 2 };
             let cur = i == self.cursor;
             if cur {
-                f.render_widget(Paragraph::new("").style(Style::default().bg(theme::pal().panel)), row);
+                f.render_widget(Paragraph::new("").style(Style::default().bg(theme::pal().surface0)), row);
             }
             let when = crate::nav::ago(n.ts);
             let head = format!("{} {} ", n.kind.icon(), n.kind.label());

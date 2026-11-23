@@ -969,10 +969,10 @@ fn sign_span(kind: Kind) -> Span<'static> {
 
 /// Sign column color and changed-word tint of KIND (0 for context lines).
 fn tints(kind: Kind) -> (Option<ratatui::style::Color>, Option<ratatui::style::Color>) {
-    let base = theme::pal().panel;
+    let base = theme::pal().surface0;
     match kind {
-        Kind::Add => (Some(theme::tint(theme::pal().ok, base, 0.7)), Some(theme::tint(theme::pal().ok, base, 0.32))),
-        Kind::Del => (Some(theme::tint(theme::pal().danger, base, 0.7)), Some(theme::tint(theme::pal().danger, base, 0.32))),
+        Kind::Add => (Some(theme::tint(theme::pal().success(), base, 0.7)), Some(theme::tint(theme::pal().success(), base, 0.32))),
+        Kind::Del => (Some(theme::tint(theme::pal().error(), base, 0.7)), Some(theme::tint(theme::pal().error(), base, 0.32))),
         Kind::Ctx => (None, None),
     }
 }
@@ -1011,7 +1011,7 @@ fn painted_spans(p: &Painted, kind: Kind, room: usize) -> Vec<Span<'static>> {
         out.push(Span::styled(run, style(c0, m0)));
     }
     if total > room {
-        out.push(Span::styled("…", style(theme::pal().muted, false)));
+        out.push(Span::styled("…", style(theme::pal().subtext0, false)));
         w += 1;
     }
     out.push(Span::raw(" ".repeat(room.saturating_sub(w))));
@@ -1960,8 +1960,8 @@ impl View {
                 Span::styled(format!(" ◆ {} ", c.short), theme::accent_bold()),
                 Span::styled(format!("{} · ", crate::nav::fit(&c.subject, 60)), theme::text()),
                 Span::styled(format!("{all} files · "), theme::muted()),
-                Span::styled(format!("+{add}"), Style::default().fg(theme::pal().ok)),
-                Span::styled(format!(" −{del}"), Style::default().fg(theme::pal().danger)),
+                Span::styled(format!("+{add}"), Style::default().fg(theme::pal().success())),
+                Span::styled(format!(" −{del}"), Style::default().fg(theme::pal().error())),
                 Span::styled(format!(" · {state} · read only · esc: back"), theme::muted()),
             ]);
         }
@@ -1977,8 +1977,8 @@ impl View {
         };
         Line::from(vec![
             Span::styled(format!(" {all} files · "), theme::muted()),
-            Span::styled(format!("+{add}"), Style::default().fg(theme::pal().ok)),
-            Span::styled(format!(" −{del}"), Style::default().fg(theme::pal().danger)),
+            Span::styled(format!("+{add}"), Style::default().fg(theme::pal().success())),
+            Span::styled(format!(" −{del}"), Style::default().fg(theme::pal().error())),
             Span::styled(format!(" · {done}/{all} reviewed · {} · {order}", self.against()), theme::muted()),
             Span::styled(self.git_state(), theme::accent()),
         ])
@@ -2511,7 +2511,7 @@ impl View {
                 let files = if c.is_empty() { "0 conflicts".to_string() } else { format!("{} conflicts: {}", c.len(), c.join(", ")) };
                 Line::from(vec![
                     Span::styled(" rebase stopped ", theme::pill()),
-                    Span::styled(crate::nav::fit(&format!(" {files} · S: the agents resolve · continue · abort"), w.saturating_sub(16)), Style::default().fg(theme::pal().warn)),
+                    Span::styled(crate::nav::fit(&format!(" {files} · S: the agents resolve · continue · abort"), w.saturating_sub(16)), theme::fg(theme::pal().attention())),
                 ])
             }
             Body::Blank => Line::raw(""),
@@ -2572,9 +2572,9 @@ impl View {
             Body::Finding(fi, k) => {
                 let Some(x) = self.review.as_ref().and_then(|r| r.findings.get(fi)) else { return bar(Vec::new()) };
                 let color = match x.severity.as_str() {
-                    "critical" => theme::pal().danger,
-                    "major" => theme::pal().warn,
-                    _ => theme::pal().muted,
+                    "critical" => theme::pal().error(),
+                    "major" => theme::pal().caution(),
+                    _ => theme::pal().subtext0,
                 };
                 let st = Style::default().fg(color).add_modifier(Modifier::BOLD);
                 if k == 0 {
@@ -2589,7 +2589,7 @@ impl View {
                 let Some(t) = self.pr_src.as_ref().and_then(|s| s.threads.get(ti)) else { return bar(Vec::new()) };
                 let lines = gh_lines(t, inner);
                 let Some((head, text)) = lines.get(k) else { return bar(Vec::new()) };
-                let st = Style::default().fg(theme::pal().warn);
+                let st = theme::fg(theme::pal().progress());
                 if *head {
                     bar(vec![Span::styled(crate::nav::fit(text, inner), st.add_modifier(Modifier::BOLD))])
                 } else {
@@ -2598,7 +2598,7 @@ impl View {
             }
             Body::Comment(ci, k) => {
                 let Some(c) = self.comments.get(ci) else { return bar(Vec::new()) };
-                let st = Style::default().fg(theme::pal().accent);
+                let st = theme::fg(theme::pal().progress());
                 let text = |l: &str, indent: usize, st: Style| bar(vec![Span::raw(" ".repeat(indent)), Span::styled(crate::nav::fit(l, inner.saturating_sub(indent)), st)]);
                 match self.clines(c).get(k).copied().unwrap_or(CLine::Head) {
                     CLine::Text(j) => return text(c.text.lines().nth(j).unwrap_or_default(), 2, st),
@@ -2661,7 +2661,7 @@ impl View {
         let reviewed = self.is_reviewed(f);
         let updated = !reviewed && self.marks.contains_key(&f.path);
         let border = self.border(i);
-        let mark = if reviewed { Span::styled("☑ ", Style::default().fg(theme::pal().ok)) } else { Span::styled("☐ ", theme::muted()) };
+        let mark = if reviewed { Span::styled("☑ ", Style::default().fg(theme::pal().success())) } else { Span::styled("☐ ", theme::muted()) };
         let (name, skip) = match &f.old_path {
             Some(o) => (format!("{o} → {}", f.path), o.chars().count() + 3),
             None => (f.path.clone(), 0),
@@ -2675,8 +2675,8 @@ impl View {
         let right = format!(" {}{tag} · {right} ", f.cat.label());
         let room = w.saturating_sub(right.width() + 8 + if updated { 9 } else { 0 });
         let stage = match self.changes.staged.get(&f.path) {
-            Some(true) => Span::styled("● ", Style::default().fg(theme::pal().ok)),
-            Some(false) => Span::styled("◐ ", Style::default().fg(theme::pal().warn)),
+            Some(true) => Span::styled("● ", Style::default().fg(theme::pal().success())),
+            Some(false) => Span::styled("◐ ", theme::fg(theme::pal().info())),
             None => Span::raw(""),
         };
         // a folded box: 1 line, 0 corners
@@ -2686,7 +2686,7 @@ impl View {
         let marks: Vec<usize> = self.hits.get(&i).map(|m| m.iter().map(|x| x + skip).filter(|&x| x < fitted.chars().count()).collect()).unwrap_or_default();
         head.extend(crate::fuzzy::spans(&fitted, &marks, theme::bold(), theme::accent_bold().add_modifier(Modifier::UNDERLINED)));
         if updated {
-            head.push(Span::styled(" updated", Style::default().fg(theme::pal().warn)));
+            head.push(Span::styled(" updated", theme::fg(theme::pal().attention())));
         }
         let used: usize = head.iter().map(|s| s.content.width()).sum();
         let fill = w.saturating_sub(used + right.width() + 3);
@@ -3318,6 +3318,8 @@ impl View {
                 let h = (qh as u16 + th + 7 + u16::from(qh > 0)).min(area.height);
                 let y = area.y + (area.height.saturating_sub(h)) / 3;
                 let r = Rect { x, y, width: w, height: h };
+                // a modal: the screen behind it fades
+                theme::dim(f.buffer_mut(), area);
                 f.render_widget(Clear, r);
                 let head = match target {
                     Target::New => format!(" comment on {title} "),
@@ -3340,8 +3342,8 @@ impl View {
                         QLine::Path(p) => f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(p, usize::from(cw)), theme::bold())), row),
                         QLine::Code(c) => {
                             let st = match c.chars().next() {
-                                Some('+') => Style::default().fg(theme::pal().ok),
-                                Some('-') => Style::default().fg(theme::pal().danger),
+                                Some('+') => Style::default().fg(theme::pal().success()),
+                                Some('-') => Style::default().fg(theme::pal().error()),
                                 _ => theme::muted(),
                             };
                             f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(c, usize::from(cw)), st)).style(Style::default().bg(bg)), row);
@@ -3368,7 +3370,7 @@ impl View {
                 let mut spans = vec![Span::styled("severity ", if *on_level { theme::accent_bold() } else { theme::muted() })];
                 for l in crate::rank::Level::ALL {
                     let st = if l == *level {
-                        let bg = if *on_level { scm::level_color(l) } else { theme::pal().panel };
+                        let bg = if *on_level { scm::level_color(l) } else { theme::pal().surface0 };
                         Style::default().bg(bg).fg(if *on_level { theme::pal().on_accent } else { scm::level_color(l) }).add_modifier(Modifier::BOLD)
                     } else {
                         theme::muted()
@@ -3400,6 +3402,8 @@ impl View {
                 let x = area.x + (area.width.saturating_sub(w)) / 2;
                 let h = (n + 4).min(area.height);
                 let r = Rect { x, y: area.y + (area.height / 3).min(area.height.saturating_sub(h)), width: w, height: h };
+                // a modal: the screen behind it fades
+                theme::dim(f.buffer_mut(), area);
                 f.render_widget(Clear, r);
                 f.render_widget(Block::bordered().border_style(theme::accent()).style(theme::text()), r);
                 let inner = Rect { x: r.x + 2, y: r.y + 1, width: w.saturating_sub(4), height: h.saturating_sub(2) };
@@ -3419,6 +3423,8 @@ impl View {
                 let x = area.x + (area.width.saturating_sub(w)) / 2;
                 let h = (ship_rows.len() as u16 + 4).min(area.height);
                 let r = Rect { x, y: area.y + area.height / 4, width: w, height: h };
+                // a modal: the screen behind it fades
+                theme::dim(f.buffer_mut(), area);
                 f.render_widget(Clear, r);
                 f.render_widget(Block::bordered().border_style(theme::accent()).title(Span::styled(" ship ", theme::accent_bold())).style(theme::text()), r);
                 let inner = Rect { x: r.x + 2, y: r.y + 1, width: w.saturating_sub(4), height: h.saturating_sub(2) };
@@ -3426,7 +3432,7 @@ impl View {
                 for (i, row) in ship_rows.iter().enumerate().take(usize::from(inner.height.saturating_sub(2))) {
                     let on = i == cur;
                     let state = if on && *armed { format!("enter again: {}", row.label) } else { row.state.clone() };
-                    let state_st = if on && *armed { Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD) } else { theme::muted() };
+                    let state_st = if on && *armed { theme::fg(theme::pal().caution()).add_modifier(Modifier::BOLD) } else { theme::muted() };
                     let label_w = usize::from(inner.width).saturating_sub(state.width() + 4);
                     let label = crate::nav::fit(&row.label, label_w);
                     let gap = usize::from(inner.width).saturating_sub(2 + label.width() + state.width());
@@ -3515,6 +3521,18 @@ impl View {
             return p.at_top();
         }
         self.at == 0 && !self.scm.focus && self.modal.is_none() && !self.filtering
+    }
+
+    /// The mode the keys are in, for the footer's badge: the filter takes the letters, or lines
+    /// are selected.
+    pub fn mode(&self) -> Option<&'static str> {
+        if self.filtering {
+            Some("filter")
+        } else if !self.sel.is_empty() {
+            Some("select")
+        } else {
+            None
+        }
     }
 
     /// The view has the letters: the filter, a modal, the commit message.
@@ -3662,17 +3680,8 @@ impl View {
         if self.selected(i) {
             // a selected line: a bar in the gutter, its text on the selection tint (the sign
             // column keeps its color)
-            let sel_bg = theme::tint(theme::pal().accent, theme::pal().panel, 0.28);
-            for x in rect.x + 2..rect.right().saturating_sub(2) {
-                if let Some(c) = buf.cell_mut((x, rect.y))
-                    && c.bg == ratatui::style::Color::Reset
-                {
-                    c.set_bg(sel_bg);
-                }
-            }
-            if let Some(c) = buf.cell_mut((rect.x + 1, rect.y)) {
-                c.set_symbol("▌").set_fg(theme::pal().accent);
-            }
+            let r = Rect { x: rect.x + 1, width: rect.width.saturating_sub(3), ..rect };
+            theme::picked(buf, r, Some(rect.x + 1), true);
         }
         // inside a box: the code's dark background
         if self.rows.get(i).is_some_and(|r| matches!(r.body, Body::Why | Body::Note(_) | Body::Hunk(_) | Body::Diff(..) | Body::Side(..) | Body::Finding(..) | Body::Comment(..) | Body::Gh(..))) {
@@ -4408,7 +4417,7 @@ fn reply_area() -> Box<crate::textarea::TextArea> {
 
 /// The code's background inside the boxes: the panel color, darker.
 fn code_bg() -> ratatui::style::Color {
-    theme::tint(ratatui::style::Color::Rgb(0, 0, 0), theme::pal().panel, 0.55)
+    theme::tint(ratatui::style::Color::Rgb(0, 0, 0), theme::pal().surface0, 0.55)
 }
 
 /// The panel shows from this many columns.

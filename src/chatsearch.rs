@@ -8,7 +8,7 @@
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -194,7 +194,7 @@ impl ChatSearch {
         let x = r.x + pill.len() as u16 + 1;
         let qw = r.width.saturating_sub(pill.len() as u16 + 1 + rw);
         self.ta.render(f, Rect { x, width: qw, ..r }, self.focus);
-        let style = if label == "0 matches" { Style::default().fg(theme::pal().warn) } else { theme::muted() };
+        let style = if label == "0 matches" { theme::fg(theme::pal().caution()) } else { theme::muted() };
         f.render_widget(Paragraph::new(Span::styled(right, style)).right_aligned(), Rect { x: r.right().saturating_sub(rw), width: rw, ..r });
     }
 }
@@ -231,7 +231,7 @@ pub fn mark(line: &Line<'static>, words: &[String]) -> Line<'static> {
         return line.clone();
     }
 
-    let hl = Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD);
+    let hl = theme::pill().add_modifier(Modifier::BOLD);
     let mut out: Vec<Span<'static>> = Vec::new();
     let mut at = 0;
     for s in &line.spans {

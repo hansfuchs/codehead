@@ -122,7 +122,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, rows: &[Row], arcs: &[Arc], cursor: Op
         if cx >= area.right() {
             break;
         }
-        let st = if a.loops { theme::accent() } else { Style::default().fg(theme::pal().warn) };
+        let st = if a.loops { theme::fg(theme::pal().info()) } else { theme::fg(theme::pal().attention()) };
         let (top, bottom) = (a.from.min(a.to), a.from.max(a.to));
         let row_y = |i: usize| -> Option<u16> { (i >= offset && i < offset + shown).then(|| area.y + (i - offset) as u16) };
         let set = |buf: &mut Buffer, x: u16, y: u16, s: &str| {

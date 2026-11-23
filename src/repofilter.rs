@@ -239,7 +239,7 @@ impl RepoFilter {
         let spans = vec![
             Span::styled("repo › ", if self.is_open() { theme::accent() } else { theme::muted() }),
             Span::styled(format!("{label} ▾"), if on { theme::accent() } else { theme::text() }),
-            Span::styled("  ←→ ", theme::panel().fg(theme::pal().line)),
+            Span::styled("  ←→ ", theme::panel().fg(theme::pal().overlay0)),
         ];
         let line = Line::from(spans);
         let w = (line.width() as u16).min(row.width);

@@ -1291,10 +1291,10 @@ impl TextArea {
         let base = self.style.unwrap_or_else(theme::panel);
         f.render_widget(Paragraph::new("").style(base), area);
         if self.is_empty() && !self.placeholder.is_empty() {
-            f.render_widget(Paragraph::new(self.placeholder.as_str()).style(base.fg(theme::pal().muted)), area);
+            f.render_widget(Paragraph::new(self.placeholder.as_str()).style(base.fg(theme::pal().subtext0)), area);
         } else {
             let sel = self.range();
-            let sel_style = Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent);
+            let sel_style = theme::pill();
             let mut lines = Vec::new();
             let (code, fence) = if self.single { (Vec::new(), Vec::new()) } else { fence_colors(&self.lines) };
             for s in self.vis.iter().skip(self.scroll).take(h) {
@@ -1317,7 +1317,7 @@ impl TextArea {
                     } else if let Some(c) = code_row.and_then(|r| r.get(col)) {
                         base.fg(*c)
                     } else if fence_row {
-                        base.fg(theme::pal().muted)
+                        base.fg(theme::pal().subtext0)
                     } else {
                         base
                     };

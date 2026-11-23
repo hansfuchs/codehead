@@ -1083,7 +1083,7 @@ impl FlowsTab {
             Sub::Steps => self.draw_step(f, right, active),
         }
         if let Some(e) = self.error.clone() {
-            f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(&e, usize::from(area.width)), Style::default().fg(theme::pal().danger))), Rect { y: area.bottom() - 1, height: 1, ..area });
+            f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(&e, usize::from(area.width)), Style::default().fg(theme::pal().error()))), Rect { y: area.bottom() - 1, height: 1, ..area });
         }
         self.draw_ask(f, right);
         self.draw_picker(f, right, area);
@@ -1146,7 +1146,7 @@ impl FlowsTab {
             (l, _) => l.label().to_string(),
         };
         let head = Line::from(vec![
-            Span::styled(fl.name.clone(), theme::accent_bold()),
+            Span::styled(fl.name.clone(), theme::bold()),
             Span::styled(format!(" · {} steps · {layer}", nodes.len()), theme::muted()),
         ]);
         f.render_widget(Paragraph::new(head), Rect { height: 1, ..area });
@@ -1162,7 +1162,7 @@ impl FlowsTab {
             .enumerate()
             .map(|(i, mut row)| {
                 if errs.iter().any(|(j, _)| *j == i) {
-                    row.tags.push(("!".into(), Style::default().fg(theme::pal().danger)));
+                    row.tags.push(("!".into(), Style::default().fg(theme::pal().error())));
                 }
                 if self.target.is_some() && i == self.node {
                     row.title_style = theme::accent_bold();
@@ -1187,7 +1187,7 @@ impl FlowsTab {
         }
         let mut y = rail.bottom();
         for (i, e) in errs.iter().take(3) {
-            f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(&format!("! {}: {e}", i + 1), usize::from(area.width)), Style::default().fg(theme::pal().danger))), Rect { y, height: 1, ..area });
+            f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(&format!("! {}: {e}", i + 1), usize::from(area.width)), Style::default().fg(theme::pal().error()))), Rect { y, height: 1, ..area });
             y += 1;
         }
         if ed_h > 0 {
@@ -1207,7 +1207,7 @@ impl FlowsTab {
         };
         let users: Vec<String> = self.lib.users_of(&s.name).iter().map(|f| f.name.clone()).collect();
         let mut lines = vec![
-            Line::from(vec![Span::styled(s.name.clone(), theme::accent_bold()), Span::styled(format!(" · {}{}", if s.edited { "edited built-in" } else { s.layer.label() }, if s.gate { " · gate" } else { "" }), theme::muted())]),
+            Line::from(vec![Span::styled(s.name.clone(), theme::bold()), Span::styled(format!(" · {}{}", if s.edited { "edited built-in" } else { s.layer.label() }, if s.gate { " · gate" } else { "" }), theme::muted())]),
             Line::styled(s.description.clone(), theme::muted()),
             Line::raw(""),
         ];
@@ -1249,7 +1249,7 @@ impl FlowsTab {
         let inner = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
         let mut y = inner.y;
         if let Some(w) = warn {
-            f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(&w, usize::from(inner.width)), Style::default().fg(theme::pal().warn))), Rect { y, height: 1, ..inner });
+            f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(&w, usize::from(inner.width)), theme::fg(theme::pal().caution()))), Rect { y, height: 1, ..inner });
             y += 1;
         }
         let n = ed.fields.len();
@@ -1345,7 +1345,7 @@ pub fn rail_rows(nodes: &[flows::Resolved]) -> Vec<flowrail::Row> {
     nodes
         .iter()
         .map(|n| {
-            let (mark, st) = if n.step.is_some() { ("✓", Style::default().fg(theme::pal().ok)) } else { ("◇", theme::accent()) };
+            let (mark, st) = if n.step.is_some() { ("✓", Style::default().fg(theme::pal().success())) } else { ("◇", theme::muted()) };
             let mut row = crate::flowbar::rail_row(n, mark, st);
             if n.step.is_none() {
                 row.tags.retain(|(t, _)| t != "◇");
@@ -1362,7 +1362,7 @@ pub fn head_line(fl: &flows::Flow, nodes: &[flows::Resolved]) -> Line<'static> {
         (_, true) => "edited built-in".to_string(),
         (l, _) => l.label().to_string(),
     };
-    Line::from(vec![Span::styled(fl.name.clone(), theme::accent_bold()), Span::styled(format!(" · {} steps · {layer}", nodes.len()), theme::muted())])
+    Line::from(vec![Span::styled(fl.name.clone(), theme::bold()), Span::styled(format!(" · {} steps · {layer}", nodes.len()), theme::muted())])
 }
 
 fn list_names(v: &[String]) -> String {

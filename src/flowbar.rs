@@ -441,7 +441,7 @@ impl FlowBar {
     pub fn card_line(&self) -> Option<(String, Style)> {
         let st = self.state.as_ref()?;
         if st.finished {
-            return Some((format!("✓ {} finished", self.name), Style::default().fg(theme::pal().ok)));
+            return Some((format!("✓ {} finished", self.name), Style::default().fg(theme::pal().success())));
         }
         let step = self.nodes.get(st.node).map(|n| n.title.clone()).unwrap_or_default();
         let mut s = format!("{} {}/{} {step}", if st.wait.is_some() { "⏸" } else { "◆" }, st.node + 1, self.nodes.len());
@@ -452,7 +452,7 @@ impl FlowBar {
         if let Some(p) = &st.pending {
             s.push_str(&format!(" → {}", self.lib.flow(&p.flow).map_or(p.flow.clone(), |f| f.name.clone())));
         }
-        let style = if st.pending.is_some() || st.wait.is_some() { Style::default().fg(theme::pal().warn) } else { theme::accent() };
+        let style = if st.wait.is_some() { theme::fg(theme::pal().attention()) } else { theme::fg(theme::pal().progress()) };
         Some((s, style))
     }
 
@@ -465,7 +465,7 @@ impl FlowBar {
         let step = self.nodes.get(st.node).map(|n| n.title.clone()).unwrap_or_default();
         if st.finished {
             spans.push(Span::raw(format!("◆ {} · finished", self.name)));
-            style = Style::default().fg(theme::pal().ok);
+            style = Style::default().fg(theme::pal().success());
         } else {
             let mut s = format!("◆ {} · {}/{total} {step}", self.name, st.node + 1);
             if let Some(n) = self.nodes.get(st.node)
@@ -480,20 +480,20 @@ impl FlowBar {
             spans.push(Span::raw(s));
         }
         match &st.wait {
-            Some(Wait::Gate) => spans.push(Span::styled(format!("  ⏸ gate {step}: answer below"), Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD))),
-            Some(Wait::LoopMax) => spans.push(Span::styled("  ⏸ loop max reached: answer below".to_string(), Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD))),
+            Some(Wait::Gate) => spans.push(Span::styled(format!("  ⏸ gate {step}: answer below"), theme::fg(theme::pal().attention()).add_modifier(Modifier::BOLD))),
+            Some(Wait::LoopMax) => spans.push(Span::styled("  ⏸ loop max reached: answer below".to_string(), theme::fg(theme::pal().attention()).add_modifier(Modifier::BOLD))),
             None => {}
         }
         if let Some(p) = &st.pending {
             let name = self.lib.flow(&p.flow).map_or(p.flow.clone(), |f| f.name.clone());
-            spans.push(Span::styled(format!("  → {name} at the next tool boundary"), Style::default().fg(theme::pal().warn)));
+            spans.push(Span::styled(format!("  → {name} at the next tool boundary"), theme::fg(theme::pal().progress())));
         }
         if let Some(q) = &st.queued {
             let name = self.lib.flow(&q.flow).map_or(q.flow.clone(), |f| f.name.clone());
             spans.push(Span::styled(format!("  → queued: {name}"), theme::muted()));
         }
         if !self.warnings.is_empty() {
-            spans.push(Span::styled(format!("  ! {}", self.warnings.len()), Style::default().fg(theme::pal().danger)));
+            spans.push(Span::styled(format!("  ! {}", self.warnings.len()), Style::default().fg(theme::pal().error())));
         }
         (spans, style)
     }
@@ -519,7 +519,7 @@ impl FlowBar {
         self.bar = anchor;
         f.render_widget(Clear, anchor);
         let (spans, style) = self.bar_line();
-        let style = if self.hover { style.bg(theme::pal().hover) } else { style };
+        let style = if self.hover { style.bg(theme::pal().surface1) } else { style };
         f.render_widget(Paragraph::new(Line::from(spans)).style(style), anchor);
         if !self.open || area.height < 5 {
             return;
@@ -620,12 +620,12 @@ impl FlowBar {
             .map(|(i, n)| {
                 let last = st.history.iter().rev().find(|p| p.node == i);
                 let (mark, ms) = if i == st.node && !st.finished {
-                    if st.wait.is_some() { ("⏸", theme::accent_bold().fg(theme::pal().warn)) } else { ("●", theme::accent_bold()) }
+                    if st.wait.is_some() { ("⏸", theme::bold().fg(theme::pal().attention())) } else { ("●", theme::bold().fg(theme::pal().progress())) }
                 } else {
                     match last.map(|p| p.how.as_str()) {
                         Some("skipped") => ("⤼", theme::muted()),
                         Some("left") => ("·", theme::muted()),
-                        Some(_) => ("✓", Style::default().fg(theme::pal().ok)),
+                        Some(_) => ("✓", Style::default().fg(theme::pal().success())),
                         None => ("○", theme::muted()),
                     }
                 };
@@ -634,7 +634,7 @@ impl FlowBar {
                     row.tags.push((dur(p.ms), theme::muted()));
                 }
                 if self.warnings.iter().any(|(w, _)| *w == i) {
-                    row.tags.push(("!".into(), Style::default().fg(theme::pal().danger)));
+                    row.tags.push(("!".into(), Style::default().fg(theme::pal().error())));
                 }
                 row
             })
@@ -661,7 +661,7 @@ impl FlowBar {
         }
         for (i, (node, w)) in self.warnings.iter().take(4).enumerate() {
             let r = Rect { y: y + i as u16, height: 1, ..inner };
-            f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(&format!("! {}: {w}", node + 1), usize::from(r.width)), Style::default().fg(theme::pal().danger))), r);
+            f.render_widget(Paragraph::new(Line::styled(crate::nav::fit(&format!("! {}: {w}", node + 1), usize::from(r.width)), Style::default().fg(theme::pal().error()))), r);
         }
     }
 }
@@ -670,7 +670,7 @@ impl FlowBar {
 pub fn rail_row(n: &Resolved, mark: &str, ms: Style) -> flowrail::Row {
     let mut tags = Vec::new();
     if n.gate {
-        tags.push(("⏸".to_string(), Style::default().fg(theme::pal().warn)));
+        tags.push(("⏸".to_string(), theme::fg(theme::pal().attention())));
     }
     if n.step.is_none() {
         tags.push(("◇".to_string(), theme::muted()));

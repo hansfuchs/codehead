@@ -845,10 +845,10 @@ impl Command {
                 };
                 let st = match (hl, active) {
                     (true, true) => theme::pill().add_modifier(Modifier::BOLD),
-                    (true, false) => Style::default().bg(theme::pal().panel).fg(theme::pal().accent).add_modifier(Modifier::BOLD),
+                    (true, false) => theme::pill_dim().add_modifier(Modifier::BOLD),
                     _ => Style::default().fg(theme::pal().text),
                 };
-                let dim = if hl && active { st.remove_modifier(Modifier::BOLD) } else { st.fg(theme::pal().muted).remove_modifier(Modifier::BOLD) };
+                let dim = if hl && active { st.remove_modifier(Modifier::BOLD) } else { st.fg(theme::pal().subtext0).remove_modifier(Modifier::BOLD) };
                 // menus: a `›` on the right (a submenu opens)
                 let mark = if submenu { " ›" } else if items { "" } else { "  " };
                 let room_w = (row.width as usize).saturating_sub(2 + mark.width());

@@ -367,16 +367,16 @@ fn size_gate(top: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>)
             let lines = vec![
                 Line::from(Span::styled("the tutorial needs room", theme::accent_bold())),
                 Line::from(""),
-                Line::from(vec![Span::styled("this window: ", theme::muted()), Span::styled(format!("{w} × {h}"), Style::default().fg(theme::pal().warn)), Span::styled(format!(" · best from {MIN_W} × {MIN_H}"), theme::muted())]),
+                Line::from(vec![Span::styled("this window: ", theme::muted()), Span::styled(format!("{w} × {h}"), theme::fg(theme::pal().caution())), Span::styled(format!(" · best from {MIN_W} × {MIN_H}"), theme::muted())]),
                 Line::from(Span::styled("make the terminal bigger, or full screen.", theme::text())),
                 Line::from(Span::styled("it goes on by itself once it fits.", theme::muted())),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("enter", theme::accent()),
+                    Span::styled("enter", theme::bold()),
                     Span::styled(" go on anyway  ", theme::muted()),
-                    Span::styled("esc", theme::accent()),
+                    Span::styled("esc", theme::bold()),
                     Span::styled(" back  ", theme::muted()),
-                    Span::styled("ctrl+c", theme::accent()),
+                    Span::styled("ctrl+c", theme::bold()),
                     Span::styled(" quit", theme::muted()),
                 ]),
             ];
@@ -410,7 +410,7 @@ fn panel_lines(coach: &Coach) -> Vec<Line<'static>> {
     for q in &coach.quests {
         let all = q.tasks.iter().all(|t| coach.is_done(*t));
         let active = cur.is_some_and(|c| q.tasks.contains(&c));
-        let (mark, st) = if all { ("✓ ", Style::default().fg(theme::pal().ok)) } else if active { ("◆ ", theme::accent_bold()) } else { ("◇ ", theme::muted()) };
+        let (mark, st) = if all { ("✓ ", Style::default().fg(theme::pal().success())) } else if active { ("◆ ", theme::accent_bold()) } else { ("◇ ", theme::muted()) };
         lines.push(Line::from(vec![Span::styled(mark, st), Span::styled(q.title, if active { theme::bold() } else { theme::muted() })]));
         for t in &q.tasks {
             let (what, keys) = coach.text(*t);
@@ -418,7 +418,7 @@ fn panel_lines(coach: &Coach) -> Vec<Line<'static>> {
                 continue;
             }
             if coach.is_done(*t) {
-                lines.push(Line::from(vec![Span::styled("  ✓ ", Style::default().fg(theme::pal().ok)), Span::styled(what, theme::muted().add_modifier(Modifier::CROSSED_OUT))]));
+                lines.push(Line::from(vec![Span::styled("  ✓ ", Style::default().fg(theme::pal().success())), Span::styled(what, theme::muted().add_modifier(Modifier::CROSSED_OUT))]));
             } else if Some(*t) == cur {
                 lines.push(Line::from(vec![Span::styled("  › ", theme::accent()), Span::styled(what, theme::text())]));
                 lines.push(Line::from(vec![Span::raw("    "), Span::styled(format!(" {keys} "), theme::pill())]));
@@ -444,7 +444,7 @@ fn chrome(f: &mut ratatui::Frame, coach: &Coach, dry: bool, view: Rect, side: Op
     }
     // shrunk after the start: a hint, the tutorial goes on
     if full.width < MIN_W || full.height < MIN_H {
-        head.push(Span::styled(format!("  · small window {} × {}: best from {MIN_W} × {MIN_H}", full.width, full.height), Style::default().fg(theme::pal().warn)));
+        head.push(Span::styled(format!("  · small window {} × {}: best from {MIN_W} × {MIN_H}", full.width, full.height), theme::fg(theme::pal().caution())));
     }
     f.render_widget(Paragraph::new(Line::from(head)), Rect { x, y: 1, width: w, height: 1 });
     let frame = Rect { x, y: view.y - 1, width: view.width + 2, height: view.height + 2 };
@@ -469,7 +469,7 @@ fn chrome(f: &mut ratatui::Frame, coach: &Coach, dry: bool, view: Rect, side: Op
         if i > 0 {
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::styled(*k, theme::accent()));
+        spans.push(Span::styled(*k, theme::bold()));
         spans.push(Span::styled(format!(" {what}"), theme::muted()));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), Rect { x, y: full.height.saturating_sub(2), width: w, height: 1 });

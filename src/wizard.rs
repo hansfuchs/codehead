@@ -413,13 +413,13 @@ impl Wizard {
             if i > 0 {
                 spans.push(Span::styled("  ", theme::muted()));
             }
-            spans.push(Span::styled(k, theme::accent()));
+            spans.push(Span::styled(k, theme::bold()));
             spans.push(Span::styled(format!(" {what}"), theme::muted()));
         }
         f.render_widget(Paragraph::new(Line::from(spans)), foot);
         if !self.note.is_empty() && foot.y > col.y {
             let row = Rect { y: foot.y - 1, ..foot };
-            f.render_widget(Paragraph::new(Span::styled(format!("· {}", self.note), Style::default().fg(theme::pal().warn))), row);
+            f.render_widget(Paragraph::new(Span::styled(format!("· {}", self.note), theme::fg(theme::pal().caution()))), row);
         }
     }
 
@@ -466,7 +466,7 @@ impl Wizard {
         for (i, h) in self.harness_rows().iter().enumerate() {
             let ok = self.installed.contains(&h.name);
             let cur = i == self.hcursor;
-            let mark = if ok { Span::styled("  ✓ ", Style::default().fg(theme::pal().ok)) } else { Span::styled("  ✗ ", theme::muted()) };
+            let mark = if ok { Span::styled("  ✓ ", Style::default().fg(theme::pal().success())) } else { Span::styled("  ✗ ", theme::muted()) };
             let label = Span::styled(format!("{:<14}", h.label), if cur { theme::accent_bold() } else { theme::text() });
             let what = if ok { Span::styled("ready", theme::muted()) } else { Span::styled(h.install.to_string(), if cur { theme::text() } else { theme::muted() }) };
             lines.push(Line::from(vec![Span::styled(if cur { "›" } else { " " }, theme::accent()), mark, label, what]));
@@ -573,8 +573,8 @@ impl Wizard {
         let what = if self.note.is_empty() { "the tutorial ended before its last step." } else { "the tutorial did not start." };
         lines.push(Line::from(Span::styled(format!("  {what}"), theme::muted())));
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![Span::styled("  enter  ", theme::accent()), Span::styled("again", theme::text())]));
-        lines.push(Line::from(vec![Span::styled("  tab    ", theme::accent()), Span::styled("skip it", theme::text())]));
+        lines.push(Line::from(vec![Span::styled("  enter  ", theme::bold()), Span::styled("again", theme::text())]));
+        lines.push(Line::from(vec![Span::styled("  tab    ", theme::bold()), Span::styled("skip it", theme::text())]));
     }
 
     fn draw_next(&self, lines: &mut Vec<Line<'static>>) {
@@ -584,7 +584,7 @@ impl Wizard {
             ("F3", "your home", "notes + plans land here".to_string()),
             ("? ", "hints again", "1 line per concept".to_string()),
         ] {
-            lines.push(Line::from(vec![Span::styled(format!("  {k}  "), theme::accent()), Span::styled(format!("{what:<24}"), theme::text()), Span::styled(hint, theme::muted())]));
+            lines.push(Line::from(vec![Span::styled(format!("  {k}  "), theme::bold()), Span::styled(format!("{what:<24}"), theme::text()), Span::styled(hint, theme::muted())]));
         }
     }
 

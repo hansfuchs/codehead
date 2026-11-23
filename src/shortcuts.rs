@@ -681,7 +681,7 @@ impl Tab {
         self.text_rect = Rect { y: ty + 1, height: th, ..right };
         self.text.render(f, self.text_rect, active && self.focus == Focus::Text);
         if let Some(e) = err {
-            f.render_widget(Paragraph::new(Line::styled(e, Style::default().fg(theme::pal().danger))), Rect { y: right.bottom().saturating_sub(1), height: 1, ..right });
+            f.render_widget(Paragraph::new(Line::styled(e, Style::default().fg(theme::pal().error()))), Rect { y: right.bottom().saturating_sub(1), height: 1, ..right });
         }
     }
 }

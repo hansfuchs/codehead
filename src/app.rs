@@ -815,7 +815,7 @@ fn key_name(k: &KeyEvent) -> String {
 }
 
 fn hint(key: &str, label: &str) -> Vec<Span<'static>> {
-    vec![Span::styled(key.to_string(), theme::accent()), Span::styled(format!(" {label}  "), theme::muted())]
+    vec![Span::styled(key.to_string(), theme::text()), Span::styled(format!(" {label}  "), theme::muted())]
 }
 
 fn trash(path: &std::path::Path) -> Result<&'static str, String> {
@@ -4358,8 +4358,8 @@ impl App {
                 let focused = active && self.tabs_focus;
                 let (bg, fg) = match (active, focused) {
                     (true, true) => (Some(theme::pal().accent), theme::pal().on_accent),
-                    (true, false) => (Some(theme::pal().panel), theme::pal().accent),
-                    _ => (None, theme::pal().muted),
+                    (true, false) => (theme::pill_dim().bg, theme::pal().accent),
+                    _ => (None, theme::pal().subtext0),
                 };
                 let base = bg.map_or(Style::default(), |b| Style::default().bg(b));
                 let mut label = label.to_string();
@@ -4417,7 +4417,7 @@ impl App {
             && let Some(q) = &self.filter
         {
             let [row, _, rest] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)]).areas(area);
-            let label = Style::default().fg(if self.filter_editing { theme::pal().accent } else { theme::pal().muted });
+            let label = Style::default().fg(if self.filter_editing { theme::pal().accent } else { theme::pal().subtext0 });
             let count = format!("{} of {} ", self.rows.len(), self.notes.files.len());
             if self.filter_editing {
                 f.render_widget(Paragraph::new(Span::styled("filter › ", label)).style(theme::panel()), row);
@@ -4426,7 +4426,7 @@ impl App {
                 let line = Line::from(vec![Span::styled("filter › ", label), Span::styled(q.clone(), theme::text())]);
                 f.render_widget(Paragraph::new(line).style(theme::panel()), row);
             }
-            f.render_widget(Paragraph::new(Line::styled(count, theme::panel().fg(theme::pal().muted)).right_aligned()), row);
+            f.render_widget(Paragraph::new(Line::styled(count, theme::panel().fg(theme::pal().subtext0)).right_aligned()), row);
             area = rest;
         }
         if self.tab == Tab::Threads {
@@ -4435,7 +4435,7 @@ impl App {
             f.render_widget(Block::new().style(theme::panel()), row);
             let chip = self.trepo.draw_chip(f, row);
             let row = Rect { width: row.width.saturating_sub(chip + 2), ..row };
-            let label = Style::default().fg(if self.tfilter_editing { theme::pal().accent } else { theme::pal().muted });
+            let label = Style::default().fg(if self.tfilter_editing { theme::pal().accent } else { theme::pal().subtext0 });
             let q = self.tfilter.clone().unwrap_or_default();
             let total = self.n_worktrees() + self.sessions.len();
             let count = if q.is_empty() && self.trepo.choice.is_none() { String::new() } else { format!("{} of {total} ", self.n_threads()) };
@@ -4445,18 +4445,18 @@ impl App {
             } else {
                 let mut spans = vec![Span::styled("filter › ", label), Span::styled(q.clone(), theme::text())];
                 if q.is_empty() {
-                    spans.push(Span::styled("f: fuzzy search thread names", theme::panel().fg(theme::pal().line)));
+                    spans.push(Span::styled("f: fuzzy search thread names", theme::panel().fg(theme::pal().overlay0)));
                 }
                 f.render_widget(Paragraph::new(Line::from(spans)).style(theme::panel()), row);
             }
             if !count.is_empty() {
-                f.render_widget(Paragraph::new(Line::styled(count, theme::panel().fg(theme::pal().muted)).right_aligned()), row);
+                f.render_widget(Paragraph::new(Line::styled(count, theme::panel().fg(theme::pal().subtext0)).right_aligned()), row);
             }
             area = rest;
         }
         if matches!(self.tab, Tab::Agents | Tab::New) {
             let [row, _, rest] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)]).areas(area);
-            let label = Style::default().fg(if self.afilter_editing { theme::pal().accent } else { theme::pal().muted });
+            let label = Style::default().fg(if self.afilter_editing { theme::pal().accent } else { theme::pal().subtext0 });
             let q = self.afilter.clone().unwrap_or_default();
             let shown: usize = self.avisible().iter().map(|(_, g)| g.len()).sum();
             let count = if q.is_empty() { String::new() } else { format!("{shown} of {} ", self.agents.len()) };
@@ -4466,12 +4466,12 @@ impl App {
             } else {
                 let mut spans = vec![Span::styled("filter › ", label), Span::styled(q.clone(), theme::text())];
                 if q.is_empty() {
-                    spans.push(Span::styled("f: fuzzy search name, harness, model", theme::panel().fg(theme::pal().line)));
+                    spans.push(Span::styled("f: fuzzy search name, harness, model", theme::panel().fg(theme::pal().overlay0)));
                 }
                 f.render_widget(Paragraph::new(Line::from(spans)).style(theme::panel()), row);
             }
             if !count.is_empty() {
-                f.render_widget(Paragraph::new(Line::styled(count, theme::panel().fg(theme::pal().muted)).right_aligned()), row);
+                f.render_widget(Paragraph::new(Line::styled(count, theme::panel().fg(theme::pal().subtext0)).right_aligned()), row);
             }
             area = rest;
         }
@@ -4544,7 +4544,7 @@ impl App {
         };
         if row.is_dir() {
             let files = self.notes.inside(row.path());
-            let mut lines = vec![Line::from(vec![Span::styled(row.path().to_string(), theme::accent_bold()), Span::styled(format!("  {} notes", files.len()), theme::muted())]), Line::raw("")];
+            let mut lines = vec![Line::from(vec![Span::styled(row.path().to_string(), theme::bold()), Span::styled(format!("  {} notes", files.len()), theme::muted())]), Line::raw("")];
             let mut files = files;
             files.sort_by_key(|f| std::cmp::Reverse(self.notes.mtime(f)));
             for p in files {
@@ -4686,8 +4686,8 @@ impl App {
                         // state: ? / ✗ needs you, the wave while an agent works
                         let tick = (crate::engine::now_ms() as u128 / crate::nav::WAVE_MS) as usize;
                         let glyph = match (&t.needs, t.busy) {
-                            (Some(n), _) if n == "question" => Span::styled("? ", fg(Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD))),
-                            (Some(_), _) => Span::styled("✗ ", fg(Style::default().fg(theme::pal().danger).add_modifier(Modifier::BOLD))),
+                            (Some(n), _) if n == "question" => Span::styled("? ", fg(theme::fg(theme::pal().attention()).add_modifier(Modifier::BOLD))),
+                            (Some(_), _) => Span::styled("✗ ", fg(Style::default().fg(theme::pal().error()).add_modifier(Modifier::BOLD))),
                             (None, true) => Span::styled(format!("{} ", crate::nav::WAVE[tick % crate::nav::WAVE.len()]), fg(theme::accent())),
                             _ => Span::raw(""),
                         };
@@ -4695,12 +4695,12 @@ impl App {
                         spans.push(Span::styled(t.title.lines().next().unwrap_or_default().chars().take(60).collect::<String>(), fg(theme::bold())));
                         spans.push(Span::styled(format!("  {}", w.label()), muted));
                         if let Some((files, add, del)) = t.stat.filter(|s| s.0 > 0) {
-                            spans.push(Span::styled(format!("  +{add}"), fg(Style::default().fg(theme::pal().ok))));
-                            spans.push(Span::styled(format!(" −{del}"), fg(Style::default().fg(theme::pal().danger))));
+                            spans.push(Span::styled(format!("  +{add}"), fg(Style::default().fg(theme::pal().success()))));
+                            spans.push(Span::styled(format!(" −{del}"), fg(Style::default().fg(theme::pal().error()))));
                             spans.push(Span::styled(format!(" {files}f"), muted));
                         }
                         if t.live > 0 {
-                            spans.push(Span::styled(" live", fg(theme::accent_bold())));
+                            spans.push(Span::styled(" live", fg(theme::bold().fg(theme::pal().progress()))));
                         }
                         if self.in_context(&t.id) {
                             spans.push(Span::styled(" ↳ context", fg(theme::accent())));
@@ -4713,7 +4713,7 @@ impl App {
                     }
                 }
                 if w.unpushed > 0 {
-                    spans.push(Span::styled(format!(" {} unpushed", w.unpushed), fg(Style::default().fg(theme::pal().danger))));
+                    spans.push(Span::styled(format!(" {} unpushed", w.unpushed), fg(theme::fg(theme::pal().attention()))));
                 }
                 spans.push(Span::styled(format!(" {}", w.when), muted));
                 spans
@@ -4768,7 +4768,7 @@ impl App {
         out.push(Line::raw(""));
         out.push(Line::styled(format!("threads: {}", uses.len()), theme::bold()));
         for u in uses.iter().take(30) {
-            let live = if u.live.is_empty() { Span::raw("") } else { Span::styled(" live", theme::accent_bold()) };
+            let live = if u.live.is_empty() { Span::raw("") } else { Span::styled(" live", theme::bold().fg(theme::pal().progress())) };
             out.push(Line::from(vec![Span::raw(format!("  {}", u.title)), live, Span::styled(format!(" {}", u.state), theme::muted())]));
         }
         out
@@ -4828,7 +4828,7 @@ impl App {
 
     /// Agents tab card: like a task card, 0 pick mark; the default agent named in the border.
     fn draw_agent_card(&self, f: &mut Frame, r: Rect, a: &Agent, cur: bool) {
-        let title = (a.name == self.cfg.agent).then(|| Span::styled(" default ", theme::accent()));
+        let title = (a.name == self.cfg.agent).then(|| Span::styled(" default ", theme::fg(theme::pal().info())));
         let look = crate::cards::Look { cur, lit: false, border: Some(crate::cards::border(cur, false, theme::pal().accent)), title, bg: None };
         crate::cards::draw(f, r, a, &self.agent_card_text(a), look);
     }
@@ -4884,7 +4884,7 @@ impl App {
         {
             let on = self.field == Field::Drafts;
             let btn = self.draft_btn();
-            let st = |cur: bool| if cur { theme::pill().add_modifier(Modifier::BOLD) } else { theme::panel().fg(theme::pal().accent) };
+            let st = |cur: bool| if cur { theme::pill().add_modifier(Modifier::BOLD) } else { theme::pill_dim() };
             let mut x = r_drafts.x;
             self.regions.drafts = Rect::default();
             if !self.drafts.is_empty() {
@@ -4921,7 +4921,7 @@ impl App {
             let area = Rect { x: x.min(r.right().saturating_sub(1)), y: r.y, width: value.width() as u16, height: 1 };
             let spans = vec![
                 Span::styled(head, if on { theme::accent_bold() } else { theme::muted() }),
-                Span::styled(value, if on { chip.bg(theme::pal().panel) } else { chip }),
+                Span::styled(value, if on { chip.bg(theme::pal().surface0) } else { chip }),
                 Span::styled(if on { "▾" } else { " " }, theme::accent()),
                 Span::raw("  "),
                 Span::styled(text, theme::muted()),
@@ -4954,7 +4954,7 @@ impl App {
                 let style = match (enabled, on && self.opt_i == i) {
                     (true, true) => theme::pill().add_modifier(Modifier::BOLD),
                     (false, true) => theme::pill().add_modifier(Modifier::DIM),
-                    (false, false) => Style::default().fg(theme::pal().line),
+                    (false, false) => Style::default().fg(theme::pal().overlay0),
                     (true, false) if checked => Style::default().fg(theme::pal().text),
                     (true, false) => theme::muted(),
                 };
@@ -5037,9 +5037,13 @@ impl App {
 
     fn draw_footer(&mut self, f: &mut Frame, area: Rect) {
         let mut spans = vec![Span::raw(" ")];
+        // a filter takes the letters: its mode badge first
+        if self.screen == Screen::Pick && (self.filter_editing || self.tfilter_editing || self.afilter_editing) {
+            spans.extend(theme::mode_badge("filter", false));
+        }
         let cmd = crate::config::command_key().to_string();
         if !self.tabs_focus && self.screen == Screen::Pick && self.tab == Tab::Merge {
-            spans.push(Span::styled(self.merge_tab.hints(), theme::muted()));
+            spans.extend(theme::hints(&self.merge_tab.hints()));
         }
         let hints: &[(&str, &str)] = match self.screen {
             _ if !self.tabs_focus && self.screen == Screen::Pick && self.tab == Tab::Merge => &[],
@@ -5073,7 +5077,7 @@ impl App {
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         let mut right = Vec::new();
         if let Some((msg, _, err)) = &self.toast {
-            right.push(Span::styled(format!("{msg}   "), Style::default().fg(if *err { theme::pal().danger } else { theme::pal().ok })));
+            right.push(Span::styled(format!("{msg}   "), Style::default().fg(if *err { theme::pal().error() } else { theme::pal().success() })));
         }
         right.push(Span::styled(crate::config::menu_key().label, theme::accent()));
         right.push(Span::styled(" menu ", theme::muted()));
@@ -5084,6 +5088,8 @@ impl App {
         let w = w.min(area.width.saturating_sub(2));
         let h = h.min(area.height.saturating_sub(2));
         let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+        // a modal: the screen behind it fades
+        theme::dim(f.buffer_mut(), area);
         f.render_widget(Clear, r);
         let block = Block::new()
             .borders(Borders::ALL)
@@ -5111,9 +5117,9 @@ impl App {
                 for (value, l) in labels {
                     let focused = value == *yes;
                     let style = if focused {
-                        Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD)
+                        theme::pill().add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().bg(theme::pal().panel).fg(theme::pal().text)
+                        Style::default().bg(theme::pal().surface0).fg(theme::pal().text)
                     };
                     let r = Rect { x, y: b.y, width: l.width() as u16, height: 1 };
                     f.render_widget(Paragraph::new(l).style(style), r);
@@ -5181,7 +5187,7 @@ impl App {
             match i {
                 F_MODEL if !form.is_claude() => {
                     let m = form.model_id();
-                    let st = if on { theme::bold().bg(theme::pal().panel) } else { theme::bold() };
+                    let st = if on { theme::bold().bg(theme::pal().surface0) } else { theme::bold() };
                     let line = Line::from(vec![Span::styled(if on { "▾" } else { " " }, theme::accent()), Span::styled(format!(" {m} "), st), Span::styled(format!("  {} models: enter", form.harness_name()), theme::muted())]);
                     f.render_widget(Paragraph::new(line), vr);
                 }
@@ -5203,7 +5209,7 @@ impl App {
                     for (j, (l, st)) in labels.into_iter().enumerate() {
                         let st = if j == cur {
                             let st = st.add_modifier(Modifier::BOLD);
-                            if on { st.bg(theme::pal().panel) } else { st }
+                            if on { st.bg(theme::pal().surface0) } else { st }
                         } else {
                             theme::muted()
                         };
@@ -5235,7 +5241,7 @@ impl App {
         }
         for (j, (name, sel)) in form.mcp.iter().enumerate() {
             let st = match (on && j == form.mcp_cur, *sel) {
-                (true, _) => theme::bold().bg(theme::pal().panel),
+                (true, _) => theme::bold().bg(theme::pal().surface0),
                 (false, true) => theme::bold(),
                 _ => theme::muted(),
             };
@@ -5250,7 +5256,7 @@ impl App {
         let cat = form.sprite.avatar.cat;
         let mut spans = vec![lab("avatars", on), Span::raw(" ")];
         for c in crate::avatar::CATS {
-            let st = if c == cat { if on { theme::bold().bg(theme::pal().panel) } else { theme::bold() } } else { theme::muted() };
+            let st = if c == cat { if on { theme::bold().bg(theme::pal().surface0) } else { theme::bold() } } else { theme::muted() };
             spans.push(Span::styled(format!(" {} ", c.name()), st));
         }
         f.render_widget(Paragraph::new(Line::from(spans)), tr);
@@ -5264,7 +5270,7 @@ impl App {
             vec![Span::styled(format!("   {}", a.name()), if on { theme::bold() } else { theme::muted() })],
             vec![Span::styled(format!("   {} {}/{} · float {}x", cat.name(), a.idx + 1, cat.count(), a.speed), theme::muted())],
             vec![],
-            vec![Span::styled("   enter: pick · r random", if on || form.field == F_SET { theme::muted() } else { Style::default().fg(theme::pal().line) })],
+            vec![Span::styled("   enter: pick · r random", if on || form.field == F_SET { theme::muted() } else { Style::default().fg(theme::pal().overlay0) })],
         ];
         f.render_widget(Paragraph::new(sprites::lines(&form.sprite, color, side)), Rect { x: sr.x + 11, width: sr.width.saturating_sub(11), ..sr });
         for (field, label_row, box_row, head) in [(F_VOICE, rows[13], rows[14], "voice · own tone on top of the style"), (F_PROMPT, rows[16], rows[17], "system prompt · standing instructions")] {
@@ -5276,7 +5282,7 @@ impl App {
             ta.render(f, Rect { x: box_row.x + 1, width: box_row.width.saturating_sub(2), ..box_row }, on);
         }
         if let Some(e) = &form.error {
-            f.render_widget(Paragraph::new(Line::styled(e.clone(), Style::default().fg(theme::pal().danger))), rows[19]);
+            f.render_widget(Paragraph::new(Line::styled(e.clone(), Style::default().fg(theme::pal().error()))), rows[19]);
         }
         let b = rows[20];
         let labels = [(true, if form.edit.is_some() { "  save (ctrl+s)  " } else { "  create (ctrl+s)  " }), (false, "  cancel (esc)  ")];
@@ -5285,7 +5291,7 @@ impl App {
         let mut buttons = Vec::new();
         for (value, l) in labels {
             let focused = form.field == F_BUTTONS && value == form.save;
-            let style = if focused { Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD) } else { Style::default().bg(theme::pal().panel).fg(theme::pal().text) };
+            let style = if focused { theme::pill().add_modifier(Modifier::BOLD) } else { Style::default().bg(theme::pal().surface0).fg(theme::pal().text) };
             let r = Rect { x, y: b.y, width: l.width() as u16, height: 1 };
             f.render_widget(Paragraph::new(l).style(style), r);
             buttons.push((r, value));
@@ -6197,13 +6203,13 @@ mod render_tests {
         let tab = a.regions.tabs.iter().find(|(_, t)| *t == Tab::Threads).unwrap().0;
         a.mouse(moved(tab.x + 1, tab.y));
         t.draw(|f| a.draw(f)).unwrap();
-        assert_eq!(bg(&t, tab.x + 1, tab.y), theme::pal().hover);
+        assert_eq!(bg(&t, tab.x + 1, tab.y), theme::pal().surface1);
         // the repo row of the task view
         let w = a.regions.repo_row;
         a.mouse(moved(w.x + 2, w.y));
         t.draw(|f| a.draw(f)).unwrap();
-        assert_eq!(bg(&t, w.x + 2, w.y), theme::pal().hover);
-        assert_ne!(bg(&t, tab.x + 1, tab.y), theme::pal().hover, "1 item at a time");
+        assert_eq!(bg(&t, w.x + 2, w.y), theme::pal().surface1);
+        assert_ne!(bg(&t, tab.x + 1, tab.y), theme::pal().surface1, "1 item at a time");
         // agents tab: a card takes the hover, the free room right of it and its heading do not
         a.switch_tab(Tab::Agents);
         a.agents.truncate(1);
@@ -6211,13 +6217,13 @@ mod render_tests {
         let card = a.acards[0].0;
         a.mouse(moved(card.right() + 1, card.y + 1));
         t.draw(|f| a.draw(f)).unwrap();
-        assert_ne!(bg(&t, card.right() + 1, card.y + 1), theme::pal().hover);
+        assert_ne!(bg(&t, card.right() + 1, card.y + 1), theme::pal().surface1);
         a.mouse(moved(card.x + 1, card.y - 1));
         t.draw(|f| a.draw(f)).unwrap();
-        assert_ne!(bg(&t, card.x + 1, card.y - 1), theme::pal().hover);
+        assert_ne!(bg(&t, card.x + 1, card.y - 1), theme::pal().surface1);
         a.mouse(moved(card.x + 2, card.y + 1));
         t.draw(|f| a.draw(f)).unwrap();
-        assert_eq!(bg(&t, card.x + 2, card.y + 1), theme::pal().hover);
+        assert_eq!(bg(&t, card.x + 2, card.y + 1), theme::pal().surface1);
     }
 
     /// Type "hi", undo (ctrl+z / ⌘z), redo (ctrl+shift+z / ⌘⇧z); TEXT reads the field.

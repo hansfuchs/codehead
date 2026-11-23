@@ -208,7 +208,7 @@ pub fn fit(s: &str, w: usize) -> String {
 
 pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c: &Card, cur: bool, here: bool, age: bool, tick: usize) {
     use crate::theme;
-    use ratatui::style::{Modifier, Style};
+    use ratatui::style::Modifier;
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
     if r.width < 6 || r.height < CARD_H {
@@ -224,9 +224,9 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
     let w = inner.width.saturating_sub(2) as usize;
     let title_st = if c.unread || cur { theme::bold() } else { theme::text() };
     let mut status: Vec<Span> = if c.blocked {
-        vec![Span::styled("? blocked", Style::default().fg(theme::pal().warn))]
+        vec![Span::styled("? blocked", theme::fg(theme::pal().attention()))]
     } else if c.busy {
-        vec![Span::styled(format!("{} ", WAVE[tick % WAVE.len()]), theme::accent()), Span::styled("working…", theme::muted())]
+        vec![Span::styled(format!("{} ", WAVE[tick % WAVE.len()]), theme::fg(theme::pal().progress())), Span::styled("working…", theme::muted())]
     } else if c.live == 0 {
         vec![Span::styled("◦ ended", theme::muted())]
     } else {
@@ -244,7 +244,7 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
     Paragraph::new(lines).render(body, buf);
     if c.unread {
         let dot = ratatui::layout::Rect { x: r.right().saturating_sub(3), y: r.y, width: 1, height: 1 };
-        Paragraph::new(Span::styled("●", Style::default().fg(theme::pal().accent).add_modifier(Modifier::BOLD))).render(dot, buf);
+        Paragraph::new(Span::styled("●", theme::fg(theme::pal().info()).add_modifier(Modifier::BOLD))).render(dot, buf);
     }
 
     // an unsent message in the prompt: on the bottom border, right
@@ -252,7 +252,7 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
     if c.draft && r.width >= tag.chars().count() as u16 + 8 {
         let w = tag.chars().count() as u16;
         let at = ratatui::layout::Rect { x: r.right() - w - 3, y: r.bottom() - 1, width: w, height: 1 };
-        Paragraph::new(Span::styled(tag, Style::default().fg(theme::pal().warn).add_modifier(Modifier::BOLD))).render(at, buf);
+        Paragraph::new(Span::styled(tag, theme::fg(theme::pal().caution()).add_modifier(Modifier::BOLD))).render(at, buf);
     }
 }
 

@@ -185,7 +185,7 @@ impl Subagents {
                 }
                 master = Some(&s.master);
                 let n = list.iter().filter(|(x, _)| x.master == s.master).count();
-                out.push(Line::from(vec![Span::styled(s.master.clone(), theme::accent_bold()), Span::styled(format!(" · {n} subagent{}", if n == 1 { "" } else { "s" }), theme::muted())]));
+                out.push(Line::from(vec![Span::styled(s.master.clone(), theme::bold()), Span::styled(format!(" · {n} subagent{}", if n == 1 { "" } else { "s" }), theme::muted())]));
             }
             let sel = cur.as_deref() == Some(s.id.as_str());
             let pad = "  ".repeat(*depth);
@@ -234,7 +234,7 @@ impl Subagents {
         self.bar = anchor;
         f.render_widget(Clear, anchor);
         let wave = ["◐", "◓", "◑", "◒"][tick % 4];
-        let style = if self.hover { theme::accent().bg(theme::pal().hover) } else { theme::accent() };
+        let style = if self.hover { theme::accent().bg(theme::pal().surface1) } else { theme::accent() };
         let what = list.iter().filter(|(_, d)| *d == 0).map(|(s, _)| format!("{}: {}", s.master, s.description)).collect::<Vec<_>>().join(" · ");
         let hint = if self.open { "click: close" } else { "click: details" };
         f.render_widget(Paragraph::new(format!("{wave} subagents ({}) · {what} · {hint}", list.len())).style(style), anchor);

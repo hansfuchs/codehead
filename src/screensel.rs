@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
-use ratatui::style::Style;
 
 use crate::theme;
 
@@ -122,7 +121,7 @@ impl ScreenSel {
         if a == b {
             return;
         }
-        let st = Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent);
+        let st = theme::pill();
         for y in a.y.max(area.y)..=b.y.min(area.bottom().saturating_sub(1)) {
             let Some((x0, x1)) = self.cols(area, y) else { continue };
             for x in x0..=x1.min(area.right().saturating_sub(1)) {
@@ -151,8 +150,8 @@ mod tests {
     fn a_drag_copies_the_cells_and_clicks_a_word_or_the_row() {
         let area = Rect::new(0, 0, 20, 3);
         let mut buf = Buffer::empty(area);
-        buf.set_string(0, 0, "hello world", Style::default());
-        buf.set_string(0, 1, "second row here", Style::default());
+        buf.set_string(0, 0, "hello world", ratatui::style::Style::default());
+        buf.set_string(0, 1, "second row here", ratatui::style::Style::default());
         let mut s = ScreenSel::default();
         assert_eq!(s.mouse(ev(MouseEventKind::Down(MouseButton::Left), 6, 0), area, &buf), None);
         s.mouse(ev(MouseEventKind::Drag(MouseButton::Left), 5, 1), area, &buf);

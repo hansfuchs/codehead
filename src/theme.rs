@@ -1,65 +1,132 @@
-//! codehead's palette (a preset: coral or amber, + overrides; 1 accent, muted text) with pills,
-//! panels, 0 cursor glyph.
+//! codehead's palette: the base16 / catppuccin slot model (surfaces, overlay, text ramp, 1
+//! accent, 7 hues) as a preset (lavender, coral, amber) + overrides, with roles over the hues,
+//! pills, panels, 0 cursor glyph. 0 solid background: `base` is the bg the colors assume, for
+//! tints only.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-/// The colors of a scheme. A preset (coral, amber), then the `[colors]` overrides.
+/// The colors of a scheme. A preset, then the `[colors]` overrides.
+///
+/// Slots, as catppuccin: `base` < `surface0` < `surface1` < `surface2` (backgrounds),
+/// `overlay0` (lines), `subtext0` < `text` (text), `accent` / `on_accent`, the hues. Call sites
+/// use the roles ([`Palette::error`], …), not the hues, wherever a color means a state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Palette {
-    /// The single accent.
-    pub accent: Color,
-    /// Text on an accent pill.
-    pub on_accent: Color,
+    /// The terminal background the colors assume (0 cell is painted with it): tints mix into it.
+    pub base: Color,
     /// Inputs, unfocused active tab, unfocused selection row.
-    pub panel: Color,
+    pub surface0: Color,
     /// Bg of a clickable row / item under the mouse; the input bubble's border.
-    pub hover: Color,
+    pub surface1: Color,
+    /// Bars, tracks, the 3rd step of the surfaces.
+    pub surface2: Color,
+    /// Borders, dividers.
+    pub overlay0: Color,
+    /// Hints, labels, timestamps.
+    pub subtext0: Color,
     /// Normal text.
     pub text: Color,
-    /// Hints, labels, timestamps.
-    pub muted: Color,
-    /// Borders, dividers.
-    pub line: Color,
-    pub ok: Color,
-    pub danger: Color,
-    pub warn: Color,
+    /// Focus and selection only: the cursor pill, the active tab, the focused border, marks.
+    pub accent: Color,
+    /// Text on an accent (or a hue) pill.
+    pub on_accent: Color,
+    pub red: Color,
+    pub peach: Color,
+    pub yellow: Color,
+    pub green: Color,
+    pub teal: Color,
+    pub sky: Color,
+    pub mauve: Color,
 }
 
-/// hell's palette (axel's): coral #FF7565, cool grays. The default.
-pub const CORAL: Palette = Palette {
-    accent: Color::Rgb(255, 117, 101),
-    on_accent: Color::Rgb(24, 22, 26),
-    panel: Color::Rgb(46, 44, 52),
-    hover: Color::Rgb(66, 63, 74),
-    text: Color::Rgb(232, 230, 236),
-    muted: Color::Rgb(146, 142, 156),
-    line: Color::Rgb(84, 80, 94),
-    ok: Color::Indexed(108),
-    danger: Color::Indexed(167),
-    warn: Color::Indexed(179),
+/// Soft pastel lavender on cool violet grays. The default: its accent is 0 status hue, so red
+/// means "error" only.
+pub const LAVENDER: Palette = Palette {
+    base: Color::Rgb(29, 26, 40),
+    surface0: Color::Rgb(43, 39, 57),
+    surface1: Color::Rgb(58, 53, 80),
+    surface2: Color::Rgb(74, 68, 98),
+    overlay0: Color::Rgb(113, 106, 142),
+    subtext0: Color::Rgb(173, 167, 198),
+    text: Color::Rgb(232, 228, 246),
+    accent: Color::Rgb(184, 166, 255),
+    on_accent: Color::Rgb(29, 26, 40),
+    red: Color::Rgb(244, 122, 142),
+    peach: Color::Rgb(245, 166, 115),
+    yellow: Color::Rgb(237, 212, 138),
+    green: Color::Rgb(157, 219, 152),
+    teal: Color::Rgb(133, 216, 196),
+    sky: Color::Rgb(140, 206, 240),
+    mauve: Color::Rgb(236, 156, 216),
 };
 
-/// Ancient amber, like codehead.sh: warm paper, bone ink, amber #EC8F1A.
+/// hell's palette (axel's): coral #FF7565, cool grays. Its accent is close to its red.
+pub const CORAL: Palette = Palette {
+    base: Color::Rgb(24, 22, 26),
+    surface0: Color::Rgb(46, 44, 52),
+    surface1: Color::Rgb(66, 63, 74),
+    surface2: Color::Rgb(84, 80, 94),
+    overlay0: Color::Rgb(98, 94, 110),
+    subtext0: Color::Rgb(146, 142, 156),
+    text: Color::Rgb(232, 230, 236),
+    accent: Color::Rgb(255, 117, 101),
+    on_accent: Color::Rgb(24, 22, 26),
+    red: Color::Rgb(215, 95, 95),
+    peach: Color::Rgb(240, 160, 90),
+    yellow: Color::Rgb(215, 175, 95),
+    green: Color::Rgb(135, 175, 135),
+    teal: Color::Rgb(95, 175, 175),
+    sky: Color::Rgb(135, 175, 215),
+    mauve: Color::Rgb(163, 113, 247),
+};
+
+/// Ancient amber, like codehead.sh: warm paper, bone ink, amber #EC8F1A. Its accent is close
+/// to its yellow.
 pub const AMBER: Palette = Palette {
+    base: Color::Rgb(21, 7, 0),
+    surface0: Color::Rgb(42, 22, 12),
+    surface1: Color::Rgb(61, 36, 22),
+    surface2: Color::Rgb(78, 52, 37),
+    overlay0: Color::Rgb(104, 78, 62),
+    subtext0: Color::Rgb(168, 146, 124),
+    text: Color::Rgb(227, 210, 190),
     accent: Color::Rgb(236, 143, 26),
     on_accent: Color::Rgb(21, 7, 0),
-    panel: Color::Rgb(42, 22, 12),
-    hover: Color::Rgb(61, 36, 22),
-    text: Color::Rgb(227, 210, 190),
-    muted: Color::Rgb(168, 146, 124),
-    line: Color::Rgb(92, 67, 52),
-    ok: Color::Rgb(143, 175, 96),
-    danger: Color::Rgb(214, 84, 60),
-    warn: Color::Rgb(224, 170, 60),
+    red: Color::Rgb(214, 84, 60),
+    peach: Color::Rgb(226, 120, 70),
+    yellow: Color::Rgb(224, 170, 60),
+    green: Color::Rgb(143, 175, 96),
+    teal: Color::Rgb(110, 170, 150),
+    sky: Color::Rgb(125, 170, 190),
+    mauve: Color::Rgb(186, 130, 196),
 };
 
 /// Presets: name, palette. The 1st one: the default.
-pub const PRESETS: [(&str, Palette); 2] = [("coral", CORAL), ("amber", AMBER)];
+pub const PRESETS: [(&str, Palette); 3] = [("lavender", LAVENDER), ("coral", CORAL), ("amber", AMBER)];
 
 /// The color names a `[colors]` override can set.
-pub const NAMES: [&str; 10] = ["accent", "on_accent", "panel", "hover", "text", "muted", "line", "ok", "danger", "warn"];
+pub const NAMES: [&str; 16] = [
+    "base", "surface0", "surface1", "surface2", "overlay0", "subtext0", "text", "accent", "on_accent",
+    "red", "peach", "yellow", "green", "teal", "sky", "mauve",
+];
+
+/// Names of the old palette (before the slot model) → their slot: old `[colors]` keys still work.
+pub const ALIASES: [(&str, &str); 7] = [
+    ("panel", "surface0"),
+    ("hover", "surface1"),
+    ("muted", "subtext0"),
+    ("line", "overlay0"),
+    ("ok", "green"),
+    ("danger", "red"),
+    ("warn", "yellow"),
+];
+
+/// NAME, or the slot an old name stands for.
+pub fn slot_name(name: &str) -> &str {
+    ALIASES.iter().find(|(old, _)| *old == name).map_or(name, |(_, new)| new)
+}
 
 impl Palette {
     pub fn preset(name: &str) -> Option<Palette> {
@@ -67,33 +134,28 @@ impl Palette {
     }
 
     pub fn get(&self, name: &str) -> Option<Color> {
-        Some(match name {
-            "accent" => self.accent,
-            "on_accent" => self.on_accent,
-            "panel" => self.panel,
-            "hover" => self.hover,
-            "text" => self.text,
-            "muted" => self.muted,
-            "line" => self.line,
-            "ok" => self.ok,
-            "danger" => self.danger,
-            "warn" => self.warn,
-            _ => return None,
-        })
+        let mut p = *self;
+        p.slot(name).map(|c| *c)
     }
 
     fn slot(&mut self, name: &str) -> Option<&mut Color> {
-        Some(match name {
+        Some(match slot_name(name) {
+            "base" => &mut self.base,
+            "surface0" => &mut self.surface0,
+            "surface1" => &mut self.surface1,
+            "surface2" => &mut self.surface2,
+            "overlay0" => &mut self.overlay0,
+            "subtext0" => &mut self.subtext0,
+            "text" => &mut self.text,
             "accent" => &mut self.accent,
             "on_accent" => &mut self.on_accent,
-            "panel" => &mut self.panel,
-            "hover" => &mut self.hover,
-            "text" => &mut self.text,
-            "muted" => &mut self.muted,
-            "line" => &mut self.line,
-            "ok" => &mut self.ok,
-            "danger" => &mut self.danger,
-            "warn" => &mut self.warn,
+            "red" => &mut self.red,
+            "peach" => &mut self.peach,
+            "yellow" => &mut self.yellow,
+            "green" => &mut self.green,
+            "teal" => &mut self.teal,
+            "sky" => &mut self.sky,
+            "mauve" => &mut self.mauve,
             _ => return None,
         })
     }
@@ -107,6 +169,44 @@ impl Palette {
             }
         }
         p
+    }
+
+    // Roles: what a color means. 1 role, 1 hue; a hue may serve 2 roles of 1 family.
+
+    /// Failed, broken, destructive: errors, failed checks, conflicts, deleted lines and files,
+    /// closed PRs, critical findings, a quota at 90%+.
+    pub fn error(&self) -> Color {
+        self.red
+    }
+    /// Done, passed, added: a finished turn or flow, passed checks, added lines and files, an
+    /// open or mergeable PR, reviewed.
+    pub fn success(&self) -> Color {
+        self.green
+    }
+    /// Waits on the owner: blocked, a question, a gate, needs action, unpushed commits.
+    pub fn attention(&self) -> Color {
+        self.yellow
+    }
+    /// A risk, not yet a failure: a quota at 70%+, high / major findings, unsaved settings, a
+    /// small window, shell mode.
+    pub fn caution(&self) -> Color {
+        self.peach
+    }
+    /// Under way: running checks, a pending step or switch, open review comments.
+    pub fn progress(&self) -> Color {
+        self.sky
+    }
+    /// A reference: links, inline code, commands, branch names, modified files.
+    pub fn info(&self) -> Color {
+        self.sky
+    }
+    /// A merged PR.
+    pub fn merged(&self) -> Color {
+        self.mauve
+    }
+    /// A renamed file.
+    pub fn renamed(&self) -> Color {
+        self.teal
     }
 }
 
@@ -126,11 +226,11 @@ pub fn hex(c: Color) -> String {
     format!("#{r:02X}{g:02X}{b:02X}")
 }
 
-static PAL: std::sync::RwLock<Palette> = std::sync::RwLock::new(CORAL);
+static PAL: std::sync::RwLock<Palette> = std::sync::RwLock::new(LAVENDER);
 
 /// The palette in use.
 pub fn pal() -> Palette {
-    PAL.read().map(|p| *p).unwrap_or(CORAL)
+    PAL.read().map(|p| *p).unwrap_or(LAVENDER)
 }
 
 /// Use P from now on (start, settings).
@@ -140,7 +240,7 @@ pub fn set_palette(p: Palette) {
     }
 }
 
-/// Hover: solid pal().hover bg on the cells of R (accent cells, like the selection pill, kept).
+/// Hover: solid pal().surface1 bg on the cells of R (accent cells, like the selection pill, kept).
 pub fn hover(buf: &mut Buffer, r: Rect) {
     let r = r.intersection(buf.area);
     for y in r.top()..r.bottom() {
@@ -148,7 +248,7 @@ pub fn hover(buf: &mut Buffer, r: Rect) {
             if let Some(c) = buf.cell_mut((x, y))
                 && c.bg != pal().accent
             {
-                c.set_bg(pal().hover);
+                c.set_bg(pal().surface1);
             }
         }
     }
@@ -174,15 +274,23 @@ pub fn text() -> Style {
     Style::default().fg(pal().text)
 }
 pub fn muted() -> Style {
-    Style::default().fg(pal().muted)
+    Style::default().fg(pal().subtext0)
 }
-/// Shell mode (`!` in the prompt): its marks, its border.
+/// Shell mode (`!` in the prompt): its marks, its border. A caution: it runs commands.
 pub fn shell() -> Color {
-    Color::Rgb(253, 93, 177)
+    pal().caution()
 }
 
 pub fn line() -> Style {
-    Style::default().fg(pal().line)
+    Style::default().fg(pal().overlay0)
+}
+/// Text in COLOR (a role): `fg(pal().error())`.
+pub fn fg(color: Color) -> Style {
+    Style::default().fg(color)
+}
+/// A pane's border: the accent when it has the focus, else the line.
+pub fn border(focused: bool) -> Style {
+    if focused { accent() } else { line() }
 }
 pub fn accent() -> Style {
     Style::default().fg(pal().accent)
@@ -197,9 +305,85 @@ pub fn accent_bold() -> Style {
 pub fn pill() -> Style {
     Style::default().bg(pal().accent).fg(pal().on_accent)
 }
-pub fn panel() -> Style {
-    Style::default().bg(pal().panel).fg(pal().text)
+/// The selection pill of a list without the focus: panel bg, accent text.
+pub fn pill_dim() -> Style {
+    Style::default().bg(pal().surface0).fg(pal().accent)
 }
+pub fn panel() -> Style {
+    Style::default().bg(pal().surface0).fg(pal().text)
+}
+
+/// A picked row (of a multi-pick) in R: the accent's tint as bg, `▌` in the accent at BAR (a
+/// column of R, else 0 bar). Cells with a bg of their own keep it when KEEP_BG.
+pub fn picked(buf: &mut Buffer, r: Rect, bar: Option<u16>, keep_bg: bool) {
+    let r = r.intersection(buf.area);
+    let bg = tint(pal().accent, pal().surface0, 0.28);
+    for y in r.top()..r.bottom() {
+        for x in r.left()..r.right() {
+            if Some(x) == bar { continue; }
+            if let Some(c) = buf.cell_mut((x, y))
+                && (!keep_bg || c.bg == Color::Reset)
+            {
+                c.set_bg(bg);
+            }
+        }
+        if let Some(x) = bar
+            && let Some(c) = buf.cell_mut((x, y))
+        {
+            c.set_symbol("▌").set_fg(pal().accent);
+        }
+    }
+}
+
+/// The backdrop of a modal: every cell of R faded halfway into `base`, so the modal drawn next
+/// stands out. Default colors (Reset) fade from `text` / stay the terminal's bg.
+pub fn dim(buf: &mut Buffer, r: Rect) {
+    let r = r.intersection(buf.area);
+    let p = pal();
+    for y in r.top()..r.bottom() {
+        for x in r.left()..r.right() {
+            if let Some(c) = buf.cell_mut((x, y)) {
+                let fg = if c.fg == Color::Reset { p.text } else { c.fg };
+                c.set_fg(tint(fg, p.base, 0.45));
+                if c.bg != Color::Reset {
+                    c.set_bg(tint(c.bg, p.base, 0.45));
+                }
+            }
+        }
+    }
+}
+/// A key hint line (`key: label · key label · …`) as spans: each key in text, its label and the
+/// ` · ` between in muted. A key: the text before `: `, else the 1st word.
+pub fn hints(s: &str) -> Vec<ratatui::text::Span<'static>> {
+    use ratatui::text::Span;
+    let mut out = Vec::new();
+    for (i, item) in s.split(" · ").enumerate() {
+        if i > 0 {
+            out.push(Span::styled(" · ", muted()));
+        }
+        let (key, rest) = match item.find(": ") {
+            Some(at) => item.split_at(at),
+            None => item.split_at(item.trim_start().find(' ').map_or(item.len(), |at| at + item.len() - item.trim_start().len())),
+        };
+        out.push(Span::styled(key.to_string(), text()));
+        out.push(Span::styled(rest.to_string(), muted()));
+    }
+    out
+}
+
+/// A mode the keys are in, as a badge at the left of the key hint row: its label in capitals
+/// (` SHELL `), then 1 blank. A neutral mode: surface1 bg, text; a risky one (shell): the
+/// caution bg, on_accent text.
+pub fn mode_badge(label: &str, risky: bool) -> Vec<ratatui::text::Span<'static>> {
+    use ratatui::text::Span;
+    let st = if risky {
+        Style::default().bg(pal().caution()).fg(pal().on_accent)
+    } else {
+        Style::default().bg(pal().surface1).fg(pal().text)
+    };
+    vec![Span::styled(format!(" {} ", label.to_uppercase()), st.add_modifier(Modifier::BOLD)), Span::raw(" ")]
+}
+
 /// Count badge: readable on the normal row and on the pill row.
 pub fn badge(on_pill: bool) -> Style {
     if on_pill {
@@ -329,6 +513,47 @@ mod tests {
         let replies = "\x1b]4;1;rgb:cdcd/3131/3131\x1b\\\x1b]4;4;rgb:24/72/c8\x07\x1b[?62;22c";
         assert_eq!(parse_osc4(replies), vec![(1, (205, 49, 49)), (4, (36, 114, 200))]);
         assert!(da1_seen(replies.as_bytes()));
+    }
+
+    #[test]
+    fn hint_keys_stand_out() {
+        let spans = hints("tab: menu · ctrl+f filter · enter");
+        let keys: Vec<&str> = spans.iter().filter(|s| s.style == text()).map(|s| s.content.as_ref()).collect();
+        assert_eq!(keys, ["tab", "ctrl+f", "enter"]);
+        assert_eq!(spans.iter().map(|s| s.content.as_ref()).collect::<String>(), "tab: menu · ctrl+f filter · enter");
+    }
+
+    #[test]
+    fn mode_badges() {
+        let b = mode_badge("shell", true);
+        assert_eq!(b[0].content, " SHELL ");
+        assert_eq!((b[0].style.bg, b[0].style.fg), (Some(pal().caution()), Some(pal().on_accent)));
+        assert_eq!(mode_badge("search", false)[0].style.bg, Some(pal().surface1));
+    }
+
+    #[test]
+    fn old_color_names_still_set_a_slot() {
+        let p = Palette::build(Some("coral"), [("danger", "#112233"), ("panel", "#445566")]);
+        assert_eq!((p.red, p.surface0), (Color::Rgb(0x11, 0x22, 0x33), Color::Rgb(0x44, 0x55, 0x66)));
+        assert_eq!(Palette::build(None, []), LAVENDER);
+    }
+
+    #[test]
+    fn lavender_accent_is_no_status_hue() {
+        // the default's accent stays apart from every status hue (hue distance ≥ 40°)
+        let hue = |c: Color| {
+            let (r, g, b) = rgb(c);
+            let (r, g, b) = (f32::from(r), f32::from(g), f32::from(b));
+            let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+            let d = max - min;
+            let h = if max == r { (g - b) / d % 6.0 } else if max == g { (b - r) / d + 2.0 } else { (r - g) / d + 4.0 };
+            (h * 60.0 + 360.0) % 360.0
+        };
+        let p = LAVENDER;
+        for c in [p.red, p.peach, p.yellow, p.green, p.teal, p.sky, p.mauve] {
+            let d = (hue(p.accent) - hue(c)).abs();
+            assert!(d.min(360.0 - d) >= 40.0, "{c:?}");
+        }
     }
 
     #[test]

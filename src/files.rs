@@ -459,8 +459,8 @@ impl View {
                     let (i, marks) = &self.visible[k];
                     let e = &self.files[*i];
                     let tag = match e.source {
-                        Source::Agent => Span::styled("✎ ", Style::default().fg(theme::pal().accent)),
-                        Source::Note => Span::styled("◆ ", Style::default().fg(theme::pal().ok)),
+                        Source::Agent => Span::styled("✎ ", theme::fg(theme::pal().info())),
+                        Source::Note => Span::styled("◆ ", theme::muted()),
                         Source::Named => Span::styled("↗ ", theme::muted()),
                     };
                     let age = crate::notes::ago(SystemTime::UNIX_EPOCH + Duration::from_secs(e.at.min(now)));
@@ -491,7 +491,7 @@ impl View {
             return;
         };
         self.scroll = self.scroll.min(lines.len().saturating_sub(1));
-        let head = Line::from(vec![Span::styled(format!(" {} ", self.shown(&p)), theme::accent_bold()), Span::styled(format!("{} lines · o: IDE · y: yazi · c: copy path · ctrl+f: filter", lines.len()), theme::muted())]);
+        let head = Line::from(vec![Span::styled(format!(" {} ", self.shown(&p)), theme::bold()), Span::styled(format!("{} lines · o: IDE · y: yazi · c: copy path · ctrl+f: filter", lines.len()), theme::muted())]);
         f.render_widget(Paragraph::new(head), Rect { height: 1, ..preview });
         let body: Vec<Line> = lines.into_iter().skip(self.scroll).take(usize::from(preview.height.saturating_sub(2))).collect();
         f.render_widget(Paragraph::new(body), Rect { x: preview.x + 1, y: preview.y + 2, height: preview.height.saturating_sub(2), width: preview.width.saturating_sub(1) });
@@ -650,8 +650,8 @@ pub fn yazi_config() -> PathBuf {
         "[mgr]\ncwd = {{ fg = \"{acc}\" }}\nhovered = {{ fg = \"{on}\", bg = \"{acc}\" }}\npreview_hovered = {{ underline = true }}\nborder_style = {{ fg = \"{line}\" }}\n\n[status]\nsep_left = {{ open = \"\", close = \"\" }}\nsep_right = {{ open = \"\", close = \"\" }}\n\n[mode]\nnormal_main = {{ fg = \"{on}\", bg = \"{acc}\", bold = true }}\nnormal_alt = {{ fg = \"{acc}\", bg = \"{panel}\" }}\n",
         acc = hex(p.accent),
         on = hex(p.on_accent),
-        line = hex(p.line),
-        panel = hex(p.panel)
+        line = hex(p.overlay0),
+        panel = hex(p.surface0)
     );
     let _ = std::fs::write(dir.join("theme.toml"), theme_toml);
     // enter on a file: pick it (back to codehead), as yazi.nvim does

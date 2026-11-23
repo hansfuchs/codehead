@@ -92,7 +92,7 @@ impl Picker {
         // tabs
         let mut tabs = vec![];
         for (i, c) in CATS.iter().enumerate() {
-            let st = if i == self.cat { theme::bold().bg(theme::pal().panel) } else { theme::muted() };
+            let st = if i == self.cat { theme::bold().bg(theme::pal().surface0) } else { theme::muted() };
             tabs.push(Span::styled(format!(" {} {} ", c.name(), c.count()), st));
             tabs.push(Span::raw(" "));
         }
@@ -126,9 +126,9 @@ impl Picker {
             let (x, y) = (grid.x + c * CELL_W, grid.y + r * CELL_H);
             let sel = i == pick;
             let rows = self.avatar(i).rows(status, crate::avatar::now());
-            let lines: Vec<Line> = rows.into_iter().map(|r| Line::styled(r, Style::default().fg(if sel { color } else { theme::pal().muted }))).collect();
+            let lines: Vec<Line> = rows.into_iter().map(|r| Line::styled(r, Style::default().fg(if sel { color } else { theme::pal().subtext0 }))).collect();
             f.render_widget(Paragraph::new(lines), Rect { x, y, width: sprites::W as u16, height: sprites::H as u16 });
-            let label = Line::styled(format!("{:03}", i + 1), if sel { theme::accent_bold() } else { Style::default().fg(theme::pal().line) });
+            let label = Line::styled(format!("{:03}", i + 1), if sel { theme::accent_bold() } else { Style::default().fg(theme::pal().overlay0) });
             f.render_widget(Paragraph::new(label), Rect { x, y: y + sprites::H as u16, width: sprites::W as u16, height: 1 });
         }
         let keys = "tab category · ←→↑↓ pick · s status · f float · e eyes · enter take · esc back";

@@ -180,11 +180,11 @@ impl Panel {
 /// The color of level L.
 pub(super) fn level_color(l: Level) -> Color {
     match l {
-        Level::Critical => theme::pal().danger,
+        Level::Critical => theme::pal().error(),
         // orange, yellow
-        Level::High => Color::Rgb(240, 140, 50),
-        Level::Medium => Color::Rgb(230, 200, 80),
-        Level::Low => theme::pal().muted,
+        Level::High => theme::pal().caution(),
+        Level::Medium => theme::pal().attention(),
+        Level::Low => theme::pal().subtext0,
     }
 }
 
@@ -562,7 +562,7 @@ impl View {
         let inner_w = area.width.saturating_sub(2);
         let rows = (self.scm.msg.rows_for(inner_w) as u16).clamp(1, 5);
         let boxr = Rect { height: rows + 2, ..area };
-        let edge = if self.scm.msg_focus { theme::accent() } else { theme::line() };
+        let edge = theme::border(self.scm.msg_focus);
         let n = self.changes.staged.len();
         let title = if self.scm.drafting.is_some() { " drafting… ".to_string() } else { format!(" commit · {n} staged ") };
         f.render_widget(Block::bordered().border_style(edge).title(Span::styled(title, theme::muted())), boxr);
@@ -634,7 +634,6 @@ impl View {
         shown.truncate(h.saturating_sub(below.len()));
         shown.extend(below.iter().map(|&i| (i, true)));
         let w = usize::from(list.width);
-        let sel_bg = theme::tint(theme::pal().accent, theme::pal().panel, 0.28);
         for (k, (i, stuck)) in shown.into_iter().enumerate() {
             let y = list.y + k as u16;
             let rect = Rect { y, height: 1, ..list };
@@ -644,7 +643,7 @@ impl View {
             let buf = f.buffer_mut();
             if stuck {
                 for x in rect.x..rect.right() {
-                    buf[(x, y)].set_bg(theme::pal().panel);
+                    buf[(x, y)].set_bg(theme::pal().surface0);
                 }
             }
             let picked = match row {
@@ -654,10 +653,7 @@ impl View {
                 _ => false,
             };
             if picked {
-                for x in rect.x + 1..rect.right() {
-                    buf[(x, y)].set_bg(sel_bg);
-                }
-                buf[(rect.x, y)].set_symbol("▌").set_fg(theme::pal().accent);
+                theme::picked(buf, rect, Some(rect.x), false);
             }
             if i == self.scm.at {
                 let r = Rect { x: rect.x + 1, width: rect.width.saturating_sub(1), ..rect };
@@ -708,7 +704,7 @@ impl View {
                 let reviewed = self.is_reviewed(f);
                 let (name, dir) = split_path(&f.path);
                 let indent = if *staged { "   " } else { "     " };
-                let right = vec![Span::styled(if reviewed { "✓ " } else { "  " }, Style::default().fg(theme::pal().ok)), Span::styled(format!("{letter} "), Style::default().fg(color).add_modifier(Modifier::BOLD))];
+                let right = vec![Span::styled(if reviewed { "✓ " } else { "  " }, Style::default().fg(theme::pal().success())), Span::styled(format!("{letter} "), Style::default().fg(color).add_modifier(Modifier::BOLD))];
                 let room = w.saturating_sub(indent.len() + 5);
                 let name_st = if reviewed { theme::muted() } else { theme::text() };
                 let name = crate::nav::fit(name, room);
@@ -731,14 +727,14 @@ impl View {
                 right_fill(&left, &[Span::styled(format!("{n} "), theme::muted())])
             }
             PRow::CState(resolved, n) => {
-                let (label, color) = if *resolved { ("RESOLVED", theme::pal().muted) } else { ("OPEN", theme::pal().accent) };
+                let (label, color) = if *resolved { ("RESOLVED", theme::pal().subtext0) } else { ("OPEN", theme::pal().progress()) };
                 let st = Style::default().fg(color).add_modifier(Modifier::BOLD);
                 right_fill(&[Span::styled(format!("   {} {label}", fold(Fold::CState(*resolved))), st)], &[Span::styled(format!("{n} "), theme::muted())])
             }
             // open: ✎ line, text, author right; resolved: ✓, muted, who resolved it
             PRow::Comment(ci) => {
                 let Some(c) = self.comments.get(*ci) else { return Line::raw("") };
-                let (mark, st) = if c.open() { ("✎", Style::default().fg(theme::pal().accent)) } else { ("✓", theme::muted()) };
+                let (mark, st) = if c.open() { ("✎", theme::fg(theme::pal().progress())) } else { ("✓", theme::muted()) };
                 let who = if c.open() || c.resolved_by.is_empty() { c.author() } else { format!("{} ✓ @{}", c.author(), c.resolved_by) };
                 // replies: ↳ count; unseen agent replies: ● count (accent)
                 let new = super::threads::unseen(c);
@@ -780,7 +776,7 @@ impl View {
                 right_fill(&[Span::styled(crate::nav::fit(&text, w.saturating_sub(8)), theme::muted())], &[Span::styled("enter ", theme::muted())])
             }
             PRow::Push(pushed, n) => {
-                let (label, color) = if *pushed { ("PUSHED", theme::pal().muted) } else { ("UNPUSHED", theme::pal().accent) };
+                let (label, color) = if *pushed { ("PUSHED", theme::pal().subtext0) } else { ("UNPUSHED", theme::pal().attention()) };
                 let st = Style::default().fg(color).add_modifier(Modifier::BOLD);
                 let cs = &self.changes.commits;
                 let mut right = format!("{n} ");
@@ -804,7 +800,7 @@ impl View {
                 let shown = self.peeked() == Some(c.oid.as_str());
                 let (dot, dot_st) = match (shown, c.pushed) {
                     (true, _) => ("◆", theme::accent()),
-                    (false, false) => ("●", theme::accent()),
+                    (false, false) => ("●", theme::fg(theme::pal().attention())),
                     (false, true) => ("○", theme::muted()),
                 };
                 let age = crate::nav::ago(c.time.max(0) as u64 * 1000).replace(" ago", "");
@@ -826,13 +822,13 @@ impl View {
     /// VS Code's 1-letter status of F: U untracked, A added, M modified, D deleted, R renamed.
     fn letter(&self, f: &super::FileDiff, staged: bool) -> (char, Color) {
         if !staged && self.changes.untracked.contains(&f.path) {
-            return ('U', theme::pal().ok);
+            return ('U', theme::pal().success());
         }
         match f.status {
-            Status::New => ('A', theme::pal().ok),
-            Status::Deleted => ('D', theme::pal().danger),
-            Status::Renamed => ('R', theme::pal().accent),
-            Status::Modified => ('M', theme::pal().warn),
+            Status::New => ('A', theme::pal().success()),
+            Status::Deleted => ('D', theme::pal().error()),
+            Status::Renamed => ('R', theme::pal().renamed()),
+            Status::Modified => ('M', theme::pal().info()),
         }
     }
 

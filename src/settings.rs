@@ -29,7 +29,7 @@ const fn spec(key: &'static str, label: &'static str, help: &'static str, env: &
 }
 
 /// The plain fields, then the alias boxes.
-const SPECS: [Spec; 27] = [
+const SPECS: [Spec; 33] = [
     spec("notes", "notes", "directory of Markdown notes, ~ expands to home", "CODEHEAD_NOTES"),
     spec("styles", "styles", "directory of agent output styles", "CODEHEAD_STYLES"),
     spec("home", "home repo", "git repo with AGENTS.md (notes, other repos): every agent reads it", "CODEHEAD_HOME_REPO"),
@@ -46,17 +46,23 @@ const SPECS: [Spec; 27] = [
     spec("editor", "editor", "IDE for ctrl+i and the changes view e: auto, or code, codium, cursor, zed, idea, flow …, terminal ($EDITOR), or a path", "CODEHEAD_EDITOR"),
     spec("keys.menu", "menu", "opens the menu: F7-F12, ctrl+<letter>, alt+<letter> (not 1 codehead binds already)", "CODEHEAD_MENU_KEY"),
     spec("keys.command", "commands", "opens the command dropdown in a prompt: 1 symbol", "CODEHEAD_COMMAND_KEY"),
-    spec("colors.scheme", "scheme", "preset: coral or amber", "CODEHEAD_SCHEME"),
-    spec("colors.accent", "accent", "the 1 accent: titles, pills, the cursor row", ""),
+    spec("colors.scheme", "scheme", "preset: lavender, coral or amber", "CODEHEAD_SCHEME"),
+    spec("colors.accent", "accent", "focus and selection: the cursor row, the active tab, the focused border", ""),
     spec("colors.on_accent", "on_accent", "text on an accent pill", ""),
-    spec("colors.panel", "panel", "inputs, unfocused tabs and rows", ""),
-    spec("colors.hover", "hover", "the row under the mouse, the input bubble's border", ""),
+    spec("colors.base", "base", "the terminal bg the colors assume: tints mix into it (0 cell painted)", ""),
+    spec("colors.surface0", "surface0", "inputs, unfocused tabs and rows", ""),
+    spec("colors.surface1", "surface1", "the row under the mouse, the input bubble's border", ""),
+    spec("colors.surface2", "surface2", "bars, tracks", ""),
+    spec("colors.overlay0", "overlay0", "borders, dividers", ""),
+    spec("colors.subtext0", "subtext0", "hints, labels, times", ""),
     spec("colors.text", "text", "normal text", ""),
-    spec("colors.muted", "muted", "hints, labels, times", ""),
-    spec("colors.line", "line", "borders, dividers", ""),
-    spec("colors.ok", "ok", "done, allowed", ""),
-    spec("colors.danger", "danger", "errors", ""),
-    spec("colors.warn", "warn", "blocked, questions", ""),
+    spec("colors.red", "red", "errors, failed, deleted, closed, critical", ""),
+    spec("colors.peach", "peach", "caution: quota 70%+, high findings, unsaved, shell mode", ""),
+    spec("colors.yellow", "yellow", "waits on you: blocked, questions, gates, unpushed", ""),
+    spec("colors.green", "green", "done, passed, added, open PRs", ""),
+    spec("colors.teal", "teal", "renamed files", ""),
+    spec("colors.sky", "sky", "under way and references: running checks, links, code, modified files", ""),
+    spec("colors.mauve", "mauve", "merged PRs", ""),
 ];
 #[cfg(test)]
 pub(crate) const PLAIN: usize = SPECS.len();
@@ -625,7 +631,7 @@ impl Form {
         }
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(if self.dirty() { "not applied · " } else { "" }, theme::text().fg(theme::pal().warn)),
+                Span::styled(if self.dirty() { "not applied · " } else { "" }, theme::text().fg(theme::pal().caution())),
                 Span::styled(self.path.display().to_string(), theme::muted()),
             ])),
             Rect { height: 1, ..area },
@@ -772,7 +778,7 @@ impl Form {
         f.render_widget(
             Paragraph::new(Line::styled(
                 self.status.clone(),
-                if self.error { theme::text().fg(theme::pal().danger) } else { theme::muted() },
+                if self.error { theme::text().fg(theme::pal().error()) } else { theme::muted() },
             )),
             Rect { y: area.bottom() - 1, height: 1, ..area },
         );
@@ -1204,7 +1210,7 @@ mod tests {
         terminal.draw(|f| form.draw(f, f.area(), true)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let x = (0..80).find(|&x| buffer[(x, top)].symbol() == "┌").unwrap();
-        assert_eq!(buffer[(x, top)].fg, theme::pal().line);
+        assert_eq!(buffer[(x, top)].fg, theme::pal().overlay0);
         let _ = std::fs::remove_dir_all(dir);
     }
 

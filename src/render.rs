@@ -26,7 +26,10 @@ impl Row {
     }
 }
 
-const CODE: Color = Color::Indexed(110);
+/// Inline code and commands: the info role.
+fn code_fg() -> Color {
+    theme::pal().info()
+}
 
 /// A styled word piece; LINK: the url it belongs to; COPY: what a click on it copies.
 #[derive(Clone, Default)]
@@ -90,7 +93,7 @@ fn mention_pieces(pieces: &[Piece]) -> Vec<Piece> {
         pieces
             .iter()
             .flat_map(|p| {
-                if p.copy.is_some() || p.link.is_some() || p.style.fg == Some(CODE) || !p.text.contains('@') {
+                if p.copy.is_some() || p.link.is_some() || p.style.fg == Some(code_fg()) || !p.text.contains('@') {
                     return vec![p.clone()];
                 }
                 mention_spans(&p.text, p.style, marks).into_iter().map(|s| Piece { text: s.content.into_owned(), style: s.style, ..p.clone() }).collect()
@@ -325,7 +328,7 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
                 };
                 let m = margin(quote, 0);
                 block = Some(Block { pieces: vec![Piece { text: mark.into(), style: theme::muted(), ..Default::default() }], first: m.clone(), rest: m });
-                styles.push(theme::accent_bold());
+                styles.push(theme::bold());
             }
             Event::End(TagEnd::Heading(_)) => {
                 heading = false;
@@ -363,7 +366,7 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
                     _ => "• ".into(),
                 };
                 let rest = [m.clone(), vec![Span::raw(" ".repeat(mark.width()))]].concat();
-                let first = [m, vec![Span::styled(mark, theme::accent())]].concat();
+                let first = [m, vec![Span::styled(mark, theme::muted())]].concat();
                 block = Some(Block { pieces: Vec::new(), first, rest });
             }
             // an empty item: its marker alone (the view shows what was sent)
@@ -414,7 +417,7 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
                 link = Some(dest_url.to_string());
-                styles.push(style.fg(theme::pal().accent).add_modifier(Modifier::UNDERLINED));
+                styles.push(style.fg(theme::pal().info()).add_modifier(Modifier::UNDERLINED));
             }
             Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {
                 styles.pop();
@@ -464,7 +467,7 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
                     let m = margin(quote, lists.len());
                     Block { pieces: Vec::new(), first: m.clone(), rest: m }
                 });
-                let st = if heading { theme::accent_bold() } else { style };
+                let st = if heading { theme::bold() } else { style };
                 // a bare URL in text: clickable too
                 for (i, part) in t.split(' ').enumerate() {
                     if i > 0 {
@@ -473,7 +476,7 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
                     // `(https://…)`, `<https://…>`, `"https://…"`: the URL without the marks around it
                     let bare = part.find("https://").or_else(|| part.find("http://")).map(|i| part[i..].trim_end_matches(['.', ',', ')', ';', ':', '>', '"', '\'', ']']).to_string());
                     let url = link.clone().or(bare);
-                    let st = if url.is_some() && link.is_none() { st.fg(theme::pal().accent).add_modifier(Modifier::UNDERLINED) } else { st };
+                    let st = if url.is_some() && link.is_none() { st.fg(theme::pal().info()).add_modifier(Modifier::UNDERLINED) } else { st };
                     b.pieces.push(Piece { text: part.to_string(), style: st, link: url, ..Default::default() });
                 }
             }
@@ -485,7 +488,7 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
                 // a panel background: inline code never reads as a link (same blue, links underlined);
                 // a path of an existing file: a file link (a click opens it in the files view)
                 let file = link.is_none().then(|| file_link(&t)).flatten();
-                let style = Style::default().fg(CODE).bg(theme::pal().panel);
+                let style = Style::default().fg(code_fg()).bg(theme::pal().surface0);
                 let style = if file.is_some() { style.add_modifier(Modifier::UNDERLINED) } else { style };
                 let copy = file.is_none().then(|| t.to_string());
                 b.pieces.push(Piece { text: t.to_string(), style, link: file.or_else(|| link.clone()), copy });
@@ -608,16 +611,16 @@ pub fn code_rows(text: &str, lang: &str, width: usize, margin: &[Span<'static>],
     let lines: Vec<&str> = text.trim_end_matches('\n').split('\n').collect();
     let mw: usize = margin.iter().map(|s| s.content.width()).sum();
     let room = width.saturating_sub(mw + 2).max(1);
-    let bg = Style::default().bg(theme::pal().panel);
+    let bg = Style::default().bg(theme::pal().surface0);
     let mut out = Vec::new();
     // head row: the language left, a copy button right
     let label = if lang == "text" { String::new() } else { format!(" {lang}") };
     let button = " copy ";
     let fill = (room + 2).saturating_sub(label.width() + button.width());
     let mut head = margin.to_vec();
-    head.push(Span::styled(label, bg.fg(theme::pal().muted)));
+    head.push(Span::styled(label, bg.fg(theme::pal().subtext0)));
     head.push(Span::styled(" ".repeat(fill), bg));
-    head.push(Span::styled(button, bg.fg(theme::pal().accent)));
+    head.push(Span::styled(button, bg.fg(theme::pal().subtext0)));
     let at = (mw + fill + lang_w(lang)) as u16;
     out.push(Row { line: Line::from(head), copies: vec![(at, at + button.width() as u16, text.trim_end_matches('\n').to_string())], ..Default::default() });
     // 1 highlight pass per block (cached); very long blocks get plain rows
@@ -635,7 +638,7 @@ pub fn code_rows(text: &str, lang: &str, width: usize, margin: &[Span<'static>],
             let mut w = 0;
             // a continuation row: `↪ ` (the line goes on, 0 new line in the source)
             if k > 0 {
-                spans.push(Span::styled(CONT, bg.fg(theme::pal().muted)));
+                spans.push(Span::styled(CONT, bg.fg(theme::pal().subtext0)));
                 w += CONT.width();
             }
             let mut run = String::new();
@@ -763,7 +766,7 @@ mod tests {
         let text: String = cells.iter().map(|c| c.0).collect();
         let at = text.find("bun run link-branch").unwrap();
         let code = &cells[at..at + "bun run link-branch".len()];
-        assert!(code.iter().all(|c| c.1 == Some(theme::pal().panel)), "every cell, spaces too: {code:?}");
+        assert!(code.iter().all(|c| c.1 == Some(theme::pal().surface0)), "every cell, spaces too: {code:?}");
         assert_eq!(cells[at - 1].1, None, "0 bg before the code");
         let link = text.find("docs").unwrap();
         assert_eq!(cells[link].1, None, "a link: 0 bg");

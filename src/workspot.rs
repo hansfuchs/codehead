@@ -4,7 +4,6 @@
 
 use std::path::{Path, PathBuf};
 
-use ratatui::style::Style;
 use ratatui::text::Span;
 
 use crate::engine::store;
@@ -82,7 +81,7 @@ pub fn spans(spots: &[Spot]) -> Vec<Span<'static>> {
         v.push(Span::styled(s.repo.clone(), theme::text()));
         if let Some(b) = &s.branch {
             v.push(Span::styled(" ⎇ ", theme::muted()));
-            v.push(Span::styled(b.clone(), Style::default().fg(theme::pal().accent)));
+            v.push(Span::styled(b.clone(), theme::fg(theme::pal().info())));
         }
         if s.worktree {
             v.push(Span::styled(" (worktree)", theme::muted()));

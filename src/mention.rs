@@ -257,7 +257,7 @@ impl Mention {
             let a = &agents[i];
             let hl = i == cur;
             let card = Rect { height: CARD_ROWS, width: body.width, ..rr };
-            let bg = hl.then_some(theme::pal().panel);
+            let bg = hl.then_some(theme::pal().surface0);
             cards::draw(f, card, a, &text(a), cards::Look { cur: hl, lit: false, border: None, title: None, bg });
             if hl {
                 let bar = Style::default().fg(theme::pal().accent).bg(theme::pal().on_accent);

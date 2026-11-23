@@ -613,14 +613,14 @@ impl View {
     /// The color of agent NAME now: blocked (a question waits on the owner): all warn yellow,
     /// else its own.
     fn color(&self, name: &str) -> Color {
-        if self.thread.asks.iter().any(|q| q.agent == name) { theme::pal().warn } else { self.colors.get(name).copied().unwrap_or(theme::pal().accent) }
+        if self.thread.asks.iter().any(|q| q.agent == name) { theme::pal().attention() } else { self.colors.get(name).copied().unwrap_or(theme::pal().accent) }
     }
 
     /// The agent colors now (blocked agents: yellow).
     fn colors_now(&self) -> stream::Colors {
         let mut c = self.colors.clone();
         for q in &self.thread.asks {
-            c.insert(q.agent.clone(), theme::pal().warn);
+            c.insert(q.agent.clone(), theme::pal().attention());
         }
         c
     }
@@ -755,6 +755,24 @@ impl View {
     }
 
     // ---------- send ----------
+
+    /// The mode the keys are in, for the footer's badge: (label, risky). 0 mode: None.
+    fn mode(&self) -> Option<(&'static str, bool)> {
+        let view_keys = !self.prompt_focus;
+        if self.agents_focus.is_some() {
+            Some(("agents", false))
+        } else if self.find.open && self.find.focus {
+            Some(("search", false))
+        } else if self.pane == Pane::Changes && view_keys && let Some(m) = self.changes.mode() {
+            Some((m, false))
+        } else if self.pane == Pane::Files && view_keys && self.files.typing() {
+            Some(("filter", false))
+        } else if self.shell_mode() && (self.pane == Pane::Chat || self.prompt_focus) {
+            Some(("shell", true))
+        } else {
+            None
+        }
+    }
 
     /// Shell mode: the prompt starts with `!`.
     fn shell_mode(&self) -> bool {
@@ -2925,7 +2943,7 @@ impl View {
         let tech = [harness, model].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
         let frame = WAVE[tick % WAVE.len()];
         let status = if self.thread.asks.iter().any(|q| q.agent == name) {
-            vec![Span::styled("  ● ", Style::default().fg(theme::pal().warn)), Span::styled("waits on you", theme::muted())]
+            vec![Span::styled("  ● ", theme::fg(theme::pal().attention())), Span::styled("waits on you", theme::muted())]
         } else if self.thread.busy.contains(name) {
             vec![Span::styled(format!("  {frame} "), Style::default().fg(color)), Span::styled("working…", theme::muted())]
         } else if self.thread.working(name) {
@@ -3099,7 +3117,7 @@ impl View {
                 extra.push(l);
             }
             let status = match err {
-                Some(e) => Line::styled(format!("send failed: {e}  "), Style::default().fg(theme::pal().danger)),
+                Some(e) => Line::styled(format!("send failed: {e}  "), Style::default().fg(theme::pal().error())),
                 None if at.elapsed() > Duration::from_secs(90) => Line::styled("unconfirmed · check the host log before a retry  ", theme::muted()),
                 None => Line::styled(format!("sending… {}s  ", at.elapsed().as_secs()), theme::muted()),
             };
@@ -3107,7 +3125,7 @@ impl View {
         }
         if let Some((new, old, _)) = &self.queued {
             extra.push(Line::raw(""));
-            extra.push(Line::styled(format!("  {new} replaces {old} after {old}'s turn · esc: interrupt {old}"), theme::accent()));
+            extra.push(Line::styled(format!("  {new} replaces {old} after {old}'s turn · esc: interrupt {old}"), theme::fg(theme::pal().progress())));
         }
         let h = usize::from(st.height);
         let total = self.drawn.rows.len();
@@ -3191,7 +3209,7 @@ impl View {
                 }
                 for x in a..=b.min(st.width.saturating_sub(1)) {
                     let cell = &mut buf[(st.x + x, y)];
-                    cell.set_style(Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent));
+                    cell.set_style(theme::pill());
                 }
             }
         }
@@ -3422,18 +3440,18 @@ impl View {
         let mut badge = crate::notify::badge(&crate::notify::unseen(Some(&self.id)));
         let here = crate::notify::unseen_of(&self.id).len();
         if here > 0 && self.back > 0 {
-            badge.insert(0, Span::styled(format!("↓ {here} new  "), theme::accent_bold()));
+            badge.insert(0, Span::styled(format!("↓ {here} new  "), theme::bold().fg(theme::pal().info())));
         }
         let badge_w = usize::from(crate::notify::width(&badge));
         let badge_w = if top.width as usize > used + link_w + badge_w + 24 { badge_w } else { 0 };
         let room = usize::from(top.width.saturating_sub(4)).saturating_sub(used + link_w + badge_w + 1);
-        spans.push(Span::styled(format!("{} ", crate::nav::fit(&self.title, room)), theme::accent_bold()));
+        spans.push(Span::styled(format!("{} ", crate::nav::fit(&self.title, room)), theme::bold()));
         f.render_widget(Paragraph::new(Line::from(spans)), Rect { x: top.x + 2, width: top.width.saturating_sub(2), ..top });
         if let Some((text, url)) = link
             && top.width as usize > link_w + used + 4
         {
             let r = Rect { x: top.right() - link_w as u16, width: link_w as u16, ..top };
-            f.render_widget(Paragraph::new(Span::styled(text, theme::accent().add_modifier(Modifier::UNDERLINED))), r);
+            f.render_widget(Paragraph::new(Span::styled(text, theme::fg(theme::pal().info()).add_modifier(Modifier::UNDERLINED))), r);
             self.url_rect = Some((r, url));
         }
         if badge_w > 0 {
@@ -3482,7 +3500,10 @@ impl View {
 
         // the input bubble: its top border the header's bottom line (├ ┴ ┤)
         let bubble = Rect { y: bubble_top, height: bubble_bottom + 1 - bubble_top, ..area };
-        let edge = Style::default().fg(if self.shell_mode() { theme::shell() } else { theme::pal().hover });
+        // the bubble's border: the accent while the prompt takes the keys (the focused pane),
+        // the shell color in shell mode
+        let keys = (self.pane == Pane::Chat || self.prompt_focus) && self.agents_focus.is_none() && self.menu.is_none();
+        let edge = if self.shell_mode() { theme::fg(theme::shell()) } else if keys { theme::accent() } else { theme::fg(theme::pal().surface1) };
         {
             let buf = f.buffer_mut();
             let (left, right) = (bubble.x, bubble.right().saturating_sub(1));
@@ -3565,19 +3586,23 @@ impl View {
             ta.render(f, cwd_rect, true);
         }
         let keys = hint_keys(self.cwd_edit.is_some() && shell, self.hist.is_open(), shell, self.input.is_empty());
-        f.render_widget(Paragraph::new(Line::styled(keys, theme::muted())).right_aligned(), Rect { x: hint.x + hint.width / 2, width: hint.width - hint.width / 2, ..hint });
+        f.render_widget(Paragraph::new(Line::from(theme::hints(keys))).right_aligned(), Rect { x: hint.x + hint.width / 2, width: hint.width - hint.width / 2, ..hint });
 
         // footer: keys or toast right
         let right = match &self.toast {
-            Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Span::styled(format!("{m} "), theme::accent()),
-            _ if self.agents_focus.is_some() => Span::styled("←→ agent · ↑↓ · enter · 1-3 · esc / ctrl+m: prompt ", theme::muted()),
-            _ if self.pane == Pane::Changes && !self.prompt_focus => Span::styled(self.changes.hints(), theme::muted()),
-            _ if self.pane == Pane::Merge && !self.prompt_focus => Span::styled(self.merge.hints(), theme::muted()),
-            _ if self.pane == Pane::Files && !self.prompt_focus => Span::styled("j k · ctrl+f filter · pgup pgdn: scroll · o e i: IDE · y: yazi · c: copy path · S S: share · ctrl+m: prompt ", theme::muted()),
-            _ if self.pane != Pane::Chat => Span::styled("tab / esc: back to the view · F1-F4: views ", theme::muted()),
-            _ => Span::styled(format!("{}: menu · ctrl+q: agents · ctrl+f: search · F1-F4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label), theme::muted()),
+            Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Line::from(Span::styled(format!("{m} "), theme::fg(theme::pal().info()))),
+            _ if self.agents_focus.is_some() => Line::from(theme::hints("←→ agent · ↑↓ · enter · 1-3 · esc / ctrl+m: prompt ")),
+            _ if self.pane == Pane::Changes && !self.prompt_focus => Line::from(theme::hints(self.changes.hints())),
+            _ if self.pane == Pane::Merge && !self.prompt_focus => Line::from(theme::hints(&self.merge.hints())),
+            _ if self.pane == Pane::Files && !self.prompt_focus => Line::from(theme::hints("j k · ctrl+f filter · pgup pgdn: scroll · o e i: IDE · y: yazi · c: copy path · S S: share · ctrl+m: prompt ")),
+            _ if self.pane != Pane::Chat => Line::from(theme::hints("tab / esc: back to the view · F1-F4: views ")),
+            _ => Line::from(theme::hints(&format!("{}: menu · ctrl+q: agents · ctrl+f: search · F1-F4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label))),
         };
-        f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), foot);
+        // the mode the keys are in: a badge left, the keys right of it
+        let badge = self.mode().map(|(label, risky)| theme::mode_badge(label, risky)).unwrap_or_default();
+        let bw = (badge.iter().map(|s| s.content.chars().count()).sum::<usize>() as u16).min(foot.width);
+        f.render_widget(Paragraph::new(Line::from(badge)), Rect { width: bw, ..foot });
+        f.render_widget(Paragraph::new(right).right_aligned(), Rect { x: foot.x + bw, width: foot.width - bw, ..foot });
 
         // spawns over the header, under every dropdown and menu
         self.draw_spawns(f);
@@ -5672,6 +5697,22 @@ mod chat_search_tests {
         assert!(!s.iter().any(|l| l.contains(" find ")), "{s:#?}");
         typed(&mut v, "!");
         assert_eq!(v.input.text(), "draft!");
+    }
+
+    #[test]
+    fn the_footer_shows_the_mode_as_a_badge() {
+        let mut v = view("chatsearch-0003");
+        let last = |s: &[String]| s.last().cloned().unwrap_or_default();
+        assert!(!last(&screen(&mut v)).contains(" SHELL "));
+        typed(&mut v, "!ls");
+        let s = screen(&mut v);
+        assert!(last(&s).trim_start().starts_with("SHELL"), "{}", last(&s));
+        v.input.set_text("");
+        key(&mut v, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        let s = screen(&mut v);
+        assert!(last(&s).trim_start().starts_with("SEARCH"), "{}", last(&s));
+        key(&mut v, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!last(&screen(&mut v)).contains("SEARCH"));
     }
 
     #[test]

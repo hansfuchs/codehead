@@ -623,6 +623,8 @@ impl Menu {
         let h = area.bottom().saturating_sub(top + 1).min(32).max(8.min(area.height));
         let r = Rect { x: area.x + (area.width - w) / 2, y: top, width: w, height: h };
         self.frame = r;
+        // a modal: the screen behind it fades
+        theme::dim(f.buffer_mut(), area);
         f.render_widget(Clear, r);
         let block = Block::new()
             .borders(Borders::ALL)
@@ -643,7 +645,7 @@ impl Menu {
             let text = format!(" {label} ");
             let wd = text.chars().count() as u16;
             let st = match (t == self.tab, self.level) {
-                (true, Level::Bar) => Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD),
+                (true, Level::Bar) => theme::pill().add_modifier(Modifier::BOLD),
                 (true, _) => theme::panel().add_modifier(Modifier::BOLD),
                 _ => theme::muted(),
             };
@@ -810,7 +812,7 @@ impl Menu {
             let y = list.y + (slot - self.soffset) as u16 * Self::HIT_H;
             let r = Rect { y, height: 2, ..list };
             let hl = slot == self.scursor;
-            let bg = if hl { Style::default().bg(theme::pal().panel) } else { Style::default() };
+            let bg = if hl { Style::default().bg(theme::pal().surface0) } else { Style::default() };
             let who = if m.from == "owner" { "you".to_string() } else { m.from.clone() };
             let here = self.thread.as_deref() == Some(m.thread.as_str());
             let place = if here { "this thread".to_string() } else { m.title.clone() };

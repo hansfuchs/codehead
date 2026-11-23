@@ -203,7 +203,7 @@ impl Session {
 
 pub fn preview(s: &Session) -> Vec<Line<'static>> {
     let mut out = vec![
-        Line::styled(s.title.clone(), theme::accent_bold()),
+        Line::styled(s.title.clone(), theme::bold()),
         Line::from(vec![Span::styled("dir ", theme::muted()), Span::raw(s.cwd.clone())]),
         Line::from(vec![Span::styled("branch ", theme::muted()), Span::raw(if s.branch.is_empty() { "-".to_string() } else { s.branch.clone() })]),
         Line::from(vec![Span::styled("session ", theme::muted()), Span::raw(s.id.clone()), Span::styled(format!(" · {}", s.when), theme::muted())]),

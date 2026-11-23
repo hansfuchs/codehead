@@ -111,10 +111,10 @@ pub struct McpTab {
 fn icon(state: &str) -> (&'static str, Style) {
     let p = theme::pal();
     match state {
-        "connected" => ("✔", Style::default().fg(p.ok)),
-        "needs-auth" => ("⚠", Style::default().fg(p.warn)),
-        "failed" => ("✘", Style::default().fg(p.danger)),
-        "pending" => ("⏸", Style::default().fg(p.warn)),
+        "connected" => ("✔", Style::default().fg(p.success())),
+        "needs-auth" => ("⚠", Style::default().fg(p.attention())),
+        "failed" => ("✘", Style::default().fg(p.error())),
+        "pending" => ("⏸", Style::default().fg(p.progress())),
         "off" => ("○", theme::muted()),
         _ => ("·", theme::muted()),
     }
@@ -875,11 +875,11 @@ impl McpTab {
         // the state line: updating, counts, the CLI errors
         let mut head = vec![];
         if self.updating() {
-            head.push(Span::styled(format!("updating{} ", if self.refreshing { ": claude mcp list checks every server (up to 1 min.)" } else { "" }), theme::text().fg(theme::pal().warn)));
+            head.push(Span::styled(format!("updating{} ", if self.refreshing { ": claude mcp list checks every server (up to 1 min.)" } else { "" }), theme::text().fg(theme::pal().progress())));
         }
         head.push(Span::styled(format!("{} codehead · {} harness servers", self.servers.len(), self.natives.len()), theme::muted()));
         for (h, e) in &self.cli_errors {
-            head.push(Span::styled(format!(" · {h}: {e}"), theme::text().fg(theme::pal().danger)));
+            head.push(Span::styled(format!(" · {h}: {e}"), theme::text().fg(theme::pal().error())));
         }
         f.render_widget(Paragraph::new(Line::from(head)), Rect { y: area.y + 1, height: 1, ..area });
         let body = Rect { y: area.y + 3, height: area.height.saturating_sub(4), ..area };
@@ -893,8 +893,8 @@ impl McpTab {
             let block = Block::new()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme::pal().warn))
-                .title(Span::styled(format!(" needs action · {actions} "), theme::text().fg(theme::pal().warn).add_modifier(Modifier::BOLD)));
+                .border_style(Style::default().fg(theme::pal().attention()))
+                .title(Span::styled(format!(" needs action · {actions} "), theme::text().fg(theme::pal().attention()).add_modifier(Modifier::BOLD)));
             let inner = block.inner(r);
             f.render_widget(block, r);
             let off = if self.cursor < actions { self.cursor.saturating_sub(shown - 1) } else { 0 };
@@ -955,7 +955,7 @@ impl McpTab {
             }
         }
         f.render_widget(
-            Paragraph::new(Line::styled(self.status.clone(), if self.error { theme::text().fg(theme::pal().danger) } else { theme::muted() })),
+            Paragraph::new(Line::styled(self.status.clone(), if self.error { theme::text().fg(theme::pal().error()) } else { theme::muted() })),
             Rect { y: area.bottom() - 1, height: 1, ..area },
         );
         if self.modal.is_some() {
@@ -982,6 +982,8 @@ impl McpTab {
         let w = area.width.saturating_sub(8).min(90);
         let place = |h: u16| Rect { x: area.x + (area.width - w) / 2, y: area.y + 2, width: w, height: h.min(area.height.saturating_sub(2)) };
         let boxed = |f: &mut Frame, r: Rect, title: &str| -> Rect {
+            // a modal: the screen behind it fades
+            theme::dim(f.buffer_mut(), area);
             f.render_widget(Clear, r);
             let block = Block::new()
                 .borders(Borders::ALL)

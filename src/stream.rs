@@ -244,8 +244,8 @@ impl Thread {
                 match error.as_deref() {
                     None | Some("session ended") => {}
                     // the owner's esc: a note, 0 error hint
-                    Some(crate::engine::host::INTERRUPTED) => self.items.push(Item::Note { agent, text: "interrupted".into(), color: theme::pal().muted }),
-                    Some(err) => self.items.push(Item::Note { agent, text: err.to_string(), color: theme::pal().danger }),
+                    Some(crate::engine::host::INTERRUPTED) => self.items.push(Item::Note { agent, text: "interrupted".into(), color: theme::pal().subtext0 }),
+                    Some(err) => self.items.push(Item::Note { agent, text: err.to_string(), color: theme::pal().error() }),
                 }
             }
             Kind::Session { model, .. } => {
@@ -260,18 +260,18 @@ impl Thread {
                 }
                 let text = if note.is_empty() { state.clone() } else { format!("{state} · {note}") };
                 let color = match state.as_str() {
-                    "blocked" => theme::pal().warn,
-                    "done" => theme::pal().ok,
-                    _ => theme::pal().muted,
+                    "blocked" => theme::pal().attention(),
+                    "done" => theme::pal().success(),
+                    _ => theme::pal().subtext0,
                 };
                 self.items.push(Item::Note { agent, text, color });
             }
-            Kind::Join => self.items.push(Item::Note { agent, text: "joined the thread".into(), color: theme::pal().muted }),
+            Kind::Join => self.items.push(Item::Note { agent, text: "joined the thread".into(), color: theme::pal().subtext0 }),
             Kind::Leave => {
                 self.busy.remove(&agent);
-                self.items.push(Item::Note { agent, text: "left the thread".into(), color: theme::pal().muted });
+                self.items.push(Item::Note { agent, text: "left the thread".into(), color: theme::pal().subtext0 });
             }
-            Kind::Error { message } => self.items.push(Item::Note { agent, text: message.clone(), color: theme::pal().danger }),
+            Kind::Error { message } => self.items.push(Item::Note { agent, text: message.clone(), color: theme::pal().error() }),
             Kind::Shell { command, output, code, dir } => self.items.push(Item::Shell { command: command.clone(), output: output.clone(), code: *code, ts: e.ts, dir: dir.clone() }),
             // flow lines: 0 chat rows (the agent card shows the step, a click on it the flow box)
             Kind::Flow { .. } => {}
@@ -431,9 +431,9 @@ fn sub_rows(d: &mut Drawn, s: &Sub, sub: usize, key: usize, fold: &Fold, w: usiz
     let pal = theme::pal();
     let state = s.state.as_deref().unwrap_or("running");
     let color = match state {
-        "done" => pal.ok,
-        "stopped" => pal.muted,
-        _ => pal.danger,
+        "done" => pal.success(),
+        "stopped" => pal.subtext0,
+        _ => pal.error(),
     };
     let secs = s.end.saturating_sub(s.start) / 1000;
     let took = if secs >= 60 { format!("{}m{:02}s", secs / 60, secs % 60) } else { format!("{secs}s") };
@@ -561,7 +561,7 @@ pub type Colors = HashMap<String, Color>;
 
 /// The row of AGENT's edits note TEXT (C: the agent's color): 1 row of W columns, cut with ….
 fn edits_row(agent: &str, text: &str, c: Color, w: usize) -> Row {
-    let muted = theme::pal().muted;
+    let muted = theme::pal().subtext0;
     let room = w.saturating_sub(2 + agent.width() + 1);
     let one = text.split_whitespace().collect::<Vec<_>>().join(" ");
     Row::plain(Line::from(vec![Span::styled("● ", Style::default().fg(muted)), Span::styled(format!("{agent} "), Style::default().fg(c)), Span::styled(crate::nav::fit(&one, room), Style::default().fg(muted))]))
@@ -804,17 +804,17 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                 let to_note = if to.len() > 1 || last_agent.as_deref() != to.first().map(String::as_str) { format!(" → {}", to.join(", ")) } else { String::new() };
                 let (body, files) = split_attachments(text);
                 let bw = (w * 3 / 4).max(20).min(w);
-                let bg = Style::default().bg(theme::pal().hover);
+                let bg = Style::default().bg(theme::pal().surface1);
                 // markdown as the agents' text (bold, lists, code); the hover bg under every span
                 let mut rows = memo::markdown(body.trim_end(), bw.saturating_sub(4), &[]);
                 for r in &mut rows {
                     for s in &mut r.line.spans {
                         if s.style.bg.is_none() {
-                            s.style = s.style.bg(theme::pal().hover);
+                            s.style = s.style.bg(theme::pal().surface1);
                         }
                     }
                 }
-                rows.extend(files.iter().map(|f| Row::plain(Line::styled(format!("📎 {f}"), theme::muted().bg(theme::pal().hover)))));
+                rows.extend(files.iter().map(|f| Row::plain(Line::styled(format!("📎 {f}"), theme::muted().bg(theme::pal().surface1)))));
                 let inner = rows.iter().map(|r| r.line.width()).max().unwrap_or(0);
                 let box_w = inner + 4;
                 let left = w.saturating_sub(box_w);
@@ -872,8 +872,8 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                     let label = crate::engine::harnesses::get(&h).map_or(h.as_str(), |x| x.label);
                     let what = if what.is_empty() { String::new() } else { format!(" for {what}") };
                     let cap = agents_on(roster, &h, true, agent);
-                    let pre = [Span::styled("● ", Style::default().fg(theme::pal().warn))];
-                    d.rows.extend(render::plain(&format!("{agent} needs a {label} agent{what}."), w, Style::default().fg(theme::pal().warn), &pre));
+                    let pre = [Span::styled("● ", theme::fg(theme::pal().attention()))];
+                    d.rows.extend(render::plain(&format!("{agent} needs a {label} agent{what}."), w, theme::fg(theme::pal().attention()), &pre));
                     let list = if cap.is_empty() { "none".to_string() } else { cap.iter().map(|(n, _)| format!("@{n}")).collect::<Vec<_>>().join(", ") + " · @agent → + adds it" };
                     d.rows.extend(render::plain(&format!("Agents on {label}: {list}"), w, theme::muted(), &[Span::raw("  ")]));
                 }
@@ -956,7 +956,7 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                 let c = color_of(colors, agent);
                 let pre = [Span::styled("● ", Style::default().fg(*color)), Span::styled(format!("{agent} "), Style::default().fg(c))];
                 d.rows.extend(render::plain(text, w, Style::default().fg(*color), &pre));
-                if *color == theme::pal().danger {
+                if *color == theme::pal().error() {
                     for h in error_hint(agent, text, roster, resume_of(t, item)) {
                         d.rows.extend(render::plain(&h, w, theme::muted(), &[Span::raw("  ")]));
                     }
@@ -973,7 +973,7 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
                     (true, true) => format!("{} · allowed", question.lines().next().unwrap_or_default()),
                     (true, false) => format!("{} · denied", question.lines().next().unwrap_or_default()),
                 };
-                let color = if *allow { theme::pal().ok } else { theme::pal().warn };
+                let color = if *allow { theme::pal().success() } else { theme::pal().caution() };
                 let c = color_of(colors, agent);
                 let pre = [Span::styled("● ", Style::default().fg(color)), Span::styled(format!("{agent} "), Style::default().fg(c))];
                 d.rows.extend(render::plain(&text, w, Style::default().fg(color), &pre));
@@ -985,7 +985,7 @@ fn draw_lines(t: &Thread, width: u16, colors: &Colors, roster: &[(String, String
     if let Some(a) = t.asks.first() {
         let c = color_of(colors, &a.agent);
         blank(&mut d);
-        let edge = Style::default().fg(theme::pal().warn);
+        let edge = theme::fg(theme::pal().attention());
         let more = if t.asks.len() > 1 { format!(" · {} more waiting", t.asks.len() - 1) } else { String::new() };
         let what = if a.tool == crate::flowbar::WAIT_TOOL { "waits on you" } else if a.questions().is_empty() { "asks to run" } else { "asks" };
         d.rows.push(Row::plain(Line::from(vec![Span::styled("┃ ", edge), Span::styled(a.agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD)), Span::styled(format!(" {what}{more}"), edge)])));
@@ -1030,7 +1030,7 @@ fn ask_rows(d: &mut Drawn, a: &Ask, w: usize, bar: &[Span<'static>], ask: &Picke
         None => {
             d.rows.extend(render::plain(&a.summary(), w, theme::bold(), bar));
             if let Some(cmd) = a.input["command"].as_str() {
-                d.rows.extend(render::plain(&format!("$ {cmd}"), w, Style::default().fg(Color::Indexed(110)), bar));
+                d.rows.extend(render::plain(&format!("$ {cmd}"), w, theme::fg(theme::pal().info()), bar));
             }
             if let Some(plan) = a.input["plan"].as_str() {
                 d.rows.extend(render::markdown(plan, w, bar));
@@ -1141,7 +1141,7 @@ fn call_rows(call: &Call, w: usize, margin: &[Span<'static>]) -> Vec<Row> {
         if !text.trim().is_empty() {
             // output: plain text (json: colors); an error in the danger color
             let lang = if crate::code::language(&text, &[]) == "json" { "json" } else { "text" };
-            let fg = if *ok { None } else { Some(theme::pal().danger) };
+            let fg = if *ok { None } else { Some(theme::pal().error()) };
             out.extend(render::code_rows(&text, lang, w, margin, true, fg));
         }
     }
@@ -1202,7 +1202,7 @@ fn owner_bubble(d: &mut Drawn, w: usize, text: &str, to_note: &str, ts: u64) {
     let want = body.lines().map(|l| l.replace('\t', "    ").width()).max().unwrap_or(0) + 4;
     let bw = want.max(stamp.width() + 6).max(if to_note.is_empty() { 0 } else { to_note.width() + stamp.width() + 9 }).min(cap).max(8);
     let left = w - bw;
-    let border = Style::default().fg(theme::pal().hover);
+    let border = Style::default().fg(theme::pal().surface1);
     let pad = Span::raw(" ".repeat(left));
     let lead = if to_note.is_empty() { Vec::new() } else { vec![Span::styled(to_note.to_string(), theme::muted())] };
     let (top, _) = top_border(bw, border, lead, false, &stamp);
@@ -1270,7 +1270,7 @@ fn kid_tag(agent: &str, state: &str) -> Vec<Span<'static>> {
         out.push(Span::styled(" subthread", theme::muted()));
     }
     if state != "done" {
-        out.push(Span::styled(format!(" · {state}"), Style::default().fg(theme::pal().danger)));
+        out.push(Span::styled(format!(" · {state}"), Style::default().fg(theme::pal().error())));
     }
     out
 }
@@ -1288,7 +1288,7 @@ fn kid_rows(title: &str, state: &str, text: &str, width: usize, bar: &[Span<'sta
     if state == "done" {
         rows.extend(memo::markdown(text.trim_end(), width, bar));
     } else {
-        rows.extend(render::plain(text.trim_end(), width, Style::default().fg(theme::pal().danger), bar));
+        rows.extend(render::plain(text.trim_end(), width, Style::default().fg(theme::pal().error()), bar));
     }
     rows
 }
@@ -1437,7 +1437,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                 if !allow {
                     let st = if *permission { "denied" } else { "declined" };
                     d.rows.push(Row::plain(Line::from(bar.to_vec())));
-                    d.rows.extend(render::plain(st, inner, Style::default().fg(theme::pal().warn), &bar));
+                    d.rows.extend(render::plain(st, inner, theme::fg(theme::pal().caution()), &bar));
                 }
                 close(&mut d, &mut cur);
                 if *allow {
@@ -1498,8 +1498,8 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                             let what = if what.is_empty() { String::new() } else { format!(" for {what}") };
                             let cap = agents_on(roster, &h, true, agent);
                             d.rows.push(Row::plain(Line::from(bar.to_vec())));
-                            let pre = [bar[0].clone(), Span::styled("● ", Style::default().fg(theme::pal().warn))];
-                            d.rows.extend(render::plain(&format!("{agent} needs a {label} agent{what}."), inner, Style::default().fg(theme::pal().warn), &pre));
+                            let pre = [bar[0].clone(), Span::styled("● ", theme::fg(theme::pal().attention()))];
+                            d.rows.extend(render::plain(&format!("{agent} needs a {label} agent{what}."), inner, theme::fg(theme::pal().attention()), &pre));
                             let list = if cap.is_empty() { "none".to_string() } else { cap.iter().map(|(n, _)| format!("@{n}")).collect::<Vec<_>>().join(", ") + " · @agent → + adds it" };
                             d.rows.extend(render::plain(&format!("Agents on {label}: {list}"), inner, theme::muted(), &[bar[0].clone(), Span::raw("  ")]));
                         }
@@ -1589,7 +1589,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
                 let c = color_of(colors, agent);
                 let pre = [Span::styled("● ", Style::default().fg(*color)), Span::styled(format!("{agent} "), Style::default().fg(c))];
                 d.rows.extend(render::plain(text, w, Style::default().fg(*color), &pre));
-                if *color == theme::pal().danger {
+                if *color == theme::pal().error() {
                     for h in error_hint(agent, text, roster, resume_of(t, item)) {
                         d.rows.extend(render::plain(&h, w, theme::muted(), &[Span::raw("  ")]));
                     }
@@ -1604,7 +1604,7 @@ fn draw_bubbles(t: &Thread, width: u16, colors: &Colors, roster: &[(String, Stri
     if let Some(a) = t.asks.first() {
         gap(&mut d);
         let c = color_of(colors, &a.agent);
-        let border = Style::default().fg(theme::pal().warn);
+        let border = theme::fg(theme::pal().attention());
         let more = if t.asks.len() > 1 { format!(" · {} more waiting", t.asks.len() - 1) } else { String::new() };
         let what = if a.tool == crate::flowbar::WAIT_TOOL { "waits on you" } else if a.questions().is_empty() { "asks to run" } else { "asks" };
         let name = vec![Span::styled(a.agent.clone(), Style::default().fg(c).add_modifier(Modifier::BOLD)), Span::styled(format!(" {what}{more}"), border)];
@@ -2043,10 +2043,10 @@ mod tests {
         let end = |error: &str| Kind::TurnEnd { cost: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0, ctx: 0, window: 0, ms: 1, error: Some(error.into()) };
         t.push(&ev(Some("ada"), Kind::TurnStart));
         t.push(&ev(Some("ada"), end(crate::engine::host::INTERRUPTED)));
-        assert!(matches!(t.items.last(), Some(Item::Note { text, color, .. }) if text == "interrupted" && *color == theme::pal().muted));
+        assert!(matches!(t.items.last(), Some(Item::Note { text, color, .. }) if text == "interrupted" && *color == theme::pal().subtext0));
         t.push(&ev(Some("ada"), Kind::TurnStart));
         t.push(&ev(Some("ada"), end("error_during_execution")));
-        assert!(matches!(t.items.last(), Some(Item::Note { color, .. }) if *color == theme::pal().danger));
+        assert!(matches!(t.items.last(), Some(Item::Note { color, .. }) if *color == theme::pal().error()));
     }
 
     #[test]
@@ -2200,7 +2200,7 @@ fn shell_rows(command: &str, output: &str, code: i32, ts: u64, dir: Option<&str>
     }
     if code != 0 {
         let what = if code < 0 { "killed".to_string() } else { format!("exit {code}") };
-        head.push(Span::styled(format!(" · {what}"), Style::default().fg(theme::pal().danger)));
+        head.push(Span::styled(format!(" · {what}"), Style::default().fg(theme::pal().error())));
     }
     let mut rows = vec![Row::plain(Line::from(head))];
     let lines: Vec<&str> = output.trim_end().lines().collect();

@@ -414,7 +414,7 @@ impl PrList {
             let rect = Rect { y, height: 1, ..list };
             match r {
                 RowKind::Repo(name, n) => {
-                    let line = Line::from(vec![Span::styled(format!(" {name}"), theme::accent_bold()), Span::styled(format!("  {n}"), theme::muted())]);
+                    let line = Line::from(vec![Span::styled(format!(" {name}"), theme::bold()), Span::styled(format!("  {n}"), theme::muted())]);
                     f.render_widget(Paragraph::new(line), rect);
                 }
                 RowKind::Pr(i) => {
@@ -430,11 +430,11 @@ impl PrList {
                     let on = pick == self.cursor;
                     let base = if on && focused { theme::pill() } else { Style::default() };
                     let line = Line::from(vec![
-                        Span::styled(num, base.fg(theme::pal().muted)),
+                        Span::styled(num, base.fg(theme::pal().subtext0)),
                         Span::styled(format!("{mark} "), base.fg(c)),
                         Span::styled(title, if on { base.add_modifier(Modifier::BOLD) } else { base.fg(theme::pal().text) }),
                         Span::styled(" ".repeat(pad + 1), base),
-                        Span::styled(right, base.fg(theme::pal().muted)),
+                        Span::styled(right, base.fg(theme::pal().subtext0)),
                     ]);
                     f.render_widget(Paragraph::new(line).style(base), rect);
                     self.rows.push((rect, pick));
@@ -446,10 +446,10 @@ impl PrList {
 
 fn state_mark(s: State) -> (&'static str, Color) {
     match s {
-        State::Open => ("●", theme::pal().ok),
-        State::Draft => ("◌", theme::pal().muted),
-        State::Merged => ("◆", Color::Rgb(163, 113, 247)),
-        State::Closed => ("✕", theme::pal().danger),
+        State::Open => ("●", theme::pal().success()),
+        State::Draft => ("◌", theme::pal().subtext0),
+        State::Merged => ("◆", theme::pal().merged()),
+        State::Closed => ("✕", theme::pal().error()),
     }
 }
 

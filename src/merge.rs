@@ -1189,7 +1189,7 @@ impl Merge {
             let label = format!(" {} ", pr.label());
             let w = label.width() as u16;
             let st = if i == self.cur {
-                if on(Stop::Tabs) { Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD) } else { theme::pill() }
+                if on(Stop::Tabs) { theme::pill().add_modifier(Modifier::BOLD) } else { theme::pill() }
             } else {
                 theme::muted()
             };
@@ -1207,7 +1207,7 @@ impl Merge {
         for (s, label) in [(Sub::Overview, " overview "), (Sub::Changes, " changes ")] {
             let w = label.width() as u16;
             let st = if s == sub {
-                if on(Stop::Subs) { Style::default().bg(theme::pal().accent).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::pal().accent).add_modifier(Modifier::BOLD | Modifier::UNDERLINED) }
+                if on(Stop::Subs) { theme::pill().add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::pal().accent).add_modifier(Modifier::BOLD | Modifier::UNDERLINED) }
             } else {
                 theme::muted()
             };
@@ -1325,10 +1325,10 @@ impl Merge {
         }
         // the status (a dropdown), the author, the times
         let (sc, sl) = match p.state {
-            State::Open => (theme::pal().ok, "● open"),
-            State::Draft => (theme::pal().muted, "◌ draft"),
-            State::Merged => (Color::Rgb(163, 113, 247), "◆ merged"),
-            State::Closed => (theme::pal().danger, "✕ closed"),
+            State::Open => (theme::pal().success(), "● open"),
+            State::Draft => (theme::pal().subtext0, "◌ draft"),
+            State::Merged => (theme::pal().merged(), "◆ merged"),
+            State::Closed => (theme::pal().error(), "✕ closed"),
         };
         let status = format!(" {sl} ▾ ");
         let sw = status.width() as u16;
@@ -1343,13 +1343,13 @@ impl Merge {
         rows.push(Row { line: Line::from(vec![Span::styled(status, st), Span::styled(meta, theme::muted())]), stops: vec![(0, sw, Stop::Status)], input: 0 });
         // the branches, the size
         rows.push(Row::new(Line::from(vec![
-            Span::styled(p.base.clone(), Style::default().fg(theme::pal().accent)),
+            Span::styled(p.base.clone(), theme::fg(theme::pal().info())),
             Span::styled(" ← ", theme::muted()),
-            Span::styled(p.head.clone(), Style::default().fg(theme::pal().accent)),
+            Span::styled(p.head.clone(), theme::fg(theme::pal().info())),
             Span::styled("  ", theme::muted()),
-            Span::styled(format!("+{}", p.additions), Style::default().fg(theme::pal().ok)),
+            Span::styled(format!("+{}", p.additions), Style::default().fg(theme::pal().success())),
             Span::raw(" "),
-            Span::styled(format!("−{}", p.deletions), Style::default().fg(theme::pal().danger)),
+            Span::styled(format!("−{}", p.deletions), Style::default().fg(theme::pal().error())),
             Span::styled(format!(" · {} files · {} commits", p.files, p.commits.len()), theme::muted()),
         ])));
         // the labels: x removes, + adds
@@ -1382,24 +1382,24 @@ impl Merge {
         let ready = p.ready();
         let (title, detail) = ready.text();
         let (icon, color) = match ready {
-            Ready::Mergeable => ("✓", theme::pal().ok),
-            Ready::Merged => ("◆", Color::Rgb(163, 113, 247)),
-            Ready::Conflicts | Ready::ChecksFailed | Ready::ChangesRequested | Ready::Closed => ("✕", theme::pal().danger),
-            Ready::ChecksRunning | Ready::Unknown => ("◷", theme::pal().warn),
-            _ => ("!", theme::pal().warn),
+            Ready::Mergeable => ("✓", theme::pal().success()),
+            Ready::Merged => ("◆", theme::pal().merged()),
+            Ready::Conflicts | Ready::ChecksFailed | Ready::ChangesRequested | Ready::Closed => ("✕", theme::pal().error()),
+            Ready::ChecksRunning | Ready::Unknown => ("◷", theme::pal().progress()),
+            _ => ("!", theme::pal().attention()),
         };
         let edge = Style::default().fg(color);
         rows.push(Row::new(Line::styled(format!("╭{}╮", "─".repeat(w.saturating_sub(2))), edge)));
         let mut buttons: Vec<(String, Stop, Style)> = Vec::new();
         if p.needs_update() {
-            buttons.push((if p.conflicts() { " resolve conflicts ".into() } else { " update branch ".into() }, Stop::Update, Style::default().bg(theme::pal().panel).fg(theme::pal().text)));
+            buttons.push((if p.conflicts() { " resolve conflicts ".into() } else { " update branch ".into() }, Stop::Update, Style::default().bg(theme::pal().surface0).fg(theme::pal().text)));
         }
         if matches!(p.state, State::Open | State::Draft) {
             let (label, st) = match (&p.auto_merge, ready) {
-                (Some(m), _) => (format!(" cancel auto-merge ({}) ", m.to_lowercase()), Style::default().bg(theme::pal().panel).fg(theme::pal().text)),
-                (None, Ready::Mergeable) => (format!(" merge · {} ", p.method.to_lowercase()), Style::default().bg(theme::pal().ok).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD)),
-                (None, Ready::Draft) => (" merge when ready ".into(), Style::default().bg(theme::pal().panel).fg(theme::pal().muted)),
-                (None, _) => (format!(" merge when ready · {} ", p.method.to_lowercase()), Style::default().bg(theme::pal().ok).fg(theme::pal().on_accent)),
+                (Some(m), _) => (format!(" cancel auto-merge ({}) ", m.to_lowercase()), Style::default().bg(theme::pal().surface0).fg(theme::pal().text)),
+                (None, Ready::Mergeable) => (format!(" merge · {} ", p.method.to_lowercase()), Style::default().bg(theme::pal().success()).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD)),
+                (None, Ready::Draft) => (" merge when ready ".into(), Style::default().bg(theme::pal().surface0).fg(theme::pal().subtext0)),
+                (None, _) => (format!(" merge when ready · {} ", p.method.to_lowercase()), Style::default().bg(theme::pal().success()).fg(theme::pal().on_accent)),
             };
             buttons.push((label, Stop::Merge, st));
         }
@@ -1441,12 +1441,12 @@ impl Merge {
         let open = t.is_some_and(|t| t.checks_open);
         let mut parts = Vec::new();
         if fail > 0 {
-            parts.push(Span::styled(format!("{fail} failed"), Style::default().fg(theme::pal().danger).add_modifier(Modifier::BOLD)));
+            parts.push(Span::styled(format!("{fail} failed"), Style::default().fg(theme::pal().error()).add_modifier(Modifier::BOLD)));
         }
         if pending > 0 {
-            parts.push(Span::styled(format!("{pending} running"), Style::default().fg(theme::pal().warn)));
+            parts.push(Span::styled(format!("{pending} running"), theme::fg(theme::pal().progress())));
         }
-        parts.push(Span::styled(format!("{pass} passed"), Style::default().fg(theme::pal().ok)));
+        parts.push(Span::styled(format!("{pass} passed"), Style::default().fg(theme::pal().success())));
         let mut spans = vec![Span::styled(format!("{} checks  ", if open { "▾" } else { "▸" }), hl(Stop::Checks, theme::bold()))];
         for (i, s) in parts.into_iter().enumerate() {
             if i > 0 {
@@ -1475,9 +1475,9 @@ impl Merge {
                     last = Some(c.verdict);
                 }
                 let (mark, mc) = match c.verdict {
-                    Verdict::Fail => ("✕", theme::pal().danger),
-                    Verdict::Pending => ("◷", theme::pal().warn),
-                    _ => ("✓", theme::pal().ok),
+                    Verdict::Fail => ("✕", theme::pal().error()),
+                    Verdict::Pending => ("◷", theme::pal().progress()),
+                    _ => ("✓", theme::pal().success()),
                 };
                 let s = Stop::Check(i);
                 let detail = match c.verdict {
@@ -1495,7 +1495,7 @@ impl Merge {
                     Span::styled(format!("    {mark} "), Style::default().fg(mc)),
                     Span::styled(crate::nav::fit(&name, room), hl(s, theme::text())),
                     Span::styled(format!("  {detail}"), theme::muted()),
-                    Span::styled(req, Style::default().fg(theme::pal().accent)),
+                    Span::styled(req, theme::text()),
                 ]);
                 let lw = line.width() as u16;
                 rows.push(Row { line, stops: vec![(0, lw, s)], input: 0 });
@@ -1517,7 +1517,7 @@ impl Merge {
         for (i, th) in p.threads.iter().enumerate() {
             // the comment box with the focus: an accent border (as a picked file's box)
             let picked = matches!(focus, Some(Stop::Comment(fi, _)) if fi == i);
-            let line_c = if picked { theme::accent_bold() } else { Style::default().fg(theme::pal().line) };
+            let line_c = if picked { theme::accent_bold() } else { Style::default().fg(theme::pal().overlay0) };
             let on_line = th.path.as_ref().map(|pa| format!(" · {pa}:{}", th.line.unwrap_or(0))).unwrap_or_default();
             let state = if th.resolved { " · resolved" } else if th.outdated { " · outdated" } else { "" };
             for (k, c) in std::iter::once(&th.root).chain(&th.replies).enumerate() {
@@ -1535,7 +1535,7 @@ impl Merge {
                 } else {
                     ""
                 };
-                let name_st = hl(s, Style::default().fg(if c.mine { theme::pal().accent } else { theme::pal().text }).add_modifier(Modifier::BOLD));
+                let name_st = hl(s, Style::default().fg(if c.mine { theme::pal().info() } else { theme::pal().text }).add_modifier(Modifier::BOLD));
                 let line = Line::from(vec![Span::styled(lead, line_c), Span::styled(crate::nav::fit(&head, w.saturating_sub(lead.width() + hint.width())), name_st), Span::styled(hint, theme::muted())]);
                 let lw = line.width() as u16;
                 rows.push(Row { line, stops: vec![(0, lw, s)], input: 0 });
