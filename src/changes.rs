@@ -3561,9 +3561,9 @@ impl View {
             return if p.filtering {
                 "type to filter · enter: 1st hit · esc: clear "
             } else if p.all {
-                "all changes · j k: file · c: comment · d: resolve · C: comments · space: pick · v: reviewed · esc: back · alt: panel "
+                "all changes · j k: file · c: comment · d: resolve · C: comments · space: pick · v: reviewed · esc: back · ← alt: panel "
             } else {
-                "commit, read only · j k: file · ←→: fold · f: filter · w: side by side · esc: back · alt: panel "
+                "commit, read only · j k: file · enter: fold · f: filter · w: side by side · esc: back · ← alt: panel "
             };
         }
 
@@ -3572,22 +3572,22 @@ impl View {
         }
 
         if self.scm.focus && !self.scm.msg_focus && self.scm.on_commit_file() {
-            return "j k · enter: the file in the review · →: show it, keys stay · ←: the commit · [ ]: sections ";
+            return "j k · enter / →: the file in the review · ←: the commit · [ ]: sections ";
         }
 
         if self.pr_src.is_some() {
             return if self.scm.focus {
-                "j k · enter on the commit: pick a commit · →: open the file · e: IDE · alt: diff "
+                "j k · enter on the commit: pick a commit · →: open the file · e: IDE · → alt: diff "
             } else if self.filtering {
                 "type to filter · enter: 1st hit · esc: clear "
             } else {
-                "j k: file · space: select · c: comment · v: reviewed · alt: panel · i: IDE · ctrl+m: prompt "
+                "j k: file · space: select · c: comment · v: reviewed · ← alt: panel · i: IDE · ctrl+m: prompt "
             };
         }
         if self.scm.focus && self.scm.msg_focus {
-            "commit message · ctrl+⏎: commit the staged files · ctrl+g: draft by model · esc: back "
+            "commit message · ctrl+⏎: commit the staged files · ctrl+g: draft by model · ↓ pgdn: list · esc: back "
         } else if self.scm.focus {
-            "j k · [ ]: sections · space: pick · e: IDE · s: stage / unstage · p: stash · →: open · x: remove · enter: restore · P: push · S: ship · ctrl+b: review "
+            "j k · [ ]: sections · space: pick (on a section: all) · e: IDE · s: stage / unstage · p: stash · → alt: review · x: remove · enter: restore · P: push · S: ship · ctrl+b: review "
         } else if self.filtering {
             "type to filter · enter: 1st hit · esc: clear "
         } else if self.row_comment(self.at).is_some() {
@@ -3951,6 +3951,13 @@ impl View {
             return self.panel_key(k);
         }
 
+        // ←: the keys to the panel (left of the review), as an alt tap; 0 file fold (enter folds)
+        let plain = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        if k.code == KeyCode::Left && plain {
+            self.toggle_focus();
+            return Act::None;
+        }
+
         // the panel's commit in the review's place: the keys are its (esc: back to the changes)
         if let Some(p) = self.peek.as_mut() {
             if k.code == KeyCode::Esc && !p.takes_esc() {
@@ -4031,8 +4038,6 @@ impl View {
                 return Act::Toast("changes: reading git".into());
             }
             KeyCode::Char('v') => return self.toggle_reviewed(),
-            KeyCode::Left => self.fold(true),
-            KeyCode::Right => self.fold(false),
             KeyCode::Char('t') => return Act::ToggleChat,
             KeyCode::Esc => {
                 if !self.filter.is_empty() {
@@ -5006,20 +5011,21 @@ Binary files a/img.png and b/img.png differ
     }
 
     #[test]
-    fn left_folds_right_opens_the_box() {
+    fn left_gives_the_keys_to_the_panel_right_back_0_fold() {
         let mut v = view(parse(DIFF));
-        let s = screen(&mut v, 100, 30);
-        assert!(s.iter().any(|l| l.contains("let b = 3;")));
+        screen(&mut v, 120, 30);
         press(&mut v, KeyCode::Down);
         press(&mut v, KeyCode::Down);
-        press(&mut v, KeyCode::Left);
-        let s = screen(&mut v, 100, 30);
-        let head = row_of(&s, "☐ src/a.rs");
-        assert!(s[head].starts_with("── ☐") && !s.iter().any(|l| l.contains("let b = 3;")), "folded: {s:#?}");
-        assert!(s[head].ends_with('▌'), "the cursor on the head: {s:#?}");
         press(&mut v, KeyCode::Right);
-        let s = screen(&mut v, 100, 30);
-        assert!(s.iter().any(|l| l.contains("let b = 3;")), "open: {s:#?}");
+        assert!(!v.scm.focus);
+        press(&mut v, KeyCode::Left);
+        assert!(v.scm.shown && v.scm.focus);
+        let s = screen(&mut v, 120, 30);
+        assert!(s.iter().any(|l| l.contains("let b = 3;")), "0 fold: {s:#?}");
+        press(&mut v, KeyCode::Right);
+        assert!(!v.scm.focus);
+        let s = screen(&mut v, 120, 30);
+        assert!(s.iter().any(|l| l.contains("let b = 3;")), "0 fold: {s:#?}");
     }
 
     #[test]

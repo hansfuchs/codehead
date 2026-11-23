@@ -734,6 +734,8 @@ impl View {
                 PRow::File(fi, _) => self.changes.files.get(fi).is_some_and(|x| self.scm.picked.contains(&x.path)),
                 PRow::Commit(ci) => self.changes.commits.list.get(ci).is_some_and(|c| self.scm.commit_picks.contains(&c.oid)),
                 PRow::Comment(ci) => self.comments.get(ci).is_some_and(|c| self.scm.comment_picks.contains(&c.id)),
+                // a group label: every item in it picked
+                ref r if r.label().is_some() || matches!(r, PRow::CommentFile(..)) => self.group_picked(r),
                 _ => false,
             };
             if picked {
@@ -1053,12 +1055,22 @@ impl View {
         self.scm.msg_focus = true;
     }
 
+    /// The keys from the commit message to list row AT (clamped).
+    fn leave_message(&mut self, at: usize) {
+        self.scm.msg_focus = false;
+        self.sync_rows();
+        self.scm.at = at.min(self.scm.rows.len().saturating_sub(1));
+    }
+
     /// A key for the commit message.
     fn msg_key(&mut self, k: KeyEvent) -> Act {
         let send = k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
         match k.code {
             KeyCode::Esc => self.scm.msg_focus = false,
             KeyCode::Enter if send => return self.commit(),
+            // ↓ on the last row: the list's 1st row; page down: its last row
+            KeyCode::Down if !send && self.scm.msg.on_last_row() => self.leave_message(0),
+            KeyCode::PageDown => self.leave_message(usize::MAX),
             KeyCode::Char('g') if k.modifiers.contains(KeyModifiers::CONTROL) => return self.draft(),
             _ => {
                 if !matches!(self.scm.msg.key(k), Outcome::Handled) && k.code == KeyCode::Enter {
@@ -1100,6 +1112,69 @@ impl View {
         })
     }
 
+    /// The items of group label R (folded ones too): file paths, comment ids, unpushed commit oids.
+    fn group_items(&self, r: &PRow) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let path = |i: usize| self.changes.files[i].path.clone();
+        let staged = |i: usize| self.changes.staged.get(&self.changes.files[i].path);
+        let files = |f: &dyn Fn(usize) -> bool| (0..self.changes.files.len()).filter(|&i| f(i)).map(path).collect::<Vec<_>>();
+        let (here, _) = self.comments_here();
+        let comments = |f: &dyn Fn(&super::Comment) -> bool| here.iter().filter(|(i, _)| f(&self.comments[*i])).map(|(i, _)| self.comments[*i].id.clone()).collect::<Vec<_>>();
+        let unpushed = || self.changes.commits.list.iter().filter(|c| !c.pushed).map(|c| c.oid.clone()).collect::<Vec<_>>();
+        match r {
+            PRow::Section(Sec::Staged, _) => (files(&|i| staged(i).is_some()), vec![], vec![]),
+            PRow::Section(Sec::Changes, _) => (files(&|i| staged(i) != Some(&true)), vec![], vec![]),
+            PRow::Level(l, _) => (files(&|i| staged(i) != Some(&true) && self.level_of(i) == *l), vec![], vec![]),
+            PRow::Section(Sec::Comments, _) => (vec![], comments(&|_| true), vec![]),
+            PRow::CState(resolved, _) => (vec![], comments(&|c| c.open() != *resolved), vec![]),
+            PRow::CLevel(l, _) => (vec![], comments(&|c| c.open() && c.level == *l), vec![]),
+            // a comments' file: its comments, the rows under it (never folded)
+            PRow::CommentFile(..) => {
+                let at = self.scm.rows.iter().position(|x| x == r).unwrap_or(self.scm.rows.len());
+                let ids = self.scm.rows[at.saturating_add(1).min(self.scm.rows.len())..]
+                    .iter()
+                    .map_while(|x| if let PRow::Comment(ci) = x { self.comments.get(*ci).map(|c| c.id.clone()) } else { None })
+                    .collect();
+                (vec![], ids, vec![])
+            }
+            PRow::Section(Sec::Commits, _) | PRow::Push(false, _) => (vec![], vec![], unpushed()),
+            _ => (vec![], vec![], vec![]),
+        }
+    }
+
+    /// Group label R has 1+ items, all of them picked.
+    fn group_picked(&self, r: &PRow) -> bool {
+        let (f, c, k) = self.group_items(r);
+        (!f.is_empty() || !c.is_empty() || !k.is_empty())
+            && f.iter().all(|p| self.scm.picked.contains(p))
+            && c.iter().all(|x| self.scm.comment_picks.contains(x))
+            && k.iter().all(|x| self.scm.commit_picks.contains(x))
+    }
+
+    /// Space on group label R: its items picked; all picked already: 0 picked.
+    fn pick_group(&mut self, r: &PRow) -> Act {
+        let (files, comments, commits) = self.group_items(r);
+        if files.is_empty() && comments.is_empty() && commits.is_empty() {
+            return Act::Toast(match r {
+                PRow::Push(true, _) => "pushed: read only, 0 pick".into(),
+                PRow::Section(Sec::Stash, _) => "stash: 0 pick (enter restores, x removes)".into(),
+                _ => "0 items to pick".into(),
+            });
+        }
+        let all = self.group_picked(r);
+        let n = files.len() + comments.len() + commits.len();
+        for p in files {
+            if all { self.scm.picked.remove(&p) } else { self.scm.picked.insert(p) };
+        }
+        for c in comments {
+            if all { self.scm.comment_picks.remove(&c) } else { self.scm.comment_picks.insert(c) };
+        }
+        for c in commits {
+            if all { self.scm.commit_picks.remove(&c) } else { self.scm.commit_picks.insert(c) };
+        }
+        self.built = None;
+        Act::Toast(if all { format!("{n} unpicked") } else { format!("{n} picked") })
+    }
+
     /// A key while the panel has the focus.
     pub(super) fn panel_key(&mut self, k: KeyEvent) -> Act {
         if self.scm.msg_focus {
@@ -1123,10 +1198,13 @@ impl View {
         let last = self.scm.rows.len().saturating_sub(1);
         let row = self.scm.rows.get(self.scm.at).cloned();
         match k.code {
+            // ↑ / page up on the 1st row: the commit message box above the list
+            KeyCode::Up | KeyCode::PageUp if self.scm.at == 0 && self.pr_src.is_none() && k.modifiers.is_empty() => self.scm.msg_focus = true,
             KeyCode::Up | KeyCode::Char('k') => self.scm.at = self.scm.at.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => self.scm.at = (self.scm.at + 1).min(last),
-            KeyCode::PageUp => self.scm.at = self.scm.at.saturating_sub(10),
-            KeyCode::PageDown => self.scm.at = (self.scm.at + 10).min(last),
+            // page up / down: the list's top / bottom
+            KeyCode::PageUp => self.scm.at = 0,
+            KeyCode::PageDown => self.scm.at = last,
             KeyCode::Home | KeyCode::Char('g') => self.scm.at = 0,
             KeyCode::End | KeyCode::Char('G') => self.scm.at = last,
             KeyCode::Left => match row.as_ref().and_then(PRow::label) {
@@ -1143,27 +1221,24 @@ impl View {
                 }
             },
             KeyCode::Enter | KeyCode::Right if row == Some(PRow::Pick) => self.scm.pick = Some(self.pick_index()),
-            KeyCode::Right => match row {
-                Some(r) if r.label().is_some() => {
-                    let f = r.label().unwrap_or(Fold::Sec(Sec::Staged));
-                    if self.scm.folded.contains(&f) {
-                        self.toggle_fold(f, Some(false));
-                    } else {
-                        self.scm.at = (self.scm.at + 1).min(last);
+            // →: the keys to the review (the panel's left of it), on the cursor row's file /
+            // comment / commit; ←: back (alt: the same switch)
+            KeyCode::Right => {
+                match row {
+                    Some(PRow::File(i, _)) => self.jump_file(i),
+                    Some(PRow::Comment(ci)) => self.jump_comment(ci),
+                    Some(PRow::Commit(ci)) => self.open_commit(ci, false),
+                    Some(PRow::CommitFile(ci, fi)) => self.open_commit_file(ci, fi),
+                    Some(PRow::All) => self.open_all(false),
+                    Some(PRow::Stash(si)) => {
+                        if let Some(i) = self.stash.get(si).and_then(|e| self.changes.files.iter().position(|f| f.path == e.path)) {
+                            self.jump_file(i);
+                        }
                     }
+                    _ => {}
                 }
-                Some(PRow::File(i, _)) => self.jump_file(i),
-                Some(PRow::Comment(ci)) => self.jump_comment(ci),
-                Some(PRow::Commit(ci)) => self.open_commit(ci, true),
-                Some(PRow::CommitFile(ci, fi)) => self.open_commit_file(ci, fi),
-                Some(PRow::All) => self.open_all(true),
-                Some(PRow::Stash(si)) => {
-                    if let Some(i) = self.stash.get(si).and_then(|e| self.changes.files.iter().position(|f| f.path == e.path)) {
-                        self.jump_file(i);
-                    }
-                }
-                _ => {}
-            },
+                self.scm.focus = false;
+            }
             KeyCode::Enter => match row {
                 Some(r) if r.label().is_some() => self.toggle_fold(r.label().unwrap_or(Fold::Sec(Sec::Staged)), None),
                 Some(PRow::File(i, _)) => {
@@ -1196,6 +1271,12 @@ impl View {
                 }
                 _ => {}
             },
+            // space on a section / group label: every item in it picked (all picked: 0 picked)
+            KeyCode::Char(' ') if row.as_ref().is_some_and(|r| r.label().is_some() || matches!(r, PRow::CommentFile(..))) => {
+                if let Some(r) = row {
+                    return self.pick_group(&r);
+                }
+            }
             KeyCode::Char(' ') => {
                 if let Some(PRow::File(i, _)) = row
                     && let Some(p) = self.changes.files.get(i).map(|f| f.path.clone())
@@ -1644,10 +1725,12 @@ mod tests {
         let all = draw(&mut v, 140, 40).join("\n");
         assert!(all.contains("x.txt") && !all.contains("read only"), "{all}");
 
-        // → on a commit: shown, the keys stay on the panel
+        // → on a commit: shown, the keys to the review; ← back to the panel
         on_commit(&mut v, "c2 subject");
         v.scm.focus = true;
         press(&mut v, KeyCode::Right);
+        assert!(v.peek.is_some() && !v.scm.focus);
+        press(&mut v, KeyCode::Left);
         assert!(v.peek.is_some() && v.scm.focus);
         assert!(v.peeked() == Some(v.changes.commits.list[2].oid.as_str()));
         drop(&w);
@@ -1665,7 +1748,7 @@ mod tests {
 
         assert!(!s.iter().any(|l| l.contains("a.txt")), "0 commit shown: 0 files: {s:#?}");
 
-        // → on c5: shown, its files under it (before c4), the keys stay on the panel
+        // → on c5: shown, its files under it (before c4), the keys to the review; ← back
         on_commit(&mut v, "c5 subject");
         press(&mut v, KeyCode::Right);
         if let Some(p) = v.peek.as_mut() {
@@ -1674,6 +1757,8 @@ mod tests {
         let s = panel(&mut v);
         let row = |s: &[String], pat: &str| s.iter().position(|l| l.contains(pat)).unwrap_or_else(|| panic!("{pat}: {s:#?}"));
 
+        assert!(!v.scm.focus);
+        press(&mut v, KeyCode::Left);
         assert!(v.scm.focus);
         assert!(row(&s, "c5 subject") < row(&s, "a.txt") && row(&s, "a.txt") < row(&s, "b.txt") && row(&s, "b.txt") < row(&s, "c4 subject"), "{s:#?}");
         assert!(s[row(&s, "b.txt")].contains(" d") && s[row(&s, "a.txt")].contains(" A "), "dir + letter: {s:#?}");
@@ -1681,7 +1766,7 @@ mod tests {
         // j onto b.txt (the 2nd file), enter: the review on its box, the keys there
         press(&mut v, KeyCode::Char('j'));
         press(&mut v, KeyCode::Char('j'));
-        assert!(v.hints().contains("enter: the file in the review"));
+        assert!(v.hints().contains("the file in the review"));
         press(&mut v, KeyCode::Enter);
         assert!(!v.scm.focus);
         let p = v.peek.as_ref().unwrap();
@@ -1693,6 +1778,7 @@ mod tests {
         assert!(matches!(v.scm.rows[v.scm.at], PRow::Commit(i) if v.changes.commits.list[i].subject == "c5 subject"));
         on_commit(&mut v, "c3 subject");
         press(&mut v, KeyCode::Right);
+        v.scm.focus = true;
         assert!(matches!(v.scm.rows[v.scm.at], PRow::Commit(i) if v.changes.commits.list[i].subject == "c3 subject"), "{:?}", v.scm.rows);
         if let Some(p) = v.peek.as_mut() {
             wait_read(p);
@@ -1710,6 +1796,7 @@ mod tests {
         // a click on a commit's file: the review on it, the keys stay on the panel
         on_commit(&mut v, "c5 subject");
         press(&mut v, KeyCode::Right);
+        v.scm.focus = true;
         if let Some(p) = v.peek.as_mut() {
             wait_read(p);
         }
@@ -1789,6 +1876,62 @@ mod tests {
         assert!(note.contains("pushed up to"), "{note}");
         assert_eq!(oid(&w, "origin/feat"), c3);
         drop(&w);
+    }
+
+    #[test]
+    fn space_on_a_section_picks_every_item_in_it_again_unpicks() {
+        let mut v = test_view();
+        draw(&mut v, 120, 30);
+        v.scm.focus = true;
+        v.sync_rows();
+        let n = v.changes.files.iter().filter(|f| v.changes.staged.get(&f.path) != Some(&true)).count();
+        assert!(n > 0);
+        v.scm.at = v.scm.rows.iter().position(|r| matches!(r, PRow::Section(Sec::Changes, _))).unwrap();
+
+        assert!(matches!(press(&mut v, KeyCode::Char(' ')), Act::Toast(t) if t == format!("{n} picked")));
+        assert_eq!(v.scm.picked.len(), n);
+        assert!(matches!(v.scm.rows[v.scm.at], PRow::Section(Sec::Changes, _)), "the cursor stays");
+
+        // folded: space still takes the hidden files
+        press(&mut v, KeyCode::Char(' '));
+        assert!(v.scm.picked.is_empty());
+        press(&mut v, KeyCode::Left);
+        press(&mut v, KeyCode::Char(' '));
+        assert_eq!(v.scm.picked.len(), n);
+    }
+
+    #[test]
+    fn arrows_and_page_keys_move_between_the_list_and_the_commit_message() {
+        let mut v = test_view();
+        draw(&mut v, 120, 30);
+        v.scm.focus = true;
+        v.sync_rows();
+        let last = v.scm.rows.len() - 1;
+        assert!(last > 0);
+
+        // page down / up: the list's bottom / top
+        press(&mut v, KeyCode::PageDown);
+        assert_eq!(v.scm.at, last);
+        press(&mut v, KeyCode::PageUp);
+        assert_eq!(v.scm.at, 0);
+
+        // ↑ on the 1st row: the message box; typing goes there
+        press(&mut v, KeyCode::Up);
+        assert!(v.scm.msg_focus);
+        press(&mut v, KeyCode::Char('k'));
+        assert_eq!(v.scm.msg.text(), "k");
+
+        // ↓ on its last row: the list's 1st row
+        press(&mut v, KeyCode::Down);
+        assert!(!v.scm.msg_focus);
+        assert_eq!(v.scm.at, 0);
+
+        // page up on the 1st row: the message box; page down there: the list's bottom
+        press(&mut v, KeyCode::PageUp);
+        assert!(v.scm.msg_focus);
+        press(&mut v, KeyCode::PageDown);
+        assert!(!v.scm.msg_focus);
+        assert_eq!(v.scm.at, last);
     }
 
     #[test]
