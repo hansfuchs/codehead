@@ -266,6 +266,9 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
     let lines = vec![Line::from(Span::styled(fit(&c.name(), w), title_st)), Line::from(status)];
     let body = ratatui::layout::Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
     Paragraph::new(lines).render(body, buf);
+    if cur {
+        theme::accent_edge(buf, r);
+    }
     if c.unread {
         let dot = ratatui::layout::Rect { x: r.right().saturating_sub(3), y: r.y, width: 1, height: 1 };
         Paragraph::new(Span::styled("●", theme::fg(theme::pal().info()).add_modifier(Modifier::BOLD))).render(dot, buf);

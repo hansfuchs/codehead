@@ -767,6 +767,10 @@ impl Form {
                 self.fields[i].render(f, input, focused);
                 self.rows.push((row, Hit::Field(i)));
             }
+            if on && !open {
+                // locked + highlighted: accent bar on the far left column
+                theme::accent_edge(f.buffer_mut(), r);
+            }
         }
         if self.aliases_on && let Some(row) = at(items[self.add_item()].0, 1) {
             let focused = active && self.focus == self.add_item();
@@ -1203,7 +1207,11 @@ mod tests {
         let buffer = terminal.backend().buffer().clone();
         let line = |y: u16| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>();
         let top = (0..140).find(|&y| line(y).contains("alias 1 · enter: edit · d: delete")).expect("highlighted box");
+        // locked + highlighted: the far left column an accent bar
         assert!(line(top).trim_start().starts_with('┌'));
+        let x = (0..80).find(|&x| buffer[(x, top + 1)].bg == theme::pal().accent).expect("accent bar");
+        assert!(buffer[(x, top + 2)].bg == theme::pal().accent);
+        assert!(buffer[(x, top)].bg != theme::pal().accent && buffer[(x, top + 3)].bg != theme::pal().accent);
         assert!(line(top + 1).contains("docs") && line(top + 2).contains("~/docs/"));
         assert!(line(top + 3).trim_start().starts_with('└'));
         // another item focused: gray border, plain title

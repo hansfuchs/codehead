@@ -270,6 +270,20 @@ pub fn cursor_row(buf: &mut Buffer, r: Rect) {
     }
 }
 
+/// A focused card / box R: its far left column on the accent (a solid bar), next to its accent
+/// border. The top + bottom cells (the corners) stay.
+pub fn accent_edge(buf: &mut Buffer, r: Rect) {
+    let r = r.intersection(buf.area);
+    if r.width == 0 || r.height < 3 {
+        return;
+    }
+    for y in r.top() + 1..r.bottom() - 1 {
+        if let Some(c) = buf.cell_mut((r.x, y)) {
+            c.set_symbol(" ").set_bg(pal().accent).set_fg(pal().on_accent);
+        }
+    }
+}
+
 pub fn text() -> Style {
     Style::default().fg(pal().text)
 }

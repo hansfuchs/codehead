@@ -152,7 +152,8 @@ pub fn effort(a: &Agent, claude: &str) -> String {
 
 /// Look of 1 card.
 pub struct Look<'a> {
-    /// Cursor on it: accent border, name + sprite in the agent color.
+    /// Cursor on it: accent border (+ accent bar on its far left column), name + sprite in the
+    /// agent color.
     pub cur: bool,
     /// Name + sprite in the agent color without the cursor (picked).
     pub lit: bool,
@@ -190,6 +191,9 @@ pub fn draw(f: &mut Frame, r: Rect, a: &Agent, rows: &[String], look: Look) {
     let sprite = agents::sprite(a).desynced(&a.name);
     let lines: Vec<Line> = crate::sprites::lines(&sprite, if lit { color } else { theme::pal().subtext0 }, side);
     f.render_widget(Paragraph::new(lines).style(base), inner);
+    if look.cur && look.border.is_some() {
+        theme::accent_edge(f.buffer_mut(), r);
+    }
 }
 
 /// Card border for the cursor / picked state (agent COLOR).
