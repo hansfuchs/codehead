@@ -738,7 +738,10 @@ impl View {
         if dir == self.cwd {
             return;
         }
-        let _ = std::env::set_current_dir(&dir);
+        // the process dir: shell runs, relative paths (tests: 1 process, 0 change)
+        if !cfg!(test) {
+            let _ = std::env::set_current_dir(&dir);
+        }
         self.files = crate::files::View::new(&self.id, &dir);
         self.paths = crate::paths::Paths::new(&dir);
         if self.shell_cwd == self.cwd {
@@ -5386,6 +5389,45 @@ mod prompt_draft_tests {
         let v = View::new(id, Path::new("/tmp"), "t", tx);
         assert_eq!(v.input.text(), "the task");
         let _ = std::fs::remove_dir_all(store::thread_dir(id));
+    }
+
+    /// A new thread's view opens before its worktree: the host's `worktree` result moves the
+    /// view (dir, changes, files) there. 0 host after the start: the task waits in the prompt.
+    #[test]
+    fn the_hosts_worktree_moves_the_view_and_a_missing_host_puts_the_task_in_the_prompt() {
+        let root = std::env::temp_dir().join(format!("codehead-view-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let sh = |c: &str| assert!(std::process::Command::new("sh").arg("-c").arg(c).current_dir(&root).output().unwrap().status.success(), "{c}");
+        sh("git init -q -b main r && cd r && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m 1 && git worktree add -q -b feat ../w");
+        let (repo, wt) = (root.join("r"), root.join("w"));
+        let mut t = store::Thread::new("wt view", "the task", &repo, vec!["zzwt".into()]);
+        t.worktree_pending = Some("feat".into());
+        t.kickoff = true;
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(&t.id, &repo, "wt view", tx);
+        v.load_checkouts();
+        assert_eq!(v.changes.dir(), repo.as_path());
+        // the host: thread.json first, then the log line
+        store::update(&t.id, |t| {
+            t.worktree = Some(wt.display().to_string());
+            t.worktree_pending = None;
+        })
+        .unwrap();
+        store::append(&t.id, &store::Event::new(Some("setup"), store::Kind::ToolResult { id: "worktree".into(), ok: true, output: String::new() })).unwrap();
+        assert!(v.read());
+        assert_eq!((v.cwd.as_path(), v.changes.dir(), v.shell_cwd.as_path()), (wt.as_path(), wt.as_path(), wt.as_path()));
+        // 0 host came: the task in the prompt (a typed text stays), kickoff off
+        v.kickoff_failed("the task");
+        assert_eq!(v.input.text(), "the task");
+        assert!(!store::load(&t.id).unwrap().kickoff);
+        v.input.set_text("my own words");
+        v.kickoff_failed("the task");
+        assert_eq!(v.input.text(), "my own words");
+        let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
