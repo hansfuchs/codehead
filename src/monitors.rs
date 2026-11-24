@@ -23,7 +23,9 @@ pub struct Watch {
 #[derive(Default)]
 pub struct Monitors {
     pub watches: Vec<Watch>,
-    reads: Reads<String, Vec<Watch>>,
+    /// None: the host did not answer in time (busy, e.g. a message to deliver): 0 change, 1 retry.
+    reads: Reads<String, Option<Vec<Watch>>>,
+    retry: bool,
     open: bool,
     selected: usize,
     scroll: usize,
@@ -49,7 +51,7 @@ impl Monitors {
         let id = thread.to_string();
         // the 1st read, then 1 per change of the files of the thread or of a kid (KIDS)
         let topics = self.topics.get_or_insert_with(crate::bus::subscribe);
-        let mut due = !std::mem::replace(&mut self.read_once, true);
+        let mut due = !std::mem::replace(&mut self.read_once, true) | std::mem::take(&mut self.retry);
         for t in topics.try_iter() {
             if let crate::bus::Topic::Thread(tid, crate::bus::Part::Meta | crate::bus::Part::Log | crate::bus::Part::Other) = t {
                 due |= tid == id || kids.contains(&tid);
@@ -61,7 +63,12 @@ impl Monitors {
             self.reads.request(id.clone(), move || load(&id));
         }
         let mut changed = false;
-        for (_, watches) in self.reads.poll() { self.watches = watches; changed = true; }
+        for (_, watches) in self.reads.poll() {
+            match watches {
+                Some(w) => { self.watches = w; changed = true; }
+                None => self.retry = true,
+            }
+        }
         self.watches.retain(|w| !self.ended.contains(&w.key()));
         let now = crate::engine::now_ms();
         let n = self.watches.len();
@@ -295,16 +302,22 @@ fn completed(path: &str) -> HashSet<String> {
 }
 
 /// Watches of THREAD and of its running sub-threads (their agents marked `(sub)`).
-fn load(thread: &str) -> Vec<Watch> {
-    let Some(t) = crate::engine::store::load(thread) else { return Vec::new() };
-    let (live, _) = crate::engine::client::state(&t.id);
-    let mut out = watches_of(&t, &live);
+/// None: a host did not answer in time (busy): its live agents unknown.
+fn load(thread: &str) -> Option<Vec<Watch>> {
+    let Some(t) = crate::engine::store::load(thread) else { return Some(Vec::new()) };
+    let mut out = watches_of(&t, &live(&t.id)?);
     for kid in &t.kids {
-        let mut w = watches(kid);
+        let Some(k) = crate::engine::store::load(kid) else { continue };
+        let mut w = watches_of(&k, &live(&k.id)?);
         for x in &mut w { x.agent = format!("{} (sub)", x.agent); }
         out.extend(w);
     }
-    out
+    Some(out)
+}
+
+/// Live agents of thread ID: 0 host → empty; a host with 0 answer in time → None.
+fn live(id: &str) -> Option<Vec<String>> {
+    crate::engine::client::state_known(id).map(|s| s.live)
 }
 
 /// Watches of thread ID alone (0 sub-thread), its live agents from its host.

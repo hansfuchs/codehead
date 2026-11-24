@@ -123,7 +123,17 @@ pub struct State {
 
 /// Live and busy agents of thread ID, the running turns' tokens (1 ping).
 pub fn state_full(id: &str) -> State {
-    let Ok(v) = send_within(id, &serde_json::json!({"op": "ping"}), Duration::from_millis(500)) else { return State::default() };
+    state_known(id).unwrap_or_default()
+}
+
+/// `state_full`, None when a host runs but gives 0 answer in time (busy): its state unknown.
+pub fn state_known(id: &str) -> Option<State> {
+    let v = match send_within(id, &serde_json::json!({"op": "ping"}), Duration::from_millis(500)) {
+        Ok(v) => v,
+        // 0 host: 0 live agent
+        Err(_) if !alive(id) => return Some(State::default()),
+        Err(_) => return None,
+    };
     let names = |k: &str| v[k].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
-    State { live: names("live"), busy: names("busy"), usage: serde_json::from_value(v["usage"].clone()).unwrap_or_default() }
+    Some(State { live: names("live"), busy: names("busy"), usage: serde_json::from_value(v["usage"].clone()).unwrap_or_default() })
 }
