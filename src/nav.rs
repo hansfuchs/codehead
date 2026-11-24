@@ -32,6 +32,9 @@ pub struct Card {
     /// Work not in the base yet (open) or 0 left (shipped: ready to archive). None: 0 read yet.
     #[serde(default)]
     pub land: Option<crate::landed::Land>,
+    /// Every agent on the thread reported done (0 turn since).
+    #[serde(default)]
+    pub done: bool,
     /// DIR is a linked worktree codehead made (delete / archive remove it).
     #[serde(default)]
     pub worktree: bool,
@@ -40,6 +43,22 @@ pub struct Card {
 impl Card {
     pub fn archived(&self) -> bool {
         self.state == "archived"
+    }
+
+    /// 0 work left to land: the branch landed / abandoned, or 0 code and every agent done (a new
+    /// thread has 0 code too: not shipped).
+    pub fn shipped(&self) -> bool {
+        use crate::landed::Land;
+        match &self.land {
+            Some(Land::Landed | Land::Abandoned(_)) => true,
+            Some(Land::NoCode) => self.done,
+            _ => false,
+        }
+    }
+
+    /// 0 code, agents not done, idle 3 days at NOW (unix ms): the owner decides.
+    pub fn stale(&self, now: u64) -> bool {
+        crate::landed::stale(self.land.as_ref(), self.done, self.activity, now)
     }
 }
 
@@ -113,7 +132,7 @@ pub fn has_draft(id: &str) -> bool {
 
 /// Time of the last agent event of thread ID (its text, error, question), unix ms. Reads
 /// only the tail of the log.
-fn last_item(id: &str) -> Option<u64> {
+pub fn last_item(id: &str) -> Option<u64> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(crate::engine::store::events_path(id)).ok()?;
     let len = f.metadata().ok()?.len();
@@ -158,6 +177,7 @@ pub fn load() -> Vec<Card> {
                 branch: t.branch.clone().unwrap_or_default(),
                 draft: has_draft(&t.id),
                 land: crate::landed::of(&t.id),
+                done: crate::notify::reported_done(&t.id),
                 worktree: t.worktree.as_deref().is_some_and(|p| std::path::Path::new(p).is_dir()),
                 id: t.id,
                 title: t.title,
@@ -255,9 +275,12 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
         vec![Span::styled(format!("{} ", WAVE[tick % WAVE.len()]), theme::fg(theme::pal().progress())), Span::styled(word, theme::muted())]
     } else if let Some(l) = open {
         vec![Span::styled(format!("◇ {}", l.badge()), theme::fg(theme::pal().caution()))]
-    } else if let Some(l) = &c.land {
+    } else if let Some(l) = c.land.as_ref().filter(|_| c.shipped()) {
         let st = if *l == crate::landed::Land::Landed { theme::fg(theme::pal().success()) } else { theme::muted() };
         vec![Span::styled(format!("⇲ {}", l.badge()), st)]
+    } else if c.stale(crate::engine::now_ms()) {
+        let days = crate::landed::archive_in_days(c.activity, crate::engine::now_ms());
+        vec![Span::styled(format!("◌ 0 code · auto-archive in {days}d"), theme::fg(theme::pal().caution()))]
     } else if c.live == 0 {
         vec![Span::styled("◦ ended", theme::muted())]
     } else {

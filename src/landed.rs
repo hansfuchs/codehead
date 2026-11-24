@@ -6,6 +6,9 @@
 //! dir without git count as 0 code: the owner handles main. A branch landed when its content is
 //! in `origin/<default>` or the local `<default>` (a local merge): ancestor, same patches
 //! (`git cherry`: rebase merges), or a merge that changes 0 (`git merge-tree`: squash merges).
+//! A new branch (0 commit since its creation) counts as 0 code too. 0 code: shipped only when
+//! every agent reported done; until then a plain thread (a new thread has 0 changes yet).
+//! 0 code, agents not done, idle 3 days: stale (the owner decides); idle 30 days: archived.
 //! A background pass reads every thread (archived ones: their kept branch, 5 min), `git fetch`
 //! per repo every 5 min.
 
@@ -24,6 +27,21 @@ const PASS_EVERY: Duration = Duration::from_secs(30);
 const FETCH_EVERY: Duration = Duration::from_secs(300);
 /// A fetch that takes longer: stopped.
 const FETCH_MAX: Duration = Duration::from_secs(60);
+const DAY_MS: u64 = 24 * 3600 * 1000;
+/// A thread with 0 code, agents not done, idle this long: stale (the owner decides).
+pub const STALE_MS: u64 = 3 * DAY_MS;
+/// A stale thread idle this long: archived by the background pass.
+pub const ARCHIVE_MS: u64 = 30 * DAY_MS;
+
+/// A thread with LAND, its agents DONE or not, last ACTIVITY (unix ms): stale at NOW.
+pub fn stale(land: Option<&Land>, done: bool, activity: u64, now: u64) -> bool {
+    land == Some(&Land::NoCode) && !done && now.saturating_sub(activity) > STALE_MS
+}
+
+/// Days left until the auto-archive of a stale thread (last ACTIVITY, unix ms) at NOW.
+pub fn archive_in_days(activity: u64, now: u64) -> u64 {
+    (activity + ARCHIVE_MS).saturating_sub(now).div_ceil(DAY_MS)
+}
 
 /// The landed state of a thread (the worst of its checkouts).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -40,7 +58,8 @@ pub enum Land {
     Abandoned(String),
     /// The branch's content is in the base.
     Landed,
-    /// 0 task branch: 0 git, or the default branch.
+    /// 0 task branch (0 git, the default branch) or a new branch without a commit. Shipped only
+    /// when every agent reported done (`Card::shipped`).
     NoCode,
 }
 
@@ -170,6 +189,11 @@ fn checkout(dir: &Path, branch: Option<&str>, dirty: bool, prs: &[PrSeen], seen:
     }
     let Some(rev) = oid(dir, &format!("refs/heads/{b}")) else { return Land::NoCode };
     let bases: Vec<String> = def.iter().flat_map(|d| [format!("origin/{d}"), d.clone()]).filter_map(|r| oid(dir, &r)).collect();
+    // a new branch (0 move since its creation, its tip in the base): 0 work yet, not shipped
+    let fresh = git(dir, &["reflog", "show", "--format=%H", &format!("refs/heads/{b}")]).1.lines().count() == 1;
+    if fresh && bases.iter().any(|base| git(dir, &["merge-base", "--is-ancestor", &rev, base]).0) {
+        return Land::NoCode;
+    }
     if bases.iter().any(|base| contained(dir, &rev, base, seen)) {
         return Land::Landed;
     }
@@ -221,8 +245,10 @@ pub fn start() {
     std::thread::spawn(|| {
         let mut seen = Seen::new();
         let mut slow_at: Option<Instant> = None;
+        let mut slow_runs = 0u32;
         loop {
             let slow = slow_at.is_none_or(|t| t.elapsed() >= FETCH_EVERY);
+            slow_runs += u32::from(slow);
             let threads: Vec<store::Thread> = store::all().into_iter().filter(|t| t.state != "deleted" && (slow || t.state != "archived")).collect();
             if slow {
                 slow_at = Some(Instant::now());
@@ -231,8 +257,15 @@ pub fn start() {
                     fetch(r);
                 }
             }
+            let now = crate::engine::now_ms();
             for t in &threads {
                 let land = thread(t, &prs_of(&t.id), &mut seen);
+                // stale for ARCHIVE_MS: archived. Not in the 1st slow pass: the done notes come
+                // from notify's 1st pass
+                let activity = crate::nav::last_item(&t.id).unwrap_or(0).max(t.updated);
+                if slow && slow_runs > 1 && t.state != "archived" && stale(Some(&land), crate::notify::reported_done(&t.id), activity, now) && now - activity > ARCHIVE_MS {
+                    let _ = crate::threads::archive(&t.id);
+                }
                 set(&t.id, land);
             }
             // oids fix the answers: only the size needs a cap
@@ -282,6 +315,12 @@ mod tests {
         assert_eq!(land(&repo, &[]), Land::NoCode, "main checkout: skipped");
         assert_eq!(land(&base, &[]), Land::NoCode, "0 git");
 
+        // a new thread's branch, 0 commit yet: 0 code (not shipped); a branch made at commits
+        // not in the base (a colleague's, fetched): open
+        sh(&repo, "git worktree add -q -b fresh ../f && git branch theirs feat");
+        assert_eq!(land(&base.join("f"), &[]), Land::NoCode);
+        assert_eq!(checkout(&repo, Some("theirs"), false, &[], &mut Seen::new()), Land::Unpushed(1));
+
         sh(&wt, "echo x > new.txt");
         assert_eq!(land(&wt, &[]), Land::Dirty(1));
 
@@ -328,6 +367,19 @@ mod tests {
 
         std::fs::remove_dir_all(&base).unwrap();
         std::fs::remove_dir_all(&base2).unwrap();
+    }
+
+    /// Stale: 0 code, agents not done, idle 3+ days; the days left to the auto-archive.
+    #[test]
+    fn stale_after_3_days_archive_after_30() {
+        let (now, day) = (100 * DAY_MS, DAY_MS);
+        assert!(stale(Some(&Land::NoCode), false, now - 3 * day - 1, now));
+        assert!(!stale(Some(&Land::NoCode), false, now - 2 * day, now), "recent");
+        assert!(!stale(Some(&Land::NoCode), true, now - 9 * day, now), "done: shipped");
+        assert!(!stale(Some(&Land::Unpushed(1)), false, now - 9 * day, now), "code: open");
+        assert!(!stale(None, false, 0, now), "0 state read");
+        assert_eq!(archive_in_days(now - 5 * day - 1, now), 25);
+        assert_eq!(archive_in_days(now - 31 * day, now), 0);
     }
 
     /// A thread: the worst of its checkouts; archived: its kept branch in the repo, 0 dirty read.
