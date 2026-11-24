@@ -574,29 +574,13 @@ pub fn pr_label(p: &Pr) -> String {
     }
 }
 
-/// The ship menu's place: right of the source control panel PANEL (its top), else left of it
-/// at the right edge, else (0 panel, too narrow) centered in AREA.
-fn ship_rect(area: Rect, panel: Rect, w: u16, h: u16) -> Rect {
-    let w = w.min(area.width);
-    let y = if panel.height > 0 { panel.y + 1 } else { area.y + area.height / 4 };
-    let y = y.min(area.bottom().saturating_sub(h));
-    let x = if panel.width == 0 {
-        area.x + (area.width - w) / 2
-    } else if panel.right() + w <= area.right() {
-        panel.right()
-    } else {
-        area.right() - w
-    };
-    Rect { x, y, width: w, height: h }
-}
-
 /// The 1st step of each agent task: the checkout must be on BRANCH, else the agent stops (a
 /// moved HEAD never gets pushed or a PR).
 fn branch_guard(branch: &str) -> String {
     format!("0. Check: `git rev-parse --abbrev-ref HEAD` prints `{branch}`. Any other output: stop, change nothing, report it.\n")
 }
 
-/// The ship menu's "create PR" (DRAFT: as a draft) for BRANCH: the task of its sub-thread.
+/// The ship section's "create PR" (DRAFT: as a draft) for BRANCH: the task of its sub-thread.
 fn pr_task(branch: &str, base: &str, draft: bool) -> String {
     let b = base_branch(base);
     let kind = if draft { "a draft pull request (`--draft`)" } else { "a pull request" };
@@ -613,7 +597,7 @@ fn pr_task(branch: &str, base: &str, draft: bool) -> String {
     )
 }
 
-/// The ship menu's "update PR description" of BRANCH's PR P: the task of its sub-thread.
+/// The ship section's "update PR description" of BRANCH's PR P: the task of its sub-thread.
 fn pr_desc_task(branch: &str, p: &Pr) -> String {
     let n = p.number;
     format!(
@@ -627,7 +611,7 @@ fn pr_desc_task(branch: &str, p: &Pr) -> String {
     )
 }
 
-/// The ship menu's "update PR on the newest base" of BRANCH's PR P (BASE: `origin/main`): the
+/// The ship section's "update PR on the newest base" of BRANCH's PR P (BASE: `origin/main`): the
 /// task of its sub-thread.
 fn pr_rebase_task(branch: &str, base: &str, p: &Pr) -> String {
     let b = base_branch(base);
@@ -647,7 +631,7 @@ fn pr_rebase_task(branch: &str, base: &str, p: &Pr) -> String {
     )
 }
 
-/// The ship menu's "ship" of BRANCH: the task of its sub-thread; the state of the branch now
+/// The ship section's "ship" of BRANCH: the task of its sub-thread; the state of the branch now
 /// along, so the agent skips the steps done.
 fn ship_task(branch: &str, c: &Changes, pr: Option<&Pr>) -> String {
     let b = base_branch(&c.base);
@@ -1188,7 +1172,7 @@ pub enum Act {
     Toast(String),
     /// Send this text to the thread (the review comments batch).
     Send(String),
-    /// A sub-thread of the thread does this task (`>sub TASK`; the ship menu's agent steps).
+    /// A sub-thread of the thread does this task (`>sub TASK`; the ship section's agent steps).
     Sub(String),
     /// The chat above the prompt: open / folded.
     ToggleChat,
@@ -1697,7 +1681,6 @@ pub struct View {
     version: u64,
     fx: crate::dissolve::Dissolve,
     /// An alt press with 0 key after it yet: its release toggles the focus.
-    alt_tap: bool,
     /// The last esc in the comment modal: a 2nd within 2 s drops an edited comment.
     esc_at: Option<std::time::Instant>,
     id: String,
@@ -1763,8 +1746,12 @@ pub struct View {
     /// row (shift+click: the rows from it).
     right_at: Option<Instant>,
     anchor: Option<usize>,
-    /// The source control panel (ctrl+b).
+    /// The source control panel (tab: the keys to it; context menu: show / hide).
     scm: scm::Panel,
+    /// `d d`: the 1st `d` armed the delete of this row (panel: true, row index); the key before
+    /// this one's arm (any other key between: 0 delete).
+    del: Option<(bool, usize)>,
+    del_prev: Option<(bool, usize)>,
     /// A modal over the view: a comment, a question; its buttons (yes / save: true).
     modal: Option<Modal>,
     modal_btns: Vec<(Rect, bool)>,
@@ -1985,8 +1972,9 @@ impl View {
             right_at: None,
             anchor: None,
             scm: scm::Panel::new(),
+            del: None,
+            del_prev: None,
             modal: None,
-            alt_tap: false,
             esc_at: None,
             modal_btns: Vec::new(),
             modal_quote: Rect::default(),
@@ -3390,22 +3378,12 @@ impl View {
                 }
                 _ => {}
             },
-            Some(Modal::Ship { .. }) => return self.ship_key(k),
             None => {}
         }
         Act::None
     }
 
-    /// S: the ship menu (a pull request's diff: read only).
-    pub(crate) fn open_ship(&mut self) -> Act {
-        if self.pr_src.is_some() {
-            return Act::Toast("a pull request's diff: read only (the merge tab's prompt tells the agents)".into());
-        }
-        self.modal = Some(Modal::Ship { cur: 0, armed: false });
-        Act::None
-    }
-
-    /// The ship menu's rows: the steps valid now (a stopped rebase: only its steps), by section.
+    /// The ship section's rows: the steps valid now (a stopped rebase: only its steps), by section.
     fn ship_rows(&self) -> Vec<ShipRow> {
         let busy = self.pushing();
         let row = |step: Ship, label: String, state: String, asks| {
@@ -3462,7 +3440,7 @@ impl View {
         Ok(b)
     }
 
-    /// Step S of the ship menu.
+    /// Step S of the ship section.
     fn ship(&mut self, s: Ship) -> Act {
         match s {
             Ship::Push => self.start_op(Op::Push),
@@ -3542,46 +3520,18 @@ impl View {
         }
     }
 
-    /// A key of the ship menu: ↑↓ j k move, enter runs (an outward step: enter enter), esc closes.
-    fn ship_key(&mut self, k: KeyEvent) -> Act {
+    /// Ship step I of the panel's context menu (its "ship" section) runs; grayed: the toast.
+    pub fn ctx_step(&mut self, i: usize) -> Act {
         let rows = self.ship_rows();
-        let Some(Modal::Ship { cur, armed }) = self.modal.as_mut() else { return Act::None };
-        let n = rows.len();
-        *cur = (*cur).min(n.saturating_sub(1));
-        match k.code {
-            KeyCode::Esc => self.modal = None,
-            KeyCode::Up | KeyCode::Char('k') => {
-                *cur = cur.saturating_sub(1);
-                *armed = false;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                *cur = (*cur + 1).min(n.saturating_sub(1));
-                *armed = false;
-            }
-            KeyCode::Enter => {
-                let Some(r) = rows.get(*cur) else {
-                    self.modal = None;
-                    return Act::None;
-                };
-                if r.off {
-                    return Act::Toast(PUSH_RUNS.into());
-                }
-                if r.asks && !*armed {
-                    *armed = true;
-                    return Act::None;
-                }
-
-                let step = r.step;
-                self.modal = None;
-                return self.ship(step);
-            }
-            _ => {}
+        let Some(r) = rows.get(i) else { return Act::None };
+        if r.off {
+            return Act::Toast(PUSH_RUNS.into());
         }
-        Act::None
+        self.ship(r.step)
     }
 
     /// The question's answer YES: its step runs.
-    fn confirm(&mut self, yes: bool) -> Act {
+    pub(super) fn confirm(&mut self, yes: bool) -> Act {
         let Some(Modal::Confirm { then, .. }) = self.modal.take() else { return Act::None };
         if !yes {
             return Act::None;
@@ -3632,7 +3582,6 @@ impl View {
     fn draw_modal(&mut self, f: &mut Frame, area: Rect) {
         use ratatui::widgets::{Block, Clear};
         self.modal_btns.clear();
-        let ship_rows = if matches!(self.modal, Some(Modal::Ship { .. })) { self.ship_rows() } else { Vec::new() };
         let Some(modal) = self.modal.as_mut() else { return };
         let w = area.width.saturating_sub(4).clamp(20, 110);
         let x = area.x + (area.width.saturating_sub(w)) / 2;
@@ -3747,63 +3696,6 @@ impl View {
                 self.modal_btns.push((Rect { width: 5, ..row }, true));
                 self.modal_btns.push((Rect { x: row.x + 7, width: 4, ..row }, false));
             }
-            Modal::Ship { cur, armed } => {
-                // the open PR on top: `codehead#1234` on the accent
-                let head = self.pr.as_ref().filter(|_| self.changes.stopped.is_none()).map(pr_label);
-                let top = u16::from(head.is_some());
-                // a rule between 2 sections
-                let rules = ship_rows.windows(2).filter(|p| p[0].group != p[1].group).count() as u16;
-                let w = w.min(72);
-                let h = (ship_rows.len() as u16 + rules + top + 2).min(area.height);
-                let r = ship_rect(area, self.scm.rect, w, h);
-                f.render_widget(Clear, r);
-                f.render_widget(Block::bordered().border_style(theme::accent()).title(Span::styled(" ship ", theme::accent_bold())).style(theme::text()), r);
-                let inner = Rect { x: r.x + 1, y: r.y + 1, width: r.width.saturating_sub(2), height: r.height.saturating_sub(2) };
-                if let Some(l) = head {
-                    let line = Line::from(vec![Span::styled(format!(" {l} "), theme::pill().add_modifier(Modifier::BOLD))]);
-                    f.render_widget(Paragraph::new(line), Rect { x: inner.x + 1, height: 1, width: inner.width.saturating_sub(1), ..inner });
-                }
-                let cur = (*cur).min(ship_rows.len().saturating_sub(1));
-                let mut y = inner.y + top;
-                for (i, row) in ship_rows.iter().enumerate() {
-                    if i > 0 && ship_rows[i - 1].group != row.group {
-                        if y >= inner.bottom() {
-                            break;
-                        }
-                        // ├──┤: the rule joins the border
-                        let buf = f.buffer_mut();
-                        buf[(r.x, y)].set_symbol("├").set_style(theme::accent());
-                        for x in inner.x..inner.right() {
-                            buf[(x, y)].set_symbol("─").set_style(theme::line());
-                        }
-                        buf[(r.right() - 1, y)].set_symbol("┤").set_style(theme::accent());
-                        y += 1;
-                    }
-                    if y >= inner.bottom() {
-                        break;
-                    }
-                    let on = i == cur;
-                    let state = if on && *armed { "enter again".to_string() } else { row.state.clone() };
-                    let state_st = if on && *armed { theme::fg(theme::pal().caution()).add_modifier(Modifier::BOLD) } else { theme::muted() };
-                    let room = usize::from(inner.width).saturating_sub(5);
-                    let label = crate::nav::fit(&row.label, room.saturating_sub(state.width() + 2));
-                    let gap = room.saturating_sub(label.width() + state.width());
-                    let base = if on { theme::pill_dim() } else { theme::text() };
-                    // grayed: label and glyph muted, 0 bold
-                    let (lab_st, mark_st) = if row.off { (base.patch(theme::muted()), base.patch(theme::muted())) } else { (if on { base.add_modifier(Modifier::BOLD) } else { base }, base.patch(theme::accent())) };
-                    let line = Line::from(vec![
-                        Span::styled(if on { "›" } else { " " }, base.patch(theme::accent())),
-                        // ✦: the step goes to an agent
-                        Span::styled(if row.agent { format!(" {AGENT_GLYPH} ") } else { "   ".into() }, mark_st),
-                        Span::styled(label, lab_st),
-                        Span::styled(" ".repeat(gap), base),
-                        Span::styled(state, base.patch(state_st)),
-                        Span::styled(" ", base),
-                    ]);
-                    f.render_widget(Paragraph::new(line), Rect { y, height: 1, ..inner });
-                    y += 1;
-                }
-            }
         }
     }
 
@@ -3911,21 +3803,20 @@ impl View {
         match &self.modal {
             Some(Modal::Comment { .. }) => return "ctrl+⏎: save · @agent: it gets the comment at once · esc: close (edited: esc esc) · alt+↑↓ / wheel: scroll · 0 text: delete ",
             Some(Modal::Confirm { .. }) => return "y / enter: yes · n / esc: no ",
-            Some(Modal::Ship { .. }) => return "↑↓ move · enter: run (outward: enter enter) · esc: close ",
             None => {}
         }
         if let Some(p) = self.peek.as_ref().filter(|_| !self.scm.focus) {
             return if p.filtering {
                 "type to filter · enter: 1st hit · esc: clear "
             } else if p.all {
-                "all changes · j k: file · c: comment · d: resolve · C: comments · space: pick · v: reviewed · esc: back · ← alt: panel "
+                "all changes · j k: file · c: comment · C: comments · space: pick · v: reviewed / resolve · esc: back · ←: panel · ctrl+.: actions "
             } else {
-                "commit, read only · j k: file · enter: fold · f: filter · w: side by side · esc: back · ← alt: panel "
+                "commit, read only · j k: file · enter: fold · ctrl+f: filter · w: side by side · esc: back · ←: panel "
             };
         }
 
         if self.scm.focus && !self.scm.msg_focus && self.scm.on_commit() {
-            return "j k · space: pick · enter: show · u: uncommit · P: push (picked: up to) · S: ship · [ ]: sections · esc: 0 picks ";
+            return "j k · space: pick · enter: show · P: push (picked: up to) · [ ]: sections · ctrl+.: uncommit, ship ";
         }
 
         if self.scm.focus && !self.scm.msg_focus && self.scm.on_commit_file() {
@@ -3934,24 +3825,24 @@ impl View {
 
         if self.pr_src.is_some() {
             return if self.scm.focus {
-                "j k · enter on the commit: pick a commit · →: open the file · e: IDE · → alt: diff "
+                "j k · enter on the commit: pick a commit · →: open the file · e: IDE · tab: next "
             } else if self.filtering {
                 "type to filter · enter: 1st hit · esc: clear "
             } else {
-                "j k: file · space: select · c: comment · v: reviewed · ← alt: panel · i: IDE · ctrl+m: prompt "
+                "j k: file · space: select · c: comment · v: reviewed · ←: panel · e: IDE · tab: next · ctrl+.: actions "
             };
         }
         if self.scm.focus && self.scm.msg_focus {
             "commit message · ctrl+⏎: commit the staged files · ctrl+g: draft by model · ↓ pgdn: list · esc: back "
         } else if self.scm.focus {
-            // the panel: only S, so the ship menu stands out (the panel's keys: README, ? help)
-            "S: ship "
+            // the panel: its keys sit in its context menu (ctrl+.), the ship steps too
+            "tab: next · ctrl+.: actions, ship "
         } else if self.filtering {
             "type to filter · enter: 1st hit · esc: clear "
         } else if self.row_comment(self.at).is_some() {
-            "comment · enter: unfold · c: reply · e: edit · C: fold · d: resolve · x: delete · ctrl+⏎: send the batch · i: IDE "
+            "comment · enter: unfold / edit · c: reply · v: resolve · C: fold · d d: delete · ctrl+⏎: send the batch · ctrl+.: actions "
         } else {
-            "j k: file · space: select · s: stage · c: comment · v: reviewed · ctrl+m: prompt · i: IDE · P: push · S: ship · ctrl+b: git · d: resolve · C: comments "
+            "j k: file · space: select · s: stage · c: comment · v: reviewed · e: IDE · tab: next · ctrl+.: actions "
         }
     }
 
@@ -4234,40 +4125,34 @@ impl View {
         self.scm.msg_focus = false;
     }
 
-    /// A modifier key alone (the kitty keyboard protocol: `crate::all_keys`): an alt tap
-    /// toggles the focus; true: it did.
-    pub fn modifier(&mut self, k: KeyEvent) -> bool {
-        use ratatui::crossterm::event::{KeyEventKind, ModifierKeyCode};
-        let alt = matches!(k.code, KeyCode::Modifier(ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt));
-        match k.kind {
-            KeyEventKind::Press if alt => self.alt_tap = true,
-            KeyEventKind::Repeat if alt => {}
-            KeyEventKind::Release if alt && std::mem::take(&mut self.alt_tap) && !self.typing() => {
-                self.toggle_focus();
-                return true;
-            }
-            _ => self.alt_tap = false,
-        }
-        false
-    }
-
-    /// A key other than a modifier: the next alt release is 0 tap.
-    pub fn no_tap(&mut self) {
-        self.alt_tap = false;
-    }
-
-    /// The side panel on / off (ctrl+b: from the view, from the prompt too).
-    /// ctrl+b: hidden → shown with the keys; shown, the keys in the review → the keys to the
-    /// panel; the panel with the keys → hidden (0 kitty protocol needed, as the alt tap is).
+    /// The side panel shown / hidden (the context menu); hidden: the keys go to the review.
     pub fn toggle_panel(&mut self) {
-        if self.scm.shown && !self.scm.focus {
-            self.scm.focus = true;
-            return;
-        }
-
         self.scm.shown = !self.scm.shown;
-        self.scm.focus = self.scm.shown;
+        self.scm.focus &= self.scm.shown;
         self.scm.msg_focus &= self.scm.shown;
+    }
+
+    /// The panel shows (tab walks to it).
+    pub fn panel_shown(&self) -> bool {
+        self.scm.shown
+    }
+
+    /// The keys to the panel (ON; it shows) or to the review.
+    pub fn focus_panel(&mut self, on: bool) {
+        if on {
+            self.scm.shown = true;
+        }
+        self.scm.focus = on;
+        self.scm.msg_focus = false;
+    }
+
+    /// `d`: the 1st press arms the delete of row AT (PANEL: of the panel); true: the 2nd press.
+    pub(super) fn del_armed(&mut self, panel: bool, at: usize) -> bool {
+        if self.del_prev == Some((panel, at)) {
+            return true;
+        }
+        self.del = Some((panel, at));
+        false
     }
 
     /// The source control panel has the keys.
@@ -4277,10 +4162,8 @@ impl View {
 
     pub fn key(&mut self, k: KeyEvent) -> Act {
         if matches!(k.code, KeyCode::Modifier(_)) {
-            self.modifier(k);
             return Act::None;
         }
-        self.alt_tap = false;
         if self.modal.is_some() {
             return self.modal_key(k);
         }
@@ -4288,12 +4171,7 @@ impl View {
             return self.filter_key(k);
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        // ctrl+b: the panel on / off; alt alone (a tap: press, release, 0 key between): the keys
-        // to the panel / the review
-        if ctrl && k.code == KeyCode::Char('b') {
-            self.toggle_panel();
-            return Act::None;
-        }
+        self.del_prev = self.del.take();
 
         // ctrl+f: the filter (the only key to it); the commit message keeps its keys
         if !self.scm.msg_focus && crate::textarea::is_filter_key(&k) {
@@ -4317,7 +4195,7 @@ impl View {
             return self.panel_key(k);
         }
 
-        // ←: the keys to the panel (left of the review), as an alt tap; 0 file fold (enter folds)
+        // ←: the keys to the panel (left of the review); 0 file fold (enter folds)
         let plain = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
         if k.code == KeyCode::Left && plain {
             self.toggle_focus();
@@ -4377,8 +4255,8 @@ impl View {
                 self.select_row(self.at, on);
                 self.at = (self.at + 1).min(last);
             }
-            // d on a comment: resolved (it leaves the file view; the panel's RESOLVED has it)
-            KeyCode::Char('d') => {
+            // v on a comment: resolved (it leaves the file view; the panel's RESOLVED has it)
+            KeyCode::Char('v') if self.rows.get(self.at).is_some_and(|r| r.comment.is_some()) => {
                 if let Some(ci) = self.rows.get(self.at).and_then(|r| r.comment) {
                     return self.toggle_resolved(ci);
                 }
@@ -4429,7 +4307,7 @@ impl View {
             }
             KeyCode::Enter => {
                 if self.rows.get(self.at).is_some_and(|r| r.comment.is_some()) {
-                    return self.open_comment_row(self.at, false);
+                    return self.open_comment_row(self.at, true);
                 } else if let Some(f) = self.file_at() {
                     let on = !self.folded(f);
                     self.fold(on);
@@ -4454,14 +4332,6 @@ impl View {
                 }
                 return self.start_op(Op::StageLines(picks.into_iter().map(|(p, _, pk)| (p, pk)).collect()));
             }
-            KeyCode::Char('R') => {
-                if self.classifier.is_none() {
-                    return Act::Toast("classify: off (setting classify)".into());
-                }
-                self.apply_rank(true);
-                self.built = None;
-                return Act::Toast("classifying again…".into());
-            }
             // a / u: on a box head the file, on a diff row its hunk (a new file: the file)
             KeyCode::Char('a') | KeyCode::Char('u') => {
                 let stage = k.code == KeyCode::Char('a');
@@ -4478,12 +4348,12 @@ impl View {
                 }
             }
             KeyCode::Char('m') => self.focus_message(),
-            // S: the ship menu (push, rebase, PR, merge, CI log; a stopped rebase: its steps)
-            KeyCode::Char('S') => return self.open_ship(),
             // P: the unpushed commits to the upstream, asked
             KeyCode::Char('P') => return self.ask_push_all(),
             // c: the comment modal on the selected lines, else on the cursor's line
             // c on a comment / reply (0 selection): a reply on that comment
+            // c on a finding: into the comment batch (ctrl+enter sends it)
+            KeyCode::Char('c') if self.sel.is_empty() && self.rows.get(self.at).is_some_and(|r| r.finding.is_some()) => return self.take_finding(),
             KeyCode::Char('c') if self.sel.is_empty() && self.row_comment(self.at).is_some() => {
                 if let Some((ci, _)) = self.row_comment(self.at) {
                     self.reply_comment(ci);
@@ -4498,8 +4368,13 @@ impl View {
                     self.open_comment(vec![spot]);
                 }
             }
-            KeyCode::Char('x') => {
-                // x on a reply: that reply goes
+            // d d: delete the comment / reply, dismiss the finding under the cursor
+            KeyCode::Char('d') | KeyCode::Delete if self.rows.get(self.at).is_some_and(|r| r.comment.is_some() || r.finding.is_some()) => {
+                if !self.del_armed(false, self.at) {
+                    let what = if self.rows.get(self.at).is_some_and(|r| r.finding.is_some()) { "dismiss the finding" } else { "delete the comment" };
+                    return Act::Toast(format!("d again: {what}"));
+                }
+                // a reply: that reply goes
                 if let Some((ci, Some(r))) = self.row_comment(self.at) {
                     let id = self.comments[ci].id.clone();
                     if let Err(e) = self.write_through(|thread| threads::edit(thread, &id, Some(r), "")) {
@@ -4520,29 +4395,9 @@ impl View {
                     return Act::Toast("finding dismissed".into());
                 }
             }
-            // y on a finding: into the comment batch (ctrl+enter sends it)
-            KeyCode::Char('y') => {
-                if let Some(fi) = self.rows.get(self.at).and_then(|r| r.finding)
-                    && let Some(x) = self.review.as_ref().and_then(|r| r.findings.get(fi)).cloned()
-                {
-                    self.drop_finding(fi);
-                    let level = crate::rank::Level::parse(&x.severity).unwrap_or_default();
-                    self.comments.push(Comment { path: x.file.clone(), line: x.line, text: crate::review::as_comment(&x), level, ..Default::default() });
-                    self.save_comments();
-                    self.rebuild_here();
-                    return Act::Toast(format!("finding → comment batch · {} · ctrl+enter: send", self.comments.len()));
-                }
-            }
             KeyCode::Char('V') => return self.start_review(),
-            // o / e: the IDE at the 1st selected line, else at the cursor's line
-            // e on a comment / reply: edit it
-            KeyCode::Char('e') if self.row_comment(self.at).is_some() => {
-                if let Some((ci, reply)) = self.row_comment(self.at) {
-                    self.edit_comment(ci, reply);
-                }
-            }
-            // o / e / i: the file in the IDE
-            KeyCode::Char('o') | KeyCode::Char('e') | KeyCode::Char('i') => {
+            // e: the IDE at the 1st selected line, else at the cursor's line (as on every screen)
+            KeyCode::Char('e') => {
                 if let Some((path, line)) = self.open_spot() {
                     return Act::Open(path, line);
                 }
@@ -4602,6 +4457,107 @@ impl View {
     }
 
     /// r: the box under the cursor reviewed / not; reviewed: the cursor goes to the next box.
+    /// The finding under the cursor into the comment batch (ctrl+enter sends it).
+    fn take_finding(&mut self) -> Act {
+        if let Some(fi) = self.rows.get(self.at).and_then(|r| r.finding)
+            && let Some(x) = self.review.as_ref().and_then(|r| r.findings.get(fi)).cloned()
+        {
+            self.drop_finding(fi);
+            let level = crate::rank::Level::parse(&x.severity).unwrap_or_default();
+            self.comments.push(Comment { path: x.file.clone(), line: x.line, text: crate::review::as_comment(&x), level, ..Default::default() });
+            self.save_comments();
+            self.rebuild_here();
+            return Act::Toast(format!("finding → comment batch · {} · ctrl+enter: send", self.comments.len()));
+        }
+        Act::None
+    }
+
+    /// The classifier again (setting `classify`).
+    fn classify_again(&mut self) -> Act {
+        if self.classifier.is_none() {
+            return Act::Toast("classify: off (setting classify)".into());
+        }
+        self.apply_rank(true);
+        self.built = None;
+        Act::Toast("classifying again…".into())
+    }
+
+    /// The context menu (ctrl+.): the actions of the row under the cursor (review or panel).
+    pub fn ctx_items(&mut self) -> (String, Vec<crate::ctxmenu::Item<crate::ctxmenu::Act>>) {
+        use crate::ctxmenu::{Act as C, Item, key};
+        if self.scm.focus {
+            return self.panel_ctx_items();
+        }
+        let row = self.rows.get(self.at);
+        let mut v = Vec::new();
+        let title;
+        if row.is_some_and(|r| r.finding.is_some()) {
+            title = "finding".to_string();
+            v.push(Item::new("into the comment batch", "c", key('c')));
+            v.push(Item::new("dismiss", "d d", key('d')));
+        } else if let Some((ci, reply)) = self.row_comment(self.at) {
+            let c = &self.comments[ci];
+            title = c.id.clone();
+            v.push(Item::new("edit", "enter", C::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))));
+            v.push(Item::new("reply", "c", key('c')));
+            v.push(Item::new(if c.open() { "resolve" } else { "open again" }, "v", key('v')));
+            v.push(Item::new("pick for the next prompt", "space", key(' ')));
+            v.push(Item::new("1 row / whole text", "C", key('C')));
+            v.push(Item::new(if reply.is_some() { "delete the reply" } else { "delete" }, "d d", key('d')));
+            v.push(Item::new("open in the IDE", "e", key('e')));
+        } else {
+            title = self.file_at().map_or_else(|| "changes".to_string(), |f| f.path.clone());
+            let lines = !self.sel.is_empty();
+            v.push(Item::new("open in the IDE", "e", key('e')));
+            v.push(Item::new(if lines { "comment on the selected lines" } else { "comment on the line" }, "c", key('c')));
+            if lines {
+                v.push(Item::new("stage the selected lines", "s", key('s')));
+                v.push(Item::new("stash the selected lines", "p", key('p')));
+            }
+            v.push(Item::new("stage the file / hunk", "a", key('a')));
+            v.push(Item::new("unstage the file / hunk", "u", key('u')));
+            v.push(Item::new("reviewed on / off", "v", key('v')));
+        }
+        v.extend([
+            Item::new("send the comment batch", "ctrl+enter", C::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))),
+            Item::new("the reviewer reads the diff", "V", key('V')),
+            Item::new("classify again", "", C::Cmd("classify")),
+            Item::new("side by side / unified", "w", key('w')),
+            Item::new("read git again", "r", key('r')),
+        ]);
+        (title, v)
+    }
+
+    /// The pill on top of the context menu: the open PR (the panel's ship section).
+    pub fn ctx_head(&self) -> Option<String> {
+        self.scm.focus.then(|| self.pr.as_ref().filter(|_| self.changes.stopped.is_none()).map(pr_label)).flatten()
+    }
+
+    /// Where the context menu opens: right of the panel at its cursor row (as the ship menu
+    /// did), else above / below the review's cursor row.
+    pub fn ctx_place(&self) -> crate::ctxmenu::Place {
+        use crate::ctxmenu::Place;
+        if self.scm.focus && self.scm.rect.width > 0 {
+            let y = self.scm.lines.iter().find(|l| l.1 == self.scm.at).map_or(self.scm.rect.y + 1, |l| l.0);
+            return Place::Beside(self.scm.rect, y);
+        }
+        let y = self.area.y + (self.at.saturating_sub(self.top) as u16).min(self.area.height.saturating_sub(1));
+        Place::At(Rect { y, height: 1, ..self.area })
+    }
+
+    /// A context menu command with 0 key of its own.
+    pub fn ctx_cmd(&mut self, c: &str) -> Act {
+        match c {
+            "classify" => self.classify_again(),
+            "uncommit" => self.ask_uncommit(),
+            "clear stash" if !self.stash.is_empty() => {
+                self.modal = Some(Modal::Confirm { question: format!("clear the stash? {} entries, their lines gone for good", self.stash.len()), yes: false, then: Then::ClearStash });
+                Act::None
+            }
+            _ => Act::None,
+        }
+    }
+
     fn toggle_reviewed(&mut self) -> Act {
         let Some(f) = self.file_at().cloned() else { return Act::None };
         let on = !self.is_reviewed(&f);
@@ -4810,12 +4766,9 @@ enum Modal {
     Comment { title: String, quote: Vec<QLine>, scroll: usize, target: Target, spots: Vec<Spot>, text: Box<crate::textarea::TextArea>, level: crate::rank::Level, on_level: bool },
     /// A yes / no question; THEN runs on yes.
     Confirm { question: String, yes: bool, then: Then },
-    /// The ship menu (S): the git / GitHub steps of the branch valid now; CUR: the cursor;
-    /// ARMED: a 1st enter on an outward row (a 2nd runs it).
-    Ship { cur: usize, armed: bool },
 }
 
-/// A step of the ship menu.
+/// A step of the ship section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ship {
     Push,
@@ -4838,10 +4791,7 @@ enum Ship {
     Abort,
 }
 
-/// The ship menu's mark of a step an agent does.
-const AGENT_GLYPH: &str = "✦";
-
-/// A section of the ship menu: the agent's whole run, git, the pull request, a stopped rebase.
+/// A section of the ship section: the agent's whole run, git, the pull request, a stopped rebase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShipGroup {
     Ship,
@@ -4871,7 +4821,7 @@ impl Ship {
     }
 }
 
-/// A row of the ship menu: its step, label, state, and whether it asks first (enter enter).
+/// A row of the ship section: its step, label, state, and whether it asks first (enter enter).
 struct ShipRow {
     step: Ship,
     /// Its section: a rule between 2 sections.
@@ -5017,6 +4967,31 @@ Binary files a/img.png and b/img.png differ
         t.draw(|f| v.draw(f, f.area())).unwrap();
         let b = t.backend().buffer().clone();
         (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect()).collect()
+    }
+
+    /// The panel's context menu (ctrl+. in the thread view) over the view, where the thread view
+    /// puts it: the screen.
+    pub fn draw_ctx(v: &mut View, w: u16, h: u16) -> Vec<String> {
+        v.focus_panel(true);
+        draw(v, w, h);
+        let (title, items) = v.ctx_items();
+        let mut m = crate::ctxmenu::Menu::new(title, items).expect("items");
+        m.head = v.ctx_head();
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        t.draw(|f| {
+            v.draw(f, f.area());
+            let p = v.ctx_place();
+            m.render(f, p, f.area());
+        })
+        .unwrap();
+        let b = t.backend().buffer().clone();
+        (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect()).collect()
+    }
+
+    /// Ship step LABEL of the panel's context menu runs (an outward one: the menu asked first).
+    pub fn ship(v: &mut View, label: &str) -> Act {
+        let i = v.ship_rows().iter().position(|r| r.label == label).unwrap_or_else(|| panic!("{label}"));
+        v.ctx_step(i)
     }
 }
 
@@ -5172,9 +5147,11 @@ Binary files a/img.png and b/img.png differ
         v.key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT));
         assert!(text(&v).iter().any(|l| l.contains("keep 2")));
 
-        // x on a comment row deletes it
+        // d d on a comment row deletes it (1 d: armed only)
         v.at = v.rows.iter().position(|r| r.comment == Some(1)).unwrap();
-        v.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(v.comment_count(), 2);
+        v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert_eq!(v.comment_count(), 1);
 
         // ctrl+enter: the batch (id, severity, author, the tool); the comment stays open, sent
@@ -5186,16 +5163,16 @@ Binary files a/img.png and b/img.png differ
         assert!(v.comments[0].sent);
         assert!(matches!(v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)), Act::Toast(t) if t.contains("0 new comments")), "sent once");
 
-        // d on the comment: resolved, it leaves the file view; d in the panel: open again
+        // v on the comment: resolved, it leaves the file view; v in the panel: open again
         v.at = v.rows.iter().position(|r| r.comment == Some(0)).unwrap();
-        v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
         assert_eq!(v.comment_count(), 0);
         assert!(!text(&v).iter().any(|l| l.contains("why 3?")), "resolved: out of the file view");
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-comments-0000"));
     }
 
     #[test]
-    fn findings_sit_under_their_line_y_takes_x_drops() {
+    fn findings_sit_under_their_line_c_takes_d_d_drops() {
         use crate::review::{Finding, Review};
         let mut v = view(parse(DIFF));
         v.id = "changes-findings-0000".into();
@@ -5207,17 +5184,18 @@ Binary files a/img.png and b/img.png differ
         let at = t.iter().position(|l| l.contains("+ let c = 4;")).unwrap();
         assert!(t[at + 1].contains("⚠ major · c is never read") && t[at + 2].contains("what breaks"), "{t:#?}");
         assert!(summary(&v).contains("2 findings (sonnet)"), "{t:#?}");
-        // y: the finding becomes a comment
+        // c: the finding becomes a comment
         v.at = v.rows.iter().position(|r| r.finding == Some(0)).unwrap();
-        v.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         assert_eq!(v.comment_count(), 1);
         assert_eq!(v.comments[0].text, "[major] c is never read: what breaks");
         assert_eq!(v.review.as_ref().unwrap().findings.len(), 1);
-        // x: dismissed
+        // d d: dismissed
         v.at = v.rows.iter().position(|r| r.finding == Some(0)).unwrap();
-        v.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert!(v.review.as_ref().unwrap().findings.is_empty());
-        assert_eq!(v.comment_count(), 1, "x on a finding: 0 comment deleted");
+        assert_eq!(v.comment_count(), 1, "d d on a finding: 0 comment deleted");
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-findings-0000"));
     }
 
@@ -5282,12 +5260,13 @@ Binary files a/img.png and b/img.png differ
     }
 
     #[test]
-    fn o_opens_the_line_under_the_cursor() {
+    fn e_opens_the_line_under_the_cursor() {
         let mut v = view(parse(DIFF));
         v.build(100);
         let i = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("let c = 4;")).unwrap();
         v.at = i;
-        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)), Act::Open("src/a.rs".into(), 12));
+        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)), Act::Open("src/a.rs".into(), 12));
+        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)), Act::None, "o, i: 0 IDE (e on every screen)");
         // a removed line: the worktree line it sat before (its old number: 11 as well here)
         let del = (0..v.rows.len()).find(|&i| text_of(&v, i).contains("- let b = 2;")).unwrap();
         v.at = del;
@@ -5820,7 +5799,7 @@ Binary files a/img.png and b/img.png differ
     }
 
     #[test]
-    fn e_on_a_comment_edits_it_0_text_deletes_it() {
+    fn enter_on_a_comment_edits_it_0_text_deletes_it() {
         let mut v = view(parse(DIFF));
         v.id = "changes-edit-0000".into();
         v.comments.clear();
@@ -5828,7 +5807,7 @@ Binary files a/img.png and b/img.png differ
         v.add_comment(&[Spot { path: "src/a.rs".into(), line: 11, lines: String::new() }], "old");
         assert_eq!(v.comments[0].quote, "+ let b = 3;");
         v.at = v.rows.iter().position(|r| r.comment == Some(0)).unwrap();
-        press(&mut v, KeyCode::Char('e'));
+        press(&mut v, KeyCode::Enter);
         let Some(Modal::Comment { target: Target::Edit(_), .. }) = &v.modal else { panic!("edit modal") };
         v.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         for c in "new".chars() {
@@ -5836,7 +5815,7 @@ Binary files a/img.png and b/img.png differ
         }
         v.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
         assert!(v.comments[0].text.ends_with("new"), "{:?}", v.comments);
-        press(&mut v, KeyCode::Char('e'));
+        press(&mut v, KeyCode::Enter);
         v.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         if let Some(Modal::Comment { text, .. }) = v.modal.as_mut() {
             text.set_text("");
@@ -6113,8 +6092,8 @@ Binary files a/img.png and b/img.png differ
         press(&mut v, KeyCode::Down);
         assert_eq!(v.row_comment(v.at), Some((0, Some(0))));
 
-        // e on the reply: its edit modal; ctrl+enter saves it
-        press(&mut v, KeyCode::Char('e'));
+        // enter on the reply: its edit modal; ctrl+enter saves it
+        press(&mut v, KeyCode::Enter);
         let Some(Modal::Comment { target: Target::EditReply(cid, 0), text: ta, .. }) = &mut v.modal else { panic!("reply edit modal") };
         assert_eq!(cid, "c1");
         ta.set_text("the spec says 3, page 2");
@@ -6132,15 +6111,15 @@ Binary files a/img.png and b/img.png differ
         assert_eq!((c.replies.len(), c.replies[1].by.as_str(), c.replies[1].text.as_str(), c.sent), (2, "", "ok, keep it", false));
         assert!(text(&v).iter().any(|l| l.contains("↳ you") && l.contains("ok, keep it")));
 
-        // x on the owner's reply: it goes
+        // d d on the owner's reply: it goes
         v.at = (0..v.rows.len()).find(|&i| v.row_comment(i) == Some((0, Some(1)))).unwrap();
-        press(&mut v, KeyCode::Char('x'));
+        press(&mut v, KeyCode::Char('d'));
+        press(&mut v, KeyCode::Char('d'));
         assert_eq!(read_comments(id)[0].replies.len(), 1);
 
-        // e / i off a comment: the file in the IDE
+        // e off a comment: the file in the IDE
         v.at = v.rows.iter().position(|r| r.head).unwrap();
         assert!(matches!(press(&mut v, KeyCode::Char('e')), Act::Open(..)));
-        assert!(matches!(press(&mut v, KeyCode::Char('i')), Act::Open(..)));
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(id));
     }
 

@@ -42,7 +42,7 @@ agents' MCP server). codehead starts them; you do not need to.
 | `CODEHEAD_HOME` | data folder (default `~/.local/share/codehead`) |
 | `CODEHEAD_RUN` | socket folder (default `$XDG_RUNTIME_DIR/codehead`) |
 | `CODEHEAD_ACP_<NAME>` | the ACP command of harness NAME (`CODEHEAD_ACP_PI="npx pi-acp"`) |
-| `CODEHEAD_VSCODE` | VS Code binary for `ctrl+i` |
+| `CODEHEAD_VSCODE` | VS Code binary for the IDE (`e`, menu → IDE) |
 | `CODEHEAD_DRAFTS` | drafts folder (default `~/.cache/codehead/drafts`) |
 | `CODEHEAD_NO_UPDATE_CHECK` | `1`: no daily release check |
 | `CODEHEAD_KEYLOG` | `1`: log every key event to `~/.cache/codehead/keys.log` (what the terminal sends) |

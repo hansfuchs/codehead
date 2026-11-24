@@ -111,7 +111,7 @@ enum Msg {
     Toast(String),
 }
 
-/// ctrl+q: the agents box above the prompt has the keys. AT: the highlighted agent (index in
+/// tab: the agents box above the prompt has the keys. AT: the highlighted agent (index in
 /// the box order), CUR: its menu row (flow, remove, replace with), ARMED: remove asks a 2nd enter,
 /// REPLACE: the agents to replace it with (cursor, 1st row in view).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -120,6 +120,44 @@ struct AgentsFocus {
     cur: usize,
     armed: bool,
     replace: Option<(usize, usize)>,
+}
+
+/// A region of the thread view: tab / shift+tab walk them (the focus ring), arrows move inside.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Region {
+    Prompt,
+    /// The changes, merge or files view.
+    View,
+    /// The source control panel of the changes view.
+    Panel,
+    /// The repo tabs of the changes view (2+ checkouts).
+    Repos,
+    /// The picker of an open question.
+    Ask,
+    /// The agents box above the prompt.
+    Agents,
+}
+
+/// A row of the context menu: a key for the region in focus, a quick command of the menu
+/// (its id), the shell history search.
+#[derive(Clone, Debug, PartialEq)]
+enum Ctx {
+    Key(KeyEvent),
+    /// A command of the view in focus with 0 key of its own.
+    Cmd(&'static str),
+    /// A ship step of the changes panel (its index).
+    Step(usize),
+    Menu(usize),
+    Hist,
+}
+
+/// A view's context menu action as the thread view's.
+fn ctx_of(a: crate::ctxmenu::Act) -> Ctx {
+    match a {
+        crate::ctxmenu::Act::Key(k) => Ctx::Key(k),
+        crate::ctxmenu::Act::Cmd(c) => Ctx::Cmd(c),
+        crate::ctxmenu::Act::Step(i) => Ctx::Step(i),
+    }
 }
 
 /// The rows of the agents box's menu.
@@ -154,7 +192,7 @@ struct View {
     slots: std::cell::RefCell<Vec<(String, Rect)>>,
     /// The flow lines of the cards of the last draw (agent, its rect): a click opens its flow box.
     flow_slots: std::cell::RefCell<Vec<(String, Rect)>>,
-    /// ctrl+q: the agents box has the keys (None: the prompt or a view).
+    /// tab: the agents box has the keys (None: the prompt or a view).
     agents_focus: Option<AgentsFocus>,
     /// The next sent message goes to this agent (a flow wait's reply), not the default.
     reply_to: Option<String>,
@@ -309,6 +347,8 @@ struct View {
     /// The search match to scroll to at the next draw (item index).
     find_to: Option<usize>,
     menu: Option<crate::menu::Menu>,
+    /// The context menu (ctrl+.): the actions of the region in focus.
+    ctx: Option<crate::ctxmenu::Menu<Ctx>>,
     cost: Option<crate::cost::Snap>,
     cost_at: Instant,
     toast: Option<(String, Instant)>,
@@ -387,6 +427,7 @@ impl View {
             input,
             input_rect: Rect::default(),
             ide_pick: None,
+            ctx: None,
             ide_rows: Vec::new(),
             hint_rect: Rect::default(),
             tutor_ide: false,
@@ -1505,22 +1546,12 @@ impl View {
     // ---------- keys ----------
 
     /// True: the view ends (EXIT set).
-    /// The changes view has the keys (0 text input): every key as an escape code, for an alt
-    /// tap.
-    fn all_keys(&self) -> bool {
-        self.pane == Pane::Changes && !self.prompt_focus && self.menu.is_none() && !self.changes.typing()
-    }
-
     fn key(&mut self, k: KeyEvent) -> bool {
-        // a modifier alone (press, release): an alt tap in the changes view, else 0 effect
+        // a modifier alone: 0 effect
         if matches!(k.code, KeyCode::Modifier(_)) {
-            if self.all_keys() && self.changes.modifier(k) {
-                self.dirty = true;
-            }
             return false;
         }
         self.last_key = Some(Instant::now());
-        self.changes.no_tap();
         self.merge.touch();
         // a key after a search jump: the mark goes
         if self.menu.is_none() && self.flash.take().is_some() {
@@ -1555,9 +1586,19 @@ impl View {
             return false;
         }
 
-        // ctrl+q: the agents box above the prompt (←→ an agent, its menu: flow, remove, replace)
-        if k.code == KeyCode::Char('q') && k.modifiers == KeyModifiers::CONTROL {
-            self.focus_agents(None);
+        // the context menu (ctrl+.): its keys first
+        if let Some(m) = self.ctx.as_mut() {
+            let out = m.key(k);
+            return self.ctx_out(out);
+        }
+        if crate::ctxmenu::is_key(&k) {
+            self.open_ctx();
+            return false;
+        }
+        // tab / shift+tab: the next / previous region (the focus ring); a dropdown of the prompt,
+        // shell mode and a text box of a view keep their tab
+        if matches!(k.code, KeyCode::Tab | KeyCode::BackTab) && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && self.ide_pick.is_none() && !self.tab_is_local() {
+            self.cycle(if k.code == KeyCode::Tab { 1 } else { -1 });
             return false;
         }
 
@@ -1570,29 +1611,6 @@ impl View {
         // the IDE's repo picker: its keys first
         if self.ide_pick.is_some() {
             self.ide_pick_key(k);
-            self.dirty = true;
-            return false;
-        }
-        // ctrl+i / ⌘i: the selected file in the IDE (the changes / files view, 0 prompt focus),
-        // else the IDE on the repo root, from every pane and field (several repos: a picker)
-        if k.code == KeyCode::Char('i') && k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) && !k.modifiers.contains(KeyModifiers::ALT) {
-            let open = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
-            if self.pane == Pane::Changes && !self.prompt_focus && !self.changes.typing() {
-                let act = self.changes.key(open);
-                if act != crate::changes::Act::None {
-                    self.changes_act(act);
-                    return false;
-                }
-            }
-
-            if self.pane == Pane::Files && !self.prompt_focus && !self.files.typing() {
-                let act = self.files.key(open);
-                if act != crate::files::Act::None {
-                    self.files_act(act);
-                    return false;
-                }
-            }
-            self.ide_key();
             self.dirty = true;
             return false;
         }
@@ -1684,16 +1702,6 @@ impl View {
             self.set_pane(*p);
             return false;
         }
-        // ctrl+b from the prompt of the changes view: the panel's cycle; the panel with the keys:
-        // the keys leave the prompt for it
-        if self.pane == Pane::Changes && self.prompt_focus && ctrl && !alt && k.code == KeyCode::Char('b') {
-            self.changes.toggle_panel();
-            if self.changes.panel_focus() {
-                self.prompt_focus = false;
-            }
-            self.dirty = true;
-            return false;
-        }
         // the files view's filter input: every key but ctrl+c (esc: clears it)
         if self.pane == Pane::Files && !self.prompt_focus && self.files.typing() && !(ctrl && k.code == KeyCode::Char('c')) {
             let act = self.files.key(k);
@@ -1701,16 +1709,11 @@ impl View {
             return false;
         }
         let tab = matches!(k.code, KeyCode::Tab | KeyCode::BackTab) && !ctrl && !alt;
-        // the changes view with the focus: its keys (esc, ctrl+c: as in chat; tab: the prompt)
+        // the changes view with the focus: its keys (esc, ctrl+c: as in chat)
         if self.pane != Pane::Chat && !self.prompt_focus {
-            // tab: the next field, the prompt (as i)
-            if tab && !(self.pane == Pane::Changes && self.changes.typing()) && !(self.pane == Pane::Merge && self.merge.typing()) {
-                self.prompt_focus = true;
-                return false;
-            }
             // the repo tabs with the keys: ←→ / h l pick a repo; ↓, enter, esc: back to the diff;
-            // other keys: 0 effect (ctrl+c, ctrl+w: as in the diff)
-            if self.pane == Pane::Changes && self.repo_focus && !(ctrl && matches!(k.code, KeyCode::Char('c' | 'w'))) {
+            // other keys: 0 effect (ctrl+c: as in the diff)
+            if self.pane == Pane::Changes && self.repo_focus && !(ctrl && k.code == KeyCode::Char('c')) {
                 match k.code {
                     KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') if !ctrl && !alt => {
                         let d = if matches!(k.code, KeyCode::Right | KeyCode::Char('l')) { 1 } else { -1 };
@@ -1726,26 +1729,11 @@ impl View {
             let esc_here = k.code == KeyCode::Esc && ((self.pane == Pane::Changes && self.changes.takes_esc()) || (self.pane == Pane::Merge && self.merge.takes_esc()));
             let through = (k.code == KeyCode::Esc && !esc_here) || (ctrl && k.code == KeyCode::Char('c'));
             if !through {
-                // i: the prompt (the changes and files views: i opens the file; ctrl+m: the prompt)
-                if k.code == KeyCode::Char('i') && !ctrl && !alt && !matches!(self.pane, Pane::Changes | Pane::Files) && !(self.pane == Pane::Merge && self.merge.typing()) {
-                    self.prompt_focus = true;
-                    return false;
-                }
                 if self.pane == Pane::Merge {
                     let act = self.merge.key(k);
                     self.merge_act(act);
                     return false;
                 }
-                if self.pane == Pane::Changes && ctrl && k.code == KeyCode::Char('w') && !self.changes.typing() {
-                    self.next_checkout();
-                    return false;
-                }
-                // shift+←→: the repo tabs (← alone: the panel)
-                if self.pane == Pane::Changes && k.modifiers.contains(KeyModifiers::SHIFT) && matches!(k.code, KeyCode::Left | KeyCode::Right) && !self.changes.typing() {
-                    self.step_checkout(if k.code == KeyCode::Right { 1 } else { -1 });
-                    return false;
-                }
-
                 // ↑ on the diff's 1st row, 2+ repos: the repo tabs (as the merge view's PR tabs)
                 if self.pane == Pane::Changes && k.code == KeyCode::Up && k.modifiers.is_empty() && self.checkouts.len() > 1 && self.changes.at_top() {
                     self.repo_focus = true;
@@ -1785,12 +1773,6 @@ impl View {
             if let Some(t) = self.hist.picked.take() {
                 self.input.set_text(&t);
             }
-            return false;
-        }
-        if k.code == KeyCode::Char('r') && k.modifiers.contains(KeyModifiers::CONTROL) && self.shell_mode() {
-            let cmds = self.shell_cmds();
-            let text = self.input.text();
-            self.hist.open(cmds, text.strip_prefix('!').unwrap_or_default().trim_start());
             return false;
         }
         // dropdowns first: they own ↑↓, tab, enter, esc while open
@@ -1845,14 +1827,6 @@ impl View {
                 } else if !self.thread.busy.is_empty() || self.queued.is_some() {
                     // a 2nd Esc within DOUBLE_ESC means back: the interrupt waits for it
                     self.esc_interrupt = Some(Instant::now());
-                }
-                return false;
-            }
-            // tab: the next field (dropdowns took theirs above): the prompt → the view in focus
-            // before it (changes, merge, files); the chat alone: 0 other field
-            KeyCode::Tab | KeyCode::BackTab if tab && !self.mention_open() => {
-                if self.pane != Pane::Chat {
-                    self.prompt_focus = false;
                 }
                 return false;
             }
@@ -2158,17 +2132,6 @@ impl View {
         self.dirty = true;
     }
 
-    /// ctrl+w in the changes view: the thread's next checkout.
-    fn next_checkout(&mut self) {
-        self.load_checkouts();
-        if self.checkouts.len() < 2 {
-            self.toast("1 checkout: an agent's edit in another repo / worktree adds 1");
-            return;
-        }
-        let next = (self.checkout + 1) % self.checkouts.len();
-        self.pick_checkout(next);
-        self.toast(format!("changes: {} ({}/{})", tilde(&self.checkouts[next]), next + 1, self.checkouts.len()));
-    }
 
     /// Show PR in the merge tab.
     pub fn show_pr(&mut self, pr: &crate::gh::PrRef) {
@@ -2199,7 +2162,7 @@ impl View {
                 self.mini_chat = !self.mini_chat;
                 self.dirty = true;
             }
-            // the ship menu's agent steps: a sub-thread (the lead), this thread waits
+            // the ship section's agent steps: a sub-thread (the lead), this thread waits
             crate::changes::Act::Sub(task) => {
                 self.back = 0;
                 self.start_sub(task);
@@ -2524,6 +2487,235 @@ impl View {
         self.dirty = true;
     }
 
+    /// The regions tab walks, in order: the prompt, the view (changes, merge, files), the panel,
+    /// the repo tabs, an open question, the agents box (the chat; a wide changes view too).
+    fn regions(&self) -> Vec<Region> {
+        let mut r = vec![Region::Prompt];
+        if self.pane != Pane::Chat {
+            r.push(Region::View);
+            if self.pane == Pane::Changes && self.changes.panel_shown() {
+                r.push(Region::Panel);
+            }
+            if self.pane == Pane::Changes && self.checkouts.len() > 1 {
+                r.push(Region::Repos);
+            }
+        }
+        if !self.thread.asks.is_empty() {
+            r.push(Region::Ask);
+        }
+        if !self.order.is_empty() && (self.pane == Pane::Chat || self.wide_split) {
+            r.push(Region::Agents);
+        }
+        r
+    }
+
+    /// The region with the keys.
+    fn region(&self) -> Region {
+        if self.agents_focus.is_some() {
+            Region::Agents
+        } else if self.ask.focus && !self.thread.asks.is_empty() {
+            Region::Ask
+        } else if self.pane != Pane::Chat && !self.prompt_focus {
+            if self.pane == Pane::Changes && self.repo_focus {
+                Region::Repos
+            } else if self.pane == Pane::Changes && self.changes.panel_focus() {
+                Region::Panel
+            } else {
+                Region::View
+            }
+        } else {
+            Region::Prompt
+        }
+    }
+
+    /// The keys to region R; every box, bar and dropdown that holds them lets go.
+    fn set_region(&mut self, r: Region) {
+        self.agents_focus = None;
+        self.ask.focus = false;
+        self.repo_focus = false;
+        self.find.focus = false;
+        self.flowbars.iter_mut().for_each(crate::flowbar::FlowBar::close);
+        let side = self.pane != Pane::Chat;
+        match r {
+            Region::Prompt => self.prompt_focus = side,
+            Region::View | Region::Panel => {
+                self.prompt_focus = false;
+                if self.pane == Pane::Changes {
+                    self.changes.focus_panel(r == Region::Panel);
+                }
+            }
+            Region::Repos => {
+                self.prompt_focus = false;
+                self.repo_focus = true;
+            }
+            Region::Ask => {
+                self.prompt_focus = side;
+                self.ask.focus = true;
+            }
+            Region::Agents => {
+                self.prompt_focus = side;
+                self.focus_agents(None);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Tab (D 1) / shift+tab (D -1): the next / previous region.
+    fn cycle(&mut self, d: isize) {
+        let rs = self.regions();
+        let at = rs.iter().position(|x| *x == self.region()).unwrap_or(0) as isize;
+        let to = rs[(at + d).rem_euclid(rs.len() as isize) as usize];
+        self.set_region(to);
+    }
+
+    /// Tab stays inside: a dropdown of the prompt, shell mode (completion), the shell dir input,
+    /// the history search, a text box of a view (a comment, the commit message, a filter, a PR
+    /// title / body).
+    fn tab_is_local(&mut self) -> bool {
+        match self.region() {
+            Region::Prompt => self.prompt_dropdown() || self.shell_mode() || self.cwd_edit.is_some() || self.hist.is_open(),
+            Region::View | Region::Panel => match self.pane {
+                Pane::Changes => self.changes.typing(),
+                Pane::Merge => self.merge.typing(),
+                Pane::Files => self.files.typing(),
+                Pane::Chat => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Ctrl+.: the context menu of the region in focus.
+    fn open_ctx(&mut self) {
+        use crate::ctxmenu::Item;
+        let (title, items): (String, Vec<Item<Ctx>>) = match self.region() {
+            Region::Prompt => {
+                let mut v = Vec::new();
+                if self.shell_mode() {
+                    v.push(Item::new("search the shell history", "", Ctx::Hist));
+                }
+                v.extend([
+                    Item::new("search the chat", "ctrl+f", Ctx::Menu(16)),
+                    Item::new("tool calls: open / close all", "ctrl+o", Ctx::Menu(1)),
+                    Item::new("thoughts: open / close all", "ctrl+t", Ctx::Menu(13)),
+                    Item::new("interrupt the agents", "esc", Ctx::Menu(12)),
+                    Item::new("IDE on the worktree", "", Ctx::Menu(2)),
+                    Item::new("yazi on the worktree (its pick: into the prompt)", "", Ctx::Menu(14)),
+                    Item::new("paste a clipboard image", "ctrl+v", Ctx::Menu(7)),
+                ]);
+                ("prompt".into(), v)
+            }
+            Region::Agents => {
+                let at = self.agents_focus.as_ref().map_or(0, |f| f.at);
+                let Some(agent) = self.order.get(at).cloned() else { return };
+                self.menu_agents = self.order.clone();
+                let items = ["flow", "remove", "replace with …"].iter().enumerate().map(|(k, l)| Item::new(*l, "", Ctx::Menu(AGENT_ITEMS + at * 3 + k))).collect();
+                (format!("@{agent}"), items)
+            }
+            Region::Repos => ("repos".into(), vec![Item::new("next repo", "→", Ctx::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))), Item::new("previous repo", "←", Ctx::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)))]),
+            Region::Ask => (String::new(), Vec::new()),
+            Region::View | Region::Panel => {
+                let (title, items) = match self.pane {
+                    Pane::Changes => self.changes.ctx_items(),
+                    Pane::Files => self.files.ctx_items(),
+                    Pane::Merge => self.merge.ctx_items(),
+                    Pane::Chat => (String::new(), Vec::new()),
+                };
+                let mut items: Vec<Item<Ctx>> = items.into_iter().map(|it| it.map(ctx_of)).collect();
+                if self.pane == Pane::Changes {
+                    items.push(Item::new(if self.changes.panel_shown() { "source control panel: hide" } else { "source control panel: show" }, "", Ctx::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))));
+                    items.push(Item::new("IDE on the worktree", "", Ctx::Menu(2)));
+                }
+                (title, items)
+            }
+        };
+        match crate::ctxmenu::Menu::new(title, items) {
+            Some(mut m) => {
+                if self.region() == Region::Panel {
+                    m.head = self.changes.ctx_head();
+                }
+                self.ctx = Some(m);
+            }
+            None => self.toast("0 actions here"),
+        }
+        self.dirty = true;
+    }
+
+    /// A key / click of the context menu.
+    fn ctx_out(&mut self, out: crate::ctxmenu::Out<Ctx>) -> bool {
+        use crate::ctxmenu::Out;
+        self.dirty = true;
+        match out {
+            Out::None => false,
+            Out::Close => {
+                self.ctx = None;
+                false
+            }
+            Out::Run(a) => {
+                self.ctx = None;
+                match a {
+                    Ctx::Key(k) if k.code == KeyCode::Char('b') && k.modifiers == KeyModifiers::CONTROL => {
+                        self.changes.toggle_panel();
+                        if !self.changes.panel_shown() && self.region() == Region::Panel {
+                            self.set_region(Region::View);
+                        }
+                        false
+                    }
+                    Ctx::Key(k) => self.key(k),
+                    Ctx::Step(i) => {
+                        let act = self.changes.ctx_step(i);
+                        self.changes_act(act);
+                        false
+                    }
+                    Ctx::Cmd(c) => {
+                        match self.pane {
+                            Pane::Changes => {
+                                let act = self.changes.ctx_cmd(c);
+                                self.changes_act(act);
+                            }
+                            Pane::Files => {
+                                let act = self.files.ctx_cmd(c);
+                                self.files_act(act);
+                            }
+                            Pane::Merge => {
+                                let act = self.merge.ctx_cmd(c);
+                                self.merge_act(act);
+                            }
+                            Pane::Chat => {}
+                        }
+                        false
+                    }
+                    Ctx::Menu(id) => self.menu_action(crate::menu::Action::Command(id)),
+                    Ctx::Hist => {
+                        let cmds = self.shell_cmds();
+                        let text = self.input.text();
+                        self.hist.open(cmds, text.strip_prefix('!').unwrap_or_default().trim_start());
+                        false
+                    }
+                }
+            }
+        }
+    }
+
+    /// Where the context menu opens: beside / above / below the thing in focus, never over it.
+    fn ctx_place(&mut self) -> crate::ctxmenu::Place {
+        use crate::ctxmenu::Place;
+        match self.region() {
+            Region::View | Region::Panel => match self.pane {
+                Pane::Changes => self.changes.ctx_place(),
+                Pane::Files => self.files.ctx_place(),
+                Pane::Merge => self.merge.ctx_place(self.view_rect),
+                Pane::Chat => Place::At(self.input_rect),
+            },
+            Region::Repos => Place::At(Rect { height: 1, ..self.view_rect }),
+            Region::Agents => {
+                let at = self.agents_focus.as_ref().map_or(0, |f| f.at);
+                let agent = self.order.get(at);
+                Place::At(self.slots.borrow().iter().find(|(a, _)| Some(a) == agent).map_or(self.input_rect, |(_, r)| *r))
+            }
+            _ => Place::At(self.input_rect),
+        }
+    }
+
     /// Agents of the roster that can replace AGENT: 0 on the thread.
     fn replace_candidates(&self) -> Vec<crate::agents::Agent> {
         self.roster.iter().filter(|a| !self.members.contains(&a.name)).cloned().collect()
@@ -2682,11 +2874,11 @@ impl View {
     fn menu_items(&mut self) -> Vec<crate::menu::Item> {
         use crate::menu::Item;
         let items = vec![
-            Item { label: "IDE on the repo root (several repos: pick 1)".into(), key: "ctrl+i · ⌘i".into(), id: 2, section: "thread" },
+            Item { label: "IDE on the repo root (several repos: pick 1)".into(), key: String::new(), id: 2, section: "thread" },
             Item { label: "interrupt the agents".into(), key: "esc".into(), id: 12, section: "thread" },
-            Item { label: "yazi on the worktree (its pick: into the prompt)".into(), key: "files view: y".into(), id: 14, section: "thread" },
+            Item { label: "yazi on the worktree (its pick: into the prompt)".into(), key: String::new(), id: 14, section: "thread" },
             Item { label: "views: chat · changes · merge · files".into(), key: "F1-F4".into(), id: 15, section: "thread" },
-            Item { label: "agents box: flow, remove, replace".into(), key: "ctrl+q".into(), id: 17, section: "agents" },
+            Item { label: "agents box: flow, remove, replace".into(), key: "tab".into(), id: 17, section: "agents" },
         ];
         // per agent of the thread: its flow, remove it, replace it (the agents box's menu)
         let mut items = items;
@@ -2765,7 +2957,9 @@ impl View {
             Action::Command(13) => self.toggle_thoughts(),
             Action::Command(2) => {
                 self.menu = None;
-                return self.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
+                self.ide_key();
+                self.dirty = true;
+                return false;
             }
             Action::Command(3) => {
                 self.exit = Exit::Back;
@@ -2846,6 +3040,15 @@ impl View {
             if matches!(m.kind, MouseEventKind::Down(_)) {
                 let pick = p.click(ratatui::layout::Position { x: m.column, y: m.row });
                 if self.notes_pick(pick) {
+                    self.mouse_exit = true;
+                }
+            }
+            return;
+        }
+        if let Some(c) = self.ctx.as_mut() {
+            if matches!(m.kind, MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                let out = c.mouse(m);
+                if self.ctx_out(out) {
                     self.mouse_exit = true;
                 }
             }
@@ -3770,13 +3973,13 @@ impl View {
         // footer: keys or toast right
         let right = match &self.toast {
             Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Line::from(Span::styled(format!("{m} "), theme::fg(theme::pal().info()))),
-            _ if self.agents_focus.is_some() => Line::from(theme::hints("←→ agent · ↑↓ · enter · 1-3 · esc / ctrl+m: prompt ")),
-            _ if self.pane == Pane::Changes && !self.prompt_focus && self.repo_focus => Line::from(theme::hints("←→ repo · ↓ / enter / esc: the changes · ctrl+w: next repo · tab: prompt ")),
+            _ if self.agents_focus.is_some() => Line::from(theme::hints("←→ agent · ↑↓ · enter · 1-3 · tab: next · esc: prompt ")),
+            _ if self.pane == Pane::Changes && !self.prompt_focus && self.repo_focus => Line::from(theme::hints("←→ repo · ↓ / enter / esc: the changes · tab: next ")),
             _ if self.pane == Pane::Changes && !self.prompt_focus => Line::from(theme::hints(self.changes.hints())),
             _ if self.pane == Pane::Merge && !self.prompt_focus => Line::from(theme::hints(&self.merge.hints())),
-            _ if self.pane == Pane::Files && !self.prompt_focus => Line::from(theme::hints("j k · ctrl+f filter · pgup pgdn: scroll · o e i: IDE · y: yazi · c: copy path · S S: share · ctrl+m: prompt ")),
-            _ if self.pane != Pane::Chat => Line::from(theme::hints("tab / esc: back to the view · F1-F4: views ")),
-            _ => Line::from(theme::hints(&format!("{}: menu · ctrl+q: agents · ctrl+f: search · F1-F4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label))),
+            _ if self.pane == Pane::Files && !self.prompt_focus => Line::from(theme::hints("j k · ctrl+f filter · pgup pgdn: scroll · e: IDE · S S: share · tab: next · ctrl+.: actions ")),
+            _ if self.pane != Pane::Chat => Line::from(theme::hints("tab: next · esc: back to the view · ctrl+.: actions · F1-F4: views ")),
+            _ => Line::from(theme::hints(&format!("{}: menu · ctrl+.: actions · tab: next · ctrl+f: search · F1-F4: views · esc: interrupt · esc esc: codehead ", crate::config::menu_key().label))),
         };
         // the mode the keys are in: a badge left, the keys right of it
         let badge = self.mode().map(|(label, risky)| theme::mode_badge(label, risky)).unwrap_or_default();
@@ -3808,6 +4011,20 @@ impl View {
             }
         }
         self.draw_ide_pick(f, area);
+        // the panel's menu: live (a push starts, a commit comes: its ship steps change)
+        if self.ctx.is_some() && self.region() == Region::Panel {
+            let (_, items) = self.changes.ctx_items();
+            let items = items.into_iter().map(|it| it.map(ctx_of)).collect();
+            let head = self.changes.ctx_head();
+            if let Some(m) = self.ctx.as_mut() {
+                m.set_items(items);
+                m.head = head;
+            }
+        }
+        let place = self.ctx_place();
+        if let Some(m) = self.ctx.as_mut() {
+            m.render(f, place, area);
+        }
         if self.menu.is_some() {
             // live: an agent came or left, a flow moved on
             let items = self.menu_items();
@@ -3949,7 +4166,6 @@ fn run_outside<B: Backend>(term: &mut Terminal<B>, target: &Path) -> Result<Vec<
 fn suspended<B: Backend>(term: &mut Terminal<B>, argv: &[std::ffi::OsString], env: &[(String, String)]) -> std::io::Result<std::process::ExitStatus> {
     use ratatui::crossterm::{cursor, event, execute, terminal};
     let mut out = std::io::stdout();
-    crate::all_keys(false);
     let _ = execute!(out, event::PopKeyboardEnhancementFlags, event::DisableMouseCapture, event::DisableBracketedPaste, terminal::LeaveAlternateScreen, cursor::Show);
     let _ = terminal::disable_raw_mode();
     let status = std::process::Command::new(&argv[0]).args(&argv[1..]).envs(env.iter().cloned()).status();
@@ -4108,7 +4324,6 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
     struct AllKeysOff;
     impl Drop for AllKeysOff {
         fn drop(&mut self) {
-            crate::all_keys(false);
         }
     }
     let _keys = AllKeysOff;
@@ -4157,7 +4372,6 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
                 crate::engine::transition_end();
             }
         }
-        crate::all_keys(v.all_keys());
         if let Some(h) = hook.as_mut()
             && h(&Peek { pane: v.pane, menu: v.menu.is_some(), ide: std::mem::take(&mut v.tutor_ide) })
         {
@@ -4170,8 +4384,8 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
             crate::textarea::stamp(Some(at));
             dirty = true;
             let done = match ev {
-                // a release: only a modifier's (an alt tap)
-                Event::Key(k) if k.kind != KeyEventKind::Release || matches!(k.code, KeyCode::Modifier(_)) => v.key(k),
+                // a release: 0 key
+                Event::Key(k) if k.kind != KeyEventKind::Release => v.key(k),
                 Event::Mouse(m) => {
                     v.mouse(m);
                     v.mouse_exit
@@ -4554,7 +4768,9 @@ mod ask_tests {
         wait(&mut v, "UNPUSHED");
         wait(&mut v, "COMMITS  4");
         wait(&mut v, "PUSHED    2");
-        k(&mut v, KeyCode::Char('b'), KeyModifiers::CONTROL);
+        // tab: the review → the panel
+        k(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(v.changes.panel_focus());
 
         // G: the last row (the oldest pushed commit); enter: its files, read only
         k(&mut v, KeyCode::Char('G'), KeyModifiers::NONE);
@@ -4854,7 +5070,7 @@ mod pane_tests {
         for k in [KeyCode::Right, KeyCode::Down, KeyCode::Down, KeyCode::Down] {
             press(&mut v, k, KeyModifiers::NONE);
         }
-        press(&mut v, KeyCode::Char('o'), KeyModifiers::CONTROL);
+        press(&mut v, KeyCode::Char('.'), KeyModifiers::CONTROL);
         let s = screen(&mut v);
         assert!(s.contains("archive: worktree goes"), "{s}");
         press(&mut v, KeyCode::Char('a'), KeyModifiers::NONE);
@@ -4926,20 +5142,62 @@ mod pane_tests {
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
         assert_eq!(v.pane, Pane::Changes);
         let s = screen(&mut v);
-        assert!(s.contains("space: select") && s.contains("v: reviewed") && s.contains("ctrl+m: prompt"), "{s}");
+        assert!(s.contains("space: select") && s.contains("v: reviewed") && s.contains("tab: next"), "{s}");
         press(&mut v, KeyCode::Char('1'), KeyModifiers::ALT);
         assert_eq!(v.pane, Pane::Chat);
+    }
+
+    /// Ctrl+.: the panel's menu right of the panel with its ship steps; the review's never over
+    /// the cursor's row; the prompt's above the prompt; esc closes it.
+    #[test]
+    fn the_context_menu_opens_beside_the_thing_in_focus() {
+        let mut v = view();
+        press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
+        screen(&mut v);
+        // the panel: right of it, its ship steps under "ship"
+        press(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(v.changes.panel_focus());
+        press(&mut v, KeyCode::Char('.'), KeyModifiers::CONTROL);
+        let s = screen(&mut v);
+        let m = v.ctx.as_ref().expect("the panel's menu");
+        assert!(m.items.iter().any(|i| i.section.starts_with("ship")), "{s}");
+        assert!(s.contains("─ ship ─"), "{s}");
+        let crate::ctxmenu::Place::Beside(p, _) = v.changes.ctx_place() else { panic!("beside the panel") };
+        assert!(p.width > 0 && s.lines().any(|l| l.chars().nth(usize::from(p.right())) == Some('┌')), "{s}");
+        press(&mut v, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(v.ctx.is_none() && v.changes.panel_focus(), "esc: the menu only");
+        // S: 0 ship menu of its own
+        press(&mut v, KeyCode::Char('S'), KeyModifiers::SHIFT);
+        assert!(!screen(&mut v).contains("─ ship ─"));
+        // the review: above / below its cursor's row (shift+tab from the panel)
+        press(&mut v, KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert!(!v.changes.panel_focus() && !v.prompt_focus);
+        press(&mut v, KeyCode::Char('.'), KeyModifiers::CONTROL);
+        screen(&mut v);
+        assert!(v.ctx.is_some());
+        let crate::ctxmenu::Place::At(row) = v.changes.ctx_place() else { panic!("at the cursor's row") };
+        assert!(!s.is_empty() && row.height == 1);
+        press(&mut v, KeyCode::Esc, KeyModifiers::NONE);
+        // the prompt: above the prompt
+        press(&mut v, KeyCode::BackTab, KeyModifiers::SHIFT);
+        press(&mut v, KeyCode::Char('.'), KeyModifiers::CONTROL);
+        let s = screen(&mut v);
+        assert!(s.contains("search the chat") && s.contains("IDE on the worktree"), "{s}");
     }
 
     #[test]
     fn tab_moves_between_the_view_and_the_prompt_ctrl_p_is_the_menu() {
         let mut v = view();
         press(&mut v, KeyCode::Char('2'), KeyModifiers::ALT);
-        press(&mut v, KeyCode::Tab, KeyModifiers::NONE);
-        assert!(v.prompt_focus && v.menu.is_none(), "tab: the prompt, 0 menu");
+        // the ring: prompt → review → panel → … → prompt; shift+tab: back
+        press(&mut v, KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert!(v.prompt_focus && v.menu.is_none(), "shift+tab: the prompt, 0 menu");
         press(&mut v, KeyCode::Char('h'), KeyModifiers::NONE);
         press(&mut v, KeyCode::Tab, KeyModifiers::NONE);
-        assert!(!v.prompt_focus && v.input.text() == "h", "tab: back to the view, the text stays");
+        assert!(!v.prompt_focus && !v.changes.panel_focus() && v.input.text() == "h", "tab: back to the review, the text stays");
+        press(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(v.changes.panel_focus(), "tab: the panel");
+        press(&mut v, KeyCode::BackTab, KeyModifiers::SHIFT);
         // the chat: tab never opens the menu; ctrl+p does, from every field
         press(&mut v, KeyCode::Char('1'), KeyModifiers::ALT);
         press(&mut v, KeyCode::Tab, KeyModifiers::NONE);
@@ -5294,10 +5552,12 @@ mod files_pane_tests {
         v.key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::ALT));
         assert_eq!(v.pane, Pane::Merge);
         v.merge = crate::merge::tests::with(crate::merge::tests::pr());
-        // letters: the tab's keys (0 prompt text); i: the prompt
+        // letters: the tab's keys (0 prompt text, i too); shift+tab: the prompt
         v.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
-        assert_eq!(v.input.text(), "");
         v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        assert_eq!(v.input.text(), "");
+        assert!(!v.prompt_focus);
+        v.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert!(v.prompt_focus);
         for c in "fix the lint".chars() {
             v.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -5815,7 +6075,7 @@ mod ide_tests {
     }
 
     #[test]
-    fn ctrl_i_opens_the_repo_root_and_several_repos_get_a_picker() {
+    fn the_ide_command_opens_the_repo_root_and_several_repos_get_a_picker() {
         let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = std::env::temp_dir().join(format!("codehead-ide-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -5831,10 +6091,10 @@ mod ide_tests {
         let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(&t.id, &a.join("src"), "ide", tx);
         v.input.set_text("draft");
-        v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
+        v.menu_action(crate::menu::Action::Command(2));
         v.set_pane(Pane::Changes);
         v.prompt_focus = false;
-        v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::SUPER));
+        v.menu_action(crate::menu::Action::Command(2));
         assert_eq!(v.ide_opened, [a.clone(), a.clone()]);
         assert!(v.ide_pick.is_none() && v.input.text() == "draft");
         // 2 repos: the picker above the repos line; ↓ enter: the 2nd
@@ -5843,7 +6103,7 @@ mod ide_tests {
         t.checkouts_pruned = true;
         t.save().unwrap();
         v.set_pane(Pane::Chat);
-        v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
+        v.menu_action(crate::menu::Action::Command(2));
         assert_eq!(v.ide_pick, Some((0, 0)));
         let s = draw(&mut v);
         assert!(s.contains("open in IDE") && s.contains("alpha") && s.contains("beta"), "{s}");
@@ -5854,12 +6114,12 @@ mod ide_tests {
         assert_eq!(v.ide_opened.last(), Some(&b));
         assert!(v.ide_pick.is_none());
         // a click on a row opens it; esc closes the picker (0 interrupt)
-        v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
+        v.menu_action(crate::menu::Action::Command(2));
         let _ = draw(&mut v);
         let (r, i) = v.ide_rows[0];
         v.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
         assert_eq!((v.ide_opened.last(), i), (Some(&a), 0));
-        v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
+        v.menu_action(crate::menu::Action::Command(2));
         v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(v.ide_pick.is_none() && v.last_esc.is_none());
         let _ = std::fs::remove_dir_all(store::thread_dir(&t.id));
@@ -6080,7 +6340,7 @@ mod chat_search_tests {
     }
 
     #[test]
-    fn ctrl_f_searches_the_chat_tab_cycles_esc_closes_the_draft_stays() {
+    fn ctrl_f_searches_the_chat_enter_cycles_esc_closes_the_draft_stays() {
         let mut v = view("chatsearch-0000");
         typed(&mut v, "draft");
         screen(&mut v);
@@ -6095,16 +6355,16 @@ mod chat_search_tests {
         assert!(s[bar].contains("needle") && s[bar].contains("4/4"), "{}", s[bar]);
         assert!(s.iter().any(|l| l.contains("message 33: the needle")), "the newest match in view: {s:#?}");
 
-        // tab: the next older match, scrolled into view with the marker
-        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        // enter: the next older match, scrolled into view with the marker
+        key(&mut v, KeyCode::Enter, KeyModifiers::NONE);
         let s = screen(&mut v);
         assert!(s.iter().any(|l| l.contains("message 23: the needle")), "{s:#?}");
         assert!(s.iter().any(|l| l.contains("3/4")), "{s:#?}");
         assert!(s.iter().any(|l| l.starts_with('▌') && l.contains("message 23")), "the marker: {s:#?}");
 
-        // shift+tab: newer again; wraps past the newest to the oldest
-        key(&mut v, KeyCode::BackTab, KeyModifiers::SHIFT);
-        key(&mut v, KeyCode::BackTab, KeyModifiers::SHIFT);
+        // ↓: newer again; wraps past the newest to the oldest
+        key(&mut v, KeyCode::Down, KeyModifiers::NONE);
+        key(&mut v, KeyCode::Down, KeyModifiers::NONE);
         let s = screen(&mut v);
         assert!(s.iter().any(|l| l.contains("1/4")) && s.iter().any(|l| l.contains("message 3: the needle")), "{s:#?}");
 
@@ -6155,7 +6415,7 @@ mod chat_search_tests {
     }
 }
 
-/// ctrl+q: the agents box above the prompt has the keys: ←→ an agent, its menu above it (flow,
+/// tab: the agents box above the prompt has the keys: ←→ an agent, its menu above it (flow,
 /// remove, replace with); ctrl+m and esc give the keys back to the prompt (its draft kept).
 #[cfg(test)]
 mod agents_box_tests {
@@ -6185,10 +6445,10 @@ mod agents_box_tests {
     }
 
     #[test]
-    fn ctrl_q_highlights_an_agent_and_its_menu_opens_above_it() {
+    fn tab_highlights_an_agent_and_its_menu_opens_above_it() {
         let mut v = view("agentsbox-0000");
         v.input.set_text("draft");
-        key(&mut v, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(v.agents_focus.as_ref().map(|f| f.at), Some(0), "the lead first");
         let s = screen(&mut v);
         println!("--- agents box\n{s}");
@@ -6211,7 +6471,7 @@ mod agents_box_tests {
     #[test]
     fn flow_opens_that_agents_flow_picker_and_sets_it_for_that_agent() {
         let mut v = view("agentsbox-0001");
-        key(&mut v, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
         key(&mut v, KeyCode::Right, KeyModifiers::NONE);
         key(&mut v, KeyCode::Enter, KeyModifiers::NONE);
         assert!(v.agents_focus.is_none(), "the flow box has the keys");
@@ -6230,7 +6490,7 @@ mod agents_box_tests {
     #[test]
     fn remove_asks_a_2nd_enter_and_replace_picks_an_agent_off_the_thread() {
         let mut v = view("agentsbox-0002");
-        key(&mut v, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
         key(&mut v, KeyCode::Right, KeyModifiers::NONE);
         key(&mut v, KeyCode::Char('2'), KeyModifiers::NONE);
         assert!(screen(&mut v).contains("enter again: remove @zed"));
@@ -6241,7 +6501,7 @@ mod agents_box_tests {
         assert!(v.agents_focus.is_none());
 
         // replace with: the agents 0 on the thread (nova)
-        key(&mut v, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
         key(&mut v, KeyCode::Char('3'), KeyModifiers::NONE);
         let s = screen(&mut v);
         assert!(s.contains("replace @ada with") && s.contains("nova") && !s.contains("│ zed"), "{s}");
@@ -6396,22 +6656,26 @@ mod repo_row_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// The keys of the repo tabs before the repo row took the focus: they stay.
+    /// The repo tabs: a region of the focus ring (tab), ←→ there; shift+←→ and ctrl+w: gone.
     #[test]
-    fn the_old_repo_keys_stay() {
+    fn the_repo_tabs_are_a_tab_stop() {
         let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (mut v, root, a, b) = two_repos("old-keys", false);
         assert_eq!(v.checkouts, vec![a.clone(), b.clone()]);
 
-        // shift+←→: the next / previous repo
-        key(&mut v, KeyCode::Right, KeyModifiers::SHIFT);
-        assert_eq!(v.changes.dir(), b.as_path());
-        key(&mut v, KeyCode::Left, KeyModifiers::SHIFT);
+        // ctrl+w: 0 repo switch
+        key(&mut v, KeyCode::Char('w'), KeyModifiers::CONTROL);
         assert_eq!(v.changes.dir(), a.as_path());
 
-        // ctrl+w: the next repo
-        key(&mut v, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        // tab tab: the panel, the repo tabs; → the next repo; shift+tab shift+tab: the review
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(v.repo_focus);
+        key(&mut v, KeyCode::Right, KeyModifiers::NONE);
         assert_eq!(v.changes.dir(), b.as_path());
+        key(&mut v, KeyCode::BackTab, KeyModifiers::SHIFT);
+        key(&mut v, KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert!(!v.repo_focus && !v.changes.panel_focus() && !v.prompt_focus);
 
         // ← in the diff: the panel, 0 repo switch
         key(&mut v, KeyCode::Left, KeyModifiers::NONE);

@@ -952,8 +952,7 @@ impl FlowsTab {
                     self.fork(i);
                 }
             }
-            KeyCode::Tab | KeyCode::Down if k.code == KeyCode::Tab || ed.fields[ed.field].1.on_last_row() => ed.field = (ed.field + 1) % n,
-            KeyCode::BackTab => ed.field = (ed.field + n - 1) % n,
+            KeyCode::Down if ed.fields[ed.field].1.on_last_row() => ed.field = (ed.field + 1) % n,
             KeyCode::Up if ed.fields[ed.field].1.on_first_row() => ed.field = ed.field.saturating_sub(1),
             _ => {
                 let ta = &mut ed.fields[ed.field].1;

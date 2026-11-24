@@ -249,7 +249,7 @@ impl Coach {
             Quest {
                 title: "finish",
                 tasks: vec![Task::Leave],
-                about: &["keys to keep: ctrl+p menu · F1-F4 views · @ agents · # shortcuts · >sub side task · esc esc back."],
+                about: &["keys to keep: tab focus · ctrl+. actions · ctrl+p menu · F1-F4 views · @ agents · # shortcuts · esc esc back."],
                 doc: "reference/keys/",
                 advanced: true,
             },

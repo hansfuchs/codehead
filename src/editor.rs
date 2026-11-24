@@ -1,4 +1,4 @@
-//! The IDE codehead opens: the worktree (ctrl+i) or a file at a line (changes view `e` / `o`).
+//! The IDE codehead opens: the worktree (menu → IDE) or a file at a line (`e` in the changes / files view).
 //! Setting `editor` ($CODEHEAD_EDITOR): `auto` (default: VS Code family, else Cursor, Zed,
 //! JetBrains, first on PATH or in /Applications), a command name, or a path.
 

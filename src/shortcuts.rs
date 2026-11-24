@@ -505,7 +505,8 @@ impl Tab {
                         self.focus = Focus::Text;
                     }
                     KeyCode::Char('n') if ctrl || k.modifiers.is_empty() => self.add(),
-                    KeyCode::Char('r') if self.at < self.list.len() => {
+                    // R: rename (as in the flows tab; r reads again on every screen)
+                    KeyCode::Char('R') if self.at < self.list.len() => {
                         self.name.move_end();
                         self.focus = Focus::Name;
                     }
@@ -538,7 +539,7 @@ impl Tab {
                 self.focus = Focus::List;
             }
             Focus::Name => match k.code {
-                KeyCode::Enter | KeyCode::Tab | KeyCode::Down => {
+                KeyCode::Enter | KeyCode::Down => {
                     let name = self.name.text().trim().to_string();
                     if !valid_name(&name) {
                         self.error = Some("name: letters, digits, _ or - only".into());
@@ -566,7 +567,6 @@ impl Tab {
                         self.focus = Focus::List;
                     }
                 }
-                KeyCode::BackTab => self.focus = Focus::Name,
                 KeyCode::Up if self.text.on_first_row() => self.focus = Focus::Name,
                 _ => {
                     if !matches!(self.text.key(k), crate::textarea::Outcome::Handled) && k.code == KeyCode::Enter {

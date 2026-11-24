@@ -30,7 +30,7 @@ pub struct MergeTab {
     pub list: PrList,
     detail: Option<Merge>,
     input: TextArea,
-    input_focus: bool,
+    pub(crate) input_focus: bool,
     input_rect: Rect,
 }
 
@@ -98,12 +98,10 @@ impl MergeTab {
             };
         };
         let ctrl = k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
-        let tab = matches!(k.code, KeyCode::Tab | KeyCode::BackTab) && !ctrl;
         if self.input_focus {
             match k.code {
-                // esc, tab: back to the pull request (tab: the next field, as in the thread view)
+                // esc: back to the pull request (tab: the next region, the start screen's)
                 KeyCode::Esc => self.input_focus = false,
-                _ if tab => self.input_focus = false,
                 KeyCode::Enter if ctrl => {
                     let text = self.input.text();
                     if text.trim().is_empty() {
@@ -121,10 +119,6 @@ impl MergeTab {
                     }
                 }
             }
-            return Out::None;
-        }
-        if !m.typing() && ((k.code == KeyCode::Char('i') && !ctrl) || tab) {
-            self.input_focus = true;
             return Out::None;
         }
         if k.code == KeyCode::Esc && !m.takes_esc() {
@@ -200,7 +194,8 @@ mod tests {
     #[test]
     fn the_prompt_and_update_open_a_new_thread() {
         let mut t = MergeTab { detail: Some(crate::merge::tests::with(crate::merge::tests::pr())), ..Default::default() };
-        t.key(KeyEvent::from(KeyCode::Char('i')));
+        // tab (the start screen's focus ring): the PR's prompt
+        t.input_focus = true;
         for c in "fix it".chars() {
             t.key(KeyEvent::from(KeyCode::Char(c)));
         }

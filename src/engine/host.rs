@@ -1292,7 +1292,7 @@ impl Host {
                 let t = self.thread()?;
                 let lib = super::flows::Library::load(Some(&t.work_dir()));
                 let f = lib.flow(&s("flow")).ok_or_else(|| format!("flow {} not found. flows: {}", s("flow"), lib.flows.iter().map(|f| f.slug.as_str()).collect::<Vec<_>>().join(", ")))?;
-                self.flow_log(&s("agent"), "suggest", format!("@{} suggests flow {} · {} · agents box (ctrl+q) → flow to switch", s("agent"), f.name, s("reason")));
+                self.flow_log(&s("agent"), "suggest", format!("@{} suggests flow {} · {} · agents box (tab) → flow to switch", s("agent"), f.name, s("reason")));
                 Ok(json!({}))
             }
             _ => Err(format!("unknown op {op:?}")),

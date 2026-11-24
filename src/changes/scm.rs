@@ -118,12 +118,12 @@ pub(super) struct Panel {
     pub msg_focus: bool,
     drafting: Option<Receiver<Result<String, String>>>,
     rows: Vec<PRow>,
-    at: usize,
+    pub(crate) at: usize,
     top: usize,
     folded: HashSet<Fold>,
     /// Picked files (space, shift+click): s / p take them.
     pub picked: BTreeSet<String>,
-    /// Picked unpushed commits (space): u uncommits them, the ship menu pushes up to them.
+    /// Picked unpushed commits (space): ctrl+. → uncommit takes them, the ship section pushes up to them.
     pub commit_picks: BTreeSet<String>,
     /// Picked comments (ids; space): the next prompt takes them along, then they clear.
     pub comment_picks: BTreeSet<String>,
@@ -131,7 +131,7 @@ pub(super) struct Panel {
     pub rect: Rect,
     msg_rect: Rect,
     /// The list's screen rows: y, row index, a stuck label.
-    lines: Vec<(u16, usize, bool)>,
+    pub(crate) lines: Vec<(u16, usize, bool)>,
     buttons: Vec<(Rect, Btn)>,
     /// PR mode: the commit dropdown open, its cursor (0: every commit, k: the k-th newest);
     /// its rows (clicks).
@@ -496,7 +496,7 @@ impl View {
     }
 
     /// u: the question, then the picked commits leave the history (their changes: uncommitted).
-    fn ask_uncommit(&mut self) -> Act {
+    pub(super) fn ask_uncommit(&mut self) -> Act {
         if self.changes.stopped.is_some() {
             return Act::Toast("a rebase stopped: finish it first (S)".into());
         }
@@ -535,7 +535,7 @@ impl View {
         Some((un[k], un.len() - k))
     }
 
-    /// The ship menu's "push up to": the question lists every commit that goes.
+    /// The ship section's "push up to": the question lists every commit that goes.
     pub(super) fn ask_push_to(&mut self) -> Act {
         if self.pushing() {
             return Act::Toast(super::PUSH_RUNS.into());
@@ -546,7 +546,7 @@ impl View {
     }
 
     /// P / the UNPUSHED row's push: every unpushed commit to the upstream, after the question
-    /// (picks: up to the newest pick, as the ship menu).
+    /// (picks: up to the newest pick, as the ship section).
     pub(super) fn ask_push_all(&mut self) -> Act {
         if self.pushing() {
             return Act::Toast(super::PUSH_RUNS.into());
@@ -1362,11 +1362,10 @@ impl View {
             }
             KeyCode::Char('[') => self.jump_section(false),
             KeyCode::Char(']') => self.jump_section(true),
-            KeyCode::Char('u') => return self.ask_uncommit(),
             // P: every unpushed commit to the upstream (picks: up to the newest pick), asked
             KeyCode::Char('P') => return self.ask_push_all(),
-            // d on a comment: resolved / open again
-            KeyCode::Char('d') => {
+            // v on a comment: resolved / open again
+            KeyCode::Char('v') => {
                 if let Some(PRow::Comment(ci)) = row {
                     let act = self.toggle_resolved(ci);
                     self.scm.rows = self.panel_rows();
@@ -1380,7 +1379,11 @@ impl View {
                 self.refresh(true);
                 return Act::Toast("changes: reading git".into());
             }
-            KeyCode::Char('x') | KeyCode::Delete => match row {
+            // d d: delete the comment / the stash entry
+            KeyCode::Char('d') | KeyCode::Delete if matches!(row, Some(PRow::Comment(_) | PRow::Stash(_))) && !self.del_armed(true, self.scm.at) => {
+                return Act::Toast("d again: delete".into());
+            }
+            KeyCode::Char('d') | KeyCode::Delete => match row {
                 Some(PRow::Comment(ci)) => {
                     self.comments.remove(ci);
                     self.save_comments();
@@ -1388,32 +1391,28 @@ impl View {
                     return Act::Toast(format!("comment deleted · {} left", self.comments.len()));
                 }
                 Some(PRow::Stash(si)) => {
-                    if let Some(e) = self.stash.get(si) {
-                        self.modal = Some(Modal::Confirm { question: format!("remove “{}” from the stash? its lines are gone for good", e.title()), yes: false, then: Then::DropStash(e.id.clone()) });
+                    if let Some(id) = self.stash.get(si).map(|e| e.id.clone()) {
+                        self.modal = Some(Modal::Confirm { question: String::new(), yes: true, then: Then::DropStash(id) });
+                        return self.confirm(true);
                     }
                 }
                 _ => {}
             },
-            KeyCode::Char('X') if !self.stash.is_empty() => {
-                self.modal = Some(Modal::Confirm { question: format!("clear the stash? {} entries, their lines gone for good", self.stash.len()), yes: false, then: Then::ClearStash });
-            }
             KeyCode::Char('m') => self.scm.msg_focus = true,
-            // S: the ship menu, as in the review
-            KeyCode::Char('S') => return self.open_ship(),
-            // e on a comment: edit it
-            KeyCode::Char('e') if matches!(row, Some(PRow::Comment(_))) => {
-                if let Some(PRow::Comment(ci)) = row {
-                    self.edit_comment(ci, None);
+            // e: the file in the IDE (its 1st changed line; a comment: its line)
+            KeyCode::Char('e') => match row {
+                Some(PRow::File(i, _)) => {
+                    if let Some(f) = self.changes.files.get(i) {
+                        return Act::Open(f.path.clone(), f.first_line());
+                    }
                 }
-            }
-            // o / e / i: the file in the IDE (its 1st changed line)
-            KeyCode::Char('o') | KeyCode::Char('e') | KeyCode::Char('i') => {
-                if let Some(PRow::File(i, _)) = row
-                    && let Some(f) = self.changes.files.get(i)
-                {
-                    return Act::Open(f.path.clone(), f.first_line());
+                Some(PRow::Comment(ci)) => {
+                    if let Some(c) = self.comments.get(ci) {
+                        return Act::Open(c.path.clone(), c.line);
+                    }
                 }
-            }
+                _ => {}
+            },
             KeyCode::Esc => {
                 self.scm.picked.clear();
                 self.scm.commit_picks.clear();
@@ -1423,6 +1422,66 @@ impl View {
             _ => {}
         }
         Act::None
+    }
+
+    /// The context menu of the panel's row under the cursor.
+    pub(super) fn panel_ctx_items(&mut self) -> (String, Vec<crate::ctxmenu::Item<crate::ctxmenu::Act>>) {
+        use crate::ctxmenu::{Act as C, Item, key};
+        self.sync_rows();
+        let enter = C::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let row = self.scm.rows.get(self.scm.at).cloned();
+        let mut v = Vec::new();
+        let title = match row {
+            Some(PRow::File(i, _)) => {
+                v.push(Item::new("jump to it in the review", "enter", enter));
+                v.push(Item::new("open in the IDE", "e", key('e')));
+                v.push(Item::new("pick", "space", key(' ')));
+                v.push(Item::new("stage the picked files (staged: unstage)", "s", key('s')));
+                v.push(Item::new("stash the picked files", "p", key('p')));
+                self.changes.files.get(i).map_or_else(String::new, |f| f.path.clone())
+            }
+            Some(PRow::Comment(ci)) => {
+                let open = self.comments.get(ci).is_some_and(|c| c.open());
+                v.push(Item::new("edit at its line", "enter", enter));
+                v.push(Item::new(if open { "resolve" } else { "open again" }, "v", key('v')));
+                v.push(Item::new("pick for the next prompt", "space", key(' ')));
+                v.push(Item::new("open in the IDE", "e", key('e')));
+                v.push(Item::new("delete", "d d", key('d')));
+                self.comments.get(ci).map_or_else(String::new, |c| c.id.clone())
+            }
+            Some(PRow::Commit(ci)) => {
+                let c = self.changes.commits.list.get(ci);
+                v.push(Item::new("its files in the review", "enter", enter));
+                if c.is_some_and(|c| !c.pushed) {
+                    v.push(Item::new("pick", "space", key(' ')));
+                    v.push(Item::new("uncommit (asks first)", "", C::Cmd("uncommit")));
+                }
+                c.map_or_else(String::new, |c| c.short.clone())
+            }
+            Some(PRow::Stash(si)) => {
+                v.push(Item::new("restore (its agent)", "enter", enter));
+                v.push(Item::new("remove", "d d", key('d')));
+                v.push(Item::new("clear the stash (asks first)", "", C::Cmd("clear stash")));
+                self.stash.get(si).map_or_else(String::new, |e| e.title())
+            }
+            _ => "panel".to_string(),
+        };
+        v.extend([Item::new("commit message", "m", key('m')), Item::new("read git again", "r", key('r'))]);
+        // the ship steps valid now (a stopped rebase: only its steps), as the ship menu had them
+        for (i, r) in self.ship_rows().into_iter().enumerate() {
+            let mut it = Item::new(r.label, "", C::Step(i)).in_section(match r.group {
+                super::ShipGroup::Ship => "ship/ship",
+                super::ShipGroup::Git => "ship/git",
+                super::ShipGroup::Pr => "ship/pr",
+                super::ShipGroup::Rebase => "ship/rebase",
+            });
+            it.state = r.state;
+            it.agent = r.agent;
+            it.off = r.off;
+            it.asks = r.asks;
+            v.push(it);
+        }
+        (title, v)
     }
 
     /// A mouse event over the panel.
@@ -1552,27 +1611,10 @@ mod tests {
     use super::super::tests_support::*;
     use super::*;
 
+    /// Tab in the thread view: the keys to the panel / the review (its focus ring).
     fn alt_tap(v: &mut super::super::View) {
-        use ratatui::crossterm::event::{KeyEventKind, KeyEventState, ModifierKeyCode};
-        for kind in [KeyEventKind::Press, KeyEventKind::Release] {
-            v.key(KeyEvent::new_with_kind_and_state(KeyCode::Modifier(ModifierKeyCode::LeftAlt), KeyModifiers::ALT, kind, KeyEventState::NONE));
-        }
-    }
-
-    #[test]
-    fn an_alt_tap_toggles_the_focus_alt_with_a_key_does_not() {
-        use ratatui::crossterm::event::{KeyEventKind, KeyEventState, ModifierKeyCode};
-        let mut v = test_view();
-        draw(&mut v, 120, 30);
-        alt_tap(&mut v);
-        assert!(v.scm.focus);
-        alt_tap(&mut v);
-        assert!(!v.scm.focus);
-        let alt = |kind| KeyEvent::new_with_kind_and_state(KeyCode::Modifier(ModifierKeyCode::LeftAlt), KeyModifiers::ALT, kind, KeyEventState::NONE);
-        v.key(alt(KeyEventKind::Press));
-        v.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
-        v.key(alt(KeyEventKind::Release));
-        assert!(!v.scm.focus, "alt+x: 0 tap");
+        let on = !v.scm.focus;
+        v.focus_panel(on);
     }
 
     #[test]
@@ -1588,139 +1630,95 @@ mod tests {
         assert!(s[staged + 1].contains("a.rs") && s[staged + 1].contains("M"), "{all}");
         let panel = |l: &String| l.chars().take(30).collect::<String>();
         assert!(s.iter().any(|l| panel(l).contains("a_test.rs") && panel(l).trim_end().ends_with('U')), "untracked: U: {all}");
-        // an alt tap: the keys to the panel; left on a label folds it
+        // tab: the keys to the panel; left on a label folds it
         alt_tap(&mut v);
         assert!(v.scm.focus);
         v.scm.at = v.scm.rows.iter().position(|r| *r == PRow::Section(Sec::Changes, 4)).unwrap();
         v.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         let all = draw(&mut v, 120, 30).join("\n");
         assert!(all.contains("▸ CHANGES") && !all.contains("▾ medium"), "{all}");
-        // ctrl+b hides it
-        v.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        // the context menu hides it
+        v.toggle_panel();
         let all = draw(&mut v, 120, 30).join("\n");
         assert!(!all.contains("STAGED") && !v.scm.focus, "{all}");
     }
 
     #[test]
-    fn s_opens_the_ship_menu_outward_steps_ask_with_a_2nd_enter() {
+    fn the_panels_menu_has_the_ship_steps_a_stopped_rebase_only_its_own() {
         let mut v = test_view();
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        // S: 0 menu of its own any more
         v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
-        let all = draw(&mut v, 120, 30).join("\n");
+        assert!(v.modal.is_none());
+        let all = draw_ctx(&mut v, 120, 30).join("\n");
         assert!(all.contains(" ship ") && all.contains("push") && all.contains("open the pull request"), "{all}");
-
-        // push: a 1st enter asks (0 git step), esc closes
-        v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert_eq!(v.key(enter), Act::None);
-        assert!(v.op.is_none() && draw(&mut v, 120, 30).join("\n").contains("enter again"));
-        v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(v.modal.is_none() && v.op.is_none());
+        let (_, items) = v.ctx_items();
+        assert!(items.iter().any(|i| i.label == "push" && i.asks && i.section == "ship/git"), "push: outward, asks first");
 
         // a stopped rebase: its steps only; the agents resolve at once, abort asks
         v.changes.stopped = Some(vec!["src/a.rs".into()]);
-        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
-        let all = draw(&mut v, 120, 30).join("\n");
+        let all = draw_ctx(&mut v, 120, 30).join("\n");
         assert!(all.contains("resolve the conflicts") && !all.contains("open the pull request"), "{all}");
-        assert!(matches!(v.key(enter), Act::Send(t) if t.contains("src/a.rs")));
-
-        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
-        v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert_eq!(v.key(enter), Act::None);
-        assert!(v.op.is_none(), "abort: a 1st enter only asks");
+        assert!(matches!(ship(&mut v, "resolve the conflicts"), Act::Send(t) if t.contains("src/a.rs")));
+        let (_, items) = v.ctx_items();
+        assert!(items.iter().any(|i| i.label.contains("abort") && i.asks), "abort: asks first");
     }
 
     #[test]
-    fn the_ship_menu_hands_pr_steps_to_a_sub_thread_and_shows_the_open_pr() {
+    fn the_ship_section_hands_pr_steps_to_a_sub_thread_and_shows_the_open_pr() {
         let mut v = test_view();
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
-        v.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        v.focus_panel(true);
         assert!(v.scm.focus);
-        // the panel's legend: only S
-        assert_eq!(v.hints(), "S: ship ");
+        assert_eq!(v.hints(), "tab: next · ctrl+.: actions, ship ");
 
-        // 0 PR: ship, create PR, create PR draft; right of the panel
-        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
-        let rows = draw(&mut v, 140, 30);
+        // 0 PR: ship, create PR, create PR draft; right of the panel, under a "ship" subheading
+        let rows = draw_ctx(&mut v, 140, 40);
         let all = rows.join("\n");
         assert!(all.contains("ship: commit, push, PR, review, CI green") && all.contains("create PR draft") && !all.contains("update PR description"), "{all}");
-        // ✦ on the agent steps only; a rule between ship / git / PR
+        // ✦ on the agent steps only; 1 subheading, a rule between ship / git / PR
         assert!(all.contains("✦ ship: commit") && all.contains("✦ create PR draft") && all.contains("   push ") && !all.contains("✦ push"), "{all}");
-        assert_eq!(rows.iter().filter(|l| l.contains('├') && l.contains('┤')).count(), 2, "{all}");
+        assert_eq!(rows.iter().filter(|l| l.contains("├─ ship ─")).count(), 1, "{all}");
+        assert_eq!(rows.iter().filter(|l| l.contains('├') && l.contains('┤')).count(), 3, "{all}");
         let at = rows.iter().find(|l| l.contains("create PR draft")).unwrap();
         let px = usize::from(v.scm.rect.right());
-        assert!(at.chars().take(px).all(|c| c != '›') && at.chars().nth(px).is_some_and(|c| c == '│' || c == '╭' || c == '╰' || c == '│'), "{at}");
+        assert!(at.chars().take(px).all(|c| c != '›') && at.chars().nth(px).is_some_and(|c| c == '│'), "{at}");
 
-        // create PR draft (row 3 of push, update…): 0 commits ahead → 0 sub-thread
-        let draft = v.ship_rows().iter().position(|r| r.label == "create PR draft").unwrap();
-        for _ in 0..draft {
-            v.key(j);
-        }
-        v.key(enter);
-        assert!(matches!(v.key(enter), Act::Toast(t) if t.contains("commit first")));
+        // create PR draft: 0 commits ahead → 0 sub-thread
+        assert!(matches!(ship(&mut v, "create PR draft"), Act::Toast(t) if t.contains("commit first")));
 
         // 2 commits ahead, 0 branch (detached / 0 git): 0 sub-thread
         v.changes.ahead = 2;
-        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
-        for _ in 0..draft {
-            v.key(j);
-        }
-        v.key(enter);
-        assert!(matches!(v.key(enter), Act::Toast(_)));
+        assert!(matches!(ship(&mut v, "create PR draft"), Act::Toast(_)));
 
         // on a branch: the sub-thread's task names it, a draft, the commits only
         v.branch_override = Some("task/x".into());
-        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
-        for _ in 0..draft {
-            v.key(j);
-        }
-        v.key(enter);
-        match v.key(enter) {
+        match ship(&mut v, "create PR draft") {
             Act::Sub(t) => assert!(t.starts_with("Open a draft pull request (`--draft`) for the branch `task/x`") && t.contains("git push -u origin task/x") && t.contains("--head task/x --base main --draft") && !t.contains("HEAD`,") && t.contains("uncommitted changes stay"), "{t}"),
             a => panic!("{a:?}"),
         }
 
         // a PR open: its label on top, update description, 0 create rows
         v.pr = Some(super::super::Pr { number: 1234, url: "https://github.com/o/codehead/pull/1234".into(), ..Default::default() });
-        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
-        let all = draw(&mut v, 140, 30).join("\n");
+        let all = draw_ctx(&mut v, 140, 40).join("\n");
         assert!(all.contains("codehead#1234") && all.contains("update PR description") && !all.contains("create PR"), "{all}");
         // update PR on the newest main: uncommitted files → 0 sub-thread; a clean tree → the task
         let up = v.ship_rows().iter().position(|r| r.label == "update PR on the newest main").unwrap();
         assert!(v.ship_rows()[up].agent && v.ship_rows()[up].group == super::super::ShipGroup::Pr);
-        for _ in 0..up {
-            v.key(j);
-        }
-        v.key(enter);
-        assert!(matches!(v.key(enter), Act::Toast(t) if t.contains("uncommitted")));
+        assert!(matches!(ship(&mut v, "update PR on the newest main"), Act::Toast(t) if t.contains("uncommitted")));
         let files = std::mem::take(&mut v.changes.files);
-        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
-        for _ in 0..up {
-            v.key(j);
-        }
-        v.key(enter);
-        match v.key(enter) {
+        match ship(&mut v, "update PR on the newest main") {
             Act::Sub(t) => assert!(t.contains("git rebase origin/main") && t.contains("--force-with-lease origin task/x") && t.contains("`task/x`"), "{t}"),
             a => panic!("{a:?}"),
         }
         v.changes.files = files;
-        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
-        let desc = v.ship_rows().iter().position(|r| r.label == "update PR description").unwrap();
-        for _ in 0..desc {
-            v.key(j);
-        }
-        v.key(enter);
-        assert!(matches!(v.key(enter), Act::Sub(t) if t.contains("gh pr edit 1234") && t.contains("`headRefName` is not `task/x`")));
+        assert!(matches!(ship(&mut v, "update PR description"), Act::Sub(t) if t.contains("gh pr edit 1234") && t.contains("`headRefName` is not `task/x`")));
 
         // ship: row 0, the state along, never merge
-        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
-        v.key(enter);
-        assert!(matches!(v.key(enter), Act::Sub(t) if t.contains("codehead#1234") && t.contains("Never merge") && t.contains("Never push to any branch but `task/x`") && !t.contains("origin HEAD")));
+        let first = v.ship_rows()[0].label.clone();
+        assert!(matches!(ship(&mut v, &first), Act::Sub(t) if t.contains("codehead#1234") && t.contains("Never merge") && t.contains("Never push to any branch but `task/x`") && !t.contains("origin HEAD")));
     }
 
     #[test]
-    fn ctrl_b_cycles_the_panel_and_letters_with_a_modifier_do_nothing() {
+    fn the_panel_shows_hides_takes_the_keys_and_letters_with_a_modifier_do_nothing() {
         let mut v = test_view();
         draw(&mut v, 120, 30);
         assert!(v.scm.shown && !v.scm.focus);
@@ -1730,16 +1728,15 @@ mod tests {
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)), Act::None);
         assert!(v.op.is_none());
 
-        // ctrl+b: shown → the keys to the panel → hidden → shown with the keys (0 kitty needed)
-        let ctrl_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
-        v.key(ctrl_b);
+        // ctrl+b: 0 effect (the context menu shows / hides the panel; tab gives it the keys)
+        v.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(v.scm.shown && !v.scm.focus);
+        v.focus_panel(true);
         assert!(v.scm.shown && v.scm.focus);
-
-        v.key(ctrl_b);
+        v.toggle_panel();
         assert!(!v.scm.shown && !v.scm.focus);
-
-        v.key(ctrl_b);
-        assert!(v.scm.shown && v.scm.focus);
+        v.toggle_panel();
+        assert!(v.scm.shown && !v.scm.focus);
     }
 
     #[test]
@@ -1819,7 +1816,7 @@ mod tests {
         on_commit(&mut v, "c4 subject");
         press(&mut v, KeyCode::Char(' '));
         assert_eq!(v.scm.commit_picks.len(), 1);
-        assert!(v.hints().contains("u: uncommit"), "the cursor on c3: commit keys");
+        assert!(v.hints().contains("ctrl+.: uncommit"), "the cursor on c3: commit keys");
 
         on_commit(&mut v, "c2 subject");
         assert!(matches!(press(&mut v, KeyCode::Char(' ')), Act::Toast(t) if t.contains("pushed")));
@@ -1958,14 +1955,14 @@ mod tests {
     }
 
     #[test]
-    fn u_asks_then_uncommits_the_picked_commit_its_message_goes_to_the_box() {
+    fn uncommit_asks_then_uncommits_the_picked_commit_its_message_goes_to_the_box() {
         use super::super::commits::fixture::*;
         let w = repo("uncommit");
         let mut v = commit_view(&w, "commits-uncommit-1");
         on_commit(&mut v, "c4 subject");
         let before = oid(&w, "HEAD");
 
-        press(&mut v, KeyCode::Char('u'));
+        v.ctx_cmd("uncommit");
         let all = draw(&mut v, 140, 40).join("\n");
 
         assert!(all.contains("uncommit 1 commit? files stay") && all.contains("c4 subject"), "{all}");
@@ -1976,7 +1973,7 @@ mod tests {
         assert!(v.modal.is_none() && v.op.is_none());
         assert_eq!(oid(&w, "HEAD"), before);
 
-        press(&mut v, KeyCode::Char('u'));
+        v.ctx_cmd("uncommit");
         press(&mut v, KeyCode::Char('y'));
         let note = wait_op(&mut v);
 
@@ -1987,7 +1984,7 @@ mod tests {
         // a pushed commit: 0 question
         wait_read(&mut v);
         on_commit(&mut v, "c2 subject");
-        assert!(matches!(press(&mut v, KeyCode::Char('u')), Act::Toast(t) if t.contains("pushed")));
+        assert!(matches!(v.ctx_cmd("uncommit"), Act::Toast(t) if t.contains("pushed")));
         assert!(v.modal.is_none());
         drop(&w);
     }
@@ -1999,22 +1996,18 @@ mod tests {
         let mut v = commit_view(&w, "commits-shipto-1");
         let c3 = oid(&w, "HEAD^");
 
-        // 0 picks: the ship menu as before
-        press(&mut v, KeyCode::Char('S'));
-        assert!(!draw(&mut v, 140, 40).join("\n").contains("push up to"));
-        press(&mut v, KeyCode::Esc);
+        // 0 picks: the ship section as before
+        assert!(!draw_ctx(&mut v, 140, 40).join("\n").contains("push up to"));
 
         on_commit(&mut v, "c3 subject");
         v.scm.focus = true;
         press(&mut v, KeyCode::Char(' '));
-        press(&mut v, KeyCode::Char('S'));
-        let all = draw(&mut v, 140, 40).join("\n");
+        let all = draw_ctx(&mut v, 140, 40).join("\n");
         assert!(all.contains("push up to") && all.contains("1 commit"), "{all}");
 
         // the row (under ship, push): the question lists the commits, 0 push yet
-        press(&mut v, KeyCode::Char('j'));
-        press(&mut v, KeyCode::Char('j'));
-        press(&mut v, KeyCode::Enter);
+        let label = v.ship_rows().iter().find(|r| r.label.contains("push up to")).map(|r| r.label.clone()).unwrap();
+        ship(&mut v, &label);
         let all = draw(&mut v, 140, 40).join("\n");
         assert!(all.contains("push 1 commit to origin/feat?") && all.contains("1 newer stay local") && all.contains("c3 subject"), "{all}");
         assert!(v.op.is_none());
@@ -2169,11 +2162,9 @@ mod tests {
         v.scm.focus = true;
         assert!(matches!(press(&mut v, KeyCode::Char('P')), Act::Toast(t) if t.contains("push")));
         assert!(v.modal.is_none() && v.op.is_none());
-        // the ship menu: push grayed, enter on it toasts
-        press(&mut v, KeyCode::Char('S'));
+        // the ship section: push grayed, running it toasts
         assert!(v.ship_rows().iter().find(|r| r.label == "push").is_some_and(|r| r.off && r.state == "a push runs"));
-        press(&mut v, KeyCode::Char('j'));
-        assert!(matches!(press(&mut v, KeyCode::Enter), Act::Toast(_)));
+        assert!(matches!(ship(&mut v, "push"), Act::Toast(_)));
         // the panel's own git step: the lock says no
         assert!(super::super::run_op(&w, &Op::Push).unwrap_err().contains("GIGAS"));
 
@@ -2189,7 +2180,7 @@ mod tests {
     }
 
     #[test]
-    fn comments_split_into_open_and_resolved_space_picks_d_resolves() {
+    fn comments_split_into_open_and_resolved_space_picks_v_resolves() {
         let mut v = test_view();
         v.id = format!("changes-cstate-{}", std::process::id());
         let c = |id: &str, by: &str, line: u32| super::super::Comment { path: "src/a.rs".into(), line, text: format!("{id} text"), id: id.into(), by: by.into(), ..Default::default() };
@@ -2205,20 +2196,20 @@ mod tests {
         let review: String = all.lines().map(|l| l.chars().skip(36).collect::<String>()).collect::<Vec<_>>().join("\n");
         assert!(review.contains("c1 text") && !review.contains("c2 text"), "resolved: out of the file view: {review}");
 
-        // the panel: space picks c1 for the prompt, d resolves it, d again opens it
+        // the panel: space picks c1 for the prompt, v resolves it, v again opens it
         alt_tap(&mut v);
         v.scm.at = v.scm.rows.iter().position(|r| *r == PRow::Comment(0)).unwrap();
         v.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         assert!(v.scm.comment_picks.contains("c1") && v.context().unwrap().contains("c1 [medium, open]"));
 
         v.scm.at = v.scm.rows.iter().position(|r| *r == PRow::Comment(0)).unwrap();
-        v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
         assert!(!v.comments[0].open());
         let all = draw(&mut v, 140, 40).join("\n");
         assert!(all.contains("▾ COMMENTS  0") && !all.contains("▾ OPEN"), "{all}");
 
         v.scm.at = v.scm.rows.iter().position(|r| *r == PRow::Comment(0)).unwrap();
-        v.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        v.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
         assert!(v.comments[0].open());
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(&v.id));
     }

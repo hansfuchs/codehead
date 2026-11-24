@@ -91,7 +91,7 @@ The last layer wins per name. `r` in the flows tab resets an edited built-in.
 - the rail: `a` add a step (type: a shared step, a new shared step, or a one-off), `enter`
   edit, `J` `K` move, `d d` remove, `g` gate, `o` gate outcome (`O` clears), `L` loop (`+`
   `-` its max), `s` save a one-off as a shared step.
-- the step editor: `tab` next field, `ctrl+g` gate, `ctrl+f` fork a shared step into a
+- the step editor: `↑↓` the fields, `ctrl+g` gate, `ctrl+f` fork a shared step into a
   one-off of this flow, `#` shortcuts, `ctrl+s` save, `esc` close (edits: `esc` again within 2 s
   drops them).
 - steps: usage count per step, `n` new, `enter` edit, `R` rename (flows follow), `d d`
@@ -99,15 +99,15 @@ The last layer wins per name. `r` in the flows tab resets an edited built-in.
 
 ## On a thread
 
-- new task: each agent card shows its flow under the effort row. `f` on a card: the flows
+- new task: each agent card shows its flow under the effort row. `ctrl+.` → flow on a card: the flows
   (`→` a flow's steps: start at a later step, `0` none). A flow picks the agent. The last flow of
   a repo is the lead's default for the next task. Each agent's step 1 goes to it with the task.
 - the thread view: the agent card of an agent with a flow shows its step below the effort
   (`◆ 4/8 implement`; a wait: `⏸`, warnings: `!2`, a queued switch: `→ chore`). A click on that
-  line, or `ctrl+q` → an agent → `flow`, opens the agent's flow box (`> flow`: of the agent a
+  line, or `tab` to the agents box → an agent → `flow`, opens the agent's flow box (`> flow`: of the agent a
   message goes to): its row (the flow, the step, the agent, a wait, warnings), the steps with
   their arcs, `enter` a step's text, `s` skip, `j` jump, `c` change the flow, `u` undo a
-  queued change, `e` edit it, `x x` remove it. The menu (`ctrl+p`) has the same per agent.
+  queued change, `e` edit it, `d d` remove it. The menu (`ctrl+p`) has the same per agent.
 - the stream: 0 flow lines. The agent card shows the step.
 - a wait: the card says `⏸`, the flow box's row `⏸ … answer below`. The wait is a question in
   the picker under the stream, after the agents' questions. It never takes the keys: write in
@@ -119,7 +119,7 @@ The last layer wins per name. `r` in the flows tab resets an edited built-in.
   - `reply`: the prompt's text as a message, the wait stays.
 - change the flow: `switch now` stops the agent's running turn at its next tool boundary and
   starts the new flow at the step you pick; `after current flow` queues it.
-- an agent leaves: its flow ends. An agent replaced (`ctrl+q` → `replace with`): the new agent
+- an agent leaves: its flow ends. An agent replaced (agents box → `replace with`): the new agent
   takes the flow over, the current step again with its 1st message.
 
 An agent reports a step of its flow done with `flow_step` (codehead MCP); codehead hands it its

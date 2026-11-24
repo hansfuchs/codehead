@@ -5,7 +5,7 @@
 //! host's), a name filter.
 //!
 //! Actions on the card under the cursor (the start screen: or the selection): open, archive /
-//! unarchive, edit, delete. ctrl+o: their dropdown (both tabs); the start screen also: a u e d.
+//! unarchive, edit, delete. ctrl+.: their dropdown (both tabs); the start screen also: a u e d.
 //! Archive and delete ask first (1 row). Edit: a form (title, repo, linked repos, agents). The
 //! jobs run off the UI thread; their result shows on the list's last row.
 
@@ -706,7 +706,7 @@ impl ThreadList {
             let acts = self.acts();
             match k.code {
                 KeyCode::Esc => self.actions = None,
-                KeyCode::Char('o') if ctrl => self.actions = None,
+                _ if crate::ctxmenu::is_key(&k) => self.actions = None,
                 KeyCode::Up => self.actions = Some(cur.saturating_sub(1)),
                 KeyCode::Down => self.actions = Some((cur + 1).min(acts.len().saturating_sub(1))),
                 KeyCode::Enter => return acts.get(cur).map_or(Out::None, |&a| self.run(a)),
@@ -819,7 +819,7 @@ impl ThreadList {
             KeyCode::PageUp => self.cursor = self.cursor.saturating_sub(5),
             KeyCode::PageDown if n > 0 => self.cursor = (self.cursor + 5).min(n - 1),
             KeyCode::Enter => return self.run(Act::Open),
-            KeyCode::Char('o') if ctrl => {
+            _ if crate::ctxmenu::is_key(&k) => {
                 if !self.acts().is_empty() {
                     self.actions = Some(0);
                 }
@@ -1133,8 +1133,8 @@ impl ThreadList {
         match (self.mode, self.focus) {
             (_, Focus::Repos) => vec![("←→", "repo"), ("↓", "views"), ("↑", "tabs")],
             (_, Focus::Views) => vec![("←→", "view"), ("↑", "repos"), ("↓", "list")],
-            (Mode::Switch, Focus::List) => vec![("type", "filter"), ("←→", "repo"), ("↑↓", "move"), ("enter", "open"), ("ctrl+o", "actions")],
-            (Mode::Manage, Focus::List) => vec![("space", "select"), ("a", "archive"), ("u", "unarchive"), ("e", "edit"), ("d", "delete"), ("ctrl+o", "actions")],
+            (Mode::Switch, Focus::List) => vec![("type", "filter"), ("←→", "repo"), ("↑↓", "move"), ("enter", "open"), ("ctrl+.", "actions")],
+            (Mode::Manage, Focus::List) => vec![("space", "select"), ("a", "archive"), ("u", "unarchive"), ("e", "edit"), ("d", "delete"), ("ctrl+.", "actions")],
         }
     }
 }
@@ -1416,7 +1416,7 @@ mod tests {
 
     /// The menu: letters filter; ctrl+o → the actions; a → the question; enter → archived.
     #[test]
-    fn switch_mode_archives_by_ctrl_o_and_a_after_a_yes() {
+    fn switch_mode_archives_by_ctrl_dot_and_a_after_a_yes() {
         let dir = std::env::temp_dir();
         let t = crate::engine::store::Thread::new("archive from menu", "task", &dir, vec!["ada".into()]);
         t.save().unwrap();
@@ -1424,7 +1424,7 @@ mod tests {
         l.key(k(KeyCode::Char('a')));
         assert_eq!(l.query(), "a", "a letter filters in the menu");
         l.key(k(KeyCode::Backspace));
-        l.key(ctrl('o'));
+        l.key(ctrl('.'));
         let s = screen(&mut l, 80, 30);
         assert!(s.contains("actions") && s.contains("archive: worktree goes") && s.contains("delete"), "{s}");
         l.key(k(KeyCode::Char('a')));
@@ -1446,7 +1446,7 @@ mod tests {
         let t = crate::engine::store::Thread::new("here", "task", &dir, vec!["ada".into()]);
         t.save().unwrap();
         let mut l = ThreadList::new(Mode::Switch, Some(t.id.clone()), None, vec![card(&t.id, |_| {})]);
-        l.key(ctrl('o'));
+        l.key(ctrl('.'));
         l.key(k(KeyCode::Char('a')));
         assert_eq!(l.key(k(KeyCode::Char('y'))), Out::Home);
         let _ = crate::engine::store::delete(&t.id);

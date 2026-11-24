@@ -6,7 +6,7 @@
 //! one (both wrap). esc: the bar closes, the stream stays where it is.
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
@@ -171,9 +171,8 @@ impl ChatSearch {
                 self.close();
                 return Act::Close;
             }
-            KeyCode::Tab | KeyCode::Enter | KeyCode::Up if none => return self.step(true).map_or(Act::None, Act::Show),
-            KeyCode::BackTab | KeyCode::Down => return self.step(false).map_or(Act::None, Act::Show),
-            KeyCode::Tab if k.modifiers == KeyModifiers::SHIFT => return self.step(false).map_or(Act::None, Act::Show),
+            KeyCode::Enter | KeyCode::Up if none => return self.step(true).map_or(Act::None, Act::Show),
+            KeyCode::Down => return self.step(false).map_or(Act::None, Act::Show),
             _ => {}
         }
         if matches!(self.ta.key(k), Outcome::Ignored) {
@@ -256,6 +255,7 @@ pub fn mark(line: &Line<'static>, words: &[String]) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::crossterm::event::KeyModifiers;
     use super::*;
     use crate::engine::store::{Event, Kind};
 
@@ -282,11 +282,11 @@ mod tests {
         s.open();
         assert_eq!(typed(&mut s, &t, "deploy"), Act::Show(3), "the newest match first");
         assert_eq!(s.label(), "3/3");
-        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(s.key(tab, &t), Act::Show(2));
-        assert_eq!(s.key(tab, &t), Act::Show(0));
-        assert_eq!(s.key(tab, &t), Act::Show(3), "wraps");
-        assert_eq!(s.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), &t), Act::Show(0));
+        let older = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(s.key(older, &t), Act::Show(2));
+        assert_eq!(s.key(older, &t), Act::Show(0));
+        assert_eq!(s.key(older, &t), Act::Show(3), "wraps");
+        assert_eq!(s.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &t), Act::Show(0));
         assert!(s.is_hit(2) && !s.is_hit(1));
     }
 
@@ -307,7 +307,7 @@ mod tests {
         let mut s = ChatSearch::default();
         s.open();
         typed(&mut s, &t, "fix");
-        s.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &t);
+        s.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &t);
         assert_eq!(s.current(), Some(0));
         t.push(&Event { ts: 9, agent: Some("ada".into()), kind: Kind::Text { text: "fix c".into() } });
         assert_eq!(s.refresh(&t), None, "a new message: 0 jump");

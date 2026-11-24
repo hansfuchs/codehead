@@ -2,7 +2,7 @@
 //! agent's flow, its current step, a wait (gate, loop max), a pending / queued switch, warnings.
 //! A click (or the agents box: flow) opens its box:
 //! - steps: the rail (marks, arcs), enter: the step's text; s skip, j jump, c change the flow,
-//!   e edit it in the flows screen, d removes it.
+//!   e edit it in the flows screen, d d removes it.
 //! - change flow: the flows (typed text filters) → `switch now` / `after current flow` / cancel
 //!   (asked at once in the same box: 0 frame where the chat waits on a hidden choice) → the start
 //!   step. `now`: the host stops the running turn at its next tool boundary.
@@ -50,6 +50,8 @@ pub struct FlowBar {
     /// The agent the flow belongs to.
     pub agent: String,
     open: bool,
+    /// `d d`: the 1st `d` armed the flow's removal.
+    del_armed: bool,
     mode: Mode,
     cur: usize,
     offset: usize,
@@ -77,6 +79,7 @@ impl Default for FlowBar {
         FlowBar {
             agent: String::new(),
             open: false,
+            del_armed: false,
             mode: Mode::Steps,
             cur: 0,
             offset: 0,
@@ -272,6 +275,7 @@ impl FlowBar {
         if !self.open {
             return None;
         }
+        let armed = std::mem::take(&mut self.del_armed);
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let n = self.len();
         match k.code {
@@ -385,7 +389,11 @@ impl FlowBar {
                     self.open = false;
                     Act::Edit(slug)
                 }
-                // d: the flow goes, 0 confirm
+                // d d: the flow goes (the 1st d arms)
+                KeyCode::Char('d') if self.state.is_some() && !armed => {
+                    self.del_armed = true;
+                    Act::None
+                }
                 KeyCode::Char('d') if self.state.is_some() => {
                     self.state = None;
                     self.open = false;
@@ -574,7 +582,7 @@ impl FlowBar {
         match &self.mode {
             Mode::Steps if self.state.as_ref().is_some_and(|s| s.wait.is_some()) => (format!("flow · {} · @{}", self.name, self.agent), "the wait: answer below the stream · ↑↓ · enter text · s skip · j jump · c change · e edit · esc"),
             Mode::Steps if self.state.as_ref().is_some_and(|s| s.pending.is_some() || s.queued.is_some()) => (format!("flow · {} · @{}", self.name, self.agent), "↑↓ · enter text · u undo switch · s skip · j jump · c change · e edit · esc"),
-            Mode::Steps => (format!("flow · {} · @{}", self.name, self.agent), "↑↓ · enter text · s skip · j jump here · c change · e edit · d remove · esc"),
+            Mode::Steps => (format!("flow · {} · @{}", self.name, self.agent), "↑↓ · enter text · s skip · j jump here · c change · e edit · d d remove · esc"),
             Mode::Pick(_) => (format!("pick a flow for @{}", self.agent), "type: filter · ↑↓ · enter · esc"),
             Mode::How(_) => (format!("change the flow of @{}", self.agent), "↑↓ · enter · esc: back"),
             Mode::Start(_) => ("start step".into(), "↑↓ · enter: switch · esc: back"),
@@ -694,19 +702,23 @@ mod wait_tests {
     }
 
     #[test]
-    fn d_removes_the_flow_at_once_x_does_not() {
+    fn d_d_removes_the_flow_x_does_not() {
         let press = |b: &mut FlowBar, c: char| b.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         let mut b = FlowBar::new("ada");
         b.state = Some(FlowState { flow: "chore".into(), title: "chore".into(), ..Default::default() });
         b.open = true;
         b.mode = Mode::Steps;
-        assert!(b.frame_text().1.contains("d remove"));
+        assert!(b.frame_text().1.contains("d d remove"));
 
         // x: 0 effect
         assert!(matches!(press(&mut b, 'x'), Some(Act::None)));
         assert!(b.state.is_some() && b.open);
 
-        // d: the flow goes, 0 confirm
+        // d: armed; another key between: 0 removal; d d: the flow goes
+        assert!(matches!(press(&mut b, 'd'), Some(Act::None)));
+        press(&mut b, 'x');
+        assert!(matches!(press(&mut b, 'd'), Some(Act::None)));
+        assert!(b.state.is_some());
         assert!(matches!(press(&mut b, 'd'), Some(Act::Host("flow_clear", _))));
         assert!(b.state.is_none() && !b.open);
     }

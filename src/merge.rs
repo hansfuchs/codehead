@@ -712,6 +712,48 @@ impl Merge {
 
     // ---------- keys ----------
 
+    /// Where the context menu opens: the PR diff: as in the changes view; the overview: above /
+    /// below the stop in focus.
+    pub fn ctx_place(&mut self, area: Rect) -> crate::ctxmenu::Place {
+        if self.tab_ref().is_some_and(|t| t.sub == Sub::Changes)
+            && let Some(c) = self.changes_view()
+        {
+            return c.ctx_place();
+        }
+        let cur = self.tab_ref().and_then(|t| t.focus);
+        let r = self.hits.iter().find(|(_, s)| Some(*s) == cur).map_or(Rect { height: 1, ..area }, |(r, _)| *r);
+        crate::ctxmenu::Place::At(Rect { height: 1, ..r })
+    }
+
+    /// A context menu command of the PR diff (0 key of its own).
+    pub fn ctx_cmd(&mut self, c: &str) -> Act {
+        match self.changes_view().map(|v| v.ctx_cmd(c)) {
+            Some(crate::changes::Act::Toast(t)) => Act::Toast(t),
+            _ => Act::None,
+        }
+    }
+
+    /// The context menu (ctrl+.): the actions of the stop in focus (the diff: of its row).
+    pub fn ctx_items(&mut self) -> (String, Vec<crate::ctxmenu::Item<crate::ctxmenu::Act>>) {
+        use crate::ctxmenu::{Act as C, Item, key};
+        if self.prs.is_empty() {
+            return ("merge".into(), vec![Item::new("read again", "r", key('r'))]);
+        }
+        let diff = self.tab_ref().is_some_and(|t| t.sub == Sub::Changes);
+        let (title, mut v) = if diff {
+            self.changes_view().map_or_else(|| (String::new(), Vec::new()), |c| c.ctx_items())
+        } else {
+            ("pull request".to_string(), vec![Item::new("act on the stop", "enter", C::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))), Item::new("open on GitHub", "o", key('o'))])
+        };
+        v.extend([
+            Item::new("previous PR", "[", key('[')),
+            Item::new("next PR", "]", key(']')),
+            Item::new(if diff { "overview" } else { "diff" }, if diff { "<" } else { ">" }, key(if diff { '<' } else { '>' })),
+            Item::new("read the PR again", "r", key('r')),
+        ]);
+        (title, v)
+    }
+
     pub fn key(&mut self, k: KeyEvent) -> Act {
         self.active = Instant::now();
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
@@ -739,7 +781,8 @@ impl Merge {
             }
         }
         if self.tab_ref().is_some_and(|t| t.sub == Sub::Changes) {
-            if ctrl && k.code == KeyCode::Char('r') {
+            // r (ctrl+r too): the PR read again, as on every screen
+            if k.code == KeyCode::Char('r') && !k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER) && !self.typing() {
                 return self.manual();
             }
             // the bar rows (PR tabs, views) with the focus: their keys, as on the overview
@@ -834,8 +877,9 @@ impl Merge {
                     _ => {}
                 }
             }
-            KeyCode::Char('r') if !ctrl => return self.manual(),
-            KeyCode::Enter if ctrl || k.modifiers.contains(KeyModifiers::ALT) || k.modifiers.contains(KeyModifiers::SUPER) => {
+            KeyCode::Char('r') => return self.manual(),
+            // o: the stop on GitHub (open in the browser)
+            KeyCode::Char('o') if !ctrl => {
                 if let Some(s) = cur {
                     return self.open_on_github(s);
                 }
@@ -1778,10 +1822,10 @@ impl Merge {
 
     /// The changes view of the tab in view (PR mode), for the host's hints.
     pub fn hints(&self) -> String {
-        let Some(t) = self.tab_ref() else { return "r: read again · i: prompt ".into() };
+        let Some(t) = self.tab_ref() else { return "r: read again · tab: next ".into() };
         if t.sub == Sub::Changes {
             if matches!(t.focus, Some(Stop::Tabs | Stop::Subs)) {
-                return "←→ PR / view · ↑↓ row · ↓ ⏎: the diff · i tab: prompt ".into();
+                return "←→ PR / view · ↑↓ row · ↓ ⏎: the diff · tab: next ".into();
             }
             return t.changes.as_ref().map(|c| format!("{}· ↑ on top: views ", c.hints())).unwrap_or_default();
         }
@@ -1791,7 +1835,7 @@ impl Merge {
         if t.menu.is_some() {
             return "↑↓ pick · ⏎ take · esc close ".into();
         }
-        "j k ↑↓ move · ←→ along · ⏎ act · ctrl+⏎ GitHub · [ ] PR · < > view · r read · i prompt ".into()
+        "j k ↑↓ move · ←→ along · ⏎ act · o GitHub · [ ] PR · < > view · r read · tab next · ctrl+. actions ".into()
     }
 }
 

@@ -146,7 +146,7 @@ pub fn build(p: &Path, kind: Kind, picker: &Picker, cols: u16, rows: u16) -> Res
 
     let bytes = std::fs::metadata(p).map_err(|e| e.to_string())?.len();
     if bytes > MAX_BYTES {
-        return Err(format!("{} MB: over {} MB, 0 preview · y: yazi", bytes >> 20, MAX_BYTES >> 20));
+        return Err(format!("{} MB: over {} MB, 0 preview · ctrl+.: yazi", bytes >> 20, MAX_BYTES >> 20));
     }
 
     let fs = picker.font_size();
@@ -271,7 +271,7 @@ fn raster(p: &Path, max: u32) -> Result<DynamicImage, String> {
     let is_pdf = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
     let pdftoppm = is_pdf && on_path("pdftoppm");
     if !pdftoppm && !cfg!(target_os = "macos") {
-        return Err(if is_pdf { "0 pdf rasterizer: install poppler (pdftoppm) · y: yazi".into() } else { "heic: 0 decoder here · y: yazi".into() });
+        return Err(if is_pdf { "0 pdf rasterizer: install poppler (pdftoppm) · ctrl+.: yazi".into() } else { "heic: 0 decoder here · ctrl+.: yazi".into() });
     }
 
     // 1 name per call: 2 rasters at once never share a file

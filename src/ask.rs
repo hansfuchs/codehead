@@ -185,10 +185,6 @@ impl Picker {
         if self.sent {
             return Act::Pass;
         }
-        if k.code == KeyCode::Tab && k.modifiers.is_empty() {
-            self.focus = !self.focus;
-            return Act::Changed;
-        }
         let none = k.modifiers.is_empty();
         let typed = none || k.modifiers == KeyModifiers::SHIFT;
         let other = self.other_row(a);
@@ -498,18 +494,16 @@ mod tests {
     }
 
     #[test]
-    fn tab_moves_the_focus_and_the_prompt_gets_every_key_then() {
+    fn without_the_focus_the_prompt_gets_every_key() {
         let a = questions("q1", vec![q("Color?", "", true, &["red", "green"])]);
         let mut p = picker(&a);
-        assert_eq!(press(&mut p, &a, "⇥"), Act::Changed);
-        assert!(!p.focus);
+        // tab: the view's focus ring moves the focus
+        p.focus = false;
         for c in [KeyCode::Down, KeyCode::Char(' '), KeyCode::Enter, KeyCode::Char('1'), KeyCode::Char('x')] {
             assert_eq!(p.key(&a, key(c)), Act::Pass, "{c:?}");
         }
         assert!(p.rows(&a).iter().all(|r| !r.picked));
         assert_eq!(p.hint(&a), "tab: answer the question");
-        press(&mut p, &a, "⇥");
-        assert!(p.focus);
     }
 
     #[test]
@@ -562,7 +556,8 @@ mod tests {
     fn sync_keeps_the_state_of_the_same_ask_and_resets_on_a_new_one() {
         let a = questions("q1", vec![q("Which?", "", true, &["a", "b"])]);
         let mut p = picker(&a);
-        press(&mut p, &a, "↓ ␣ ⇥");
+        press(&mut p, &a, "↓ ␣");
+        p.focus = false;
         p.sync(Some(&a));
         assert_eq!((p.at, p.focus), (1, false));
         assert!(p.rows(&a)[1].picked);

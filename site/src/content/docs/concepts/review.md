@@ -1,6 +1,6 @@
 ---
 title: Review
-description: The changes view, the comments, the reviewer, the ship menu. Done means read.
+description: The changes view, the comments, the reviewer, the ship steps. Done means read.
 ---
 
 Agents write fast. The changes view (`F2`, `alt+2`) makes the reading fast too: the diff sorted
@@ -32,13 +32,14 @@ comment has an id (`c3`), an author and a state (open, resolved).
 - `space` on a comment picks it for the next prompt only: "work on c3".
 - Agents resolve the comments they addressed, with a note (MCP tool `comment_status`). A
   reviewer re-opens a comment whose fix does not hold.
-- The panel (`ctrl+b`) lists the comments, open by severity, then resolved.
+- `v` resolves the comment under the cursor; `d d` deletes it.
+- The panel (`tab` from the review) lists the comments, open by severity, then resolved.
 
 ## The reviewer
 
 `V` sends the diff to a reviewer model (setting `review`, default `claude:sonnet`): read-only
 tools in the worktree, findings back as structured output. Each finding shows under its line
-(`⚠ severity · title`). `y` takes a finding into your comment batch, `x` dismisses it.
+(`⚠ severity · title`). `c` takes a finding into your comment batch, `d d` dismisses it.
 
 ## Lines, not files
 
@@ -46,12 +47,13 @@ tools in the worktree, findings back as structured output. Each finding shows un
 - `p` stashes the selected lines out of the worktree. The agent that wrote them names the
   entry; `↺` has the agent put them back at their place.
 - `m` opens the commit message: `ctrl+g` drafts it from the staged diff.
-- `u` in the panel uncommits unpushed commits: the files stay, the messages go back into the
-  commit box.
+- `ctrl+.` → uncommit in the panel uncommits unpushed commits: the files stay, the messages go
+  back into the commit box.
 
 ## Ship
 
-`S` opens the ship menu: only the steps valid now, each with its state. Push, rebase on the
+`ctrl+.` in the panel opens its actions right of it; under **ship**: only the steps valid now,
+each with its state. Push, rebase on the
 base, push and open the pull request, merge when the checks pass. A failed CI run sends its log
 to the agents. The merge view (`F3`) then shows the pull request: checks, comments, labels,
 merge.

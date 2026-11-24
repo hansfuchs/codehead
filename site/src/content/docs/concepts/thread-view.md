@@ -5,7 +5,7 @@ description: The agents, the stream, your prompt and the cost, in 1 terminal.
 
 From 160 columns (and in a git checkout), a thread opens side by side: the changes view left at
 full height, the agents, the stream and the prompt right. The prompt has the keys; `esc` with 0
-agents at work gives them to the changes, `i` gives them back. Narrower, the thread shows the
+agents at work gives them to the changes, `tab` walks the regions (prompt, changes, panel, …). Narrower, the thread shows the
 chat alone: a window that shrinks when your editor opens next to it falls back to the chat by
 itself, and widens back. Once you pick a view (`F1`-`F4`, `alt+1`-`alt+4`), it stays.
 

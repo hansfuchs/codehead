@@ -40,11 +40,11 @@ is installed and the command codehead runs.
 
 - **Clipboard** (Linux): `wl-clipboard` on Wayland, `xclip` or `xsel` on X11.
 - **Editor**: `$VISUAL` or `$EDITOR` (default `nvim`, else `vi`), to edit notes.
-- **IDE**: VS Code, VSCodium, Cursor, Zed or a JetBrains IDE (setting `editor`), for `ctrl+i` and
-  the changes view `o`.
+- **IDE**: VS Code, VSCodium, Cursor, Zed or a JetBrains IDE (setting `editor`), for `e` (changes,
+  files view) and menu → IDE on the worktree.
 - **portless** (Node 24+): dev server URLs per worktree; the install script installs it (`npm -g`)
   and runs `portless trust` once (its local CA in the OS trust store; may ask for your password).
-- **yazi**: the file browser (`ctrl+y`, files view `y`); the install script installs it (brew,
+- **yazi**: the file browser (menu → yazi, files view `ctrl+.`); the install script installs it (brew,
   else `cargo binstall`).
 - **claude** (Claude Code), logged in: the changes view order (`rank`), the reviewer (`review`),
   commit message drafts and `> handoff`, also when the agents run on other harnesses.

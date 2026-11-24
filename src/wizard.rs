@@ -320,8 +320,8 @@ impl Wizard {
                 self.preset = (self.preset + 1) % PRESETS.len();
                 self.build_crew();
             }
-            (Screen::Crew, KeyCode::Tab) => self.focus = (self.focus + 1) % self.crew.len(),
-            (Screen::Crew, KeyCode::BackTab) => self.focus = (self.focus + self.crew.len() - 1) % self.crew.len(),
+            (Screen::Crew, KeyCode::Down) => self.focus = (self.focus + 1) % self.crew.len(),
+            (Screen::Crew, KeyCode::Up) => self.focus = (self.focus + self.crew.len() - 1) % self.crew.len(),
             (Screen::Crew, KeyCode::Char(' ')) => {
                 let a = self.random_avatar();
                 let s = self.spawn();
@@ -345,7 +345,7 @@ impl Wizard {
             }
             // the tutorial ended without its last step (or failed to start): again, or skip it
             (Screen::Try, KeyCode::Enter) => self.launch = true,
-            (Screen::Try, KeyCode::Tab) => self.go(self.screen + 1),
+            (Screen::Try, KeyCode::Right) => self.go(self.screen + 1),
             (Screen::Next, KeyCode::Enter) => self.quit = true,
             _ => {}
         }
@@ -454,8 +454,8 @@ impl Wizard {
             Screen::Harness => vec![("↑↓", "pick"), ("c", "copy install"), ("r", "check again"), ("enter", "next")],
             Screen::Home if HOME_CHOICES[self.home].0 == HomeChoice::Skip => vec![("↑↓", "pick"), ("enter", "next")],
             Screen::Home => vec![("↑↓", "pick"), ("type", "path"), ("enter", "next")],
-            Screen::Crew => vec![("←→", "preset"), ("tab", "agent"), ("type", "name"), ("space", "avatar"), ("enter", "next")],
-            Screen::Try => vec![("enter", "again"), ("tab", "skip")],
+            Screen::Crew => vec![("←→", "preset"), ("↑↓", "agent"), ("type", "name"), ("space", "avatar"), ("enter", "next")],
+            Screen::Try => vec![("enter", "again"), ("→", "skip")],
             Screen::Next => vec![("enter", "start screen")],
         };
         v.insert(0, esc);
@@ -574,7 +574,7 @@ impl Wizard {
         lines.push(Line::from(Span::styled(format!("  {what}"), theme::muted())));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled("  enter  ", theme::bold()), Span::styled("again", theme::text())]));
-        lines.push(Line::from(vec![Span::styled("  tab    ", theme::bold()), Span::styled("skip it", theme::text())]));
+        lines.push(Line::from(vec![Span::styled("  →      ", theme::bold()), Span::styled("skip it", theme::text())]));
     }
 
     fn draw_next(&self, lines: &mut Vec<Line<'static>>) {
@@ -830,7 +830,7 @@ mod tests {
         assert!(w.launch);
 
         // tab: skip it
-        w.key(key(KeyCode::Tab));
+        w.key(key(KeyCode::Right));
         assert_eq!(SCREENS[w.screen], Screen::Next);
 
         // ctrl+c ctrl+c in the tutorial's thread: the wizard ends too

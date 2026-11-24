@@ -202,6 +202,18 @@ fn choices_of(repo: &Path, cwd: &Path, bs: Vec<String>, checkouts: HashMap<Strin
     Choices { wheres, checkouts, repo_branch, here_branch, here_dir }
 }
 
+/// A region of the start screen: tab / shift+tab walk them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Region {
+    /// The main tabs row.
+    Tabs,
+    /// The settings' sub-tabs row.
+    SubTabs,
+    Content,
+    /// The prompt under a PR (merge tab).
+    Input,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Field {
     /// The drafts row above the prompt: "view drafts (n)" (only with 1+ drafts), "save as draft".
@@ -243,6 +255,14 @@ enum Act {
     SaveDraft,
     Reset,
     Quit,
+}
+
+/// A row of the start screen's context menu: a command of the screen, the flow of the agents
+/// card under the cursor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum StartCtx {
+    Run(Act),
+    Flow,
 }
 
 struct Cmd {
@@ -733,6 +753,8 @@ pub struct App {
     modal: Option<Modal>,
     /// F2 menu (over every screen and modal), and the commands of its quick tab.
     menu: Option<crate::menu::Menu>,
+    /// The context menu (ctrl+.): the actions of this screen / field.
+    ctx: Option<crate::ctxmenu::Menu<StartCtx>>,
     menu_cmds: Vec<Cmd>,
     menu_help: Vec<(&'static str, &'static str)>,
     toast: Option<(String, Instant, bool)>,
@@ -807,7 +829,7 @@ fn worktree_of(c: &crate::nav::Card) -> Worktree {
     Worktree { path, branch: if c.branch.is_empty() { "in place".into() } else { c.branch.clone() }, thread: Some(thread), unpushed: 0, when: String::new(), linked: c.worktree, repo: c.repo.clone() }
 }
 
-fn key_name(k: &KeyEvent) -> String {
+pub(crate) fn key_name(k: &KeyEvent) -> String {
     let mut s = String::new();
     if k.modifiers.contains(KeyModifiers::CONTROL) {
         s.push_str("ctrl+");
@@ -1008,6 +1030,7 @@ impl App {
             target: None,
             modal: None,
             menu: None,
+            ctx: None,
             menu_cmds: Vec::new(),
             menu_help: Vec::new(),
             toast: None,
@@ -2313,14 +2336,15 @@ impl App {
                     c("ctrl+enter", "start the thread (also cmd+enter, alt+enter)", Act::Start),
                     // no hotkey: ⌘→ arrives as ctrl+e in macOS terminals (it opened the editor)
                     c("menu", "edit the prompt in $EDITOR", Act::EditPrompt),
-                    c("ctrl+o", "pick notes (also enter on notes)", Act::OpenNotes),
+                    c("enter on notes", "pick notes", Act::OpenNotes),
                     c("ctrl+s", "save the task as a draft for later, start over", Act::SaveDraft),
                     c("menu", "reset: where from the where row, 0 notes, 0 Claude Code context (asks first)", Act::Reset),
                     c("esc esc", "quit", Act::Quit),
                 ],
                 vec![
                     ("↑↓", "field (↑ on the prompt's 1st row leaves it)"),
-                    ("tab / shift+tab", "next / previous field"),
+                    ("tab / shift+tab", "tabs row ↔ the task"),
+                    ("ctrl+.", "actions of the field: agents card → its flow"),
                     ("F1-F6 · alt+1-6", "main tabs"),
                     ("enter", "title: next field · notes: pick · prompt: new line"),
                     ("x on notes", "drop notes + Claude Code context"),
@@ -2378,7 +2402,7 @@ impl App {
                     ("←→", "previous / next repo (on the view tabs: the view)"),
                     ("space", "select thread"),
                     ("enter", "open thread (worktree: new task there; claude: new thread, last response as context)"),
-                    ("ctrl+o", "actions of the thread / the selection"),
+                    ("ctrl+.", "actions of the thread / the selection"),
                     ("c", "thread / claude session: last response in / out of the task context"),
                     ("F1-F6 · alt+1-6", "switch tab"),
                     ("pgup pgdn", "scroll preview"),
@@ -2408,12 +2432,11 @@ impl App {
                 vec![
                     ("↑↓ / j k", "move: PRs; in a PR: the things to act on"),
                     ("enter", "open the PR · act (edit, dropdown, merge, update)"),
-                    ("ctrl+enter / ctrl+click", "open on GitHub"),
+                    ("o / ctrl+click", "open on GitHub"),
                     ("←→", "state tabs: open, merged, closed, all"),
                     ("[ ] · < >", "previous / next PR · overview / changes"),
                     ("↑ on top · ←→", "PR / views row: switch PR / overview, changes (the diff too)"),
-                    ("i · tab", "the prompt; tab / esc: back"),
-                    ("i", "prompt: a new thread with this task"),
+                    ("tab", "the PR's prompt (a new thread with this task); tab / esc: back"),
                     ("esc", "back to the list"),
                 ],
             ),
@@ -2433,8 +2456,46 @@ impl App {
             ),
             (Screen::Pick, Tab::Settings) => (
                 vec![c("menu", "add path alias (also enter on + add)", Act::AddAlias), c("ctrl+r", "reload file", Act::Reload), c("menu", "quit codehead", Act::Quit)],
-                vec![("↑↓", "field / alias box"), ("enter", "alias box: edit / done"), ("d", "delete the highlighted alias"), ("F1-F6 · alt+1-6", "switch tab"), ("esc", "close path suggestions"), ("auto", "changes apply on leaving a field")],
+                vec![("↑↓", "field / alias box"), ("enter", "alias box: edit / done"), ("d d", "delete the highlighted alias"), ("F1-F6 · alt+1-6", "switch tab"), ("esc", "close path suggestions"), ("auto", "changes apply on leaving a field")],
             ),
+        }
+    }
+
+    /// Ctrl+.: the commands of this screen; the agents field: the card's flow first.
+    fn open_ctx(&mut self) {
+        use crate::ctxmenu::Item;
+        let mut items = Vec::new();
+        let title = match self.cur_tab() {
+            Tab::New => "task",
+            Tab::Notes => "notes",
+            Tab::Threads => "threads",
+            Tab::Merge => "merge",
+            Tab::Agents => "agents",
+            Tab::Flows => "flows",
+            Tab::Settings => "settings",
+        };
+        if self.screen == Screen::Compose && !self.tabs_focus && self.field == Field::Agents && self.agents.get(self.pick_cursor).is_some() {
+            items.push(Item::new("flow of this agent (a flow picks the agent)", "", StartCtx::Flow));
+        }
+        let (cmds, _) = self.commands();
+        items.extend(cmds.into_iter().filter(|c| c.act != Act::Quit).map(|c| Item::new(c.label, if c.key == "menu" { "" } else { c.key }, StartCtx::Run(c.act))));
+        if let Some(m) = crate::ctxmenu::Menu::new(title, items) {
+            self.ctx = Some(m);
+        }
+    }
+
+    fn ctx_out(&mut self, out: crate::ctxmenu::Out<StartCtx>) {
+        use crate::ctxmenu::Out;
+        match out {
+            Out::None => {}
+            Out::Close => self.ctx = None,
+            Out::Run(a) => {
+                self.ctx = None;
+                match a {
+                    StartCtx::Flow => self.open_flow_menu(),
+                    StartCtx::Run(act) => self.run(act),
+                }
+            }
         }
     }
 
@@ -2803,6 +2864,17 @@ impl App {
             self.last_esc = None;
             return self.open_menu();
         }
+        // the context menu (ctrl+.): its keys first; the thread list has its own (actions)
+        if let Some(m) = self.ctx.as_mut() {
+            self.last_esc = None;
+            let out = m.key(k);
+            return self.ctx_out(out);
+        }
+        let threads = self.screen == Screen::Pick && self.tab == Tab::Threads && !self.tabs_focus;
+        if crate::ctxmenu::is_key(&k) && !threads && self.modal.is_none() {
+            self.last_esc = None;
+            return self.open_ctx();
+        }
         // drafts dropdown: its keys first (esc: back to the task, 0 double esc)
         if self.drafts_menu.is_some() && self.modal.is_none() {
             self.last_esc = None;
@@ -2879,7 +2951,8 @@ impl App {
         // F1-F4 (alt+1..4 too): the main tabs from every field (ctrl / alt+←→: word jumps); tab: the next field
         let main_tab = match k.code {
             KeyCode::F(n @ 1..=6) => Some(usize::from(n - 1)),
-            KeyCode::Char(c @ '1'..='6') if k.modifiers.contains(KeyModifiers::ALT) && !ctrl => Some(usize::from(c as u8 - b'1')),
+            // alt+1-6, ctrl+1-6 (kitty protocol), as the views of a thread
+            KeyCode::Char(c @ '1'..='6') if k.modifiers.contains(KeyModifiers::ALT) != ctrl => Some(usize::from(c as u8 - b'1')),
             _ => None,
         };
         if !self.cfg.copy_mode
@@ -2891,6 +2964,11 @@ impl App {
             if to != Tab::Settings {
                 self.tabs_focus = false;
             }
+            return;
+        }
+        // tab / shift+tab: the next / previous region (the tabs row, the tab's content and its
+        // parts); arrows walk the fields inside
+        if matches!(k.code, KeyCode::Tab | KeyCode::BackTab) && !ctrl && !k.modifiers.contains(KeyModifiers::ALT) && !self.cfg.copy_mode && self.cycle(k.code == KeyCode::BackTab) {
             return;
         }
         match self.screen {
@@ -2916,6 +2994,58 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The regions of the screen in tab order: the tabs row, the settings' sub-tabs, the content,
+    /// a PR's prompt (merge tab).
+    fn regions(&self) -> Vec<Region> {
+        let mut r = vec![Region::Tabs];
+        if self.screen == Screen::Pick && self.tab == Tab::Settings {
+            r.push(Region::SubTabs);
+        }
+        r.push(Region::Content);
+        if self.screen == Screen::Pick && self.tab == Tab::Merge && self.merge_tab.is_detail() {
+            r.push(Region::Input);
+        }
+        r
+    }
+
+    fn region(&self) -> Region {
+        if self.tabs_focus {
+            Region::Tabs
+        } else if self.screen == Screen::Pick && self.tab == Tab::Settings && self.settings.as_ref().is_some_and(|s| s.bar) {
+            Region::SubTabs
+        } else if self.screen == Screen::Pick && self.tab == Tab::Merge && self.merge_tab.input_focus {
+            Region::Input
+        } else {
+            Region::Content
+        }
+    }
+
+    /// Tab (BACK: shift+tab): the keys to the next / previous region. False: tab is the
+    /// content's own here (the notes list, a flow being edited).
+    fn cycle(&mut self, back: bool) -> bool {
+        if self.screen == Screen::Pick && (self.tab == Tab::Notes || (self.tab == Tab::Flows && self.flows_tab.typing())) {
+            return false;
+        }
+        let rs = self.regions();
+        let at = rs.iter().position(|r| *r == self.region()).unwrap_or(0) as isize;
+        let to = rs[(at + if back { -1 } else { 1 }).rem_euclid(rs.len() as isize) as usize];
+        let settings = self.screen == Screen::Pick && self.tab == Tab::Settings;
+        if let Some(s) = self.settings.as_mut().filter(|_| settings) {
+            s.commit();
+            s.bar = to == Region::SubTabs;
+            if to == Region::Content {
+                s.focus_input();
+            }
+        }
+        self.apply_settings();
+        self.merge_tab.input_focus = to == Region::Input;
+        self.tabs_focus = to == Region::Tabs;
+        if to == Region::Content && self.screen == Screen::Compose && self.field == Field::Drafts {
+            self.field = self.fields()[0];
+        }
+        true
     }
 
     /// The start screen: 1 of its main tabs (task, threads, agents, settings), 0 local controls
@@ -3095,14 +3225,11 @@ impl App {
         if (self.filter_editing || self.tlist.filtering || self.afilter_editing) && !matches!(k.code, KeyCode::PageUp | KeyCode::PageDown) {
             return false;
         }
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let half = (self.regions.preview.height / 2).max(1);
         match k.code {
             KeyCode::PageDown => self.pscroll = self.pscroll.saturating_add(half * 2),
             KeyCode::PageUp => self.pscroll = self.pscroll.saturating_sub(half * 2),
-            KeyCode::Char('d') if ctrl => self.pscroll = self.pscroll.saturating_add(half),
-            KeyCode::Char('u') if ctrl => self.pscroll = self.pscroll.saturating_sub(half),
             KeyCode::Down if shift => self.pscroll = self.pscroll.saturating_add(1),
             KeyCode::Up if shift => self.pscroll = self.pscroll.saturating_sub(1),
             _ => return false,
@@ -3114,8 +3241,7 @@ impl App {
         match k.code {
             KeyCode::Right | KeyCode::Char('l') => self.switch_tab(self.cur_tab().next()),
             KeyCode::Left | KeyCode::Char('h') => self.switch_tab(self.cur_tab().prev()),
-            // tab: the next field, the tab's content (as ↓)
-            KeyCode::Down | KeyCode::Enter | KeyCode::Char('j') | KeyCode::Tab => {
+            KeyCode::Down | KeyCode::Enter | KeyCode::Char('j') => {
                 self.tabs_focus = false;
                 if self.screen == Screen::Compose {
                     self.field = self.fields()[0];
@@ -3127,7 +3253,7 @@ impl App {
                 }
             }
             // esc: the top level already (esc esc quits); q: 0 quit (menu → quit codehead)
-            KeyCode::Up | KeyCode::BackTab | KeyCode::Esc => {}
+            KeyCode::Up | KeyCode::Esc => {}
             // any other key: the tab's own (its hotkeys, e.g. ctrl+f: filter), focus to the content.
             // Settings: 0 (a letter there would edit a field)
             _ if self.screen == Screen::Compose => {
@@ -3296,8 +3422,6 @@ impl App {
             Out::Open(c) => self.open_card(&c),
             Out::Pass => match k.code {
                 KeyCode::Char('c') => self.toggle_context(),
-                // a list: 0 fields to tab to (main tabs: alt+1-6)
-                KeyCode::Tab | KeyCode::BackTab => {}
                 _ => {
                     let name = key_name(&k);
                     if let Some(c) = self.commands().0.into_iter().find(|c| c.key == name) {
@@ -3364,7 +3488,6 @@ impl App {
                 self.aoffset = 0;
             }
             KeyCode::Enter => self.run(Act::EditAgent),
-            KeyCode::Tab | KeyCode::BackTab => {}
             _ => {
                 let name = key_name(&k);
                 if let Some(c) = self.commands().0.into_iter().find(|c| c.key == name) {
@@ -3630,26 +3753,14 @@ impl App {
         }
     }
 
-    /// Tab / shift+tab: the next / previous field, round (the drafts row only on ↑).
-    fn tab_field(&mut self, d: isize) {
-        let f: Vec<Field> = self.fields().into_iter().filter(|x| *x != Field::Drafts).collect();
-        let n = f.len() as isize;
-        let at = f.iter().position(|x| *x == self.field).map_or(0, |i| i as isize);
-        self.field = f[(at + d).rem_euclid(n) as usize];
-    }
-
     fn compose_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let plain = !k.modifiers.contains(KeyModifiers::SHIFT);
         match k.code {
             KeyCode::Esc => return,
-            // tab: the next field (main tabs: alt+1-4)
-            KeyCode::Tab if k.modifiers.is_empty() => return self.tab_field(1),
-            KeyCode::BackTab => return self.tab_field(-1),
             // cmd+enter (SUPER) needs a terminal that reports it (kitty keyboard protocol)
             KeyCode::Enter if ctrl || alt || k.modifiers.contains(KeyModifiers::SUPER) => return self.start(),
-            KeyCode::Char('o') if ctrl => return self.run(Act::OpenNotes),
             KeyCode::Char('s') if ctrl => return self.run(Act::SaveDraft),
             // ctrl+v / ⌘v in the prompt, like Claude Code: the clipboard image, else its text
             KeyCode::Char('v' | 'V') if self.field == Field::Prompt && (ctrl || k.modifiers.contains(KeyModifiers::SUPER)) => {
@@ -3728,8 +3839,6 @@ impl App {
                 KeyCode::Left | KeyCode::Char('h') => { step(self, -1, 0); }
                 KeyCode::Right | KeyCode::Char('l') => { step(self, 1, 0); }
                 KeyCode::Char(' ') => self.toggle_pick(),
-                // f: the card's flow (a flow picks the agent)
-                KeyCode::Char('f') => self.open_flow_menu(),
                 KeyCode::Up | KeyCode::Char('k') => if !step(self, 0, -1) { self.go_field(-1); },
                 KeyCode::Down | KeyCode::Char('j') => if !step(self, 0, 1) { self.go_field(1); },
                 KeyCode::Enter => self.go_field(1),
@@ -3755,7 +3864,7 @@ impl App {
                         self.declined(action)
                     }
                 }
-                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('h' | 'l') => {
+                KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') => {
                     self.modal = Some(Modal::Confirm { title, question, yes: !yes, action })
                 }
                 _ => self.modal = Some(Modal::Confirm { title, question, yes, action }),
@@ -3792,8 +3901,6 @@ impl App {
                     }
                     KeyCode::Char('s') if ctrl => return self.save_agent(form),
                     KeyCode::Enter if ctrl => return self.save_agent(form),
-                    KeyCode::Tab => form.field = next(form.field),
-                    KeyCode::BackTab => form.field = prev(form.field),
                     KeyCode::Down if !form.multiline() => form.field = next(form.field),
                     KeyCode::Up if !form.multiline() => form.field = prev(form.field),
                     // voice, system prompt: ↑ on the 1st row / ↓ on the last leaves the box (shift: selects)
@@ -3926,6 +4033,13 @@ impl App {
         {
             crate::merge::open_url(&url);
             self.toast(format!("open {url}"), false);
+            return;
+        }
+        if let Some(c) = self.ctx.as_mut() {
+            if matches!(m.kind, MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                let out = c.mouse(m);
+                self.ctx_out(out);
+            }
             return;
         }
         if let Some(menu) = self.menu.as_mut() {
@@ -4266,6 +4380,26 @@ impl App {
             }
         }
         self.draw_modal(f, area);
+        // the context menu: above / below the field in focus (the task), right of the list (a
+        // list tab), never over the cursor's row
+        let place = if self.screen == Screen::Compose {
+            let r = match self.field {
+                Field::Agents => self.regions.task_agents,
+                Field::Notes => self.regions.notes_label,
+                Field::Where => self.regions.where_row,
+                Field::Repo => self.regions.repo_row,
+                Field::Drafts => self.regions.drafts,
+                _ => Rect::default(),
+            };
+            crate::ctxmenu::Place::At(if r.height == 0 { Rect { y: area.y + 2, height: 1, ..area } } else { Rect { height: 1, ..r } })
+        } else if self.regions.list.width > 0 {
+            crate::ctxmenu::Place::Beside(self.regions.list, self.regions.list.y)
+        } else {
+            crate::ctxmenu::Place::At(Rect { y: area.y + 2, height: 1, ..area })
+        };
+        if let Some(c) = self.ctx.as_mut() {
+            c.render(f, place, area);
+        }
         if let Some(m) = self.menu.as_mut() {
             m.render(f, area);
         }
@@ -5009,8 +5143,8 @@ impl App {
         }
         let hints: &[(&str, &str)] = match self.screen {
             _ if !self.tabs_focus && self.screen == Screen::Pick && self.tab == Tab::Merge => &[],
-            _ if self.tabs_focus => &[("←→", "tab"), ("↓ / esc", "back"), ("q", "quit")],
-            Screen::Compose if self.field == Field::Agents => &[("↑↓←→", "move"), ("space", "pick"), ("f", "flow"), ("enter", "notes"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
+            _ if self.tabs_focus => &[("←→", "tab"), ("↓ / tab", "content"), ("esc esc", "quit")],
+            Screen::Compose if self.field == Field::Agents => &[("↑↓←→", "move"), ("space", "pick"), ("ctrl+.", "flow"), ("enter", "notes"), ("⌘/ctrl+⏎", "start"), ("tab", "tabs row")],
             Screen::Compose if self.where_menu.is_some() => &[("↑↓", "move"), ("type", "filter"), ("enter", "pick"), ("esc", "close")],
             Screen::Compose if self.flow_menu.as_ref().is_some_and(|m| m.sub.is_some()) => &[("↑↓", "step"), ("enter", "start here"), ("← esc", "flows")],
             Screen::Compose if self.flow_menu.is_some() => &[("↑↓", "flow"), ("enter →", "its steps"), ("a-z", "jump"), ("0", "0 flow"), ("esc", "close")],
@@ -5021,8 +5155,8 @@ impl App {
             Screen::Compose if self.drafts_menu.is_some() => &[("↑↓", "move"), ("enter", "load"), ("d", "delete"), ("esc", "back")],
             Screen::Compose if self.field == Field::Drafts => &[("←→", "button"), ("enter", "press"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("F1-F6", "tabs")],
             Screen::Compose if self.field == Field::Prompt => &[("@", "agents"), (cmd.as_str(), "commands"), ("dir/", "paths"), ("ctrl+v", "image"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("esc esc", "quit")],
-            Screen::Compose if self.field == Field::Notes => &[("enter", "pick notes"), ("x", "drop"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
-            Screen::Compose => &[("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("tab", "next field"), ("F1-F6", "tabs"), ("esc esc", "quit")],
+            Screen::Compose if self.field == Field::Notes => &[("enter", "pick notes"), ("x", "drop"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("tab", "tabs row")],
+            Screen::Compose => &[("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("ctrl+.", "actions"), ("F1-F6", "tabs"), ("esc esc", "quit")],
             Screen::Pick if self.tlist.filtering => &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to list")],
             Screen::Pick if self.filter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter", "done"), ("esc", "clear")],
             Screen::Pick if self.tab == Tab::Notes && self.cfg.copy_mode => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "copy"), ("esc", "quit")],
@@ -6593,26 +6727,32 @@ mod render_tests {
         let s = a.settings.as_ref().unwrap();
         assert!(s.form.editing.is_none() && s.form.fields[crate::settings::PLAIN].text().is_empty());
         assert_eq!(std::fs::read_to_string(&a.settings_path).unwrap_or_default(), before);
-        // tab / shift+tab: the next / previous field, settings stays
+        // shift+tab: the sub-tabs row; tab: back to the form, on the same field; settings stays
         let at = a.settings.as_ref().unwrap().form.focus;
         key(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
-        assert_eq!(a.settings.as_ref().unwrap().form.focus, at - 1);
+        assert!(a.settings.as_ref().unwrap().bar && !a.tabs_focus);
+        key(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert!(a.tabs_focus);
         key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(!a.tabs_focus && !a.settings.as_ref().unwrap().bar);
         assert_eq!(a.settings.as_ref().unwrap().form.focus, at);
         assert!(a.tab == Tab::Settings);
     }
 
     #[test]
-    fn alt_digits_switch_tabs_and_tab_walks_the_fields() {
+    fn alt_digits_switch_tabs_and_tab_walks_the_regions() {
         let mut a = app();
         let alt = |a: &mut App, d: char| key(a, KeyCode::Char(d), KeyModifiers::ALT);
         alt(&mut a, '2');
         assert!(a.screen == Screen::Pick && a.tab == Tab::Threads && !a.tabs_focus);
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         assert!(a.screen == Screen::Pick && a.tab == Tab::Threads);
-        // tab on a list: 0 tab switch
+        // tab on a list: the tabs row (0 tab switch), tab again: the list
         key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
-        assert!(a.tab == Tab::Threads);
+        assert!(a.tab == Tab::Threads && a.tabs_focus);
+        key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(a.tab == Tab::Threads && !a.tabs_focus);
         alt(&mut a, '1');
         assert!(a.screen == Screen::Compose && a.field == Field::Prompt);
         // alt+2..4: threads, agents, settings
@@ -6627,13 +6767,12 @@ mod render_tests {
         // the agents tab loaded the machine's agents: 1 card again (↓ leaves the cards)
         a.agents.truncate(1);
         a.field = Field::Prompt;
-        // tab: prompt → title → repo → agents → notes → prompt; shift+tab back
-        for f in [Field::Title, Field::Repo, Field::Agents, Field::Notes, Field::Prompt] {
-            key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
-            assert!(a.field == f && a.screen == Screen::Compose);
-        }
+        // tab: the tabs row, tab: back on the same field (tab never walks the fields)
+        key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(a.tabs_focus && a.screen == Screen::Compose);
         key(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
-        assert!(a.field == Field::Notes);
+        assert!(!a.tabs_focus && a.field == Field::Prompt);
+        a.field = Field::Notes;
         // ↑↓ walk the fields: ↓ on the last stays, ↑ on the prompt's 1st row: the tabs
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Notes);
@@ -6935,9 +7074,7 @@ mod render_tests {
         println!("--- menu\n{}", dump(&mut a, 100, 22));
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-        // tab from the notes field: round to the prompt
-        key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
-        assert!(a.field == Field::Prompt);
+        a.field = Field::Prompt;
         a.paste("line one\nline two");
         println!("--- compose\n{}", dump(&mut a, 100, 22));
         println!("--- message\n{}", a.message());
@@ -7060,7 +7197,7 @@ mod flow_menu_tests {
     /// `f` on an agent card: that agent's flows, a flow its steps (the start step); the card shows
     /// the flow under its effort row; each agent keeps its own flow.
     #[test]
-    fn f_on_a_card_opens_its_flows_and_a_flow_its_steps() {
+    fn the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps() {
         let mut a = app_with(None);
         a.flow_lib = crate::engine::flows::Library::load(None);
         a.agents.push(Agent { name: "zed".into(), harness: "claude".into(), ..Default::default() });
@@ -7072,8 +7209,11 @@ mod flow_menu_tests {
         let _ = screen(&mut a);
         a.pick_cursor = 1;
         let (agent, other) = (a.agents[1].name.clone(), a.agents[0].name.clone());
-        // f: the flows of the card under the cursor
+        // ctrl+. → flow of this agent: the flows of the card under the cursor (f: 0 key)
         press(&mut a, KeyCode::Char('f'));
+        assert!(a.flow_menu.is_none());
+        a.key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::CONTROL));
+        press(&mut a, KeyCode::Enter);
         assert!(a.flow_menu.as_ref().is_some_and(|m| m.sub.is_none() && m.cursor == 0 && m.agent == agent));
         let s = screen(&mut a);
         let first = a.flow_lib.flows[0].name.clone();
@@ -7099,11 +7239,13 @@ mod flow_menu_tests {
         println!("--- cards with flows\n{s}");
         assert!(s.contains(&format!("◆ {first} › 2")) && s.contains("0 flow"), "{s}");
         // esc in the dropdown closes it only
-        press(&mut a, KeyCode::Char('f'));
+        a.key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::CONTROL));
+        press(&mut a, KeyCode::Enter);
         press(&mut a, KeyCode::Esc);
         assert!(a.flow_menu.is_none() && a.outcome.is_none());
         // a click on a flow opens its steps, a click on a step picks it
-        press(&mut a, KeyCode::Char('f'));
+        a.key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::CONTROL));
+        press(&mut a, KeyCode::Enter);
         let _ = screen(&mut a);
         let (r, _) = *a.regions.flow_rows.iter().find(|(_, i)| *i == 2).unwrap();
         a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
@@ -7113,7 +7255,8 @@ mod flow_menu_tests {
         a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 2, row: r.y, modifiers: KeyModifiers::NONE });
         assert_eq!((a.flow_at(&agent), a.flow_menu.is_none()), ((2, 0), true));
         // 0: 0 flow at once
-        press(&mut a, KeyCode::Char('f'));
+        a.key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::CONTROL));
+        press(&mut a, KeyCode::Enter);
         press(&mut a, KeyCode::Char('0'));
         assert_eq!(a.flow_at(&agent), (0, 0));
     }

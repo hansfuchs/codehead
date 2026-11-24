@@ -299,6 +299,47 @@ impl Menu {
         self.level = Level::Bar;
     }
 
+    /// Tab (BACK: shift+tab): the next / previous region of the tab: the bar, its groups
+    /// (threads: repos, views; merge: states), its list.
+    fn cycle(&mut self, back: bool) {
+        #[derive(Clone, Copy, PartialEq)]
+        enum R {
+            Bar,
+            Group,
+            Repos,
+            Views,
+            Body,
+        }
+        let rs: &[R] = match self.tab {
+            Tab::Threads => &[R::Bar, R::Repos, R::Views, R::Body],
+            Tab::Merge => &[R::Bar, R::Group, R::Body],
+            _ => &[R::Bar, R::Body],
+        };
+        let now = match (self.level, self.tab) {
+            (Level::Bar, _) => R::Bar,
+            (Level::Group, _) => R::Group,
+            (Level::Body, Tab::Threads) => match self.list.focus {
+                threadlist::Focus::Repos => R::Repos,
+                threadlist::Focus::Views => R::Views,
+                threadlist::Focus::List => R::Body,
+            },
+            (Level::Body, _) => R::Body,
+        };
+        let at = rs.iter().position(|r| *r == now).unwrap_or(0) as isize;
+        let to = rs[(at + if back { -1 } else { 1 }).rem_euclid(rs.len() as isize) as usize];
+        self.level = match to {
+            R::Bar => Level::Bar,
+            R::Group => Level::Group,
+            _ => Level::Body,
+        };
+        match to {
+            R::Repos => self.list.focus = threadlist::Focus::Repos,
+            R::Views => self.list.focus = threadlist::Focus::Views,
+            R::Body if self.tab == Tab::Threads => self.list.focus = threadlist::Focus::List,
+            _ => {}
+        }
+    }
+
     /// The tab has a tab group (threads: repos + views, merge: states).
     fn grouped(&self) -> bool {
         matches!(self.tab, Tab::Threads | Tab::Merge)
@@ -394,8 +435,10 @@ impl Menu {
             // esc or the menu key again: closed
             KeyCode::Esc => return Action::Close,
             _ if crate::config::menu_key().matches(&k) => return Action::Close,
+            // tab / shift+tab: the next / previous region (the tab bar, a tab group, the list),
+            // as on every screen; ←→ on the tab bar: the tabs
             KeyCode::Tab | KeyCode::BackTab if !ctrl => {
-                self.switch(if k.code == KeyCode::Tab { 1 } else { -1 });
+                self.cycle(k.code == KeyCode::BackTab);
                 return Action::None;
             }
             _ if self.tab == Tab::Threads => return self.threads_key(k),
@@ -810,25 +853,33 @@ mod tests {
         assert_eq!(m.level, Level::Bar);
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Merge);
-        // merge: the same 3 levels; tab switches the tabs from any level
+        // merge: the same 3 levels; tab walks them (bar → states → list → bar), shift+tab back
         m.key(k(KeyCode::Down));
         m.key(k(KeyCode::Down));
         assert_eq!(m.level, Level::Body);
         m.key(k(KeyCode::Up));
         m.key(k(KeyCode::Up));
         assert_eq!(m.level, Level::Bar);
-        m.key(k(KeyCode::Down));
         m.key(k(KeyCode::Tab));
-        assert_eq!((m.tab, m.level), (Tab::Search, Level::Bar));
+        assert_eq!((m.tab, m.level), (Tab::Merge, Level::Group));
+        m.key(k(KeyCode::Tab));
+        assert_eq!(m.level, Level::Body);
+        m.key(k(KeyCode::Tab));
+        assert_eq!(m.level, Level::Bar);
+        m.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(m.level, Level::Body);
+        m.key(k(KeyCode::Tab));
+        m.key(k(KeyCode::Right));
+        assert_eq!(m.tab, Tab::Search);
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Tokens);
-        // 0 agents tab (the agents box of the thread view, ctrl+q, has their actions)
+        // 0 agents tab (the agents box of the thread view, tab, has their actions)
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Quick);
         m.key(k(KeyCode::Left));
         assert_eq!(m.tab, Tab::Tokens);
         assert_eq!(m.key(k(KeyCode::Esc)), Action::Close);
-        // the menu key closes it too; tab: the next menu tab (0 close)
+        // the menu key closes it too; tab: the next region (0 close)
         assert_eq!(m.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)), Action::Close);
         assert_ne!(m.key(k(KeyCode::Tab)), Action::Close);
     }
@@ -974,7 +1025,7 @@ mod tests {
         t.draw(|f| m.render(f, f.area())).unwrap();
         let b = t.backend().buffer().clone();
         let s: String = (0..34).map(|y| (0..90).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
-        assert!(s.contains(" here ") && s.contains("open · 2") && s.contains("ctrl+o"), "{s}");
+        assert!(s.contains(" here ") && s.contains("open · 2") && s.contains("ctrl+."), "{s}");
         m.key(k(KeyCode::Backspace));
         for c in "older".chars() {
             m.key(k(KeyCode::Char(c)));
@@ -1061,7 +1112,7 @@ mod render_tests {
         s
     }
 
-    /// 0 agents tab (the thread view's agents box, ctrl+q, has their actions); n starts a thread.
+    /// 0 agents tab (the thread view's agents box, tab, has their actions); n starts a thread.
     #[test]
     fn the_menu_has_0_agents_tab_and_n_starts_a_thread() {
         let roster = vec![agent("amon", "claude"), agent("nova", "codex")];

@@ -17,6 +17,7 @@ mod claude;
 mod clip;
 mod code;
 mod command;
+mod ctxmenu;
 mod config;
 mod cost;
 mod drafts;
@@ -136,10 +137,10 @@ config:  ~/.config/codehead.toml ($CODEHEAD_CONFIG overrides). keys, each overri
            [aliases]
            \"project:platform\" = \"~/projects/exampleorg/project/notes/platform/\"
 settings: 6th tab (F6). edit fields and path aliases; ctrl+s saves, ctrl+r discards edits / reloads.
-          enter on + add (menu: add path alias) adds an alias; ctrl+d / d removes the current alias, on a
+          enter on + add (menu: add path alias) adds an alias; d d removes the current alias, on a
           field ctrl+d: back to its default (↺ too).
           path fields use the prompt's path suggestions: tab completes, esc closes suggestions.
-          esc on a field: its edit undone (0 apply). tab / shift+tab: next / previous field.
+          esc on a field: its edit undone (0 apply). ↑↓: next / previous field; tab: the sub-tabs, the tabs.
           environment variables override file values. edits stay until saved or reloaded.
 default agent: config agent, else amon, else the first agent.
          preselected for new threads, takes over threads of deleted agents.
@@ -179,8 +180,12 @@ esc:     1 level back: never saves, never drops edits unasked (edited text: esc 
          it; the agent form and reset ask).
 keys:    1 key, 1 meaning: a letter key never acts with ctrl / alt / ⌘ held (alt+P never pushes).
          outward or destructive keys ask first: a 2nd press (d d, S S, ctrl+d ctrl+d, enter enter).
-tabs:    start screen: F1-F6 (alt+1-6) switch tabs (word jumps: ctrl / alt+←→). tab / shift+tab: next /
-         previous field (on a row of tabs: into its content). ←→ on a row of tabs: the next / previous tab.
+         the same keys on every screen: tab / shift+tab: the next / previous region (focus); arrows:
+         inside it. ctrl+. (shift+F10 in any terminal): the context menu, the actions of the thing in
+         focus, beside it. ctrl+p: the menu. e: the IDE / editor at the thing. d d: delete. r: read again.
+tabs:    start screen: F1-F6 (alt+1-6, ctrl+1-6) switch tabs (word jumps: ctrl / alt+←→). tab /
+         shift+tab: the tabs row ↔ the tab's content (settings: its sub-tabs too). ←→ on a row of tabs:
+         the next / previous tab; ↑↓: the fields.
 quit:    esc esc on the start screen; ctrl+c 2× within 1 s (a 1st ctrl+c on text: clears it, ctrl+z back);
          menu → quit codehead. q never quits.
 updates: 1 check per day (github.com releases, in the background). a newer release: 1 line after
@@ -192,14 +197,16 @@ inputs:  all text fields (title, prompt, agent form, filters, thread prompt): ct
          Markdown lists (`- `, `* `, `1. `, 2 spaces per layer): enter starts the next item at the same
          layer; enter / backspace on an empty item: 1 layer out (1st layer: the marker goes), space: 1 layer in.
 start:   the new tab: the prompt first (its 1st line: the thread title, unless the title field has one),
-         then title, repo, where, opts, agents (f on a card: its flow), notes. type, ctrl+enter. notes: tab to the notes field, enter.
+         then title, repo, where, opts, agents (ctrl+. on a card: its flow), notes. type, ctrl+enter. notes: ↓ to the notes field, enter.
 threads: worktrees, then recent Claude Code sessions. enter on a session:
          new thread in its dir, its last response as context.
 thread view: the thread's agents on top (sprite, model, working / idle / waits on you; ★ the lead),
          the stream (every message, tool run and open question, from the thread's event log), the
          prompt below, the cost box beside it (screens ≥ 100 columns).
-         ctrl+q: the agents box has the keys: ←→ an agent, its menu above it (flow: its flow box,
-         remove: 2 enters, replace with: an agent off the thread takes over, flow too); esc back.
+         tab / shift+tab: the next / previous region: the prompt, the view (changes, merge, files), the
+         source control panel, the repo tabs, an open question, the agents box (←→ an agent, its menu
+         above it: flow, remove: 2 enters, replace with: an agent off the thread takes over, flow too).
+         ctrl+.: the context menu of the region (shift+F10, the menu key: any terminal).
          ctrl+m (kitty protocol): the prompt again, from every pane, box, filter and the menu.
          below the prompt: who gets the message, where the thread works (repo ⎇ branch, (worktree);
          1 per checkout, read again every 3 s).
@@ -207,7 +214,7 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          joins it). agents message each other with the `send` tool of codehead's MCP server.
          wheel, pgup / pgdn, shift+↑↓: scroll · esc: back to live, else interrupt (after 0.5 s) · esc esc: back.
          send: ctrl+enter (⌘enter, alt+enter); ctrl+s never sends. a question: ↑↓ space enter 1-9,
-         letters: Other, tab: question ↔ prompt. a new question takes the keys only on an empty prompt
+         letters: Other, tab: the next region (question → agents → prompt). a new question takes the keys only on an empty prompt
          after 1 s of 0 keys; else it waits for tab (0 typed key answers it by surprise).
          click a link: open it; ctrl+click: any URL on screen. ctrl+c: copies the prompt's selection,
          else clears the prompt (ctrl+z: back), 2× on an empty one closes codehead.
@@ -218,26 +225,28 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          Claude Code session (claude --resume ID --fork-session). the old thread stays.
          @: agent names. ←→ on a name: + add, or ⇄ replace an agent of the thread: on send, the old
          agent leaves and the new one gets the message with the old one's last messages.
-         ctrl+i / ⌘i (every pane): the IDE on the repo root, several repos: a picker (setting editor: auto, code, cursor, zed, idea …).
-         views (row 0): F1-F4 (ctrl+1-4, alt+1-4): chat, changes, merge, files. tab / i: the prompt, tab / esc:
-         back to the view. yazi: files view y, menu. changes: 1 box per file in review
+         menu → IDE on the worktree (every pane): the IDE on the repo root, several repos: a picker (setting editor: auto, code, cursor, zed, idea …).
+         views (row 0): F1-F4 (ctrl+1-4, alt+1-4): chat, changes, merge, files. tab: the next region,
+         esc: back to the view. yazi: files view ctrl+., menu. changes: 1 box per file in review
          order (schema, logic, config, UI, docs, tests, generated), j k box (j: down), n N hunk,
-         v reviewed, enter fold, e / o IDE at the line, w side by side / unified, r read git again,
-         ctrl+f filter, ctrl+b: panel shown → its keys → hidden, i / tab prompt (esc / tab back).
-         S: the ship menu right of the panel: ship (agent: commit, push, PR, review, CI green), push,
-         fetch + rebase, create PR / PR draft (agent, sub-thread, commits only), open the PR (gh),
-         open PR on top: update its description (agent), merge it, CI log → agents (a stopped
-         rebase: the agents resolve, continue, abort); outward steps: enter enter.
+         v reviewed (a comment: resolved), enter fold (a comment: edit), e IDE at the line, w side by
+         side / unified, r read git again, ctrl+f filter, c comment (a finding: into the batch), d d
+         delete a comment / dismiss a finding. ←: the panel; ctrl+. → show / hide the panel.
+         the panel's ctrl+. (right of the panel): its row's actions, then the ship steps under
+         \"ship\": ship (agent: commit, push, PR, review, CI green), push, fetch + rebase, create PR /
+         PR draft (agent, sub-thread, commits only), open the PR (gh), open PR on top: update its
+         description (agent), merge it, CI log → agents (a stopped rebase: the agents resolve,
+         continue, abort); outward steps: enter enter.
          ↑ on the 1st row of a PR's diff: its views row.
          flow waits (gate, loop max, role with 0 agent): a question in the picker under the stream,
          after the agents' ones; text in the prompt goes along as the note. > flow: the flow's steps.
          ctrl+f: the search bar above the prompt (the chat's messages, notes, shell, tool calls);
-         tab / enter / ↑ the next older match, shift+tab / ↓ the next newer one, esc closes.
+         enter / ↑ the next older match, ↓ the next newer one, esc closes.
          tool runs (▸): click opens / closes the calls (input + output); ctrl+o: all.
          thoughts (setting thoughts = hidden | folded | open): ∴ rows, a click opens 1, ctrl+t: all.
          ctrl+v pastes a clipboard image as [Image #n], a dropped image path too. pasted text over
          1024 chars (code: never): [Pasted text #n +L lines]. both go in as attachments.
-         a click on a marker or a 📎 row: the files view on the file (section attachments), y: yazi.
+         a click on a marker or a 📎 row: the files view on the file (section attachments), ctrl+.: yazi.
          files view: images + pdf page 1 drawn in Ghostty, kitty, Rio, iTerm2, WezTerm, sixel
          terminals (setting previews = auto | kitty | iterm2 | sixel | off; 0 in tmux, zellij, screen).
          ⌘/ctrl+Enter (alt+Enter) sends, Enter: new line. ↑ on the 1st row of an empty
@@ -254,7 +263,7 @@ engine:  codehead runs the agents itself. 1 host process per thread (codehead ho
          sockets: $XDG_RUNTIME_DIR/codehead. logs: ~/.local/share/codehead/logs.
          codehead ctl <thread> '<json>': 1 command to a thread's host (scripts).
 menu:    ctrl+p on every screen (setting keys.menu: 1 key codehead binds to nothing else), esc / ctrl+p
-         closes. tab / shift+tab: tabs (←→ too, outside threads / merge); ↓ / ↑ at the top of a list: in / out of a
+         closes. ←→: tabs (outside threads / merge); tab / shift+tab, ↓ / ↑ at the top of a list: in / out of a
          tab's sub-tabs (threads: repos, merge: states) and its list. quick: new, settings + the commands of
          the screen (keys: the keys of the screen). threads: filter (type) + thread cards, enter opens.
          agents: the agents of the thread in view (enter, enter: remove = it leaves the thread), add,
@@ -342,7 +351,6 @@ impl Tty {
 
     /// Input modes off, alternate screen kept (the next screen takes it over: no flash).
     fn release(&mut self, out: &mut Stdout) {
-        all_keys(false);
         if self.enhanced {
             let _ = execute!(out, PopKeyboardEnhancementFlags);
             self.enhanced = false;
@@ -365,7 +373,6 @@ fn restore_on_panic() {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let mut out = io::stdout();
-        all_keys(false);
         let _ = execute!(out, PopKeyboardEnhancementFlags, DisableMouseCapture, DisableBracketedPaste, cursor::Show, LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
         hook(info);
@@ -437,31 +444,6 @@ fn catch_signals() {
     }
 }
 
-static ALL_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// ON: every key as an escape code, modifiers alone and releases too (the kitty keyboard
-/// protocol: an alt tap in the changes view); off: back to the base flags. Terminals without
-/// it ignore the request.
-pub fn all_keys(on: bool) {
-    use std::sync::atomic::Ordering;
-    if ALL_KEYS.swap(on, Ordering::Relaxed) == on {
-        return;
-    }
-    let mut out = io::stdout();
-    let _ = if on {
-        execute!(
-            out,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-            )
-        )
-    } else {
-        execute!(out, PopKeyboardEnhancementFlags)
-    };
-}
 
 /// The fd crossterm reads keys from: stdin when a tty, else /dev/tty (crossterm's own pick).
 /// -1: no terminal.

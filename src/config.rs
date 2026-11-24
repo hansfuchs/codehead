@@ -485,9 +485,9 @@ fn command_char(s: &str) -> Option<char> {
 }
 
 /// Keys codehead binds itself: a menu key on 1 of them never fires or hides a built-in.
-const TAKEN: [&str; 29] = [
+const TAKEN: [&str; 30] = [
     "ctrl+a", "ctrl+b", "ctrl+c", "ctrl+d", "ctrl+e", "ctrl+f", "ctrl+g", "ctrl+h", "ctrl+i", "ctrl+k", "ctrl+m", "ctrl+n", "ctrl+o", "ctrl+q", "ctrl+r", "ctrl+s", "ctrl+t", "ctrl+u", "ctrl+v", "ctrl+w", "ctrl+x",
-    "ctrl+y", "ctrl+z", "F1", "F2", "F3", "F4", "F5", "F6",
+    "ctrl+y", "ctrl+z", "ctrl+.", "F1", "F2", "F3", "F4", "F5", "F6",
 ];
 
 /// The menu key of S: a valid key codehead binds to nothing else (alt+b/d/f: word keys too).

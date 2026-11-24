@@ -43,7 +43,7 @@ const SPECS: [Spec; 34] = [
     spec("classify", "classifier", "changes view tabs (critical · high · medium · low) + order: an agent, empty: the default agent, off: path rules", "CODEHEAD_CLASSIFY"),
     spec("rank", "review order", "changes view: claude:<model> when 0 classifier agent is found, off: path rules", "CODEHEAD_RANK"),
     spec("review", "reviewer", "changes view V: claude:<model> reviews the diff (read-only tools), off: 0 reviews", "CODEHEAD_REVIEW"),
-    spec("editor", "editor", "IDE for ctrl+i and the changes view e: auto, or code, codium, cursor, zed, idea, flow …, terminal ($EDITOR), or a path", "CODEHEAD_EDITOR"),
+    spec("editor", "editor", "IDE for e (changes, files) and menu → IDE: auto, or code, codium, cursor, zed, idea, flow …, terminal ($EDITOR), or a path", "CODEHEAD_EDITOR"),
     spec("previews", "previews", "files view: images + pdf drawn as images: auto (Ghostty, kitty, Rio, iTerm2, WezTerm, sixel terminals), kitty, iterm2, sixel, or off", "CODEHEAD_PREVIEWS"),
     spec("keys.menu", "menu", "opens the menu: F7-F12, ctrl+<letter>, alt+<letter> (not 1 codehead binds already)", "CODEHEAD_MENU_KEY"),
     spec("keys.command", "commands", "opens the command dropdown in a prompt: 1 symbol", "CODEHEAD_COMMAND_KEY"),
@@ -110,6 +110,8 @@ enum Hit {
 /// A form of codehead.toml fields: the codehead tab (plain fields + path aliases), the harnesses tab.
 pub struct Form {
     path: PathBuf,
+    /// `d d` on an alias box: the 1st `d` armed the delete.
+    del_armed: bool,
     specs: Vec<Spec>,
     /// Groups: the 1st field, the title, what the group sets.
     sections: Vec<(usize, &'static str, &'static str)>,
@@ -149,6 +151,7 @@ impl Form {
     pub(crate) fn with(path: PathBuf, specs: Vec<Spec>, sections: Vec<(usize, &'static str, &'static str)>, aliases_on: bool, path_fields: usize) -> Self {
         let mut form = Self {
             path,
+            del_armed: false,
             specs,
             sections,
             aliases_on,
@@ -347,11 +350,6 @@ impl Form {
         self.applied.take()
     }
 
-    /// Focus D items on (clamped: the 1st field, the add row).
-    fn step(&mut self, d: isize) {
-        self.focus = (self.focus as isize + d).clamp(0, self.add_item() as isize) as usize;
-    }
-
     /// A new alias box, open on its name (enter on + add, menu → add path alias).
     pub fn add_alias(&mut self) {
         if !self.aliases_on {
@@ -429,6 +427,7 @@ impl Form {
     }
 
     fn key_inner(&mut self, key: KeyEvent) -> Action {
+        let armed = std::mem::take(&mut self.del_armed);
         if self.suggestions_key(key) {
             return Action::None;
         }
@@ -469,12 +468,6 @@ impl Form {
                 KeyCode::Up if key.modifiers.is_empty() && !(i - self.plain()).is_multiple_of(2) => self.editing = Some(i - 1),
                 KeyCode::Down if key.modifiers.is_empty() && (i - self.plain()).is_multiple_of(2) => self.editing = Some(i + 1),
                 KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {}
-                // tab: done with the alias, the next item
-                KeyCode::Tab | KeyCode::BackTab => {
-                    self.editing = None;
-                    self.commit();
-                    self.step(if key.code == KeyCode::Tab { 1 } else { -1 });
-                }
                 _ => {
                     self.fields[i].key(key);
                 }
@@ -482,18 +475,6 @@ impl Form {
             return Action::None;
         }
         match key.code {
-            // tab / shift+tab: the next / previous field (main tabs: F1-F6)
-            KeyCode::Tab => {
-                self.commit();
-                self.step(1);
-            }
-            KeyCode::BackTab => {
-                self.commit();
-                if self.focus == 0 {
-                    return Action::Header;
-                }
-                self.step(-1);
-            }
             // esc: the field's edit undone, 0 commit
             KeyCode::Esc => self.revert(),
             KeyCode::Up if key.modifiers.is_empty() => {
@@ -521,8 +502,13 @@ impl Form {
                 self.commit();
                 self.focus = (self.focus + 1).min(self.add_item());
             }
+            // d d: delete the alias box
             KeyCode::Char('d') if key.modifiers.is_empty() && (self.plain()..self.add_item()).contains(&self.focus) => {
-                self.delete_alias(self.focus - self.plain());
+                if armed {
+                    self.delete_alias(self.focus - self.plain());
+                } else {
+                    self.del_armed = true;
+                }
             }
             _ => {
                 if let Some(i) = self.field() {
@@ -887,8 +873,7 @@ impl Settings {
                 KeyCode::Left | KeyCode::Char('h') => self.switch(SUBS[(at + SUBS.len() - 1) % SUBS.len()].0),
                 KeyCode::Right | KeyCode::Char('l') => self.switch(SUBS[(at + 1) % SUBS.len()].0),
                 KeyCode::Up => return Action::Header,
-                // tab: the next field, the sub-tab's content (as ↓)
-                KeyCode::Down | KeyCode::Enter | KeyCode::Char('j') | KeyCode::Esc | KeyCode::Tab => {
+                KeyCode::Down | KeyCode::Enter | KeyCode::Char('j') | KeyCode::Esc => {
                     self.bar = false;
                     self.focus_input();
                 }
@@ -1143,7 +1128,9 @@ mod tests {
         assert_eq!(file.aliases["project:platform"], "~/projects/exampleorg/project/notes/platform/");
         assert!(!form.dirty() && !form.error);
         assert!(std::fs::read_to_string(dir.join("codehead.toml")).unwrap().contains("# config"));
-        // d on the highlighted box: deleted + applied
+        // d d on the highlighted box: deleted + applied (1 d: armed only)
+        key(&mut form, KeyCode::Char('d'));
+        assert_eq!(form.aliases(), 1);
         key(&mut form, KeyCode::Char('d'));
         assert_eq!(form.aliases(), 0);
         assert_eq!(file_aliases(&dir), 0);
@@ -1246,13 +1233,14 @@ mod tests {
         ));
         assert_eq!(form.fields[PLAIN + 1].text(), target);
         assert_eq!((form.focus, form.editing), (PLAIN, Some(PLAIN + 1)));
-        // tab: the alias locked, the next item (the add row); shift+tab: back on the alias
+        // enter: the alias locked; ↓: the next item (the add row); ↑: back on the alias
+        form.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(
-            form.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            form.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
             Action::None
         ));
         assert_eq!((form.focus, form.editing), (PLAIN + 1, None));
-        form.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        form.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!((form.focus, form.editing), (PLAIN, None));
         // back into the box: a new field resets the dropdown's Escape state
         form.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

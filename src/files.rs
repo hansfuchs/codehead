@@ -465,7 +465,7 @@ impl View {
         };
 
         let key: ImageKey = (p.to_path_buf(), mtime(p), body.width, body.height);
-        let hints = "y: yazi · o: IDE · c: copy path · ctrl+f: filter";
+        let hints = "e: IDE · ctrl+.: yazi, copy path · ctrl+f: filter";
         let shown = self.shown(p);
         let line = |info: &str| Line::from(vec![Span::styled(format!(" {shown} "), theme::bold()), Span::styled(format!("{info} · {hints}"), theme::muted())]);
 
@@ -716,7 +716,7 @@ impl View {
             return;
         };
         self.scroll = self.scroll.min(lines.len().saturating_sub(1));
-        let head = Line::from(vec![Span::styled(format!(" {} ", self.shown(&p)), theme::bold()), Span::styled(format!("{} lines · o: IDE · y: yazi · c: copy path · ctrl+f: filter", lines.len()), theme::muted())]);
+        let head = Line::from(vec![Span::styled(format!(" {} ", self.shown(&p)), theme::bold()), Span::styled(format!("{} lines · e: IDE · ctrl+.: yazi, copy path · ctrl+f: filter", lines.len()), theme::muted())]);
         f.render_widget(Paragraph::new(head), Rect { height: 1, ..preview });
         let body: Vec<Line> = lines.into_iter().skip(self.scroll).take(usize::from(preview.height.saturating_sub(2))).collect();
         f.render_widget(Paragraph::new(body), Rect { x: preview.x + 1, y: preview.y + 2, height: preview.height.saturating_sub(2), width: preview.width.saturating_sub(1) });
@@ -775,16 +775,8 @@ impl View {
             KeyCode::PageDown | KeyCode::Char(' ') => self.scroll += page,
             KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(page),
             KeyCode::Char('g') | KeyCode::Home => self.scroll = 0,
-            KeyCode::Char('o' | 'e' | 'i') => return self.cur().map_or(Act::None, |e| Act::Open(e.path.clone())),
-            // y: yazi on the file (0 files: on the work dir)
-            KeyCode::Char('y') => return Act::Yazi(self.cur().map_or_else(|| self.dir.clone(), |e| e.path.clone())),
-            KeyCode::Char('c') => {
-                if let Some(e) = self.cur() {
-                    let p = e.path.display().to_string();
-                    let ok = crate::clip::copy(&p);
-                    return Act::Toast(if ok { format!("copied {p}") } else { "0 clipboard tool".into() });
-                }
-            }
+            // e: the file in the IDE, as on every screen
+            KeyCode::Char('e') => return self.cur().map_or(Act::None, |e| Act::Open(e.path.clone())),
             KeyCode::Char('r') => self.refresh(true),
             // S S: share the thread's home repo files (commit those paths, push if tracked)
             KeyCode::Char('S') => {
@@ -810,6 +802,45 @@ impl View {
             _ => {}
         }
         Act::None
+    }
+
+    /// The context menu (ctrl+.): the actions of the file under the cursor.
+    pub fn ctx_items(&mut self) -> (String, Vec<crate::ctxmenu::Item<crate::ctxmenu::Act>>) {
+        use crate::ctxmenu::{Act as C, Item, key};
+        let title = self.cur().map_or_else(|| "files".to_string(), |e| e.path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()));
+        let mut v = Vec::new();
+        if self.cur().is_some() {
+            v.push(Item::new("open in the IDE", "e", key('e')));
+            v.push(Item::new("copy the path", "", C::Cmd("copy path")));
+        }
+        v.push(Item::new("yazi on the file (its pick: into the prompt)", "", C::Cmd("yazi")));
+        v.push(Item::new("share: commit + push the home repo files", "S S", key('S')));
+        v.push(Item::new("read the list again", "r", key('r')));
+        (title, v)
+    }
+
+    /// Where the context menu opens: above / below the cursor's row of the list (the preview
+    /// stays in view).
+    pub fn ctx_place(&self) -> crate::ctxmenu::Place {
+        let i = self.visible.get(self.at).map(|(i, _)| *i);
+        let y = self.drawn.iter().find(|(_, r)| matches!(r, Row::File(f) if Some(*f) == i)).map_or(self.list.y, |(y, _)| *y);
+        crate::ctxmenu::Place::At(Rect { y, height: 1, ..self.list })
+    }
+
+    /// A context menu command with 0 key of its own.
+    pub fn ctx_cmd(&mut self, c: &str) -> Act {
+        match c {
+            "yazi" => Act::Yazi(self.cur().map_or_else(|| self.dir.clone(), |e| e.path.clone())),
+            "copy path" => match self.cur() {
+                Some(e) => {
+                    let p = e.path.display().to_string();
+                    let ok = crate::clip::copy(&p);
+                    Act::Toast(if ok { format!("copied {p}") } else { "0 clipboard tool".into() })
+                }
+                None => Act::None,
+            },
+            _ => Act::None,
+        }
     }
 
     pub fn mouse(&mut self, m: MouseEvent) {
@@ -999,7 +1030,7 @@ mod view_tests {
     }
 
     #[test]
-    fn letters_with_a_modifier_do_nothing_and_y_opens_yazi_on_the_dir_without_files() {
+    fn letters_with_a_modifier_do_nothing_and_the_context_menu_opens_yazi_on_the_dir_without_files() {
         let mut v = View::new("fileskeys-0000", Path::new("/tmp/fileskeys"));
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::ALT | KeyModifiers::SHIFT)), Act::None);
         for c in ['f', '/'] {
@@ -1011,7 +1042,8 @@ mod view_tests {
         assert!(v.filtering, "ctrl+f: the filter");
         v.filtering = false;
 
-        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)), Act::Yazi(PathBuf::from("/tmp/fileskeys")));
+        assert_eq!(v.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)), Act::None, "y: 0 key (yes only)");
+        assert_eq!(v.ctx_cmd("yazi"), Act::Yazi(PathBuf::from("/tmp/fileskeys")));
         assert_eq!(v.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)), Act::None, "0 file: 0 IDE");
     }
 
@@ -1112,7 +1144,7 @@ mod view_tests {
         // the encode in: the size line, 1 image (the iTerm2 sequence in the buffer)
         encoded(&mut v);
         let (s, b) = full(&mut v);
-        assert!(s.iter().any(|r| r.contains("2000×1000 px") && r.contains("y: yazi")), "{s:#?}");
+        assert!(s.iter().any(|r| r.contains("2000×1000 px") && r.contains("ctrl+.: yazi")), "{s:#?}");
         assert!(b.content().iter().any(|c| c.symbol().contains("\x1b]1337;File=")), "an iTerm2 image");
 
         // a 2nd draw: from the cache, 0 new read

@@ -625,11 +625,11 @@ impl McpTab {
                     }
                     KeyCode::Char('s') if ctrl => self.save_edit(e),
                     KeyCode::Enter if e.field == 4 => self.save_edit(e),
-                    KeyCode::Tab | KeyCode::Down if !(e.field == 3 && k.code == KeyCode::Down && !e.secrets_at_end()) => {
+                    KeyCode::Down if !(e.field == 3 && k.code == KeyCode::Down && !e.secrets_at_end()) => {
                         e.field = (e.field + 1).min(4);
                         Some(Modal::Edit(e))
                     }
-                    KeyCode::BackTab | KeyCode::Up if !(e.field == 3 && k.code == KeyCode::Up && !e.secrets_at_start()) => {
+                    KeyCode::Up if !(e.field == 3 && k.code == KeyCode::Up && !e.secrets_at_start()) => {
                         e.field = e.field.saturating_sub(1);
                         Some(Modal::Edit(e))
                     }
