@@ -3535,7 +3535,7 @@ impl View {
                 let h = (ship_rows.len() as u16 + rules + top + 2).min(area.height);
                 let r = ship_rect(area, self.scm.rect, w, h);
                 f.render_widget(Clear, r);
-                f.render_widget(Block::bordered().border_type(ratatui::widgets::BorderType::Rounded).border_style(theme::accent()).title(Span::styled(" ship ", theme::accent_bold())).style(theme::text()), r);
+                f.render_widget(Block::bordered().border_style(theme::accent()).title(Span::styled(" ship ", theme::accent_bold())).style(theme::text()), r);
                 let inner = Rect { x: r.x + 1, y: r.y + 1, width: r.width.saturating_sub(2), height: r.height.saturating_sub(2) };
                 if let Some(l) = head {
                     let line = Line::from(vec![Span::styled(format!(" {l} "), theme::pill().add_modifier(Modifier::BOLD))]);
