@@ -581,27 +581,35 @@ fn ship_rect(area: Rect, panel: Rect, w: u16, h: u16) -> Rect {
     Rect { x, y, width: w, height: h }
 }
 
-/// The ship menu's "create PR" (DRAFT: as a draft): the task of its sub-thread.
-fn pr_task(base: &str, draft: bool) -> String {
+/// The 1st step of each agent task: the checkout must be on BRANCH, else the agent stops (a
+/// moved HEAD never gets pushed or a PR).
+fn branch_guard(branch: &str) -> String {
+    format!("0. Check: `git rev-parse --abbrev-ref HEAD` prints `{branch}`. Any other output: stop, change nothing, report it.\n")
+}
+
+/// The ship menu's "create PR" (DRAFT: as a draft) for BRANCH: the task of its sub-thread.
+fn pr_task(branch: &str, base: &str, draft: bool) -> String {
     let b = base_branch(base);
     let kind = if draft { "a draft pull request (`--draft`)" } else { "a pull request" };
     format!(
-        "Open {kind} for this branch against `{b}`.\n\n\
-         1. Push the commits already made: `git push -u origin HEAD`. Never commit, stage, stash or discard: uncommitted changes stay as they are, out of the PR.\n\
-         2. Read the branch's commits and diff against `{base}` (`git log {base}..HEAD`, `git diff {base}...HEAD`).\n\
+        "Open {kind} for the branch `{branch}` against `{b}`.\n\n\
+         {guard}\
+         1. Push the commits already made: `git push -u origin {branch}`. Never commit, stage, stash or discard: uncommitted changes stay as they are, out of the PR.\n\
+         2. Read the branch's commits and diff against `{base}` (`git log {base}..{branch}`, `git diff {base}...{branch}`).\n\
          3. Title: imperative, max. 72 chars, in the repo's commit style. Body: what changed and why, how it was tested. The repo has a PR template (`.github/pull_request_template.md` or similar): fill it in.\n\
-         4. `gh pr create --base {b}{d} --title \"…\" --body-file -` (the body on stdin).\n\n\
+         4. `gh pr create --head {branch} --base {b}{d} --title \"…\" --body-file -` (the body on stdin).\n\n\
          End with the PR's URL as your last line.",
+        guard = branch_guard(branch),
         d = if draft { " --draft" } else { "" }
     )
 }
 
-/// The ship menu's "update PR description": the task of its sub-thread.
-fn pr_desc_task(p: &Pr) -> String {
+/// The ship menu's "update PR description" of BRANCH's PR P: the task of its sub-thread.
+fn pr_desc_task(branch: &str, p: &Pr) -> String {
     let n = p.number;
     format!(
-        "Update the title and the description of pull request {label} ({url}) where they no longer match its changes.\n\n\
-         1. Read the PR's title, body and full diff: `gh pr view {n} --json title,body,baseRefName`, `gh pr diff {n}`.\n\
+        "Update the title and the description of pull request {label} ({url}) of the branch `{branch}` where they no longer match its changes.\n\n\
+         1. Read the PR's title, body and full diff: `gh pr view {n} --json title,body,baseRefName,headRefName`, `gh pr diff {n}`. `headRefName` is not `{branch}`: stop, change nothing, report it.\n\
          2. Rewrite only what is wrong or missing: keep what still holds, keep the template's sections. Title: imperative, max. 72 chars.\n\
          3. `gh pr edit {n} --title \"…\" --body-file -` (only when a change is needed).\n\n\
          Change no code, make no commit. End with what changed (title / body), or \"title and body match the changes: 0 edits\".",
@@ -610,24 +618,26 @@ fn pr_desc_task(p: &Pr) -> String {
     )
 }
 
-/// The ship menu's "ship": the task of its sub-thread; the state of the branch now along, so
-/// the agent skips the steps done.
-fn ship_task(c: &Changes, pr: Option<&Pr>) -> String {
+/// The ship menu's "ship" of BRANCH: the task of its sub-thread; the state of the branch now
+/// along, so the agent skips the steps done.
+fn ship_task(branch: &str, c: &Changes, pr: Option<&Pr>) -> String {
     let b = base_branch(&c.base);
     let unpushed = c.commits.list.iter().filter(|x| !x.pushed).count();
-    let pr_now = match pr {
-        Some(p) => format!("open: {} ({}), checks ✓{} ✗{} ●{}", pr_label(p), p.url, p.pass, p.fail, p.pending),
-        None => "none".into(),
+    let (pr_now, checks) = match pr {
+        Some(p) => (format!("open: {} ({}), checks ✓{} ✗{} ●{}", pr_label(p), p.url, p.pass, p.fail, p.pending), format!("gh pr checks {} --watch", p.number)),
+        None => ("none".into(), format!("gh pr checks {branch} --watch")),
     };
     format!(
-        "Ship this branch: do each step in order, skip each step already done.\n\n\
+        "Ship the branch `{branch}`: do each step in order, skip each step already done.\n\n\
          State now: {files} uncommitted file(s), {unpushed} unpushed commit(s), {ahead} commit(s) ahead of `{base}`, pull request: {pr_now}.\n\n\
+         {guard}\
          1. Commit: the uncommitted changes as commits in the repo's commit style (1 commit per topic). Leave out files that do not belong (secrets, local config, scratch).\n\
-         2. Push: `git push -u origin HEAD`.\n\
-         3. Pull request: open one against `{b}` if none exists (`gh pr create --base {b} --title \"…\" --body-file -`; fill in the repo's PR template).\n\
-         4. Review: read the full PR diff as a reviewer, find correctness bugs. Fix the real ones, commit, push. Then bring the PR's title + body up to date.\n\
-         5. CI: `gh pr checks --watch`. A check fails: read its log (`gh run view <id> --log-failed`), fix the cause, commit, push, watch again. Repeat until every check passes.\n\n\
-         Never merge the pull request. End with the PR's URL and the checks' state.",
+         2. Push: `git push -u origin {branch}`.\n\
+         3. Pull request: open one if none exists (`gh pr create --head {branch} --base {b} --title \"…\" --body-file -`; fill in the repo's PR template).\n\
+         4. Review: read the full PR diff as a reviewer, find correctness bugs. Fix the real ones, commit, push to `{branch}`. Then bring the PR's title + body up to date.\n\
+         5. CI: `{checks}`. A check fails: read its log (`gh run view <id> --log-failed`), fix the cause, commit, push to `{branch}`, watch again. Repeat until every check passes.\n\n\
+         Never merge the pull request. Never push to any branch but `{branch}`. End with the PR's URL and the checks' state.",
+        guard = branch_guard(branch),
         files = c.files.len(),
         ahead = c.ahead,
         base = c.base
@@ -1717,6 +1727,9 @@ pub struct View {
     pr: Option<Pr>,
     pr_read: Option<Receiver<Option<Pr>>>,
     pr_at: Option<Instant>,
+    /// Tests: the branch the agent steps name (0 git repo).
+    #[cfg(test)]
+    pub(crate) branch_override: Option<String>,
     /// The CI fix message on its way; messages for the thread (the view sends them; `@name`
     /// first: to that agent).
     ci: Option<Receiver<Result<String, String>>>,
@@ -1917,6 +1930,8 @@ impl View {
             pr: None,
             pr_read: None,
             pr_at: None,
+            #[cfg(test)]
+            branch_override: None,
             ci: None,
             outbox: Vec::new(),
             op: None,
@@ -3268,6 +3283,19 @@ impl View {
         v
     }
 
+    /// The checkout's branch (the agent steps name it). Err: a detached HEAD, 0 git.
+    fn branch(&self) -> Result<String, String> {
+        #[cfg(test)]
+        if let Some(b) = &self.branch_override {
+            return Ok(b.clone());
+        }
+        let b = git(&self.dir, &["rev-parse", "--abbrev-ref", "HEAD"]).map_err(|e| format!("branch: {e}"))?.trim().to_string();
+        if b.is_empty() || b == "HEAD" {
+            return Err("detached HEAD: check out a branch first".into());
+        }
+        Ok(b)
+    }
+
     /// Step S of the ship menu.
     fn ship(&mut self, s: Ship) -> Act {
         match s {
@@ -3296,17 +3324,29 @@ impl View {
                 if self.changes.ahead == 0 {
                     return Act::Toast(format!("0 commits ahead of {}: commit first (uncommitted changes stay out of the PR)", self.changes.base));
                 }
+                let b = match self.branch() {
+                    Ok(b) => b,
+                    Err(t) => return Act::Toast(t),
+                };
                 self.pr_at = None;
-                Act::Sub(pr_task(&self.changes.base, draft))
+                Act::Sub(pr_task(&b, &self.changes.base, draft))
             }
             Ship::PrDesc => {
                 let Some(p) = self.pr.clone() else { return Act::Toast("0 pull request on this branch".into()) };
+                let b = match self.branch() {
+                    Ok(b) => b,
+                    Err(t) => return Act::Toast(t),
+                };
                 self.pr_at = None;
-                Act::Sub(pr_desc_task(&p))
+                Act::Sub(pr_desc_task(&b, &p))
             }
             Ship::Full => {
+                let b = match self.branch() {
+                    Ok(b) => b,
+                    Err(t) => return Act::Toast(t),
+                };
                 self.pr_at = None;
-                Act::Sub(ship_task(&self.changes, self.pr.as_ref()))
+                Act::Sub(ship_task(&b, &self.changes, self.pr.as_ref()))
             }
             Ship::CiLog => {
                 if self.ci.is_some() {

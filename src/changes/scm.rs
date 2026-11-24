@@ -1602,15 +1602,24 @@ mod tests {
         v.key(enter);
         assert!(matches!(v.key(enter), Act::Toast(t) if t.contains("commit first")));
 
-        // 2 commits ahead: the sub-thread's task, a draft, the commits only
+        // 2 commits ahead, 0 branch (detached / 0 git): 0 sub-thread
         v.changes.ahead = 2;
         v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         for _ in 0..draft {
             v.key(j);
         }
         v.key(enter);
+        assert!(matches!(v.key(enter), Act::Toast(_)));
+
+        // on a branch: the sub-thread's task names it, a draft, the commits only
+        v.branch_override = Some("task/x".into());
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        for _ in 0..draft {
+            v.key(j);
+        }
+        v.key(enter);
         match v.key(enter) {
-            Act::Sub(t) => assert!(t.contains("--draft") && t.contains("--base main") && t.contains("uncommitted changes stay"), "{t}"),
+            Act::Sub(t) => assert!(t.starts_with("Open a draft pull request (`--draft`) for the branch `task/x`") && t.contains("git push -u origin task/x") && t.contains("--head task/x --base main --draft") && !t.contains("HEAD`,") && t.contains("uncommitted changes stay"), "{t}"),
             a => panic!("{a:?}"),
         }
 
@@ -1624,12 +1633,12 @@ mod tests {
             v.key(j);
         }
         v.key(enter);
-        assert!(matches!(v.key(enter), Act::Sub(t) if t.contains("gh pr edit 1234")));
+        assert!(matches!(v.key(enter), Act::Sub(t) if t.contains("gh pr edit 1234") && t.contains("`headRefName` is not `task/x`")));
 
         // ship: row 0, the state along, never merge
         v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         v.key(enter);
-        assert!(matches!(v.key(enter), Act::Sub(t) if t.contains("codehead#1234") && t.contains("Never merge")));
+        assert!(matches!(v.key(enter), Act::Sub(t) if t.contains("codehead#1234") && t.contains("Never merge") && t.contains("Never push to any branch but `task/x`") && !t.contains("origin HEAD")));
     }
 
     #[test]
