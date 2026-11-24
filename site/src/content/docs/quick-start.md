@@ -20,7 +20,7 @@ description: From 0 to a running thread in a few minutes.
    `claude/opus`), a mode. `autopilot` works without asking; `supervised` asks before each
    tool call. The agent is a file now: `~/.config/codehead/agents/<name>.toml`.
 
-4. Back on the **new** tab (`F1`; `F1`-`F5` or `alt+1`-`alt+5` switch tabs), type the task in the prompt: its 1st
+4. Back on the **new** tab (`F1`; `F1`-`F6` or `alt+1`-`alt+6` switch tabs), type the task in the prompt: its 1st
    line is the thread's title (or type one in the title field). `@` lists agents, `>`
    lists commands, `tab` moves between fields.
 
@@ -29,6 +29,9 @@ description: From 0 to a running thread in a few minutes.
 
 6. Start the thread. The thread view opens: the agents on top, the stream in the middle, your
    prompt below. Send more with `ctrl+enter`.
+
+7. Review the work in the changes view (`F2`): files sorted by what to read first, comments on
+   lines, a file marked read with `v`. See [review](/docs/concepts/review/).
 
 `esc esc` goes back to the start screen. The thread keeps running: open it again from the
 **threads** tab, or with `codehead --view <thread>`. Plain `codehead` opens the thread updated last.
