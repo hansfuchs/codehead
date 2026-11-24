@@ -1727,6 +1727,9 @@ pub struct View {
     pr: Option<Pr>,
     pr_read: Option<Receiver<Option<Pr>>>,
     pr_at: Option<Instant>,
+    /// The commits a running push takes (oids, newest first): the PUSHING group, since when.
+    pub(super) pushing: Vec<String>,
+    pub(super) pushing_at: Option<Instant>,
     /// Tests: the branch the agent steps name (0 git repo).
     #[cfg(test)]
     pub(crate) branch_override: Option<String>,
@@ -1930,6 +1933,8 @@ impl View {
             pr: None,
             pr_read: None,
             pr_at: None,
+            pushing: Vec::new(),
+            pushing_at: None,
             #[cfg(test)]
             branch_override: None,
             ci: None,
@@ -2176,6 +2181,14 @@ impl View {
         if self.op.is_some() {
             return Act::Toast("git: 1 step at a time".into());
         }
+        // a push: its commits leave UNPUSHED for PUSHING until it ends
+        let un = self.changes.commits.list.iter().filter(|c| !c.pushed).map(|c| c.oid.clone());
+        self.pushing = match &op {
+            Op::Push | Op::OpenPr => un.collect(),
+            Op::PushTo(oid) => un.skip_while(|o| o != oid).collect(),
+            _ => Vec::new(),
+        };
+        self.pushing_at = (!self.pushing.is_empty()).then(Instant::now);
         let (tx, rx) = mpsc::channel();
         let dir = self.dir.clone();
         let label = op.label();
@@ -2185,6 +2198,11 @@ impl View {
         self.op = Some(rx);
         self.built = None;
         Act::Toast(format!("git … {label}"))
+    }
+
+    /// A push runs: its PUSHING group's wave moves (the view draws at the wave's pace).
+    pub fn pushing(&self) -> bool {
+        !self.pushing.is_empty()
     }
 
     /// What the last git step did, once (the thread view toasts it).
@@ -2234,6 +2252,14 @@ impl View {
         let Some(rx) = &self.op else { return false };
         let Ok(r) = rx.try_recv() else { return false };
         self.op = None;
+        // the push ended: its commits pushed (the read after it agrees), else back to UNPUSHED
+        let gone = std::mem::take(&mut self.pushing);
+        self.pushing_at = None;
+        if r.is_ok() {
+            for c in self.changes.commits.list.iter_mut().filter(|c| gone.contains(&c.oid)) {
+                c.pushed = true;
+            }
+        }
         let prefill = self.prefill.take();
         if r.is_ok()
             && let Some(m) = prefill
