@@ -56,7 +56,7 @@ accent = "#B8A6FF"                    # overrides 1 color of the scheme
 | `editor` | `auto` | The IDE of `ctrl+i` and the changes view `o`: `auto` (VS Code, VSCodium, Cursor, Zed, JetBrains: the 1st found), a command (`code`, `cursor`, `zed`, `idea` …), a path, or `terminal` ($VISUAL / $EDITOR full screen in codehead's terminal, at the line). Trust codehead's worktrees dir once in the IDE: every worktree under it is trusted |
 | `[keys] menu` | `ctrl+p` | the menu key: `F1`-`F12`, `ctrl+<letter>`, `alt+<letter>` |
 | `[keys] command` | `>` | the char that opens the command dropdown in a prompt: 1 symbol |
-| `[colors] scheme` | `lavender` | color preset: `lavender` (violet grays, pastel lavender accent), `coral` (cool grays, coral accent) or `amber` (warm paper, amber accent) |
+| `[colors] scheme` | `lavender` | color preset: `lavender` (warm brown `#140700`, pastel lavender accent), `coral` (cool grays, coral accent) or `amber` (warm paper, amber accent) |
 | `[colors] <name>` | the scheme's | `#RRGGBB` for 1 slot (base16 / catppuccin model): `base`, `surface0`-`surface2`, `overlay0`, `subtext0`, `text`, `accent`, `on_accent`, `red`, `peach`, `yellow`, `green`, `teal`, `sky`, `mauve`. Old names still work: `panel` → `surface0`, `hover` → `surface1`, `muted` → `subtext0`, `line` → `overlay0`, `ok` → `green`, `danger` → `red`, `warn` → `yellow` |
 | `[aliases]` | none | short names for directories, see [aliases](/docs/concepts/notes/#path-aliases) |
 

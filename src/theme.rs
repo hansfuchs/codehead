@@ -41,18 +41,18 @@ pub struct Palette {
     pub mauve: Color,
 }
 
-/// Soft pastel lavender on cool violet grays. The default: its accent is 0 status hue, so red
-/// means "error" only.
+/// Soft pastel lavender on warm brown #140700, like codehead.sh: the warm paper makes the cool
+/// accent pop (9.4:1). The default: its accent is 0 status hue, so red means "error" only.
 pub const LAVENDER: Palette = Palette {
-    base: Color::Rgb(29, 26, 40),
-    surface0: Color::Rgb(43, 39, 57),
-    surface1: Color::Rgb(58, 53, 80),
-    surface2: Color::Rgb(74, 68, 98),
-    overlay0: Color::Rgb(113, 106, 142),
+    base: Color::Rgb(20, 7, 0),
+    surface0: Color::Rgb(34, 18, 10),
+    surface1: Color::Rgb(46, 28, 19),
+    surface2: Color::Rgb(61, 42, 32),
+    overlay0: Color::Rgb(105, 95, 98),
     subtext0: Color::Rgb(173, 167, 198),
     text: Color::Rgb(232, 228, 246),
     accent: Color::Rgb(184, 166, 255),
-    on_accent: Color::Rgb(29, 26, 40),
+    on_accent: Color::Rgb(20, 7, 0),
     red: Color::Rgb(244, 122, 142),
     peach: Color::Rgb(245, 166, 115),
     yellow: Color::Rgb(237, 212, 138),
