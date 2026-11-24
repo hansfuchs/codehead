@@ -1734,7 +1734,8 @@ impl View {
                     self.merge_act(act);
                     return false;
                 }
-                // ↑ on the diff's 1st row, 2+ repos: the repo tabs (as the merge view's PR tabs)
+                // ↑ on the diff's or the panel's 1st row, 2+ repos: the repo tabs (as the merge
+                // view's PR tabs); ↓ back: the diff or the panel
                 if self.pane == Pane::Changes && k.code == KeyCode::Up && k.modifiers.is_empty() && self.checkouts.len() > 1 && self.changes.at_top() {
                     self.repo_focus = true;
                     self.dirty = true;
@@ -2126,7 +2127,8 @@ impl View {
         self.checkout = i;
         self.checkout_picked = true;
         let dir = self.checkouts[i].clone();
-        self.changes = crate::changes::View::new(&self.id, &dir);
+        let old = std::mem::replace(&mut self.changes, crate::changes::View::new(&self.id, &dir));
+        self.changes.focus_like(&old);
         self.changes_agents();
         self.changes.refresh(true);
         self.dirty = true;
@@ -6744,19 +6746,37 @@ mod repo_row_tests {
     }
 
     #[test]
-    fn up_keeps_the_diff_with_1_repo_or_the_panel_focused() {
+    fn up_keeps_the_diff_with_1_repo() {
         let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (mut v, root, ..) = two_repos("up-one", true);
         let _ = screen(&mut v);
         key(&mut v, KeyCode::Up, KeyModifiers::NONE);
         assert!(!v.repo_focus, "1 repo: 0 tabs to step");
         done(&v, &root);
+    }
 
-        let (mut v, root, ..) = two_repos("up-panel", false);
+    /// The panel: ↑ on its 1st row, the commit message; ↑ there, the repo tabs; ↓, the panel.
+    #[test]
+    fn up_from_the_panels_top_gives_the_repo_tabs_the_arrow_keys() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut v, root, a, b) = two_repos("up-panel", false);
+        let _ = screen(&mut v);
         key(&mut v, KeyCode::Left, KeyModifiers::NONE);
         assert!(v.changes.panel_focus());
         key(&mut v, KeyCode::Up, KeyModifiers::NONE);
-        assert!(!v.repo_focus, "the panel's ↑");
+        assert!(!v.repo_focus, "the panel's 1st row: the commit message 1st");
+        key(&mut v, KeyCode::Up, KeyModifiers::NONE);
+        assert!(v.repo_focus);
+        assert_eq!(tab_bg(&mut v, 0), theme::pill().bg.unwrap());
+
+        key(&mut v, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(v.changes.dir(), b.as_path());
+        key(&mut v, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(v.changes.dir(), a.as_path());
+
+        // ↓: the panel again, 0 diff
+        key(&mut v, KeyCode::Down, KeyModifiers::NONE);
+        assert!(!v.repo_focus && v.changes.panel_focus());
         done(&v, &root);
     }
 

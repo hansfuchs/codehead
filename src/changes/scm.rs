@@ -135,7 +135,7 @@ pub(super) struct Panel {
     buttons: Vec<(Rect, Btn)>,
     /// PR mode: the commit dropdown open, its cursor (0: every commit, k: the k-th newest);
     /// its rows (clicks).
-    pick: Option<usize>,
+    pub(super) pick: Option<usize>,
     pick_rows: Vec<(Rect, usize)>,
 }
 

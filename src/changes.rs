@@ -3764,12 +3764,22 @@ impl View {
         self.built = None;
     }
 
-    /// The cursor on the 1st row of the diff, 0 panel / modal / filter: ↑ leaves the view.
+    /// The cursor on the 1st row of the diff or the panel, 0 modal / filter: ↑ leaves the view.
+    /// The panel's 1st row: the commit message's 1st row (PR mode: 0 message, the list's 1st row).
     pub fn at_top(&self) -> bool {
-        if let Some(p) = self.peek.as_ref().filter(|_| !self.scm.focus && self.modal.is_none()) {
+        if self.modal.is_some() || self.filtering {
+            return false;
+        }
+        if self.scm.focus {
+            if self.scm.pick.is_some() {
+                return false;
+            }
+            return if self.scm.msg_focus { self.scm.msg.on_first_row() } else { self.scm.at == 0 && self.pr_src.is_some() };
+        }
+        if let Some(p) = &self.peek {
             return p.at_top();
         }
-        self.at == 0 && !self.scm.focus && self.modal.is_none() && !self.filtering
+        self.at == 0
     }
 
     /// The mode the keys are in, for the footer's badge: the filter takes the letters, or lines
@@ -4144,6 +4154,14 @@ impl View {
         }
         self.scm.focus = on;
         self.scm.msg_focus = false;
+    }
+
+    /// The keys where FROM (another checkout's changes) had them: the panel, its commit message.
+    pub fn focus_like(&mut self, from: &View) {
+        if from.panel_focus() {
+            self.focus_panel(true);
+            self.scm.msg_focus = from.scm.msg_focus;
+        }
     }
 
     /// `d`: the 1st press arms the delete of row AT (PANEL: of the panel); true: the 2nd press.
