@@ -63,6 +63,15 @@ pub struct Thread {
     /// over the repo of DIR / WORKTREE. None: the repo of DIR / WORKTREE.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    /// Projects of the thread's repo (slugs, `projects.rs`): 0..n.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
+    /// The owner picked PROJECTS (new form, edit form): the agents' `set_projects` leaves them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub projects_set: bool,
+    /// The owner wrote the title (new form, edit form): the agents' `set_title` leaves it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_set: bool,
     pub created: u64,
     pub updated: u64,
     /// Agents on the thread, lead first: an owner message without @name goes to the lead.

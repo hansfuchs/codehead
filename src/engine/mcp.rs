@@ -95,6 +95,21 @@ fn tools() -> Value {
             }, "required": ["flow", "reason"]}
         },
         {
+            "name": "set_title",
+            "description": "Name the thread after its work: title `area: outcome` (e.g. `menu: live quick commands`), and for a thread in its own codehead worktree its branch `<kind>/<area>-<slug>` (codehead renames it, also on the remote; GitHub PRs follow). Call it after your 1st turn's work and when the work changes direction, not every turn. An owner-written title stays.",
+            "inputSchema": {"type": "object", "properties": {
+                "title": {"type": "string", "description": "`area: outcome`, imperative, max. 72 chars, 0 `#n`"},
+                "branch": {"type": "string", "description": "Optional: `<kind>/<area>-<slug>`, kind: feat fix refactor perf docs test chore style ci build"}
+            }, "required": ["title"]}
+        },
+        {
+            "name": "set_projects",
+            "description": "Assign the thread to 0..n existing projects of its repo (slugs from the system prompt's Projects list). Never invent a project: only the owner makes them. Owner-picked projects stay.",
+            "inputSchema": {"type": "object", "properties": {
+                "projects": {"type": "array", "items": {"type": "string"}, "description": "Project slugs; [] for 0 projects"}
+            }, "required": ["projects"]}
+        },
+        {
             "name": "list_agents",
             "description": "Every agent: name, harness/model, mode, whether it is on this thread.",
             "inputSchema": {"type": "object", "properties": {}}
@@ -155,6 +170,11 @@ fn call(thread: &str, agent: &str, name: &str, args: &Value) -> Result<String, S
         "flow_suggest" => {
             client::send(thread, &json!({"op": "flow_suggest", "agent": agent, "flow": args["flow"], "reason": args["reason"]}))?;
             Ok("suggestion shown to the owner. Go on with the current step until the owner switches.".into())
+        }
+        "set_title" => crate::projects::set_title(thread, args["title"].as_str().unwrap_or_default(), args["branch"].as_str()),
+        "set_projects" => {
+            let v: Vec<String> = args["projects"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+            crate::projects::set_projects(thread, &v)
         }
         "list_agents" => {
             let on = super::store::load(thread).map(|t| t.agents).unwrap_or_default();
@@ -231,7 +251,7 @@ mod tests {
         let r = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})).unwrap();
         assert_eq!(r["result"]["protocolVersion"], "2025-03-26");
         let r = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
-        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 11);
+        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 13);
         assert!(handle("t", "a", &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none());
     }
 

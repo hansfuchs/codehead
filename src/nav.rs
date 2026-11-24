@@ -38,6 +38,9 @@ pub struct Card {
     /// DIR is a linked worktree codehead made (delete / archive remove it).
     #[serde(default)]
     pub worktree: bool,
+    /// Projects of the thread (slugs of its repo's projects).
+    #[serde(default)]
+    pub projects: Vec<String>,
 }
 
 impl Card {
@@ -179,6 +182,7 @@ pub fn load() -> Vec<Card> {
                 land: crate::landed::of(&t.id),
                 done: crate::notify::reported_done(&t.id),
                 worktree: t.worktree.as_deref().is_some_and(|p| std::path::Path::new(p).is_dir()),
+                projects: t.projects,
                 id: t.id,
                 title: t.title,
                 state: t.state,
@@ -195,14 +199,36 @@ pub fn load() -> Vec<Card> {
 
 /// Fuzzy filter (title, branch) of CARDS: best match first; empty Q: all, order kept.
 pub fn filter(cards: &[Card], q: &str) -> Vec<usize> {
-    let q = q.trim();
+    // `kind:fix`, `area:menu`, `project:slug`: exact filters; the other words: the fuzzy match
+    let mut words = Vec::new();
+    let mut keep: Vec<Box<dyn Fn(&Card) -> bool>> = Vec::new();
+    for w in q.split_whitespace() {
+        match w.split_once(':') {
+            Some(("kind", v)) if !v.is_empty() => {
+                let v = v.to_lowercase();
+                keep.push(Box::new(move |c: &Card| crate::projects::kind_of(&c.branch) == Some(v.as_str())));
+            }
+            Some(("area", v)) if !v.is_empty() => {
+                let v = v.to_lowercase();
+                keep.push(Box::new(move |c: &Card| crate::projects::area_of(&c.title).as_deref() == Some(v.as_str())));
+            }
+            Some(("project", v)) if !v.is_empty() => {
+                let v = v.to_lowercase();
+                keep.push(Box::new(move |c: &Card| c.projects.iter().any(|p| p.starts_with(&v))));
+            }
+            _ => words.push(w),
+        }
+    }
+    let q = words.join(" ");
+    let passes = |c: &Card| keep.iter().all(|f| f(c));
     if q.is_empty() {
-        return (0..cards.len()).collect();
+        return (0..cards.len()).filter(|&i| passes(&cards[i])).collect();
     }
     let mut hits: Vec<(i64, usize)> = cards
         .iter()
         .enumerate()
-        .filter_map(|(i, c)| crate::app::fuzzy(q, &format!("{} {}", c.name(), c.branch)).map(|s| (s, i)))
+        .filter(|(_, c)| passes(c))
+        .filter_map(|(i, c)| crate::app::fuzzy(&q, &format!("{} {}", c.name(), c.branch)).map(|s| (s, i)))
         .collect();
     hits.sort_by_key(|(s, i)| (std::cmp::Reverse(*s), *i));
     hits.into_iter().map(|(_, i)| i).collect()
@@ -222,6 +248,11 @@ pub const WAVE_MS: u128 = 150;
 
 /// Rows of a card: border, title, status, border.
 pub const CARD_H: u16 = 4;
+
+/// Rows of card C: CARD_H, +1 for its projects line.
+pub fn card_h(c: &Card) -> u16 {
+    CARD_H + u16::from(!c.projects.is_empty())
+}
 
 /// S cut to W display columns (… at the cut).
 pub fn fit(s: &str, w: usize) -> String {
@@ -293,7 +324,12 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
             status.push(Span::styled(fit(&format!(" · {tail}"), w - used), theme::muted()));
         }
     }
-    let lines = vec![Line::from(Span::styled(fit(&c.name(), w), title_st)), Line::from(status)];
+    let mut lines = vec![Line::from(Span::styled(fit(&c.name(), w), title_st))];
+    // the projects: own line, below the title, above the status line
+    if !c.projects.is_empty() {
+        lines.push(Line::from(Span::styled(fit(&c.projects.join(" · "), w), theme::muted())));
+    }
+    lines.push(Line::from(status));
     let body = ratatui::layout::Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
     Paragraph::new(lines).render(body, buf);
     if cur {
@@ -329,6 +365,22 @@ mod tests {
         draw_card(&mut buf, area, &c, false, false, false, 0);
         let text: String = (0..CARD_H).flat_map(|y| (0..40).map(move |x| (x, y))).map(|p| buf[p].symbol().to_string()).collect();
         assert!(text.contains("? blocked") && !text.contains("working"), "{text}");
+    }
+
+    /// The projects of a thread: own line below the title, above the status line; the bottom border stays plain.
+    #[test]
+    fn a_card_shows_its_projects_below_the_title() {
+        let c = Card { live: 1, projects: vec!["bug-fixes".into(), "ux".into()], ..card("t", "open", 0) };
+        let h = card_h(&c);
+        assert_eq!(h, CARD_H + 1);
+        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, h));
+        let area = buf.area;
+        draw_card(&mut buf, area, &c, false, false, false, 0);
+        let row = |y: u16| (0..40).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
+        assert!(row(1).contains('t') && !row(1).contains("bug-fixes"), "{}", row(1));
+        assert!(row(2).contains("bug-fixes · ux") && !row(2).contains("idle"), "{}", row(2));
+        assert!(row(3).contains("◦ idle") && !row(3).contains("bug-fixes"), "{}", row(3));
+        assert!(!row(h - 1).contains("bug-fixes"), "{}", row(h - 1));
     }
 
     /// A monitor or background command runs, 0 turn: `monitoring…`, not `idle` or `working…`.

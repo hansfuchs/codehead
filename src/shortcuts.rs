@@ -185,7 +185,7 @@ fn wrap(text: &str, w: usize, max: usize) -> Vec<String> {
 }
 
 /// A box with TEXT (a shortcut's text) in R: frame with LABEL, the text wrapped.
-fn text_box(f: &mut Frame, r: Rect, label: &str, text: &str) {
+pub(crate) fn text_box(f: &mut Frame, r: Rect, label: &str, text: &str) {
     let inner = dropdown::frame(f, r, label, "", false, false, false);
     let rows = wrap(text, usize::from(inner.width.saturating_sub(2)), usize::from(inner.height));
     let lines: Vec<Line> = rows.into_iter().map(|l| Line::styled(format!(" {l}"), theme::text())).collect();
@@ -193,7 +193,7 @@ fn text_box(f: &mut Frame, r: Rect, label: &str, text: &str) {
 }
 
 /// Width and rows of the text box for TEXT: max. 64 columns, 12 rows.
-fn box_size(text: &str, bounds: Rect) -> (u16, usize) {
+pub(crate) fn box_size(text: &str, bounds: Rect) -> (u16, usize) {
     let w = text.lines().map(UnicodeWidthStr::width).max().unwrap_or(0).clamp(24, 62) as u16 + 4;
     let w = w.min(bounds.width);
     let rows = wrap(text, usize::from(w.saturating_sub(4)), 12).len().max(1);

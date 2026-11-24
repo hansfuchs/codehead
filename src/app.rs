@@ -75,7 +75,9 @@ pub enum Outcome {
     /// CLONE: a home repo to clone first (url, path).
     /// FLOW: the slug of the flow the thread follows, the step it starts at.
     /// FLOWS: (agent, flow slug, start step) per agent with a flow.
-    New { message: String, target: Target, agents: Vec<String>, clone: Option<(String, PathBuf)>, flows: Vec<(String, String, usize)> },
+    /// PROJECTS: the owner's projects (None: auto, the agents pick). TITLE_SET: the owner wrote
+    /// the title.
+    New { message: String, target: Target, agents: Vec<String>, clone: Option<(String, PathBuf)>, flows: Vec<(String, String, usize)>, projects: Option<Vec<String>>, title_set: bool },
     Resume(Box<Worktree>),
 }
 
@@ -92,6 +94,8 @@ enum Tab {
     /// Sub-screen of task: enter on the notes field.
     Notes,
     Threads,
+    /// Projects of a repo: their briefs (projtab.rs).
+    Projects,
     /// The owner's pull requests (mergetab.rs).
     Merge,
     Agents,
@@ -104,7 +108,8 @@ impl Tab {
     fn next(self) -> Tab {
         match self {
             Tab::New | Tab::Notes => Tab::Threads,
-            Tab::Threads => Tab::Merge,
+            Tab::Threads => Tab::Projects,
+            Tab::Projects => Tab::Merge,
             Tab::Merge => Tab::Agents,
             Tab::Agents => Tab::Flows,
             Tab::Flows => Tab::Settings,
@@ -115,7 +120,8 @@ impl Tab {
         match self {
             Tab::New | Tab::Notes => Tab::Settings,
             Tab::Threads => Tab::New,
-            Tab::Merge => Tab::Threads,
+            Tab::Projects => Tab::Threads,
+            Tab::Merge => Tab::Projects,
             Tab::Agents => Tab::Merge,
             Tab::Flows => Tab::Agents,
             Tab::Settings => Tab::Flows,
@@ -123,8 +129,8 @@ impl Tab {
     }
 }
 
-/// The main tabs in order (F1-F6, alt+1-6).
-const MAIN_TABS: [Tab; 6] = [Tab::New, Tab::Threads, Tab::Merge, Tab::Agents, Tab::Flows, Tab::Settings];
+/// The main tabs in order (F1-F7, alt+1-7).
+const MAIN_TABS: [Tab; 7] = [Tab::New, Tab::Threads, Tab::Projects, Tab::Merge, Tab::Agents, Tab::Flows, Tab::Settings];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -221,6 +227,8 @@ enum Field {
     Title,
     /// The repo row of "where" (enter: the repo picker).
     Repo,
+    /// The projects row of "where" (←→ a project, space: on / off; auto: the agents pick).
+    Projects,
     /// The branch row of "where" (enter: the where dropdown).
     Where,
     /// Checkboxes below the where row: checkout, stash.
@@ -575,6 +583,7 @@ struct Regions {
     /// The repo row, its chip (anchor of the repo picker), the open picker's area.
     repo_row: Rect,
     repo_chip: Rect,
+    proj_row: Rect,
     repo_pick: Rect,
     /// The open flow dropdown: its area, rows (area, 0 = 0 flow / I = flow); the steps dropdown:
     /// its rows (area, step).
@@ -584,6 +593,10 @@ struct Regions {
     /// The where chip (anchor of the where dropdown), the rows of the open dropdown (area, choice).
     where_chip: Rect,
     where_rows: Vec<(Rect, usize)>,
+    /// The project chip (anchor of the project dropdown), the rows of the open dropdown (area,
+    /// 0 = auto / I = the I-th project).
+    proj_chip: Rect,
+    proj_rows: Vec<(Rect, usize)>,
     /// Rows of the open harness / model dropdown of the agent form (area, row).
     form_rows: Vec<(Rect, usize)>,
     task_agents: Rect,
@@ -614,6 +627,13 @@ pub struct App {
     merge_tab: crate::mergetab::MergeTab,
     /// The flows tab.
     flows_tab: crate::flows::FlowsTab,
+    projects_tab: crate::projtab::ProjectsTab,
+    projects_area: Rect,
+    /// The new form's projects row: the repo's projects (repo, projects dir, its mtime: read
+    /// again when a brief is made / saved / deleted), the picks (None: auto), the open dropdown.
+    proj_cache: Option<(PathBuf, PathBuf, Option<std::time::SystemTime>, Vec<crate::projects::Project>)>,
+    proj_picks: Option<Vec<String>>,
+    proj_menu: Option<WhereMenu>,
     flows_area: Rect,
     merge_area: Rect,
     /// The new-thread view was open at the last tick (its windows warmed up: engine::warm).
@@ -886,7 +906,7 @@ pub(crate) fn fuzzy(q: &str, text: &str) -> Option<i64> {
 }
 
 /// $HOME/x → ~/x.
-fn tilde(p: &str) -> String {
+pub fn tilde(p: &str) -> String {
     match std::env::var("HOME") {
         Ok(h) if !h.is_empty() && p.starts_with(&h) => format!("~{}", &p[h.len()..]),
         _ => p.to_string(),
@@ -979,6 +999,11 @@ impl App {
             warmed: false,
             merge_tab: Default::default(),
             flows_tab: crate::flows::FlowsTab::new(Some(cfg.cwd.clone())),
+            projects_tab: Default::default(),
+            projects_area: Rect::default(),
+            proj_cache: None,
+            proj_picks: None,
+            proj_menu: None,
             flows_area: Rect::default(),
             merge_area: Rect::default(),
             tab: if cfg.copy_mode { Tab::Notes } else { Tab::New },
@@ -1881,11 +1906,163 @@ impl App {
                 {
                     flow_default_set(&self.flow_key(), slug);
                 }
-                self.outcome = Some(Outcome::New { message: self.message(), target, agents, clone: self.clone_first(), flows })
+                let projects = self.proj_picks.clone().filter(|_| self.cfg.repo.is_some());
+                let title_set = !self.title.text().trim().is_empty();
+                self.outcome = Some(Outcome::New { message: self.message(), target, agents, clone: self.clone_first(), flows, projects, title_set })
             }
             Err(e) => {
                 self.field = Field::Title;
                 self.toast(e, true);
+            }
+        }
+    }
+
+    /// The active projects of the new form's repo: read again when the projects dir changes
+    /// (a brief made, saved, deleted: its mtime).
+    fn task_projects(&mut self) -> Vec<crate::projects::Project> {
+        let Some(repo) = self.cfg.repo.clone() else { return Vec::new() };
+        let same_repo = self.proj_cache.as_ref().is_some_and(|c| c.0 == repo);
+        let dir = match &self.proj_cache {
+            Some(c) if same_repo => c.1.clone(),
+            _ => crate::projects::dir(&repo),
+        };
+        let mtime = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+        if !same_repo || self.proj_cache.as_ref().is_some_and(|c| c.2 != mtime) {
+            let all: Vec<crate::projects::Project> = crate::projects::list_in(&dir).into_iter().filter(|p| !p.done).collect();
+            // another repo: its own projects, auto again
+            if !same_repo && self.proj_cache.is_some() {
+                self.proj_picks = None;
+                self.proj_menu = None;
+            }
+            self.proj_cache = Some((repo, dir, mtime, all));
+        }
+        self.proj_cache.as_ref().map(|c| c.3.clone()).unwrap_or_default()
+    }
+
+    /// Rows of the project dropdown: 0 = auto, I = the I-th project. With Q: the matches (title,
+    /// slug, goal) by score, the best on top; auto only for 0 filter.
+    fn proj_rows(&mut self, q: &str) -> Vec<usize> {
+        let all = self.task_projects();
+        let q = q.trim().to_lowercase();
+        if q.is_empty() {
+            return (0..=all.len()).collect();
+        }
+        let mut m: Vec<(i64, usize)> = all.iter().enumerate().filter_map(|(i, p)| fuzzy(&q, &format!("{} {} {}", p.title, p.slug, p.goal)).map(|s| (s, i + 1))).collect();
+        m.sort();
+        m.into_iter().map(|(_, i)| i).collect()
+    }
+
+    /// Enter / space / click on the project row: the dropdown, its cursor on auto or the 1st pick.
+    fn open_projects(&mut self) {
+        let all = self.task_projects();
+        let cursor = self.proj_picks.as_ref().and_then(|v| v.first()).and_then(|s| all.iter().position(|p| p.slug == *s)).map_or(0, |i| i + 1);
+        self.proj_menu = Some(WhereMenu { cursor, offset: 0, query: String::new() });
+    }
+
+    /// Row I of the project dropdown: 0 auto, else the I-th project on / off (0 on: auto again).
+    /// CLOSE: the dropdown closes (enter, click); tab keeps it open, its filter cleared.
+    fn toggle_project(&mut self, i: usize, close: bool) {
+        let all = self.task_projects();
+        if i == 0 {
+            self.proj_picks = None;
+        } else if let Some(p) = all.get(i - 1) {
+            let mut v = self.proj_picks.clone().unwrap_or_default();
+            match v.iter().position(|x| *x == p.slug) {
+                Some(j) => {
+                    v.remove(j);
+                }
+                None => v.push(p.slug.clone()),
+            }
+            self.proj_picks = (!v.is_empty()).then_some(v);
+        }
+        self.proj_menu = if close { None } else { Some(WhereMenu { cursor: i, offset: 0, query: String::new() }) };
+    }
+
+    /// Keys of the open project dropdown: ↑↓ move, type: filter, enter: pick + close, tab: pick,
+    /// esc: close.
+    fn proj_key(&mut self, k: KeyEvent) {
+        let Some(q) = self.proj_menu.as_ref().map(|m| m.query.clone()) else { return };
+        let rows = self.proj_rows(&q);
+        let n = rows.len();
+        let typed = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        let mut query = None;
+        let Some(m) = self.proj_menu.as_mut() else { return };
+        match k.code {
+            KeyCode::Esc => self.proj_menu = None,
+            KeyCode::Up if n > 0 => m.cursor = (m.cursor + n - 1) % n,
+            KeyCode::Down if n > 0 => m.cursor = (m.cursor + 1) % n,
+            KeyCode::PageUp => m.cursor = m.cursor.saturating_sub(dropdown::MAX_ROWS),
+            KeyCode::PageDown if n > 0 => m.cursor = (m.cursor + dropdown::MAX_ROWS).min(n - 1),
+            KeyCode::Enter | KeyCode::Tab => {
+                if let Some(&i) = rows.get(m.cursor) {
+                    self.toggle_project(i, k.code == KeyCode::Enter);
+                }
+            }
+            KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h') if {
+                let mut s = q.clone();
+                crate::textarea::delete_key(&mut s, &k) && {
+                    query = Some(s);
+                    true
+                }
+            } => {}
+            KeyCode::Char(c) if typed => query = Some(format!("{q}{c}")),
+            _ => {}
+        }
+        if let Some(q) = query {
+            self.proj_menu = Some(WhereMenu { cursor: 0, offset: 0, query: q });
+        }
+    }
+
+    /// The project chip's value: auto, or the picked titles.
+    fn proj_value(&mut self) -> String {
+        let all = self.task_projects();
+        match &self.proj_picks {
+            None => "auto".into(),
+            Some(v) => v.iter().map(|s| all.iter().find(|p| p.slug == *s).map_or(s.clone(), |p| p.title.clone())).collect::<Vec<_>>().join(", "),
+        }
+    }
+
+    /// The open project dropdown below the chip (◼ picked), the brief of the current row in a 2nd
+    /// box beside it.
+    fn draw_proj_menu(&mut self, f: &mut Frame, bounds: Rect) {
+        let Some((q, cur, off)) = self.proj_menu.as_ref().map(|m| (m.query.clone(), m.cursor, m.offset)) else { return };
+        let all = self.task_projects();
+        let rows = self.proj_rows(&q);
+        let n = rows.len();
+        let picks = self.proj_picks.clone();
+        let items: Vec<dropdown::Row> = rows
+            .iter()
+            .map(|&i| match i {
+                0 => dropdown::Row { text: format!("{} auto", if picks.is_none() { "◼" } else { "◻" }), detail: "agents assign projects".into(), ..Default::default() },
+                _ => {
+                    let p = &all[i - 1];
+                    let on = picks.as_ref().is_some_and(|v| v.contains(&p.slug));
+                    dropdown::Row { text: format!("{} {}", if on { "◼" } else { "◻" }, p.title), detail: p.slug.clone(), ..Default::default() }
+                }
+            })
+            .collect();
+        let w = items.iter().map(|r| r.text.width() + r.detail.width() + 8).max().unwrap_or(0).clamp(40, 72) as u16;
+        let Some(r) = dropdown::place(self.regions.proj_chip, w, n, bounds, false) else { return };
+        let cur = cur.min(n.saturating_sub(1));
+        let label = if q.is_empty() { "project".to_string() } else { format!("project › {q}") };
+        let note = if q.is_empty() { "type: filter · tab: add".to_string() } else { format!("{n} of {}", all.len() + 1) };
+        let (off, drawn) = dropdown::list(f, r, &label, &note, &items, cur, off, "0 matches");
+        if let Some(m) = self.proj_menu.as_mut() {
+            m.cursor = cur;
+            m.offset = off;
+        }
+        // the 2nd box: the brief of the hovered row, else of the current one
+        let hover = self.hover.and_then(|h| drawn.iter().find(|(r, _)| r.contains(h)).map(|&(_, j)| j));
+        let j = hover.unwrap_or(cur);
+        self.regions.proj_rows = drawn.iter().map(|&(row, j)| (row, rows[j])).collect();
+        if let Some(p) = rows.get(j).filter(|&&i| i > 0).map(|&i| &all[i - 1]) {
+            let text = crate::projects::body_of(&std::fs::read_to_string(&p.path).unwrap_or_default());
+            let text = text.trim_end();
+            let text = if text.is_empty() { "0 brief yet: projects tab (F3)" } else { text };
+            let (bw, br) = crate::shortcuts::box_size(text, bounds);
+            let row_y = drawn.iter().find(|(_, i)| *i == j).map_or(r.y + 1, |(rr, _)| rr.y);
+            if let Some(b) = dropdown::place_beside(r, row_y, bw, br, bounds, r) {
+                crate::shortcuts::text_box(f, b, &p.title, text);
             }
         }
     }
@@ -1965,6 +2142,8 @@ impl App {
         self.target = None;
         self.checkout = true;
         self.stash = false;
+        self.proj_picks = None;
+        self.proj_menu = None;
         self.where_i = if self.cfg.branch.is_some() { self.wheres.iter().position(|w| *w == Where::NewWorktree).unwrap_or(0) } else { 0 };
         let mut picks: Vec<String> = self.cfg.picks.iter().filter(|n| self.agents.iter().any(|a| &a.name == *n)).cloned().collect();
         if picks.is_empty() && self.agents.iter().any(|a| a.name == self.cfg.agent) {
@@ -2345,7 +2524,7 @@ impl App {
                     ("↑↓", "field (↑ on the prompt's 1st row leaves it)"),
                     ("tab / shift+tab", "tabs row ↔ the task"),
                     ("ctrl+.", "actions of the field: agents card → its flow"),
-                    ("F1-F6 · alt+1-6", "main tabs"),
+                    ("F1-F7 · alt+1-7", "main tabs"),
                     ("enter", "title: next field · notes: pick · prompt: new line"),
                     ("x on notes", "drop notes + Claude Code context"),
                     ("enter", "where: dropdown · current branch · new branch · new worktree · recent branches · type: filter"),
@@ -2404,7 +2583,7 @@ impl App {
                     ("enter", "open thread (worktree: new task there; claude: new thread, last response as context)"),
                     ("ctrl+.", "actions of the thread / the selection"),
                     ("c", "thread / claude session: last response in / out of the task context"),
-                    ("F1-F6 · alt+1-6", "switch tab"),
+                    ("F1-F7 · alt+1-7", "switch tab"),
                     ("pgup pgdn", "scroll preview"),
                     ("esc", "clear filter · clear selection"),
                 ],
@@ -2422,7 +2601,7 @@ impl App {
                     ("↑↓←→", "move in the card grid · ↑ on top row: tabs"),
                     ("enter", "edit agent"),
                     ("ctrl+f", "filter: enter / esc back to the cards"),
-                    ("F1-F6 · alt+1-6", "switch tab"),
+                    ("F1-F7 · alt+1-7", "switch tab"),
                     ("pgup pgdn", "scroll preview"),
                     ("esc", "clear the filter"),
                 ],
@@ -2454,9 +2633,13 @@ impl App {
                     ("editor: ctrl+g ctrl+f", "gate · fork a shared step into a one-off"),
                 ],
             ),
+            (Screen::Pick, Tab::Projects) => (
+                vec![c("r", "read the briefs again", Act::Reload), c("menu", "quit codehead", Act::Quit)],
+                self.projects_tab.help().to_vec(),
+            ),
             (Screen::Pick, Tab::Settings) => (
                 vec![c("menu", "add path alias (also enter on + add)", Act::AddAlias), c("ctrl+r", "reload file", Act::Reload), c("menu", "quit codehead", Act::Quit)],
-                vec![("↑↓", "field / alias box"), ("enter", "alias box: edit / done"), ("d d", "delete the highlighted alias"), ("F1-F6 · alt+1-6", "switch tab"), ("esc", "close path suggestions"), ("auto", "changes apply on leaving a field")],
+                vec![("↑↓", "field / alias box"), ("enter", "alias box: edit / done"), ("d d", "delete the highlighted alias"), ("F1-F7 · alt+1-7", "switch tab"), ("esc", "close path suggestions"), ("auto", "changes apply on leaving a field")],
             ),
         }
     }
@@ -2542,6 +2725,28 @@ impl App {
             crate::flows::Out::Toast(t) => self.toast(t, false),
             crate::flows::Out::Up => self.tabs_focus = true,
         }
+    }
+
+    /// What the projects tab asked for.
+    fn projects_out(&mut self, o: crate::projtab::Out) {
+        match o {
+            crate::projtab::Out::None => {}
+            crate::projtab::Out::Toast(t) => self.toast(t, false),
+            crate::projtab::Out::Up => self.tabs_focus = true,
+        }
+    }
+
+    /// The projects tab opens: the start screen's repo first, then the threads' repos, the home
+    /// repo's repos on disk; thread counts per project.
+    fn enter_projects(&mut self) {
+        let mut repos: Vec<PathBuf> = self.cfg.repo.iter().cloned().collect();
+        for r in self.tlist.cards.iter().filter_map(|c| c.repo.clone()).chain(self.repos.iter().map(|r| r.path.clone()).filter(|p| p.is_dir())) {
+            if !repos.contains(&r) {
+                repos.push(r);
+            }
+        }
+        self.projects_tab.enter(repos);
+        self.projects_tab.threads = self.tlist.cards.iter().filter(|c| !c.archived() && !c.projects.is_empty()).filter_map(|c| Some((c.repo.clone()?, c.projects.clone()))).collect();
     }
 
     /// What the merge tab asked for.
@@ -2693,6 +2898,7 @@ impl App {
                     Tab::Notes | Tab::New => self.reload_notes(),
                     Tab::Settings => { self.settings_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)); return; }
                     Tab::Flows => self.flows_tab.enter(),
+                    Tab::Projects => self.enter_projects(),
                 }
                 self.toast("reloaded", false);
             }
@@ -2885,6 +3091,10 @@ impl App {
             self.last_esc = None;
             return self.where_key(k);
         }
+        if self.proj_menu.is_some() && self.modal.is_none() {
+            self.last_esc = None;
+            return self.proj_key(k);
+        }
         // flow dropdown (+ its steps): its keys first (esc closes 1 level, 0 double esc)
         if self.flow_menu.is_some() && self.modal.is_none() {
             self.last_esc = None;
@@ -2950,9 +3160,9 @@ impl App {
         }
         // F1-F4 (alt+1..4 too): the main tabs from every field (ctrl / alt+←→: word jumps); tab: the next field
         let main_tab = match k.code {
-            KeyCode::F(n @ 1..=6) => Some(usize::from(n - 1)),
-            // alt+1-6, ctrl+1-6 (kitty protocol), as the views of a thread
-            KeyCode::Char(c @ '1'..='6') if k.modifiers.contains(KeyModifiers::ALT) != ctrl => Some(usize::from(c as u8 - b'1')),
+            KeyCode::F(n @ 1..=7) => Some(usize::from(n - 1)),
+            // alt+1-7, ctrl+1-7 (kitty protocol), as the views of a thread
+            KeyCode::Char(c @ '1'..='7') if k.modifiers.contains(KeyModifiers::ALT) != ctrl => Some(usize::from(c as u8 - b'1')),
             _ => None,
         };
         if !self.cfg.copy_mode
@@ -2982,6 +3192,11 @@ impl App {
                 if self.tab == Tab::Flows && !self.tabs_focus {
                     let o = self.flows_tab.key(k);
                     self.flows_out(o);
+                    return;
+                }
+                if self.tab == Tab::Projects && !self.tabs_focus {
+                    let o = self.projects_tab.key(k);
+                    self.projects_out(o);
                     return;
                 }
                 if self.tab != Tab::Merge && self.preview_key(k) {
@@ -3052,9 +3267,9 @@ impl App {
     /// for an Esc to close (modal, filter input, thread filter, the notes list of the task).
     fn at_start(&self) -> bool {
         let notes = self.screen == Screen::Pick && self.tab == Tab::Notes;
-        let pr_open = self.screen == Screen::Pick && ((self.tab == Tab::Merge && (self.merge_tab.is_detail() || self.merge_tab.typing())) || (self.tab == Tab::Flows && self.flows_tab.typing()));
+        let pr_open = self.screen == Screen::Pick && ((self.tab == Tab::Merge && (self.merge_tab.is_detail() || self.merge_tab.typing())) || (self.tab == Tab::Flows && self.flows_tab.typing()) || (self.tab == Tab::Projects && self.projects_tab.typing()));
         let threads = self.screen == Screen::Pick && self.tab == Tab::Threads;
-        self.modal.is_none() && self.drafts_menu.is_none() && self.where_menu.is_none() && self.flow_menu.is_none() && self.repo_pick.is_none() && !notes && !pr_open
+        self.modal.is_none() && self.drafts_menu.is_none() && self.where_menu.is_none() && self.proj_menu.is_none() && self.flow_menu.is_none() && self.repo_pick.is_none() && !notes && !pr_open
             && !self.filter_editing && !self.afilter_editing
             && !(threads && (self.tlist.modal() || !self.tlist.query().is_empty() || !self.tlist.sel.is_empty()))
             && !(self.screen == Screen::Pick && self.tab == Tab::Agents && self.afilter.as_deref().is_some_and(|q| !q.is_empty()))
@@ -3065,6 +3280,7 @@ impl App {
         self.modal = None;
         self.drafts_menu = None;
         self.where_menu = None;
+        self.proj_menu = None;
         self.flow_menu = None;
         self.repo_pick = None;
         self.filter_editing = false;
@@ -3149,6 +3365,7 @@ impl App {
 
     fn switch_tab(&mut self, tab: Tab) {
         self.where_menu = None;
+        self.proj_menu = None;
         self.flow_menu = None;
         self.repo_pick = None;
         // leaving the settings: their last edit applies
@@ -3173,6 +3390,9 @@ impl App {
         }
         if tab == Tab::Flows {
             self.flows_tab.enter();
+        }
+        if tab == Tab::Projects {
+            self.enter_projects();
         }
         if tab == Tab::Settings {
             self.settings_typed = false;
@@ -3283,6 +3503,10 @@ impl App {
             Tab::Flows => {
                 let o = self.flows_tab.key(k);
                 self.flows_out(o);
+            }
+            Tab::Projects => {
+                let o = self.projects_tab.key(k);
+                self.projects_out(o);
             }
         }
     }
@@ -3731,6 +3955,9 @@ impl App {
         let mut v = vec![Field::Drafts];
         // the repo row: always (the picker finds a repo also when codehead runs outside of one)
         v.extend([Field::Prompt, Field::Title, Field::Repo]);
+        if self.cfg.repo.is_some() {
+            v.push(Field::Projects);
+        }
         if !self.wheres.is_empty() {
             v.extend([Field::Where, Field::Opts]);
         }
@@ -3789,6 +4016,15 @@ impl App {
         if self.field == Field::Repo {
             match k.code {
                 KeyCode::Enter | KeyCode::Char(' ') => self.open_repo_pick(),
+                KeyCode::Up => self.go_field(-1),
+                KeyCode::Down => self.go_field(1),
+                _ => {}
+            }
+            return;
+        }
+        if self.field == Field::Projects {
+            match k.code {
+                KeyCode::Char(' ') | KeyCode::Enter => self.open_projects(),
                 KeyCode::Up => self.go_field(-1),
                 KeyCode::Down => self.go_field(1),
                 _ => {}
@@ -3985,6 +4221,10 @@ impl App {
             self.flows_tab.paste(text);
             return;
         }
+        if self.screen == Screen::Pick && self.tab == Tab::Projects {
+            self.projects_tab.paste(text);
+            return;
+        }
         match self.screen {
             Screen::Compose if self.field == Field::Title => self.title.insert(text),
             // like the thread view: a paste on any other field goes to the prompt
@@ -4045,6 +4285,10 @@ impl App {
         if let Some(menu) = self.menu.as_mut() {
             let a = menu.mouse(m);
             return self.menu_action(a);
+        }
+        if self.modal.is_none() && self.screen == Screen::Pick && self.tab == Tab::Projects && self.projects_area.contains(at) {
+            let o = self.projects_tab.mouse(m);
+            return self.projects_out(o);
         }
         if self.modal.is_none() && self.screen == Screen::Pick && self.tab == Tab::Flows && self.flows_area.contains(at) {
             let o = self.flows_tab.mouse(m);
@@ -4169,6 +4413,16 @@ impl App {
                 }
                 return;
             }
+            // project dropdown: a click on a row picks it, a click next to it closes it
+            if self.proj_menu.is_some() {
+                if down {
+                    match self.regions.proj_rows.iter().find(|(r, _)| r.contains(at)) {
+                        Some(&(_, i)) => self.toggle_project(i, true),
+                        None => self.proj_menu = None,
+                    }
+                }
+                return;
+            }
             // where dropdown: a click on a row picks it, a click next to it closes it
             if self.where_menu.is_some() {
                 if down {
@@ -4217,6 +4471,9 @@ impl App {
                 } else if self.regions.repo_row.contains(at) {
                     self.field = Field::Repo;
                     return self.open_repo_pick();
+                } else if self.regions.proj_row.contains(at) && self.cfg.repo.is_some() {
+                    self.field = Field::Projects;
+                    return self.open_projects();
                 } else if self.regions.where_row.contains(at) {
                     self.field = Field::Where;
                     return self.open_where();
@@ -4373,6 +4630,7 @@ impl App {
         if self.screen == Screen::Compose {
             self.draw_drafts(f, area);
             self.draw_where_menu(f, area);
+            self.draw_proj_menu(f, area);
             self.draw_flow_menu(f, area);
             let anchor = self.regions.repo_chip;
             if let Some(p) = self.repo_pick.as_mut() {
@@ -4455,6 +4713,9 @@ impl App {
             if self.where_menu.is_some() {
                 return find_rows(&self.regions.where_rows, at);
             }
+            if self.proj_menu.is_some() {
+                return find_rows(&self.regions.proj_rows, at);
+            }
             if self.flow_menu.is_some() {
                 return find_rows(&self.regions.flow_rows, at).or_else(|| find_rows(&self.regions.flow_steps, at));
             }
@@ -4471,7 +4732,7 @@ impl App {
             }
             return find_rows(&self.regions.opts, at)
                 .or_else(|| find_rows(&self.regions.menu_rows, at))
-                .or_else(|| [self.regions.repo_row, self.regions.where_row, self.regions.notes_label].into_iter().find(|r| r.contains(at)));
+                .or_else(|| [self.regions.repo_row, self.regions.proj_row, self.regions.where_row, self.regions.notes_label].into_iter().find(|r| r.contains(at)));
         }
         let list = self.regions.list;
         if !list.contains(at) {
@@ -4502,7 +4763,7 @@ impl App {
         if self.screen == Screen::Pick && self.tab == Tab::Notes {
             spans.push(Span::styled(" new › notes ", theme::pill()));
         } else {
-            for (tab, label) in [(Tab::New, "new"), (Tab::Threads, "threads"), (Tab::Merge, "merge"), (Tab::Agents, "agents"), (Tab::Flows, "flows"), (Tab::Settings, "settings")] {
+            for (tab, label) in [(Tab::New, "new"), (Tab::Threads, "threads"), (Tab::Projects, "projects"), (Tab::Merge, "merge"), (Tab::Agents, "agents"), (Tab::Flows, "flows"), (Tab::Settings, "settings")] {
                 let active = self.cur_tab() == tab;
                 let focused = active && self.tabs_focus;
                 let (bg, fg) = match (active, focused) {
@@ -4548,6 +4809,13 @@ impl App {
         if self.tab == Tab::Merge {
             self.merge_area = area;
             self.merge_tab.draw(f, area);
+            return;
+        }
+        self.projects_area = Rect::default();
+        if self.tab == Tab::Projects {
+            self.projects_area = area;
+            let active = !self.tabs_focus;
+            self.projects_tab.draw(f, area, active);
             return;
         }
         self.flows_area = Rect::default();
@@ -4639,7 +4907,7 @@ impl App {
                 }
             }
             Tab::Agents | Tab::New => self.draw_agents(f, list),
-            Tab::Settings | Tab::Merge | Tab::Flows => {}
+            Tab::Settings | Tab::Merge | Tab::Flows | Tab::Projects => {}
         }
     }
 
@@ -4938,9 +5206,11 @@ impl App {
         let opts_h = if self.wheres.is_empty() { 0 } else { 2 };
         // "where": a label, the repo row, the branch row (a git repo only)
         let branch_h = u16::from(!self.wheres.is_empty());
+        // the projects row: a git repo only
+        let proj_h = u16::from(self.cfg.repo.is_some());
         // the drafts row: "view drafts (n)" (1+ drafts), "save as draft"; a blank row below
         let drafts_h = 2;
-        let available = area.height.saturating_sub(drafts_h + title_rows + opts_h + note_rows + branch_h + 15);
+        let available = area.height.saturating_sub(drafts_h + title_rows + opts_h + note_rows + branch_h + proj_h + 15);
         let agents_h = if self.agents.is_empty() { 1 } else {
             let g = self.agent_grid(area.width);
             let view = g.height.min(2 * (CARD_H as usize + 1)).min(available.max(CARD_H + 1) as usize);
@@ -4956,7 +5226,7 @@ impl App {
         // prompt first and largest (the rest of the height), then title, where (repo, branch,
         // opts), agents, notes, a
         // blank row below the notes (above the footer)
-        let [r_drafts, l_prompt, i_prompt, _, l_title, i_title, _, l_where, repo_row, info, opts, _, l_agents, r_agents, _, l_notes, notes, _] = Layout::vertical([
+        let [r_drafts, l_prompt, i_prompt, _, l_title, i_title, _, l_where, repo_row, proj_row, info, opts, _, l_agents, r_agents, _, l_notes, notes, _] = Layout::vertical([
             Constraint::Length(drafts_h),
             Constraint::Length(1),
             Constraint::Min(3),
@@ -4966,6 +5236,7 @@ impl App {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(proj_h),
             Constraint::Length(branch_h),
             Constraint::Length(opts_h),
             Constraint::Length(1),
@@ -5006,7 +5277,7 @@ impl App {
         self.title.render(f, Rect { x: i_title.x + 1, width: i_title.width.saturating_sub(2), ..i_title }, self.field == Field::Title);
         // where: a label, then the repo row and the branch row (each: a chip, enter: its picker
         // ▾, what it does), then the opts boxes; 1 column in from the label, like the title input
-        let any = matches!(self.field, Field::Repo | Field::Where | Field::Opts);
+        let any = matches!(self.field, Field::Repo | Field::Projects | Field::Where | Field::Opts);
         f.render_widget(Paragraph::new(label("where", any)), l_where);
         let chip = Style::default().fg(theme::pal().text).add_modifier(Modifier::BOLD);
         // a row: the sub-label, the chip (its area back), the text
@@ -5032,6 +5303,14 @@ impl App {
         };
         self.regions.repo_chip = row(f, repo_row, "repo", self.field == Field::Repo, repo_value, repo_text);
         self.regions.repo_row = repo_row;
+        if proj_h > 0 {
+            let on = self.field == Field::Projects;
+            let n = self.task_projects().len();
+            let value = if n == 0 { "0 projects".to_string() } else { self.proj_value() };
+            let text = if n == 0 { "projects tab (F3): new project".to_string() } else if self.proj_picks.is_none() { format!("agents assign projects · {n} in this repo") } else { format!("{n} in this repo") };
+            self.regions.proj_chip = row(f, proj_row, "project", on, value, text);
+            self.regions.proj_row = proj_row;
+        }
         if !self.wheres.is_empty() {
             self.regions.where_chip = row(f, info, "branch", self.field == Field::Where, self.where_chip(), self.where_text());
             self.regions.where_row = info;
@@ -5146,17 +5425,19 @@ impl App {
             _ if self.tabs_focus => &[("←→", "tab"), ("↓ / tab", "content"), ("esc esc", "quit")],
             Screen::Compose if self.field == Field::Agents => &[("↑↓←→", "move"), ("space", "pick"), ("ctrl+.", "flow"), ("enter", "notes"), ("⌘/ctrl+⏎", "start"), ("tab", "tabs row")],
             Screen::Compose if self.where_menu.is_some() => &[("↑↓", "move"), ("type", "filter"), ("enter", "pick"), ("esc", "close")],
+            Screen::Compose if self.proj_menu.is_some() => &[("↑↓", "move"), ("type", "filter"), ("enter", "pick"), ("tab", "add"), ("esc", "close")],
             Screen::Compose if self.flow_menu.as_ref().is_some_and(|m| m.sub.is_some()) => &[("↑↓", "step"), ("enter", "start here"), ("← esc", "flows")],
             Screen::Compose if self.flow_menu.is_some() => &[("↑↓", "flow"), ("enter →", "its steps"), ("a-z", "jump"), ("0", "0 flow"), ("esc", "close")],
             Screen::Compose if self.repo_pick.is_some() => &[("↑↓", "dir"), ("←→", "out · in"), ("type", "filter"), ("~", "home"), ("enter", "pick"), ("esc", "close")],
             Screen::Compose if self.field == Field::Repo => &[("enter", "pick repo"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.field == Field::Where => &[("enter", "choices"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
+            Screen::Compose if self.field == Field::Projects => &[("enter", "pick projects"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.field == Field::Opts => &[("space", "check / uncheck"), ("↑↓", "box · field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.drafts_menu.is_some() => &[("↑↓", "move"), ("enter", "load"), ("d", "delete"), ("esc", "back")],
-            Screen::Compose if self.field == Field::Drafts => &[("←→", "button"), ("enter", "press"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("F1-F6", "tabs")],
+            Screen::Compose if self.field == Field::Drafts => &[("←→", "button"), ("enter", "press"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("F1-F7", "tabs")],
             Screen::Compose if self.field == Field::Prompt => &[("@", "agents"), (cmd.as_str(), "commands"), ("dir/", "paths"), ("ctrl+v", "image"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("esc esc", "quit")],
             Screen::Compose if self.field == Field::Notes => &[("enter", "pick notes"), ("x", "drop"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("tab", "tabs row")],
-            Screen::Compose => &[("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("ctrl+.", "actions"), ("F1-F6", "tabs"), ("esc esc", "quit")],
+            Screen::Compose => &[("↑↓", "field"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("ctrl+.", "actions"), ("F1-F7", "tabs"), ("esc esc", "quit")],
             Screen::Pick if self.tlist.filtering => &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to list")],
             Screen::Pick if self.filter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter", "done"), ("esc", "clear")],
             Screen::Pick if self.tab == Tab::Notes && self.cfg.copy_mode => &[("↑↓", "move"), ("←→", "fold"), ("space", "select"), ("enter", "copy"), ("esc", "quit")],
@@ -5164,8 +5445,9 @@ impl App {
             Screen::Pick if self.tab == Tab::Threads => &[("↑↓", "move"), ("space", "select"), ("a", "archive"), ("e", "edit"), ("ctrl+o", "actions"), ("enter", "open"), ("ctrl+f", "filter")],
             Screen::Pick if self.tab == Tab::Settings => self.settings.as_ref().map_or(&[], |s| s.help()),
             Screen::Pick if self.tab == Tab::Flows => self.flows_tab.help(),
+            Screen::Pick if self.tab == Tab::Projects => self.projects_tab.hints(),
             Screen::Pick if self.afilter_editing => &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to cards")],
-            Screen::Pick => &[("↑↓←→", "move"), ("ctrl+f", "filter"), ("enter", "edit"), ("F1-F6", "tabs")],
+            Screen::Pick => &[("↑↓←→", "move"), ("ctrl+f", "filter"), ("enter", "edit"), ("F1-F7", "tabs")],
         };
         for (k, l) in hints {
             spans.extend(hint(k, l));
@@ -5546,15 +5828,18 @@ mod render_tests {
         a.repos = vec![crate::home::Repo { name: "gone".into(), path: base.join("gone"), url: Some("git@x:y/gone.git".into()) }];
         a.screen = Screen::Compose;
         a.title.set_text("fix it");
-        // ↓ from the title: the repo row, then the branch row (0 field skipped)
+        // ↓ from the title: the repo row, the projects row, then the branch row (0 field skipped)
         a.field = Field::Title;
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Repo);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert!(a.field == Field::Projects);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Where);
         // r on the branch row: 0 repo switch (the hotkey is gone)
         key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
         assert_eq!(a.cfg.repo.as_deref(), Some(start.as_path()));
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
         // enter: the picker on start; left: base's dirs (gone: a clone), right: start's dirs
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -5605,7 +5890,7 @@ mod render_tests {
         let at = |pat: &str| s.lines().position(|l| l.contains(pat)).unwrap_or_else(|| panic!("{pat}\n{s}"));
         let col = |pat: &str| s.lines().find_map(|l| l.find(pat).map(|b| l[..b].chars().count())).unwrap();
         assert!(s.lines().any(|l| l.trim() == "where"), "{s}");
-        assert_eq!((at(" repo "), at(" branch ")), (at("where") + 1, at("where") + 2), "{s}");
+        assert_eq!((at(" repo "), at(" project "), at(" branch ")), (at("where") + 1, at("where") + 2, at("where") + 3), "{s}");
         assert!(s.lines().any(|l| l.contains(" repo ") && l.contains(" start ")), "{s}");
         assert_eq!(col("repo"), col("branch"), "{s}");
         assert_eq!(col("checkout selected"), col("branch") + 2, "{s}");
@@ -5703,10 +5988,12 @@ mod render_tests {
         assert_eq!(a.where_chip(), "worktree b");
         pick_up(&mut a, 0);
         assert_eq!(a.where_chip(), "current branch · feature/x");
-        // field order: title → repo → branch → opts (2 rows, also with disabled boxes) → agents
+        // field order: title → repo → projects → branch → opts (2 rows, also with disabled boxes) → agents
         a.field = Field::Title;
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Repo);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert!(a.field == Field::Projects);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.field == Field::Where);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
@@ -5723,7 +6010,7 @@ mod render_tests {
             Agent { name: "nova".into(), harness: "codex".into(), model: Some("gpt-5.5".into()), ..Default::default() },
         ];
         a.picks = vec!["amon".into()];
-        let out = dump(&mut a, 110, 38);
+        let out = dump(&mut a, 110, 39);
         assert!(out.contains("branch  current branch · feature/x"), "{out}");
         assert!(out.contains("◼ checkout selected branch"), "{out}");
         // each box on its own row, below each other
@@ -6581,7 +6868,7 @@ mod render_tests {
         std::fs::write(&a.settings_path, &config).unwrap();
 
         a.switch_tab(Tab::Agents);
-        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('7'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings && a.tabs_focus);
         let screen = dump(&mut a, 100, 36);
         assert!(!screen.contains("deploy.md"), "{screen}");
@@ -6589,7 +6876,7 @@ mod render_tests {
         assert!(a.screen == Screen::Compose);
         assert_eq!(std::fs::read_to_string(&a.settings_path).unwrap(), config);
 
-        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('7'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings && a.tabs_focus);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(!a.tabs_focus);
@@ -6601,11 +6888,11 @@ mod render_tests {
 
         // Re-entry must remove focus even after the path field was active.
         a.switch_tab(Tab::Agents);
-        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('7'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings && a.tabs_focus);
         let screen = dump(&mut a, 100, 36);
         assert!(!screen.contains("deploy.md"), "{screen}");
-        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Agents);
         assert_eq!(std::fs::read_to_string(&a.settings_path).unwrap(), config);
     }
@@ -6639,7 +6926,7 @@ mod render_tests {
         let s = crate::engine::servers::Server { name: "docs-x".into(), kind: "stdio".into(), command: Some("npx".into()), args: vec!["-y".into(), "docs".into()], auto_allow: true, ..Default::default() };
         crate::engine::servers::save(&[s]).unwrap();
         let mut a = app();
-        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('7'), KeyModifiers::ALT);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         // ↑ from the 1st field: the sub-tab bar; → →: mcp servers
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
@@ -6680,14 +6967,14 @@ mod render_tests {
         let mut a = app();
         a.title.set_text("task title");
         a.prompt.set_text("task prompt");
-        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('7'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Settings);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
         a.paste("project:platform");
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         a.paste("~/notes/platform/");
-        let screen = dump(&mut a, 70, 18);
+        let screen = dump(&mut a, 80, 18);
         assert!(screen.lines().next().unwrap().contains("settings") && screen.contains("mcp servers"), "{screen}");
         assert!(screen.contains("not applied"), "{screen}");
         assert!(screen.contains("~/notes/platform/"), "{screen}");
@@ -6696,10 +6983,10 @@ mod render_tests {
         assert!(a.screen == Screen::Compose);
         assert_eq!(a.title.text(), "task title");
         assert_eq!(a.prompt.text(), "task prompt");
-        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('7'), KeyModifiers::ALT);
         let screen = dump(&mut a, 100, 24);
         assert!(screen.contains("~/notes/platform/"), "{screen}");
-        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Agents);
     }
 
@@ -6707,7 +6994,7 @@ mod render_tests {
     fn settings_esc_undoes_the_field_edit_and_never_applies() {
         let mut a = app();
         let before = std::fs::read_to_string(&a.settings_path).unwrap_or_default();
-        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('7'), KeyModifiers::ALT);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         assert!(a.tab == Tab::Settings && !a.tabs_focus);
         // a plain field: typed, esc → the text at entry, 0 write
@@ -6756,7 +7043,7 @@ mod render_tests {
         alt(&mut a, '1');
         assert!(a.screen == Screen::Compose && a.field == Field::Prompt);
         // alt+2..4: threads, agents, settings
-        for (t, d) in [(Tab::Threads, '2'), (Tab::Merge, '3'), (Tab::Agents, '4'), (Tab::Flows, '5'), (Tab::Settings, '6')] {
+        for (t, d) in [(Tab::Threads, '2'), (Tab::Projects, '3'), (Tab::Merge, '4'), (Tab::Agents, '5'), (Tab::Flows, '6'), (Tab::Settings, '7')] {
             alt(&mut a, d);
             assert!(a.screen == Screen::Pick && a.tab == t);
         }
@@ -6925,7 +7212,7 @@ mod render_tests {
         ]);
         a.switch_tab(Tab::Threads);
         a.tabs_focus = false;
-        let s = dump(&mut a, 120, 40);
+        let s = dump(&mut a, 130, 40);
         for l in ["open · 3", "shipped: archive? · 1", "show", "active 4", "archived 0", "worktrees 0"] {
             assert!(s.contains(l), "{l}: {s}");
         }
@@ -7034,10 +7321,74 @@ mod render_tests {
         assert!(!line(a.regions.preview.y).contains("in place"));
     }
 
+    /// The projects tab: the repo's briefs, threads per project; the threads tab: a project row
+    /// below the repo row filters the cards.
+    #[test]
+    fn the_projects_tab_lists_briefs_and_the_threads_filter_by_project() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut a = app();
+        let repo = std::env::temp_dir().join(format!("ch-app-proj-{}", std::process::id())).join("shop");
+        let dir = crate::projects::dir(&repo);
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::projects::create_in(&dir, "Website refinement").unwrap();
+        crate::projects::create_in(&dir, "Bug fixes").unwrap();
+        a.cfg.repo = Some(repo.clone());
+        let card = |id: &str, ps: &[&str]| crate::nav::Card { id: id.into(), title: format!("ui: {id}"), state: "open".into(), repo: Some(repo.clone()), projects: ps.iter().map(|p| p.to_string()).collect(), ..Default::default() };
+        a.tlist.set_cards(vec![card("one", &["website-refinement"]), card("two", &["website-refinement", "bug-fixes"]), card("three", &[])]);
+        key(&mut a, KeyCode::Char('3'), KeyModifiers::ALT);
+        assert!(a.tab == Tab::Projects);
+        let out = dump(&mut a, 110, 20);
+        assert!(out.contains("Website refinement   2 threads") && out.contains("Bug fixes   1 thread"), "{out}");
+        println!("--- projects\n{out}");
+        key(&mut a, KeyCode::Char('2'), KeyModifiers::ALT);
+        let out = dump(&mut a, 110, 30);
+        assert!(out.contains("project") && out.contains("website-refinement") && out.contains("0 projects"), "{out}");
+        assert_eq!(a.tlist.visible().len(), 3);
+        // the project row: → the most used project
+        a.tlist.focus = crate::threadlist::Focus::Projects;
+        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(a.tlist.proj_tab(), crate::threadlist::ProjTab::Project("website-refinement".into()));
+        assert_eq!(a.tlist.visible().len(), 2);
+        println!("--- threads by project\n{}", dump(&mut a, 110, 30));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The new form's project row: a dropdown with a filter and the brief beside it; a project
+    /// made after the 1st read shows at once.
+    #[test]
+    fn the_project_dropdown_filters_shows_the_brief_and_sees_new_projects() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut a = app();
+        let repo = std::env::temp_dir().join(format!("ch-app-projdd-{}", std::process::id())).join("shop");
+        let dir = crate::projects::dir(&repo);
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::projects::create_in(&dir, "Website refinement").unwrap();
+        a.cfg.repo = Some(repo.clone());
+        a.screen = Screen::Compose;
+        assert_eq!(a.task_projects().len(), 1);
+        let p = crate::projects::create_in(&dir, "Bug fixes").unwrap();
+        crate::engine::write_atomic(&p.path, crate::projects::merge("", "Bug fixes", "Goal: 0 crashes").as_bytes()).unwrap();
+        assert_eq!(a.task_projects().len(), 2, "a new brief: read again");
+        a.field = Field::Projects;
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.proj_menu.is_some());
+        for c in "bug".chars() {
+            key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        let out = dump(&mut a, 130, 40);
+        println!("--- project dropdown\n{out}");
+        assert!(out.contains("project › bug") && out.contains("Goal: 0 crashes"), "{out}");
+        assert!(!out.contains("◻ Website refinement"), "{out}");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.proj_menu.is_none());
+        assert_eq!(a.proj_picks, Some(vec!["bug-fixes".to_string()]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_flows_tab_draws_the_rail_with_its_arcs() {
         let mut a = app();
-        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('6'), KeyModifiers::ALT);
         assert!(a.tab == Tab::Flows);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
@@ -7082,7 +7433,7 @@ mod render_tests {
         println!("--- threads\n{}", dump(&mut a, 120, 14));
         key(&mut a, KeyCode::Char('3'), KeyModifiers::NONE);
         assert!(a.tab == Tab::Threads, "0 number keys for tabs");
-        key(&mut a, KeyCode::Char('4'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('5'), KeyModifiers::ALT);
         println!("--- agents\n{}", dump(&mut a, 120, 14));
         key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
         println!("--- new agent\n{}", dump(&mut a, 120, 42));

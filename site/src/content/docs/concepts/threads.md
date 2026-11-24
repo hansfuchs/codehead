@@ -27,7 +27,7 @@ never write over each other.
 
 ```
 ~/.local/share/codehead/threads/<id>/
-  thread.json    title, task, dir, branch, agents (lead first), session per agent, state
+  thread.json    title, task, dir, branch, projects, agents (lead first), session per agent, state
   events.jsonl   1 JSON event per line, append only
 ```
 

@@ -36,6 +36,20 @@ pub fn parse(text: &str) -> Vec<Repo> {
     out
 }
 
+/// The `Notes:` dir (relative to the home repo) of the line of REPO (its path, else its NAME) in
+/// TEXT (an AGENTS.md). None: 0 such line, 0 `Notes:` in it.
+pub fn notes_of(text: &str, repo: &Path, name: &str) -> Option<String> {
+    let line = parse_lines(text).into_iter().find(|(r, _)| r.path == repo).or_else(|| parse_lines(text).into_iter().find(|(r, _)| r.name == name))?.1;
+    let after = &line[line.find("Notes:")? + "Notes:".len()..];
+    let tick = after.split('`').nth(1)?.trim();
+    (!tick.is_empty() && !tick.starts_with('/') && !tick.starts_with("~/")).then(|| tick.to_string())
+}
+
+/// Each repo line of TEXT with its repo.
+fn parse_lines(text: &str) -> Vec<(Repo, &str)> {
+    text.lines().filter_map(|l| parse(l).into_iter().next().map(|r| (r, l))).collect()
+}
+
 /// The repos of the home repo's AGENTS.md (0 home repo: 0 repos).
 pub fn repos() -> Vec<Repo> {
     let Some(home) = crate::config::home_repo() else { return Vec::new() };

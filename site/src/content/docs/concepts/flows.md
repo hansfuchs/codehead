@@ -83,7 +83,7 @@ The last layer wins per name. `r` in the flows tab resets an edited built-in.
 
 ## The flows tab
 
-`F5` (alt+5). `←→` on the list: flows / steps. Every edit is saved at once.
+`F6` (alt+6). `←→` on the list: flows / steps. Every edit is saved at once.
 
 - flows: `n` new, `D` duplicate, `R` rename, `d d` delete, `m` user ↔ repo, `ctrl+f` filter,
   `r` read the files again, `ctrl+d ctrl+d` an edited built-in back to its default,

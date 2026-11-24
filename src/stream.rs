@@ -598,6 +598,14 @@ pub fn call_summary(name: &str, input: &Value) -> String {
         "WebSearch" => s("query"),
         "Task" | "Agent" => s("description"),
         "TodoWrite" => Some("todos".into()),
+        _ if name.ends_with("codehead__set_projects") => Some(match input["projects"].as_array() {
+            Some(a) if !a.is_empty() => a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "),
+            _ => "0 projects".into(),
+        }),
+        _ if name.ends_with("codehead__set_title") => s("title").map(|t| match s("branch") {
+            Some(b) => format!("{t} · {b}"),
+            None => t,
+        }),
         _ if name.starts_with("mcp__codehead__send") => Some(format!("→ {}", match &input["to"] { Value::Array(a) => a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "), v => v.as_str().unwrap_or_default().to_string() })),
         _ => input.as_object().and_then(|o| o.values().find_map(|v| v.as_str().map(String::from))),
     };

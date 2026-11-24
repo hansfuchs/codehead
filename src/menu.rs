@@ -836,16 +836,19 @@ mod tests {
         assert_eq!(m.tab, Tab::Merge);
         m.key(k(KeyCode::Left));
         assert_eq!(m.tab, Tab::Threads);
-        // ↓: the repo tabs (←→ there), ↓: the view tabs, ↓: the list; ↑ at its top: the view
-        // tabs, the repo tabs, the tab bar
+        // ↓: the repo tabs (←→ there), ↓: the project tabs, ↓: the view tabs, ↓: the list; ↑ at
+        // its top: the view tabs, the project tabs, the repo tabs, the tab bar
         m.key(k(KeyCode::Down));
         assert_eq!((m.level, m.list.focus), (Level::Body, threadlist::Focus::Repos));
+        m.key(k(KeyCode::Down));
+        assert_eq!(m.list.focus, threadlist::Focus::Projects);
         m.key(k(KeyCode::Down));
         assert_eq!(m.list.focus, threadlist::Focus::Views);
         m.key(k(KeyCode::Down));
         assert_eq!(m.list.focus, threadlist::Focus::List);
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Threads, "the list: ←→ walk the repos");
+        m.key(k(KeyCode::Up));
         m.key(k(KeyCode::Up));
         m.key(k(KeyCode::Up));
         assert_eq!(m.list.focus, threadlist::Focus::Repos);
@@ -999,8 +1002,8 @@ mod tests {
     fn threads_filter_and_open() {
         let mut m = menu();
         m.key(k(KeyCode::Right));
-        // repo tabs, view tabs, the list, its 2nd card
-        for _ in 0..4 {
+        // repo tabs, project tabs, view tabs, the list, its 2nd card
+        for _ in 0..5 {
             m.key(k(KeyCode::Down));
         }
         assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "t2"));
