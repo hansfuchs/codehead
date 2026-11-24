@@ -74,6 +74,10 @@ pub(super) enum PRow {
     Pick,
     /// The commits' group (pushed: true): its count.
     Push(bool, usize),
+    /// The commits of a running push (above UNPUSHED): their count; 0 keys, 0 clicks.
+    Pushing(usize),
+    /// A commit of the running push (index in the read's commits); 0 keys, 0 clicks.
+    PushingCommit(usize),
     /// A commit (index in the read's commits).
     Commit(usize),
     /// A file of the shown commit: the commit's index, the file's index in the commit's view.
@@ -359,8 +363,15 @@ impl View {
         if cs.list.is_empty() {
             v.push(PRow::Empty("0 commits on the branch"));
         }
+        // a running push: its commits on their own, above UNPUSHED
+        let going = |i: usize| !cs.list[i].pushed && self.pushing.contains(&cs.list[i].oid);
+        let gone: Vec<usize> = (0..cs.list.len()).filter(|&i| going(i)).collect();
+        if !gone.is_empty() || self.push_by.is_some() {
+            v.push(PRow::Pushing(gone.len()));
+            v.extend(gone.into_iter().map(PRow::PushingCommit));
+        }
         for pushed in [false, true] {
-            let at: Vec<usize> = (0..cs.list.len()).filter(|&i| cs.list[i].pushed == pushed).collect();
+            let at: Vec<usize> = (0..cs.list.len()).filter(|&i| cs.list[i].pushed == pushed && !going(i)).collect();
             if at.is_empty() {
                 continue;
             }
@@ -383,6 +394,22 @@ impl View {
             v.push(PRow::Empty("older commits: not listed"));
         }
         v
+    }
+
+    /// The cursor to row I; a row of a running push (0 keys): past it, DOWN or up (0 other row
+    /// that way: the other way).
+    fn move_to(&mut self, i: usize, down: bool) {
+        let inert = |r: &PRow| matches!(r, PRow::Pushing(_) | PRow::PushingCommit(_));
+        let rows = &self.scm.rows;
+        if rows.get(i).is_none_or(|r| !inert(r)) {
+            self.scm.at = i;
+            return;
+        }
+        let fwd = (i..rows.len()).find(|&j| !inert(&rows[j]));
+        let back = (0..i).rev().find(|&j| !inert(&rows[j]));
+        if let Some(j) = if down { fwd.or(back) } else { back.or(fwd) } {
+            self.scm.at = j;
+        }
     }
 
     /// After a read: picks and the shown commit of commits that left the list go.
@@ -429,6 +456,8 @@ impl View {
         if let Some(i) = to {
             self.scm.at = i;
         }
+        // the cursor's commit went into a running push: the next row it can be on
+        self.move_to(self.scm.at, true);
     }
 
     /// The review shows the branch's changes against its base (STAY: the keys stay on the panel).
@@ -508,6 +537,9 @@ impl View {
 
     /// The ship menu's "push up to": the question lists every commit that goes.
     pub(super) fn ask_push_to(&mut self) -> Act {
+        if self.pushing() {
+            return Act::Toast(super::PUSH_RUNS.into());
+        }
         let Some((top, _)) = self.push_pick() else { return Act::Toast("0 commits picked".into()) };
         let oid = top.oid.clone();
         self.ask_push(oid)
@@ -516,6 +548,9 @@ impl View {
     /// P / the UNPUSHED row's push: every unpushed commit to the upstream, after the question
     /// (picks: up to the newest pick, as the ship menu).
     pub(super) fn ask_push_all(&mut self) -> Act {
+        if self.pushing() {
+            return Act::Toast(super::PUSH_RUNS.into());
+        }
         if self.pr_src.is_some() || self.commit_src.is_some() || self.all {
             return self.start_op(Op::Push);
         }
@@ -541,6 +576,9 @@ impl View {
 
     /// The question of a push up to unpushed commit OID: it lists every commit that goes.
     fn ask_push(&mut self, oid: String) -> Act {
+        if self.pushing() {
+            return Act::Toast(super::PUSH_RUNS.into());
+        }
         let cs = &self.changes.commits;
         let un: Vec<String> = cs.list.iter().filter(|c| !c.pushed).map(|c| c.oid.clone()).collect();
         let k = un.iter().position(|o| *o == oid).unwrap_or(0);
@@ -878,9 +916,25 @@ impl View {
                     let label = "↑ push ";
                     let bw = label.width() as u16;
                     self.scm.buttons.push((Rect { x: rect.right().saturating_sub(bw), width: bw, ..rect }, Btn::Push));
-                    spans.push(Span::styled(label, theme::accent()));
+                    // a push runs: grayed (a click toasts why)
+                    spans.push(Span::styled(label, if self.pushing() { theme::muted() } else { theme::accent() }));
                 }
                 right_fill(&[Span::styled(format!("   {} {label}", fold(Fold::Push(*pushed))), st)], &spans)
+            }
+            // a running push: the wave (as an agent's at work) at the panel's right edge
+            PRow::Pushing(n) => {
+                let st = theme::accent_bold();
+                let tick = self.pushing_at.map_or(0, |t| (t.elapsed().as_millis() / crate::nav::WAVE_MS) as usize);
+                let wave = crate::nav::WAVE[tick % crate::nav::WAVE.len()];
+                // another process's push: who (an agent, shell)
+                let by = self.push_by.as_ref().map(|b| format!(" · {b}")).unwrap_or_default();
+                right_fill(&[Span::styled("   PUSHING", st), Span::styled(format!("  {n}{by}"), theme::muted())], &[Span::styled(wave, theme::accent())])
+            }
+            PRow::PushingCommit(ci) => {
+                let Some(c) = self.changes.commits.list.get(*ci) else { return Line::raw("") };
+                let room = w.saturating_sub(5 + c.short.len() + 3);
+                let left = vec![Span::raw("     "), Span::styled("↑ ", theme::accent()), Span::styled(format!("{} ", c.short), theme::muted()), Span::styled(crate::nav::fit(&c.subject, room), theme::muted())];
+                right_fill(&left, &[])
             }
             PRow::All => {
                 let on = self.peek.as_ref().is_some_and(|p| p.all);
@@ -1119,7 +1173,7 @@ impl View {
         let files = |f: &dyn Fn(usize) -> bool| (0..self.changes.files.len()).filter(|&i| f(i)).map(path).collect::<Vec<_>>();
         let (here, _) = self.comments_here();
         let comments = |f: &dyn Fn(&super::Comment) -> bool| here.iter().filter(|(i, _)| f(&self.comments[*i])).map(|(i, _)| self.comments[*i].id.clone()).collect::<Vec<_>>();
-        let unpushed = || self.changes.commits.list.iter().filter(|c| !c.pushed).map(|c| c.oid.clone()).collect::<Vec<_>>();
+        let unpushed = || self.changes.commits.list.iter().filter(|c| !c.pushed && !self.pushing.contains(&c.oid)).map(|c| c.oid.clone()).collect::<Vec<_>>();
         match r {
             PRow::Section(Sec::Staged, _) => (files(&|i| staged(i).is_some()), vec![], vec![]),
             PRow::Section(Sec::Changes, _) => (files(&|i| staged(i) != Some(&true)), vec![], vec![]),
@@ -1200,13 +1254,13 @@ impl View {
         match k.code {
             // ↑ / page up on the 1st row: the commit message box above the list
             KeyCode::Up | KeyCode::PageUp if self.scm.at == 0 && self.pr_src.is_none() && k.modifiers.is_empty() => self.scm.msg_focus = true,
-            KeyCode::Up | KeyCode::Char('k') => self.scm.at = self.scm.at.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => self.scm.at = (self.scm.at + 1).min(last),
+            KeyCode::Up | KeyCode::Char('k') => self.move_to(self.scm.at.saturating_sub(1), false),
+            KeyCode::Down | KeyCode::Char('j') => self.move_to((self.scm.at + 1).min(last), true),
             // page up / down: the list's top / bottom
-            KeyCode::PageUp => self.scm.at = 0,
-            KeyCode::PageDown => self.scm.at = last,
-            KeyCode::Home | KeyCode::Char('g') => self.scm.at = 0,
-            KeyCode::End | KeyCode::Char('G') => self.scm.at = last,
+            KeyCode::PageUp => self.move_to(0, true),
+            KeyCode::PageDown => self.move_to(last, false),
+            KeyCode::Home | KeyCode::Char('g') => self.move_to(0, true),
+            KeyCode::End | KeyCode::Char('G') => self.move_to(last, false),
             KeyCode::Left => match row.as_ref().and_then(PRow::label) {
                 Some(f) => self.toggle_fold(f, Some(true)),
                 // ← on the shown commit: the changes back, its files hide
@@ -1425,6 +1479,10 @@ impl View {
         self.scm.msg_focus = false;
         let Some(&(_, i, stuck)) = self.scm.lines.iter().find(|(y, ..)| *y == m.row) else { return Act::None };
         let row = self.scm.rows.get(i).cloned();
+        // a running push's rows: 0 clicks
+        if matches!(row, Some(PRow::Pushing(_) | PRow::PushingCommit(_))) {
+            return Act::None;
+        }
         if let Some(f) = row.as_ref().and_then(PRow::label) {
             self.scm.at = i;
             if stuck {
@@ -1552,8 +1610,9 @@ mod tests {
         assert!(all.contains(" ship ") && all.contains("push") && all.contains("open the pull request"), "{all}");
 
         // push: a 1st enter asks (0 git step), esc closes
+        v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert_eq!(v.key(enter), Act::None);
-        assert!(v.op.is_none() && draw(&mut v, 120, 30).join("\n").contains("enter again: push"));
+        assert!(v.op.is_none() && draw(&mut v, 120, 30).join("\n").contains("enter again"));
         v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(v.modal.is_none() && v.op.is_none());
 
@@ -1569,6 +1628,95 @@ mod tests {
         v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert_eq!(v.key(enter), Act::None);
         assert!(v.op.is_none(), "abort: a 1st enter only asks");
+    }
+
+    #[test]
+    fn the_ship_menu_hands_pr_steps_to_a_sub_thread_and_shows_the_open_pr() {
+        let mut v = test_view();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        v.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(v.scm.focus);
+        // the panel's legend: only S
+        assert_eq!(v.hints(), "S: ship ");
+
+        // 0 PR: ship, create PR, create PR draft; right of the panel
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        let rows = draw(&mut v, 140, 30);
+        let all = rows.join("\n");
+        assert!(all.contains("ship: commit, push, PR, review, CI green") && all.contains("create PR draft") && !all.contains("update PR description"), "{all}");
+        // ✦ on the agent steps only; a rule between ship / git / PR
+        assert!(all.contains("✦ ship: commit") && all.contains("✦ create PR draft") && all.contains("   push ") && !all.contains("✦ push"), "{all}");
+        assert_eq!(rows.iter().filter(|l| l.contains('├') && l.contains('┤')).count(), 2, "{all}");
+        let at = rows.iter().find(|l| l.contains("create PR draft")).unwrap();
+        let px = usize::from(v.scm.rect.right());
+        assert!(at.chars().take(px).all(|c| c != '›') && at.chars().nth(px).is_some_and(|c| c == '│' || c == '╭' || c == '╰' || c == '│'), "{at}");
+
+        // create PR draft (row 3 of push, update…): 0 commits ahead → 0 sub-thread
+        let draft = v.ship_rows().iter().position(|r| r.label == "create PR draft").unwrap();
+        for _ in 0..draft {
+            v.key(j);
+        }
+        v.key(enter);
+        assert!(matches!(v.key(enter), Act::Toast(t) if t.contains("commit first")));
+
+        // 2 commits ahead, 0 branch (detached / 0 git): 0 sub-thread
+        v.changes.ahead = 2;
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        for _ in 0..draft {
+            v.key(j);
+        }
+        v.key(enter);
+        assert!(matches!(v.key(enter), Act::Toast(_)));
+
+        // on a branch: the sub-thread's task names it, a draft, the commits only
+        v.branch_override = Some("task/x".into());
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        for _ in 0..draft {
+            v.key(j);
+        }
+        v.key(enter);
+        match v.key(enter) {
+            Act::Sub(t) => assert!(t.starts_with("Open a draft pull request (`--draft`) for the branch `task/x`") && t.contains("git push -u origin task/x") && t.contains("--head task/x --base main --draft") && !t.contains("HEAD`,") && t.contains("uncommitted changes stay"), "{t}"),
+            a => panic!("{a:?}"),
+        }
+
+        // a PR open: its label on top, update description, 0 create rows
+        v.pr = Some(super::super::Pr { number: 1234, url: "https://github.com/o/codehead/pull/1234".into(), ..Default::default() });
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        let all = draw(&mut v, 140, 30).join("\n");
+        assert!(all.contains("codehead#1234") && all.contains("update PR description") && !all.contains("create PR"), "{all}");
+        // update PR on the newest main: uncommitted files → 0 sub-thread; a clean tree → the task
+        let up = v.ship_rows().iter().position(|r| r.label == "update PR on the newest main").unwrap();
+        assert!(v.ship_rows()[up].agent && v.ship_rows()[up].group == super::super::ShipGroup::Pr);
+        for _ in 0..up {
+            v.key(j);
+        }
+        v.key(enter);
+        assert!(matches!(v.key(enter), Act::Toast(t) if t.contains("uncommitted")));
+        let files = std::mem::take(&mut v.changes.files);
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        for _ in 0..up {
+            v.key(j);
+        }
+        v.key(enter);
+        match v.key(enter) {
+            Act::Sub(t) => assert!(t.contains("git rebase origin/main") && t.contains("--force-with-lease origin task/x") && t.contains("`task/x`"), "{t}"),
+            a => panic!("{a:?}"),
+        }
+        v.changes.files = files;
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        let desc = v.ship_rows().iter().position(|r| r.label == "update PR description").unwrap();
+        for _ in 0..desc {
+            v.key(j);
+        }
+        v.key(enter);
+        assert!(matches!(v.key(enter), Act::Sub(t) if t.contains("gh pr edit 1234") && t.contains("`headRefName` is not `task/x`")));
+
+        // ship: row 0, the state along, never merge
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        v.key(enter);
+        assert!(matches!(v.key(enter), Act::Sub(t) if t.contains("codehead#1234") && t.contains("Never merge") && t.contains("Never push to any branch but `task/x`") && !t.contains("origin HEAD")));
     }
 
     #[test]
@@ -1863,7 +2011,8 @@ mod tests {
         let all = draw(&mut v, 140, 40).join("\n");
         assert!(all.contains("push up to") && all.contains("1 commit"), "{all}");
 
-        // the row: the question lists the commits, 0 push yet
+        // the row (under ship, push): the question lists the commits, 0 push yet
+        press(&mut v, KeyCode::Char('j'));
         press(&mut v, KeyCode::Char('j'));
         press(&mut v, KeyCode::Enter);
         let all = draw(&mut v, 140, 40).join("\n");
@@ -1960,6 +2109,82 @@ mod tests {
         wait_read(&mut v);
         assert!(matches!(press(&mut v, KeyCode::Char('P')), Act::Toast(t) if t.contains("0 unpushed")));
         assert!(v.modal.is_none());
+        drop(&w);
+    }
+
+    #[test]
+    fn a_running_push_moves_its_commits_to_pushing_with_a_wave_0_keys_there() {
+        use super::super::commits::fixture::*;
+        let w = repo("pushing");
+        let mut v = commit_view(&w, "commits-pushing-1");
+        let c3 = oid(&w, "HEAD^");
+        draw(&mut v, 140, 40);
+
+        // the push up to c3 runs: c3 in PUSHING above UNPUSHED, c4 stays; the wave at the edge
+        v.pushing = vec![c3.clone()];
+        v.pushing_at = Some(std::time::Instant::now());
+        let rows = draw(&mut v, 140, 40);
+        let row = |t: &str| rows.iter().position(|l| l.contains(t)).unwrap_or_else(|| panic!("{t}: {}", rows.join("\n")));
+        assert!(row("PUSHING") < row("c3 subject") && row("c3 subject") < row("▾ UNPUSHED") && row("▾ UNPUSHED") < row("c4 subject"), "{}", rows.join("\n"));
+        let px = usize::from(v.scm.rect.right());
+        let head: String = rows[row("PUSHING")].chars().take(px).collect();
+        assert!(crate::nav::WAVE.iter().any(|f| head.trim_end().ends_with(f)), "{head}");
+        assert!(v.pushing());
+
+        // j over the PUSHING rows: the cursor lands on UNPUSHED; a click on them: 0 change
+        v.scm.focus = true;
+        let all = v.scm.rows.iter().position(|r| *r == PRow::All).unwrap();
+        v.scm.at = all;
+        press(&mut v, KeyCode::Char('j'));
+        assert_eq!(v.scm.rows[v.scm.at], PRow::Push(false, 1));
+        press(&mut v, KeyCode::Char('k'));
+        assert_eq!(v.scm.at, all);
+        // the UNPUSHED group's items: c4 only
+        assert_eq!(v.group_items(&PRow::Push(false, 1)).2.len(), 1);
+
+        // the real push: c3 out of PUSHING into PUSHED
+        v.pushing.clear();
+        assert!(matches!(v.start_op(Op::PushTo(c3.clone())), Act::Toast(_)));
+        assert_eq!(v.pushing, vec![c3.clone()]);
+        wait_op(&mut v);
+        assert!(v.pushing.is_empty() && v.pushing_at.is_none());
+        assert!(v.changes.commits.find(&c3).is_some_and(|c| c.pushed));
+        assert!(!draw(&mut v, 140, 40).join("\n").contains("PUSHING"));
+        drop(&w);
+    }
+
+    #[test]
+    fn an_agents_push_shows_as_pushing_with_its_name_and_blocks_the_panels_pushes() {
+        use super::super::commits::fixture::*;
+        let w = repo("agentpush");
+        let mut v = commit_view(&w, "commits-agentpush-1");
+        wait_read(&mut v);
+        let gd = v.changes.git_dir.clone().expect("git dir");
+
+        // GIGAS's push runs (a live process holds the lock)
+        let mut holder = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        std::mem::forget(crate::pushlock::acquire_in(&gd, "GIGAS", holder.id()).unwrap());
+        let all = draw(&mut v, 140, 40).join("\n");
+        assert!(all.contains("PUSHING  2 · GIGAS") && !all.contains("▾ UNPUSHED"), "{all}");
+        v.scm.focus = true;
+        assert!(matches!(press(&mut v, KeyCode::Char('P')), Act::Toast(t) if t.contains("push")));
+        assert!(v.modal.is_none() && v.op.is_none());
+        // the ship menu: push grayed, enter on it toasts
+        press(&mut v, KeyCode::Char('S'));
+        assert!(v.ship_rows().iter().find(|r| r.label == "push").is_some_and(|r| r.off && r.state == "a push runs"));
+        press(&mut v, KeyCode::Char('j'));
+        assert!(matches!(press(&mut v, KeyCode::Enter), Act::Toast(_)));
+        // the panel's own git step: the lock says no
+        assert!(super::super::run_op(&w, &Op::Push).unwrap_err().contains("GIGAS"));
+
+        // the push ends: a read, then the commits leave PUSHING
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        draw(&mut v, 140, 40);
+        assert!(v.push_by.is_none() && v.push_hold);
+        wait_read(&mut v);
+        let all = draw(&mut v, 140, 40).join("\n");
+        assert!(!all.contains("PUSHING") && all.contains("▾ UNPUSHED"), "{all}");
         drop(&w);
     }
 

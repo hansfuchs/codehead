@@ -57,6 +57,7 @@ mod picker;
 mod prlist;
 mod portless;
 mod preview;
+mod pushlock;
 mod rank;
 mod screensel;
 mod search;
@@ -223,7 +224,9 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          order (schema, logic, config, UI, docs, tests, generated), j k box (j: down), n N hunk,
          v reviewed, enter fold, e / o IDE at the line, w side by side / unified, r read git again,
          ctrl+f filter, ctrl+b: panel shown → its keys → hidden, i / tab prompt (esc / tab back).
-         S: the ship menu: push, fetch + rebase, open the PR, merge it, CI log → agents (a stopped
+         S: the ship menu right of the panel: ship (agent: commit, push, PR, review, CI green), push,
+         fetch + rebase, create PR / PR draft (agent, sub-thread, commits only), open the PR (gh),
+         open PR on top: update its description (agent), merge it, CI log → agents (a stopped
          rebase: the agents resolve, continue, abort); outward steps: enter enter.
          ↑ on the 1st row of a PR's diff: its views row.
          flow waits (gate, loop max, role with 0 agent): a question in the picker under the stream,
@@ -539,7 +542,12 @@ fn enable_artifacts() {
 }
 
 fn main() {
+    // called as `git` (the shim on the agents' PATH): the push lock, then the real git
+    if std::env::args_os().next().is_some_and(|a| Path::new(&a).file_name().is_some_and(|n| n == "git")) {
+        pushlock::shim_main();
+    }
     engine::trace("main");
+    pushlock::install();
     enable_artifacts();
     sub();
     // the palette before any screen (`--cost` draws in parse); a broken file fails in start

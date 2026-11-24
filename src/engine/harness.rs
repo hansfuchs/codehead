@@ -166,6 +166,8 @@ fn harness_command(bin: &str, s: &Spec) -> Command {
     c.current_dir(s.dir)
         .env("CODEHEAD_THREAD", s.thread)
         .env("CODEHEAD_AGENT", &s.agent.name)
+        // `git` through codehead's shim: 1 push per checkout at a time (crate::pushlock)
+        .env("PATH", crate::pushlock::path_with_shim())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
