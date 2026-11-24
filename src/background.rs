@@ -32,7 +32,10 @@ impl<K: Clone + Eq + Hash + Send + 'static, V: Send + 'static> Reads<K, V> {
         let generation = self.generation;
         self.pending.insert(key.clone(), generation);
         let tx = self.tx.clone();
-        std::thread::spawn(move || { let _ = tx.send((key, generation, read())); });
+        std::thread::spawn(move || {
+            let _ = tx.send((key, generation, read()));
+            crate::bus::wake();
+        });
     }
 
 

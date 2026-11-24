@@ -3,7 +3,6 @@
 //! stops the selected one. The row and its box go by themselves once 0 sub-thread runs: a
 //! sub-thread reports its end to the thread and deletes itself.
 
-use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -54,7 +53,11 @@ pub struct SubThreads {
     popup: Rect,
     hover: bool,
     read: Option<std::sync::mpsc::Receiver<Vec<Kid>>>,
-    read_at: Option<Instant>,
+    /// Bus topics: a file of the main thread or of a kid changed → 1 read (0 timer).
+    topics: Option<std::sync::mpsc::Receiver<crate::bus::Topic>>,
+    /// A read is due (the 1st one, a topic during a read).
+    due: bool,
+    read_once: bool,
 }
 
 /// The 1st non-empty line of S, cut to N chars.
@@ -122,17 +125,25 @@ impl SubThreads {
         !self.kids.is_empty()
     }
 
-    /// Each second: the sub-threads of thread MAIN (in the background). True: news.
+    /// The sub-threads of thread MAIN (in the background): read once, then after each change of
+    /// MAIN's or a kid's files (bus topics). True: news.
     pub fn tick(&mut self, main: &str) -> bool {
-        let due = self.read.is_none() && self.read_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
-        if due && !cfg!(test) {
-            let (tx, rx) = std::sync::mpsc::channel();
+        let topics = self.topics.get_or_insert_with(crate::bus::subscribe);
+        for t in topics.try_iter() {
+            if let crate::bus::Topic::Thread(id, _) = t {
+                self.due |= id == main || self.kids.iter().any(|k| k.id == id);
+            }
+        }
+        if (self.due || !self.read_once) && self.read.is_none() && !cfg!(test) {
+            self.due = false;
+            self.read_once = true;
+            let (tx, rx) = crate::bus::channel();
             let main = main.to_string();
             std::thread::spawn(move || {
                 let _ = tx.send(read(&main));
+                crate::bus::wake();
             });
             self.read = Some(rx);
-            self.read_at = Some(Instant::now());
         }
         let mut changed = false;
         if let Some(kids) = self.read.as_ref().and_then(|r| r.try_recv().ok()) {

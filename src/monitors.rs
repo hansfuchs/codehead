@@ -36,15 +36,30 @@ pub struct Monitors {
     note: Option<String>,
     /// A 1st d: a 2nd d ends the selected watch.
     armed: bool,
+    /// Bus topics: a file of the thread or of a kid changed → 1 read (0 timer).
+    topics: Option<std::sync::mpsc::Receiver<crate::bus::Topic>>,
+    read_once: bool,
 }
 
 impl Monitors {
     pub fn new(thread: &str) -> Self {
         Self { watches: crate::background::snapshot(&format!("monitors-{thread}")).unwrap_or_default(), ..Default::default() }
     }
-    pub fn tick(&mut self, thread: &str) -> bool {
+    pub fn tick(&mut self, thread: &str, kids: &[String]) -> bool {
         let id = thread.to_string();
-        self.reads.request(id.clone(), move || load(&id));
+        // the 1st read, then 1 per change of the files of the thread or of a kid (KIDS)
+        let topics = self.topics.get_or_insert_with(crate::bus::subscribe);
+        let mut due = !std::mem::replace(&mut self.read_once, true);
+        for t in topics.try_iter() {
+            if let crate::bus::Topic::Thread(tid, crate::bus::Part::Meta | crate::bus::Part::Log | crate::bus::Part::Other) = t {
+                due |= tid == id || kids.contains(&tid);
+            }
+        }
+        // an expiry: the next draw drops it (below); a change: 1 read at once
+        if due {
+            self.reads.forget(&id);
+            self.reads.request(id.clone(), move || load(&id));
+        }
         let mut changed = false;
         for (_, watches) in self.reads.poll() { self.watches = watches; changed = true; }
         self.watches.retain(|w| !self.ended.contains(&w.key()));

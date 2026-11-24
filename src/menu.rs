@@ -5,7 +5,7 @@
 //! list: up 1 level; ↓: down 1 level. ←→ on the tab bar (a list without a tab group too): next /
 //! previous tab; on a tab group: its tabs. enter: run, a single esc or tab closes.
 
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use ratatui::Frame;
@@ -183,7 +183,7 @@ impl Menu {
         }
         let due = self.detail_at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2));
         if self.tab == Tab::Tokens && self.detail_rx.is_none() && due && !cfg!(test) {
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = crate::bus::channel();
             let id = self.thread.clone();
             std::thread::spawn(move || {
                 let _ = tx.send(crate::cost::detail(id.as_deref()));
@@ -214,7 +214,7 @@ impl Menu {
         }
         // the search tab: a new read on its 1st show, then every 5s while it shows
         if self.tab == Tab::Search && self.msgs_rx.is_none() && due(self.msgs_at, MSGS_EVERY) && !cfg!(test) {
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = crate::bus::channel();
             std::thread::spawn(move || {
                 let _ = tx.send(crate::search::load());
             });

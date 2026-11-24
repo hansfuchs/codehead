@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -191,7 +191,7 @@ pub struct Merge {
     pub prs: Vec<PrRef>,
     cur: usize,
     tabs: HashMap<PrRef, Tab>,
-    tx: Sender<Res>,
+    tx: crate::bus::Tx<Res>,
     rx: Receiver<Res>,
     sources: Option<Sources>,
     /// Data version: up with each read that brings new data (its area dissolves in).
@@ -285,7 +285,7 @@ impl Merge {
     }
 
     fn new(thread: bool, prs: Vec<PrRef>) -> Merge {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         Merge {
             thread,
             thread_id: String::new(),

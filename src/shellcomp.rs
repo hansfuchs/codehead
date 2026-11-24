@@ -81,7 +81,7 @@ enum Res {
 pub struct ShellComp {
     fish: bool,
     tx: Option<Sender<Req>>,
-    res_tx: Sender<Res>,
+    res_tx: crate::bus::Tx<Res>,
     rx: Receiver<Res>,
     /// fish's rows per command line (the last few).
     fish_rows: HashMap<String, Vec<(String, String)>>,
@@ -111,7 +111,7 @@ pub struct ShellComp {
 
 impl Default for ShellComp {
     fn default() -> Self {
-        let (res_tx, rx) = channel();
+        let (res_tx, rx) = crate::bus::channel();
         ShellComp {
             fish: crate::engine::harnesses::on_path("fish"),
             tx: None,
