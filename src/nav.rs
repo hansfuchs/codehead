@@ -49,7 +49,7 @@ impl Card {
     }
 
     /// 0 work left to land: the branch landed / abandoned, or 0 code and every agent done (a new
-    /// thread has 0 code too: not shipped).
+    /// thread has 0 code too: not shipped). On main: never.
     pub fn shipped(&self) -> bool {
         use crate::landed::Land;
         match &self.land {
@@ -311,7 +311,8 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
         vec![Span::styled(format!("⇲ {}", l.badge()), st)]
     } else if c.stale(crate::engine::now_ms()) {
         let days = crate::landed::archive_in_days(c.activity, crate::engine::now_ms());
-        vec![Span::styled(format!("◌ 0 code · auto-archive in {days}d"), theme::fg(theme::pal().caution()))]
+        let what = if c.land == Some(crate::landed::Land::Main) { "on main" } else { "0 code" };
+        vec![Span::styled(format!("◌ {what} · auto-archive in {days}d"), theme::fg(theme::pal().caution()))]
     } else if c.live == 0 {
         vec![Span::styled("◦ ended", theme::muted())]
     } else {

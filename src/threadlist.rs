@@ -613,7 +613,7 @@ impl ThreadList {
     fn label_text(s: u8, n: usize) -> String {
         match s {
             0 => format!("open · {n}"),
-            1 => format!("stale · {n} · 0 code, idle 3+ days: go on or archive"),
+            1 => format!("stale · {n} · 0 code or on main, idle 3+ days: go on or archive"),
             2 => format!("shipped: archive? · {n}"),
             _ => format!("archived · {n} · branches kept, worktrees gone"),
         }
@@ -1515,6 +1515,16 @@ mod tests {
                 c.land = Some(Land::NoCode);
                 c.done = true;
             }),
+            card("onmain", |c| {
+                c.land = Some(Land::Main);
+                c.done = true;
+                c.activity = now - hour;
+            }),
+            card("mainidle", |c| {
+                c.land = Some(Land::Main);
+                c.done = true;
+                c.activity = now - 4 * 24 * hour;
+            }),
             card("new", |c| {
                 c.land = Some(Land::NoCode);
                 c.activity = now - hour;
@@ -1536,17 +1546,18 @@ mod tests {
         ];
         let mut l = ThreadList::new(Mode::Switch, None, None, cards);
         let ids: Vec<String> = l.visible().iter().map(|&i| l.cards[i].id.clone()).collect();
-        // 0 code: shipped only when the agents reported done; idle 3 days: stale (code: never)
-        assert_eq!(ids, ["idle", "asks", "busy", "new", "loose", "dusty", "waits", "shipped", "talk"]);
-        let s = screen(&mut l, 80, 90);
-        for x in ["open · 5", "stale · 2", "shipped: archive? · 2", "◇ 3 unpushed", "⇲ shipped", "⇲ nothing to ship", "auto-archive in 25d"] {
+        // 0 code: shipped only when the agents reported done; idle 3 days: stale (code: never);
+        // on main: never shipped (done or not), stale after 3 days
+        assert_eq!(ids, ["idle", "asks", "busy", "onmain", "new", "loose", "mainidle", "dusty", "waits", "shipped", "talk"]);
+        let s = screen(&mut l, 80, 120);
+        for x in ["open · 6", "stale · 3", "shipped: archive? · 2", "◇ 3 unpushed", "⇲ shipped", "⇲ nothing to ship", "auto-archive in 25d", "◌ on main · auto-archive in 26d"] {
             assert!(s.contains(x), "{x}: {s}");
         }
         for x in ["needs you ·", "recent ·", "working ·", "threads ·"] {
             assert!(!s.contains(x), "{x}: {s}");
         }
         assert_eq!(s.matches("nothing to ship").count(), 1, "{s}");
-        assert!(s.contains("active 9") && s.contains("archived 1") && !s.contains("old"), "{s}");
+        assert!(s.contains("active 11") && s.contains("archived 1") && !s.contains("old"), "{s}");
 
         // ↑ from the 1st card: the view tabs; → archived
         l.key(k(KeyCode::Up));

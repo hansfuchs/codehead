@@ -2,8 +2,9 @@
 //! unmerged, PR open) or 0 work left (shipped: landed, abandoned, 0 code). The thread lists put
 //! open threads and shipped threads in 2 sections; shipped ones are ready to archive.
 //!
-//! 1 state per checkout, the worst wins. A checkout on the default branch (main / master) and a
-//! dir without git count as 0 code: the owner handles main. A branch landed when its content is
+//! 1 state per checkout, the worst wins. A checkout on the default branch (main / master): on
+//! main, never shipped (0 branch to tell landed work from open work: the owner archives it, or
+//! stale after 3 idle days). A dir without git: 0 code. A branch landed when its content is
 //! in `origin/<default>` or the local `<default>` (a local merge): ancestor, same patches
 //! (`git cherry`: rebase merges), or a merge that changes 0 (`git merge-tree`: squash merges).
 //! A new branch (0 commit since its creation) counts as 0 code too. 0 code: shipped only when
@@ -41,7 +42,16 @@ pub const ARCHIVE_MS: u64 = 30 * DAY_MS;
 
 /// A thread with LAND, its agents DONE or not, last ACTIVITY (unix ms): stale at NOW.
 pub fn stale(land: Option<&Land>, done: bool, activity: u64, now: u64) -> bool {
-    land == Some(&Land::NoCode) && !done && now.saturating_sub(activity) > STALE_MS
+    idle_kind(land, done) && now.saturating_sub(activity) > STALE_MS
+}
+
+/// LAND, agents DONE or not: stale once idle (0 code, agents not done; on main: done or not).
+fn idle_kind(land: Option<&Land>, done: bool) -> bool {
+    match land {
+        Some(Land::NoCode) => !done,
+        Some(Land::Main) => true,
+        _ => false,
+    }
 }
 
 /// Days left until the auto-archive of a stale thread (last ACTIVITY, unix ms) at NOW.
@@ -64,9 +74,11 @@ pub enum Land {
     Abandoned(String),
     /// The branch's content is in the base.
     Landed,
-    /// 0 task branch (0 git, the default branch) or a new branch without a commit. Shipped only
-    /// when every agent reported done (`Card::shipped`).
+    /// 0 task branch (0 git) or a new branch without a commit. Shipped only when every agent
+    /// reported done (`Card::shipped`).
     NoCode,
+    /// A checkout on the default branch: never shipped (the owner archives it).
+    Main,
 }
 
 impl Land {
@@ -85,6 +97,7 @@ impl Land {
             Land::Abandoned(pr) => format!("abandoned: {pr} closed"),
             Land::Landed => "shipped".into(),
             Land::NoCode => "nothing to ship".into(),
+            Land::Main => "on main".into(),
         }
     }
 
@@ -95,9 +108,11 @@ impl Land {
             Land::Unpushed(_) => 1,
             Land::Unmerged => 2,
             Land::PrOpen(_) => 3,
-            Land::Abandoned(_) => 4,
-            Land::Landed => 5,
-            Land::NoCode => 6,
+            // not open, never shipped: worse than a landed checkout of the same thread
+            Land::Main => 4,
+            Land::Abandoned(_) => 5,
+            Land::Landed => 6,
+            Land::NoCode => 7,
         }
     }
 }
@@ -232,7 +247,10 @@ fn contained(dir: &Path, rev: &str, base: &str, seen: &mut Seen) -> bool {
 /// The state of checkout DIR. BRANCH: the branch to read (an archived thread's kept branch in
 /// its repo; None: DIR's current one). DIRTY: count uncommitted files.
 fn checkout(dir: &Path, branch: Option<&str>, dirty: bool, prs: &[PrSeen], seen: &mut Seen) -> Land {
-    let Some((b, def)) = task_branch(dir, branch) else { return Land::NoCode };
+    let (b, def) = match task_branch(dir, branch) {
+        Ok(x) => x,
+        Err(l) => return l,
+    };
     if dirty {
         let n = dirty_count(dir);
         if n > 0 {
@@ -243,14 +261,21 @@ fn checkout(dir: &Path, branch: Option<&str>, dirty: bool, prs: &[PrSeen], seen:
 }
 
 /// The task branch of checkout DIR (BRANCH: that one, None: DIR's current one) and the repo's
-/// default branch. None: 0 code (0 git, the default branch).
-fn task_branch(dir: &Path, branch: Option<&str>) -> Option<(String, Option<String>)> {
+/// default branch. Err: the state of a checkout with 0 task branch (0 git, 0 branch: 0 code;
+/// the default branch: on main).
+fn task_branch(dir: &Path, branch: Option<&str>) -> Result<(String, Option<String>), Land> {
     if !dir.is_dir() || !git(dir, &["rev-parse", "--git-dir"]).0 {
-        return None;
+        return Err(Land::NoCode);
     }
     let b = branch.map(String::from).unwrap_or_else(|| crate::threads::current_branch(dir));
     let def = default_branch(dir);
-    (!(b.is_empty() || Some(&b) == def.as_ref() || b == "main" || b == "master")).then_some((b, def))
+    if b.is_empty() {
+        return Err(Land::NoCode);
+    }
+    if Some(&b) == def.as_ref() || b == "main" || b == "master" {
+        return Err(Land::Main);
+    }
+    Ok((b, def))
 }
 
 /// Uncommitted + untracked files of checkout DIR.
@@ -421,8 +446,10 @@ struct Co {
     common: PathBuf,
     /// Its own git dir (a linked worktree: `<common>/worktrees/<name>`).
     own: PathBuf,
-    /// Its task branch, None: 0 code.
+    /// Its task branch, None: PLAIN.
     branch: Option<String>,
+    /// Its state with 0 task branch: 0 code, on main.
+    plain: Land,
     /// The repo's default branch.
     def: Option<String>,
     dirty: usize,
@@ -618,12 +645,15 @@ impl Worker {
             return;
         }
         let (top, common, own) = crate::watch::git_dirs(p).map(|(t, c, o)| (canon(&t), canon(&c), canon(&o))).unwrap_or_default();
-        let (branch, def) = task_branch(p, None).map_or((None, None), |(b, d)| (Some(b), d));
+        let (branch, def, plain) = match task_branch(p, None) {
+            Ok((b, d)) => (Some(b), d, Land::NoCode),
+            Err(l) => (None, None, l),
+        };
         let (dirty, refs) = match &branch {
             Some(b) => (dirty_count(p), refs(p, b, def.as_deref(), &mut self.seen)),
             None => (0, Refs::NoCode),
         };
-        self.cos.insert(dir.to_string(), Co { top, common, own, branch, def, dirty, refs });
+        self.cos.insert(dir.to_string(), Co { top, common, own, branch, plain, def, dirty, refs });
         // oids fix the answers: only the size needs a cap
         if self.seen.len() > 4096 {
             self.seen.clear();
@@ -638,7 +668,7 @@ impl Worker {
         }
         let prs = prs_of(id);
         let lands = self.dirs(t).into_iter().filter_map(|d| self.cos.get(&d).cloned()).map(|c| match &c.branch {
-            None => Land::NoCode,
+            None => c.plain.clone(),
             Some(_) if c.dirty > 0 => Land::Dirty(c.dirty),
             Some(b) => with_prs(&c.refs, b, &prs),
         });
@@ -696,8 +726,9 @@ impl Worker {
         let now = crate::engine::now_ms();
         let mut next = u64::MAX;
         for (id, t) in &self.threads {
-            // 0 code, agents not done: archived at ACTIVITY + ARCHIVE_MS (stale since STALE_MS)
-            if t.state == "archived" || self.land(id) != Some(Land::NoCode) || crate::notify::reported_done(id) {
+            // 0 code, agents not done / on main: archived at ACTIVITY + ARCHIVE_MS (stale since
+            // STALE_MS)
+            if t.state == "archived" || !idle_kind(self.land(id).as_ref(), crate::notify::reported_done(id)) {
                 continue;
             }
             let activity = crate::nav::last_item(id).unwrap_or(0).max(t.updated);
@@ -747,11 +778,15 @@ mod tests {
     }
 
     /// The path of a branch: dirty → unpushed → pushed → PR open → squash merged on the remote:
-    /// shipped. The main checkout and a dir without git: 0 code.
+    /// shipped. The main checkout: on main (dirty or not); a dir without git: 0 code.
     #[test]
     fn a_branch_goes_from_open_to_shipped() {
         let (base, repo, wt) = setup("path");
-        assert_eq!(land(&repo, &[]), Land::NoCode, "main checkout: skipped");
+        assert_eq!(land(&repo, &[]), Land::Main, "main checkout");
+        sh(&repo, "echo x > loose.txt");
+        assert_eq!(land(&repo, &[]), Land::Main, "main checkout, dirty");
+        sh(&repo, "rm loose.txt");
+        assert!(!Land::Main.open());
         assert_eq!(land(&base, &[]), Land::NoCode, "0 git");
 
         // a new thread's branch, 0 commit yet: 0 code (not shipped); a branch made at commits
@@ -815,6 +850,8 @@ mod tests {
         assert!(stale(Some(&Land::NoCode), false, now - 3 * day - 1, now));
         assert!(!stale(Some(&Land::NoCode), false, now - 2 * day, now), "recent");
         assert!(!stale(Some(&Land::NoCode), true, now - 9 * day, now), "done: shipped");
+        assert!(stale(Some(&Land::Main), true, now - 3 * day - 1, now), "on main, done: stale");
+        assert!(!stale(Some(&Land::Main), false, now - 2 * day, now), "on main, recent");
         assert!(!stale(Some(&Land::Unpushed(1)), false, now - 9 * day, now), "code: open");
         assert!(!stale(None, false, 0, now), "0 state read");
         assert_eq!(archive_in_days(now - 5 * day - 1, now), 25);
@@ -826,7 +863,7 @@ mod tests {
     fn thread_takes_the_worst_checkout() {
         let (base, repo, wt) = setup("thread");
         let mut t = store::Thread::new("t", "x", &repo, vec!["ada".into()]);
-        assert_eq!(thread(&t, &[], &mut Seen::new()), Land::NoCode, "on main: 0 code");
+        assert_eq!(thread(&t, &[], &mut Seen::new()), Land::Main, "on main");
 
         t.checkouts.push(store::Checkout { dir: wt.display().to_string(), branch: Some("feat".into()) });
         assert_eq!(thread(&t, &[], &mut Seen::new()), Land::Unpushed(1));

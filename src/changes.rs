@@ -768,7 +768,7 @@ fn stash_items(dir: &Path, thread: &str, rev: &str, items: &[(String, String, pa
 /// guess (a step that keeps the state, a checkout on the default branch).
 fn expected(op: &Op, c: &Changes, now: Option<crate::landed::Land>) -> Option<crate::landed::Land> {
     use crate::landed::Land;
-    let task = !matches!(now, None | Some(Land::NoCode));
+    let task = !matches!(now, None | Some(Land::NoCode | Land::Main));
     match op {
         Op::Commit(_) if task && !c.staged.is_empty() => {
             let left = c.files.iter().filter(|f| c.staged.get(&f.path) != Some(&true)).count();
