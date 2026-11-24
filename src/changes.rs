@@ -629,6 +629,26 @@ fn pr_desc_task(branch: &str, p: &Pr) -> String {
     )
 }
 
+/// The ship menu's "update PR on the newest base" of BRANCH's PR P (BASE: `origin/main`): the
+/// task of its sub-thread.
+fn pr_rebase_task(branch: &str, base: &str, p: &Pr) -> String {
+    let b = base_branch(base);
+    let remote = base.split_once('/').map_or("origin", |(r, _)| r);
+    format!(
+        "Update pull request {label} ({url}) of the branch `{branch}` on the newest `{b}`: rebase, resolve the conflicts, push.\n\n\
+         {guard}\
+         1. `git status --porcelain` prints anything: stop, change nothing, report it (the owner's uncommitted work stays untouched).\n\
+         2. `git fetch {remote}`, then `git rebase {base}`.\n\
+         3. A conflict: resolve each file, keep the intent of both sides; `git add` it, `git -c core.editor=true rebase --continue`. Repeat until the rebase is done. A conflict you cannot resolve with confidence: `git rebase --abort`, report it, push nothing.\n\
+         4. Build and run the tests the repo has for the changed code; fix what the rebase broke, as new commits.\n\
+         5. `git push --force-with-lease origin {branch}` (only this branch, never a plain `--force`).\n\n\
+         End with the new head commit, what you decided per conflict, and the test result.",
+        label = pr_label(p),
+        url = p.url,
+        guard = branch_guard(branch)
+    )
+}
+
 /// The ship menu's "ship" of BRANCH: the task of its sub-thread; the state of the branch now
 /// along, so the agent skips the steps done.
 fn ship_task(branch: &str, c: &Changes, pr: Option<&Pr>) -> String {
@@ -3363,6 +3383,7 @@ impl View {
                 v.push(row(Ship::OpenPr, "push + open the pull request".into(), "gh pr create --fill".into(), true));
             }
             Some(p) => {
+                v.push(row(Ship::PrRebase, format!("update PR on the newest {}", base_branch(&c.base)), format!("{} behind · sub-thread", c.behind), true));
                 v.push(row(Ship::PrDesc, "update PR description".into(), "sub-thread".into(), true));
                 v.push(row(Ship::Merge, format!("merge PR #{} when its checks pass", p.number), format!("✓{} ✗{} ●{}", p.pass, p.fail, p.pending), true));
                 if p.fail > 0 {
@@ -3429,6 +3450,19 @@ impl View {
                 };
                 self.pr_at = None;
                 Act::Sub(pr_desc_task(&b, &p))
+            }
+            Ship::PrRebase => {
+                let Some(p) = self.pr.clone() else { return Act::Toast("0 pull request on this branch".into()) };
+                // a rebase needs a clean tree: the owner's uncommitted work never gets touched
+                if !self.changes.files.is_empty() {
+                    return Act::Toast(format!("{} uncommitted files: commit or stash them first", self.changes.files.len()));
+                }
+                let b = match self.branch() {
+                    Ok(b) => b,
+                    Err(t) => return Act::Toast(t),
+                };
+                self.pr_at = None;
+                Act::Sub(pr_rebase_task(&b, &self.changes.base, &p))
             }
             Ship::Full => {
                 let b = match self.branch() {
@@ -4733,6 +4767,8 @@ enum Ship {
     AgentPr { draft: bool },
     /// The lead brings the open PR's title + body up to date in a sub-thread.
     PrDesc,
+    /// The lead rebases the PR's branch on the newest base, resolves the conflicts, pushes.
+    PrRebase,
     /// The lead ships the branch in a sub-thread: commit, push, PR, review, CI until green.
     Full,
     Merge,
@@ -4759,19 +4795,19 @@ impl Ship {
         match self {
             Ship::Full => ShipGroup::Ship,
             Ship::Push | Ship::PushTo | Ship::Update => ShipGroup::Git,
-            Ship::OpenPr | Ship::AgentPr { .. } | Ship::PrDesc | Ship::Merge | Ship::CiLog => ShipGroup::Pr,
+            Ship::OpenPr | Ship::AgentPr { .. } | Ship::PrDesc | Ship::PrRebase | Ship::Merge | Ship::CiLog => ShipGroup::Pr,
             Ship::Resolve | Ship::Continue | Ship::Abort => ShipGroup::Rebase,
         }
     }
 
     /// The step pushes commits (git or the agent).
     fn pushes(self) -> bool {
-        matches!(self, Ship::Push | Ship::PushTo | Ship::OpenPr | Ship::AgentPr { .. } | Ship::Full)
+        matches!(self, Ship::Push | Ship::PushTo | Ship::OpenPr | Ship::AgentPr { .. } | Ship::PrRebase | Ship::Full)
     }
 
     /// An agent does the step (a sub-thread, a message to the agents).
     fn agent(self) -> bool {
-        matches!(self, Ship::Full | Ship::AgentPr { .. } | Ship::PrDesc | Ship::CiLog | Ship::Resolve)
+        matches!(self, Ship::Full | Ship::AgentPr { .. } | Ship::PrDesc | Ship::PrRebase | Ship::CiLog | Ship::Resolve)
     }
 }
 

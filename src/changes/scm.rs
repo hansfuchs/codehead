@@ -1686,6 +1686,26 @@ mod tests {
         v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         let all = draw(&mut v, 140, 30).join("\n");
         assert!(all.contains("codehead#1234") && all.contains("update PR description") && !all.contains("create PR"), "{all}");
+        // update PR on the newest main: uncommitted files → 0 sub-thread; a clean tree → the task
+        let up = v.ship_rows().iter().position(|r| r.label == "update PR on the newest main").unwrap();
+        assert!(v.ship_rows()[up].agent && v.ship_rows()[up].group == super::super::ShipGroup::Pr);
+        for _ in 0..up {
+            v.key(j);
+        }
+        v.key(enter);
+        assert!(matches!(v.key(enter), Act::Toast(t) if t.contains("uncommitted")));
+        let files = std::mem::take(&mut v.changes.files);
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        for _ in 0..up {
+            v.key(j);
+        }
+        v.key(enter);
+        match v.key(enter) {
+            Act::Sub(t) => assert!(t.contains("git rebase origin/main") && t.contains("--force-with-lease origin task/x") && t.contains("`task/x`"), "{t}"),
+            a => panic!("{a:?}"),
+        }
+        v.changes.files = files;
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
         let desc = v.ship_rows().iter().position(|r| r.label == "update PR description").unwrap();
         for _ in 0..desc {
             v.key(j);
