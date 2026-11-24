@@ -1,5 +1,5 @@
 //! `codehead --cost <thread>`: the cost pane of the thread view (bottom right).
-//! Scoped to 1 thread: per agent tokens, $, ctx, last-hour sparkline, then the plan limits.
+//! Scoped to 1 thread: per agent tokens, $, a context line, then the plan limits (line bars).
 //! Sources: the thread's event log (turn ends), the host's live agents, `limits.json`.
 
 use std::collections::HashMap;
@@ -15,7 +15,7 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::{agents, theme};
 
-/// The last-hour sparkline moves with the clock: 1 read per CLOCK without a log change.
+/// The plan windows' resets move with the clock: 1 read per CLOCK without a log change.
 const CLOCK: Duration = Duration::from_secs(30);
 const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -27,8 +27,6 @@ struct AgentRow {
     usd: f64,
     /// Context fill of the agent's latest session, percent.
     ctx: Option<u64>,
-    /// Last hour, (unix time, tokens).
-    samples: Vec<(u64, u64)>,
     live: bool,
     /// Saved in the agent prompt, else the stable pool pick (agents::sprite).
     sprite: Option<crate::sprites::Sprite>,
@@ -191,7 +189,6 @@ fn fetch(id: &str, names: &Names) -> Snap {
     let Some(t) = crate::engine::store::load(id) else { return Snap::default() };
     let (_, busy) = if crate::engine::client::alive(&t.id) { crate::engine::client::state(&t.id) } else { Default::default() };
     let status = if busy.is_empty() { t.state.clone() } else { format!("working: {}", busy.join(", ")) };
-    let hour = now().saturating_sub(3600);
     let mut snap = Snap { found: true, status, ..Default::default() };
     for u in uses(&t.id) {
         snap.cost += u.usd;
@@ -208,7 +205,6 @@ fn fetch(id: &str, names: &Names) -> Snap {
             tokens: u.input + u.output,
             usd: u.usd,
             ctx: u.ctx.filter(|c| c.1 > 0).map(|(used, size)| used * 100 / size),
-            samples: u.samples.into_iter().filter(|(at, _)| *at > hour).collect(),
             live: u.live,
             ctx_tokens: u.ctx.map_or(0, |c| c.0),
             usd_per_token: u.usd_per_token,
@@ -226,23 +222,6 @@ pub fn human(v: u64) -> String {
         1_000..1_000_000 => format!("{:.1}k", v as f64 / 1e3),
         _ => format!("{:.1}M", v as f64 / 1e6),
     }
-}
-
-/// WIDTH buckets over the last hour; empty bucket = "·".
-fn spark(samples: &[(u64, u64)], width: usize, now: u64) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let mut b = vec![0u64; width];
-    let start = now.saturating_sub(3600);
-    for &(at, tok) in samples {
-        if at > start {
-            let i = (((at - start) as usize) * width / 3600).min(width - 1);
-            b[i] += tok;
-        }
-    }
-    let max = b.iter().copied().max().unwrap_or(0).max(1);
-    b.iter().map(|&v| if v == 0 { '·' } else { SPARK[((v * 7) / max) as usize] }).collect()
 }
 
 /// Short name of plan window W: `five_hour` → `5h`, `seven_day` → `7d`, `seven_day_opus` → `7d opus`.
@@ -286,20 +265,24 @@ fn next_cost(s: &Snap, n: &Next) -> Option<(u64, f64)> {
     Some((tok, usd))
 }
 
-/// Window L as a bar of WIDTH cells: the used % a solid bg, the share of the next message `▒`,
-/// the rest dithered (`░`).
+/// Window L as a line bar of WIDTH cells: the used % `━` in text, caution / error near the limit,
+/// the share of the next message `━` in info.
 fn bar(pct: f64, next: f64, width: usize) -> Vec<Span<'static>> {
-    // used: the line gray (dimmer than text), caution / error near the limit
-    let col = if pct >= 90.0 { theme::pal().error() } else if pct >= 70.0 { theme::pal().caution() } else { theme::pal().overlay0 };
+    let col = if pct >= 90.0 { theme::pal().error() } else if pct >= 70.0 { theme::pal().caution() } else { theme::pal().text };
+    line_bar(pct, next, width, theme::fg(col))
+}
+
+/// A line bar of WIDTH cells: PCT % `━` in USED, the next SHARE % `━` in info, the rest `─`.
+fn line_bar(pct: f64, share: f64, width: usize, used_style: Style) -> Vec<Span<'static>> {
     let cells = |p: f64| ((p.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
     let used = cells(pct).min(width);
     // a share > 0: 1 cell at least (visible)
-    let share = if next > 0.0 { cells(next).max(1).min(width - used) } else { 0 };
+    let share = if share > 0.0 { cells(share).max(1).min(width - used) } else { 0 };
     let rest = width - used - share;
     vec![
-        Span::styled(" ".repeat(used), Style::default().bg(col)),
-        Span::styled("▒".repeat(share), theme::fg(theme::pal().info())),
-        Span::styled("░".repeat(rest), theme::line()),
+        Span::styled("━".repeat(used), used_style),
+        Span::styled("━".repeat(share), theme::fg(theme::pal().info())),
+        Span::styled("─".repeat(rest), theme::line()),
     ]
 }
 
@@ -410,10 +393,9 @@ fn draw_at(buf: &mut Buffer, area: Rect, s: &Snap, age: Duration, now: u64, next
         return;
     }
     let name_w = s.agents.iter().map(|a| a.name.chars().count()).max().unwrap_or(3).max(3) + 1;
-    // name, tok 7, $ 9, ctx 5, spark rest
-    let fixed = name_w + 7 + 9 + 5 + 2;
-    let spark_w = w.saturating_sub(fixed);
-    let head = format!("{:name_w$}{:>7}{:>9}{:>5}  {}", "", "tok", "$", "ctx", if spark_w >= 9 { "last hour" } else { "" });
+    // name, tok 7, $ 9, 2, ctx line rest, 1, ctx % 4 (the last-hour sparkline: the ctrl+p tokens tab)
+    let ctx_w = w.saturating_sub(name_w + 7 + 9 + 2 + 1 + 4);
+    let head = format!("{:name_w$}{:>7}{:>9}  {}", "", "tok", "$", if ctx_w > 0 { "context" } else { "" });
     if compact {
         // the thread cost right of the column names
         let room = w.saturating_sub(head.trim_end().chars().count());
@@ -425,16 +407,22 @@ fn draw_at(buf: &mut Buffer, area: Rect, s: &Snap, age: Duration, now: u64, next
     }
     for a in &s.agents {
         // live session: bold name
-        let name = Style::default().fg(agents::color(a.color.as_deref()));
-        let name = if a.live { name.add_modifier(ratatui::style::Modifier::BOLD) } else { name };
-        lines.push(Line::from(vec![
+        let color = Style::default().fg(agents::color(a.color.as_deref()));
+        let name = if a.live { color.add_modifier(ratatui::style::Modifier::BOLD) } else { color };
+        let mut spans = vec![
             Span::styled(format!("{:name_w$}", a.name), name),
             Span::styled(format!("{:>7}", human(a.tokens)), theme::text()),
             Span::styled(format!("{:>9}", format!("${:.2}", a.usd)), theme::text()),
-            Span::styled(format!("{:>5}", a.ctx.map_or("·".into(), |c| format!("{c}%"))), theme::text()),
             Span::raw("  "),
-            Span::styled(spark(&a.samples, spark_w, now), theme::fg(theme::pal().info())),
-        ]));
+        ];
+        // the context line: ━ the context tokens over the model's window, the agent's color
+        // (dim: 0 live session, error: ≥ 90 %)
+        let pct = a.ctx.unwrap_or(0) as f64;
+        let fill = if pct >= 90.0 { theme::fg(theme::pal().error()) } else { color };
+        let fill = if a.live { fill } else { fill.add_modifier(ratatui::style::Modifier::DIM) };
+        spans.extend(line_bar(pct, 0.0, ctx_w, fill));
+        spans.push(Span::styled(format!(" {:>4}", a.ctx.map_or("·".into(), |c| format!("{c}%"))), theme::muted()));
+        lines.push(Line::from(spans));
     }
     if s.agents.len() != 1 {
         lines.push(Line::from(vec![
@@ -536,8 +524,8 @@ fn names() -> Names {
 
 fn run_loop(term: &mut DefaultTerminal, id: &str) -> std::io::Result<()> {
     let names = names();
-    // the log's changes come from the watcher (0 stat poll); the last-hour sparkline moves with
-    // the clock: 1 read per CLOCK anyway
+    // the log's changes come from the watcher (0 stat poll); the windows' resets move with the
+    // clock: 1 read per CLOCK anyway
     crate::watch::start();
     let topics = crate::bus::subscribe();
     let mut snap = fetch(id, &names);
@@ -619,12 +607,6 @@ mod tests {
         assert_eq!(human(12_812_803), "12.8M");
     }
 
-    #[test]
-    fn sparks() {
-        assert_eq!(spark(&[], 4, 3600), "····");
-        assert_eq!(spark(&[(3599, 10), (100, 5)], 4, 3600), "▄··█");
-    }
-
     /// Live check: CODEHEAD_THREAD=<id> cargo test live_fetch -- --ignored --nocapture
     #[test]
     #[ignore]
@@ -652,7 +634,7 @@ mod tests {
             cache_write: 534_032,
             turns: 9,
             agents: vec![
-                AgentRow { name: "amon".into(), color: Some("orange".into()), tokens: 98_000, usd: 26.87, ctx: Some(19), samples: vec![(now - 60, 500)], live: true, sprite: Some(crate::sprites::default_for("amon")), ctx_tokens: 38_000, usd_per_token: 0.000_01 },
+                AgentRow { name: "amon".into(), color: Some("orange".into()), tokens: 98_000, usd: 26.87, ctx: Some(19), live: true, sprite: Some(crate::sprites::default_for("amon")), ctx_tokens: 38_000, usd_per_token: 0.000_01 },
                 AgentRow { name: "lilith".into(), tokens: 92, usd: 1.6, ..Default::default() },
             ],
             limits: vec![
@@ -687,11 +669,24 @@ mod tests {
         assert!(first.contains("tok") && first.ends_with("$28.47 thread"), "{text}");
         assert!(text.contains("$26.87") && !text.contains("9 turns"), "{text}");
         assert!(!text.contains("q close") && !text.contains("◆"), "{text}");
-        // the bars: used part solid (bg), the next message's share ▒, the rest dithered ░
+        // amon's context line: ━ in amon's color up to 19 %, ─ rest, the % after it
+        let row = text.lines().position(|l| l.starts_with(" amon")).expect("amon row");
+        let cells: Vec<_> = (0..w).map(|x| b[(x, row as u16)].clone()).collect();
+        let amon = agents::color(Some("orange"));
+        let fill = cells.iter().filter(|c| c.symbol() == "━" && c.fg == amon).count();
+        let rest = cells.iter().filter(|c| c.symbol() == "─").count();
+        assert!(fill > 0 && rest > fill * 3, "{text}");
+        assert!(text.lines().nth(row).unwrap().ends_with(" 19%"), "{text}");
+        // lilith: 0 context yet, all ─
+        assert!(text.lines().any(|l| l.starts_with(" lilith") && l.contains('─') && !l.contains('━') && l.ends_with('·')), "{text}");
+        // the window bars: used ━ in text (7d: error from 90 %), the next message's share ━ in info, ─ rest
         let row = text.lines().position(|l| l.starts_with(" 5h")).expect("5h row");
         let cells: Vec<_> = (0..w).map(|x| b[(x, row as u16)].clone()).collect();
-        assert!(cells.iter().any(|c| c.symbol() == " " && c.bg == theme::pal().overlay0), "used part");
-        assert!(text.lines().nth(row).unwrap().contains('▒') && text.contains('░'), "{text}");
+        assert!(cells.iter().any(|c| c.symbol() == "━" && c.fg == theme::pal().text), "used part: {text}");
+        assert!(cells.iter().any(|c| c.symbol() == "━" && c.fg == theme::pal().info()), "share: {text}");
+        assert!(cells.iter().any(|c| c.symbol() == "━" && c.fg == theme::pal().error()), "7d near the limit: {text}");
+        assert!(cells.iter().any(|c| c.symbol() == "─"), "rest: {text}");
+        assert!(!text.contains('░') && !text.contains('▒'), "{text}");
         // the windows side by side: 5h and 7d on 1 row
         assert!(text.lines().nth(row).unwrap().contains(" 7d "), "{text}");
         // the next message: ≥ context + text tokens, $, share per window (0 rate: ?)
