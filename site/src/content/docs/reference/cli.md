@@ -9,6 +9,7 @@ codehead [-a agent[,agent…]] [-b branch] [-c] [-n] [title...]
 codehead --view <thread>
 codehead --cost <thread>
 codehead ctl <thread> '<json>'
+codehead setup [--dry]
 codehead --version
 codehead --update
 ```
@@ -24,6 +25,7 @@ codehead --update
 | `--view <thread>` | the thread view of a thread (id or a unique prefix) |
 | `--cost <thread>` | the cost box of a thread, full screen |
 | `ctl <thread> '<json>'` | 1 command to a thread's host, see [threads](/docs/concepts/threads/#scripting) |
+| `setup [--dry]` | the setup wizard, full screen: harnesses, home repo, crew, a tutorial in a sandbox (scripted agents, 0 tokens; your threads, agents and settings stay untouched), next steps. `--dry`: every screen, 0 writes |
 | `-V`, `--version` | print the version |
 | `--update` | install the latest release with the install script |
 | `-h`, `--help` | full help, with every key |

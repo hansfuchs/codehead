@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The favicon: the website's monolith (site/public/monolith.json) at an angle, its top with
-the coral eyes, cropped 1:1, as an SVG of dots on the paper color.
+the lavender eyes (the accent), cropped 1:1, as an SVG of dots on the paper color.
 
 favicon.py [frame] [pattern] [step] > site/public/favicon.svg
   frame:   turn step of the monolith (0..20, default 15)
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 DATA = Path(__file__).resolve().parents[1] / "site/public/monolith.json"
-BG, INK, CORAL = "#150700", (0xE3, 0xD2, 0xBE), "#FF7565"
+BG, INK, CORAL = "#140700", (0xE8, 0xE4, 0xF6), "#B8A6FF"
 # tone digit → ink share (global.css .s0-.s5)
 TONE = {"0": 0.22, "1": 0.34, "2": 0.48, "3": 0.64, "4": 0.82, "5": 1.0}
 # braille dot bit → (dx, dy) in the 2x4 cell
@@ -21,7 +21,7 @@ BITS = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2), (0, 3), (1, 3)]
 
 
 def ink(share: float) -> str:
-    bg = (0x15, 0x07, 0x00)
+    bg = (0x14, 0x07, 0x00)
     r, g, b = (round(bg[i] + (INK[i] - bg[i]) * share) for i in range(3))
     return f"#{r:02x}{g:02x}{b:02x}"
 
@@ -46,7 +46,7 @@ def main():
             for bit, (dx, dy) in enumerate(BITS):
                 if c >> bit & 1:
                     dots[(x * 2 + dx, y * 4 + dy)] = col
-    # every eye dot lit: the dots each eye glyph adds turn coral
+    # every eye dot lit: the dots each eye glyph adds turn lavender
     for eye in f["e"]:
         for cell, ch in eye:
             x, y = cell % cols, cell // cols

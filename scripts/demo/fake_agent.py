@@ -2,7 +2,8 @@
 """Fake harness for the demo recordings: plays scripted turns, 0 model calls.
 
 Run as `claude` (any args): Claude Code's stream-json protocol on stdin / stdout.
-Run under any other name (`codex-acp`, `opencode acp`, ...): the Agent Client Protocol.
+Run as `codex app-server`: the Codex app server protocol (JSON-RPC, item/* notifications).
+Run under any other name (`opencode acp`, `goose acp`, ...): the Agent Client Protocol.
 
 Script: $DEMO_SCRIPT, a JSON file {agent: {"model": ..., "turns": [turn, ...]}}. A turn is
 {"match": regex (optional), "steps": [step, ...], "usage": {...} (optional)}. Each prompt to
@@ -374,10 +375,128 @@ class Acp:
                 "cachedReadTokens": u.get("cache_read", self.ctx), "cachedWriteTokens": 0, "totalTokens": self.ctx}}})
 
 
+# ---------------------------------------------------------------- Codex app server
+class Codex(Acp):
+    """`codex app-server`: JSON-RPC on stdio (src/engine/codex.rs). initialize → thread/start →
+    turn/start; a turn streams item/* notifications and ends with turn/completed."""
+
+    def __init__(self):
+        super().__init__()
+        self.tid = None
+        self.turn_id = None
+
+    def send(self, v):
+        emit(v)
+
+    def read(self):
+        for line in sys.stdin:
+            try:
+                v = json.loads(line)
+            except ValueError:
+                continue
+            m = v.get("method")
+            if m is None:
+                with self.cv:
+                    self.pending[v.get("id")] = v.get("result") or {}
+                    self.cv.notify_all()
+            elif m == "initialize":
+                self.send({"id": v["id"], "result": {"userAgent": "codex-demo"}})
+            elif m in ("thread/start", "thread/resume", "thread/fork"):
+                self.tid = v["params"].get("threadId") or "thr_" + uuid.uuid4().hex[:16]
+                self.send({"id": v["id"], "result": {"model": self.model, "thread": {"id": self.tid}}})
+            elif m == "turn/start":
+                text = " ".join(b.get("text", "") for b in v["params"].get("input", []))
+                self.turn_id = "turn_" + uuid.uuid4().hex[:12]
+                self.send({"id": v["id"], "result": {"turn": {"id": self.turn_id}}})
+                self.prompts.put((self.turn_id, text))
+            elif m == "turn/interrupt":
+                self.cancel.set()
+                self.send({"id": v["id"], "result": {}})
+                with self.cv:
+                    self.cv.notify_all()
+            elif "id" in v:
+                self.send({"id": v["id"], "result": {}})
+        os._exit(0)
+
+    def note(self, method, params):
+        self.send({"method": method, "params": params})
+
+    def item(self, name, inp):
+        """A scripted tool → an app server item (started)."""
+        iid = "item_" + uuid.uuid4().hex[:12]
+        if name in ("Edit", "Write"):
+            path = inp.get("file_path", "")
+            return {"type": "fileChange", "id": iid, "status": "inProgress", "changes": [{"path": path, "kind": {"type": "update"}, "diff": ""}]}
+        if name.startswith("mcp__"):
+            _, server, tool = name.split("__", 2)
+            return {"type": "mcpToolCall", "id": iid, "status": "inProgress", "server": server, "tool": tool, "arguments": inp}
+        cmd = inp.get("command") or {"Read": "cat", "Grep": "rg", "Glob": "ls"}.get(name, name) + " " + str(inp.get("file_path") or inp.get("pattern") or inp.get("path") or "")
+        return {"type": "commandExecution", "id": iid, "status": "inProgress", "command": cmd.strip(), "cwd": os.getcwd()}
+
+    def tool(self, name, inp, output, ok=True, ms=800, ask=False):
+        it = self.item(name, inp)
+        self.note("item/started", {"item": it, "threadId": self.tid, "turnId": self.turn_id})
+        if ask and it["type"] == "commandExecution":
+            r = self.request("item/commandExecution/requestApproval", {"itemId": it["id"], "threadId": self.tid, "turnId": self.turn_id, "command": it["command"], "cwd": it["cwd"]})
+            if r.get("decision") not in ("accept", "acceptForSession"):
+                self.note("item/completed", {"item": dict(it, status="declined")})
+                return
+        self.sleep(ms / 1000)
+        if callable(output):
+            output = output(inp)
+        done = dict(it, status="completed" if ok else "failed")
+        if it["type"] == "commandExecution":
+            done.update(exitCode=0 if ok else 1, aggregatedOutput=output)
+        elif it["type"] == "fileChange":
+            done["changes"] = [dict(done["changes"][0], diff=output)]
+        else:
+            done["result"] = {"content": [{"type": "text", "text": output}]}
+        self.note("item/completed", {"item": done})
+        self.ctx += len(output) // 4
+
+    def step(self, s):
+        if "think" in s:
+            self.sleep(s.get("ms", 600) / 1000)
+            self.note("item/completed", {"item": {"type": "reasoning", "id": "r_" + uuid.uuid4().hex[:8], "summary": [s["think"]], "content": []}})
+        elif "say" in s:
+            iid = "msg_" + uuid.uuid4().hex[:8]
+            for part, pause in chunks(s["say"], s.get("cps", 260)):
+                self.note("item/agentMessage/delta", {"itemId": iid, "delta": part})
+                self.sleep(pause)
+            self.note("item/completed", {"item": {"type": "agentMessage", "id": iid, "text": s["say"]}})
+            self.ctx += len(s["say"]) // 3
+        else:
+            super().step(s)
+
+    def run(self):
+        threading.Thread(target=self.read, daemon=True).start()
+        while True:
+            tid, text = self.prompts.get()
+            self.cancel.clear()
+            self.note("turn/started", {"turn": {"id": tid}})
+            t = next_turn(text)
+            status, error = "completed", None
+            t0 = time.time()
+            try:
+                self.sleep(t.get("delay", 0.8))
+                for s in t["steps"]:
+                    self.step(s)
+            except Cancelled:
+                status = "interrupted"
+            except Failed as f:
+                status, error = "failed", {"message": str(f)}
+            u = t.get("usage", {})
+            last = {"inputTokens": u.get("input", 2100) + self.ctx, "cachedInputTokens": self.ctx, "outputTokens": u.get("output", 1900), "totalTokens": self.ctx}
+            self.note("thread/tokenUsage/updated", {"tokenUsage": {"total": last, "last": last, "modelContextWindow": ME.get("window", 272000)}})
+            self.note("turn/completed", {"turn": {"id": tid, "status": status, "error": error, "durationMs": int((time.time() - t0) * 1000)}})
+
+
 if __name__ == "__main__":
     try:
         if os.path.basename(sys.argv[0]) == "claude":
             Claude().run()
+        elif os.path.basename(sys.argv[0]) == "codex" and "app-server" in sys.argv[1:]:
+            Codex().run()
         else:
             Acp().run()
     except BrokenPipeError:

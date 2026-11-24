@@ -50,6 +50,7 @@ Rules on every screen:
 | `enter` on **+ add** (menu: add path alias) / `d`, `ctrl+d` | settings: add / remove an alias |
 | `ctrl+d`, click `↺` | settings: the field back to its default |
 | `ctrl+f` | settings → mcp servers, notes, threads, agents, flows: filter |
+| `n` · `r` · `d d` | settings → shortcuts: new · rename · delete; `enter` edits the text, `ctrl+s` saves |
 
 ## Thread view
 
@@ -64,6 +65,8 @@ Rules on every screen:
 | `ctrl+r` (shell mode) | search the thread's commands and your shell history (fzf, else a built-in fuzzy filter): the best match at the bottom, right above the prompt; `↑` / `ctrl+r` worse matches, `↓` better ones, `enter` / `tab` take it, `esc` closes |
 | `↑` `↓` | a question open: its choices; else sent messages (an empty prompt too: shell commands only in shell mode) |
 | a path (`src/`, `~/x/`, `/usr/`) | a dropdown of that dir's entries; a name with a space gets a `"` in front (a file: one after it too), the dropdown goes on inside the quote |
+| `#` | a dropdown of your [shortcuts](/docs/concepts/shortcuts/), a 2nd box with the text: `↑` `↓` preview it in place, `tab` / `enter` take the text; a `#name` left in the prompt expands on send |
+| `>sub <task>` | a [sub-thread](/docs/concepts/threads/#sub-threads) does the task (0 history, same checkout); the thread waits for its result. Sub-threads row: a click opens the box, `d` stops one |
 | `1`-`9`, `space` | a question: pick (several: toggle); letters: the **Other** answer |
 | a new question | takes the keys only on an empty prompt after 1 s of 0 keys; else it waits for `tab` (0 typed key answers it by surprise). `tab` with an `@` / `#` / path dropdown open: completes there |
 | `←` `→` | a question with several parts: previous / next part |

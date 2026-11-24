@@ -17,6 +17,8 @@ export const nav: { label: string; items: { slug: string; label: string }[] }[] 
       { slug: 'concepts/agents', label: 'Agents' },
       { slug: 'concepts/messaging', label: 'Agents together' },
       { slug: 'concepts/thread-view', label: 'Thread view' },
+      { slug: 'concepts/review', label: 'Review' },
+      { slug: 'concepts/shortcuts', label: 'Shortcuts' },
       { slug: 'concepts/flows', label: 'Flows' },
       { slug: 'concepts/notes', label: 'Notes and aliases' },
     ],

@@ -140,3 +140,19 @@ codehead adds exact facts (branch, directory, ports, uncommitted files, last com
 thread keeps the worktree, branch, ports and agents, starts fresh sessions (any harness), and
 opens with the document as its prompt draft: edit it, add the next goal, send. `thread.json`
 `parent` names the old thread.
+
+## Sub-threads
+
+A side question should not fill the thread's history. `>sub <task>` hands it to a sub-thread:
+0 history of the thread, the same checkout, the same branch and ports. The task takes
+`@names` (else the agents your last message went to), `#shortcuts` and any text:
+
+```text
+>sub @HAL why does retry.rs cap at 30 min? 1 paragraph.
+```
+
+While a sub-thread runs, the thread waits: your messages to its agents are held, the
+sub-threads row above the subagents row shows each run (a click: its agents, its time, its
+last steps; `d` stops it). At its end, the sub-thread posts its result into the thread as 1
+message, deletes itself and the held messages go out. A sub-thread gets 0 row of its own in the
+threads list.

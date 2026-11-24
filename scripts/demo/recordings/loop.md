@@ -86,7 +86,13 @@ sleep 2
 shot fixed
 # wide: the changes left, the chat right. esc (0 agents at work) gives the keys to the changes
 key esc
-sleep 1.5
+sleep 1
+# the branch's commits: the panel's "all changes" row (the default view: uncommitted only)
+click 'all changes'
+sleep 1.2
+# the keys to the review: a click on the migration's box head
+click 'migrations/0009_endpoint_disabled\.sql'
+sleep 0.8
 shot changes
 type "n"
 sleep 0.6
@@ -103,7 +109,7 @@ sleep 0.8
 key ctrl+enter
 wait 'is an enum now' 60
 sleep 1.5
-type "r"
+type "v"
 sleep 2.5
 shot end
 ```

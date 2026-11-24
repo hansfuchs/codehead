@@ -21,16 +21,16 @@ HERE = Path(__file__).resolve().parent
 H = "/home/dev"  # the home folder as the recording sees it
 
 AGENTS = {
-    "EVA": dict(harness="claude", model="opus", effort="high", mode="autopilot", color="red", style="mecha",
-                voice="Short, exact, numbers first.", sprite="regi:45",
+    "EVA": dict(harness="claude", model="opus", effort="high", mode="autopilot", color="lavender", style="mecha",
+                voice="Short, exact, numbers first.", sprite="regi:47",
                 prompt="Run the tests before you report done. Small commits, 1 concern each."),
-    "HAL": dict(harness="codex", model="gpt-5.5", effort="high", mode="autopilot", color="blue",
-                 voice="Reviewer. Name the risk, the file and the line.", sprite="regi:40",
+    "HAL": dict(harness="codex", model="gpt-5.5", effort="high", mode="autopilot", color="glacier",
+                 voice="Reviewer. Name the risk, the file and the line.", sprite="geob:20",
                  prompt="You review diffs. Block on correctness, nit on style."),
-    "DMON": dict(harness="claude", model="sonnet", effort="medium", mode="supervised", color="purple",
-                 voice="Database person. Careful with migrations.", sprite="regi:30 eyes=11 speed=0.5",
+    "DMON": dict(harness="claude", model="sonnet", effort="medium", mode="supervised", color="orchid",
+                 voice="Database person. Careful with migrations.", sprite="regi:48 speed=0.5",
                  prompt="Plan schema changes. Never run a migration on production unasked."),
-    "ENOCH": dict(harness="opencode", model="kimi-k2", mode="autopilot", color="green", sprite="regi:61",
+    "ENOCH": dict(harness="opencode", model="kimi-k2", mode="autopilot", color="sage", sprite="geob:27",
                 voice="Fast, pragmatic.", prompt="Finish what others started. Keep their style."),
 }
 
@@ -289,7 +289,8 @@ def build(root: Path, script: dict, threads: list | None = None, config: dict | 
            "classify": "off", "rank": "off", "review": "off"}
     cfg.update(config or {})
     lines = [f"{k} = {json.dumps(v)}" for k, v in cfg.items() if not isinstance(v, dict)]
-    lines += ["", "[colors]", 'scheme = "coral"', "", "[aliases]", f'"payd:notes" = "{H}/notes/"']
+    # the default scheme: lavender on warm paper, as codehead.sh
+    lines += ["", "[colors]", 'scheme = "lavender"', "", "[aliases]", f'"payd:notes" = "{H}/notes/"']
     write(home / ".config/codehead.toml", "\n".join(lines) + "\n")
 
     for name, a in AGENTS.items():

@@ -27,8 +27,8 @@ FALLBACKS = [
 ]
 
 # Default colors of the recording terminal: the paper and ink of codehead.sh.
-BG = (21, 7, 0)
-FG = (227, 210, 190)
+BG = (20, 7, 0)
+FG = (232, 228, 246)
 # 16 ANSI colors: Ghostty's default palette.
 ANSI = [
     (0x1D, 0x1F, 0x21), (0xCC, 0x66, 0x66), (0xB5, 0xBD, 0x68), (0xF0, 0xC6, 0x74),
