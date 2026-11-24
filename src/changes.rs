@@ -551,6 +551,89 @@ impl Op {
     }
 }
 
+/// The base branch for `gh pr create --base`: BASE without its remote (`origin/main` → `main`).
+fn base_branch(base: &str) -> &str {
+    base.split_once('/').map_or(base, |(_, b)| b)
+}
+
+/// The PR of URL as `repo#N` (`https://github.com/o/codehead/pull/12` → `codehead#12`).
+pub fn pr_label(p: &Pr) -> String {
+    let repo = p.url.split('/').nth(4).filter(|r| !r.is_empty());
+    match repo {
+        Some(r) => format!("{r}#{}", p.number),
+        None => format!("#{}", p.number),
+    }
+}
+
+/// The ship menu's place: right of the source control panel PANEL (its top), else left of it
+/// at the right edge, else (0 panel, too narrow) centered in AREA.
+fn ship_rect(area: Rect, panel: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(area.width);
+    let y = if panel.height > 0 { panel.y + 1 } else { area.y + area.height / 4 };
+    let y = y.min(area.bottom().saturating_sub(h));
+    let x = if panel.width == 0 {
+        area.x + (area.width - w) / 2
+    } else if panel.right() + w <= area.right() {
+        panel.right()
+    } else {
+        area.right() - w
+    };
+    Rect { x, y, width: w, height: h }
+}
+
+/// The ship menu's "create PR" (DRAFT: as a draft): the task of its sub-thread.
+fn pr_task(base: &str, draft: bool) -> String {
+    let b = base_branch(base);
+    let kind = if draft { "a draft pull request (`--draft`)" } else { "a pull request" };
+    format!(
+        "Open {kind} for this branch against `{b}`.\n\n\
+         1. Push the commits already made: `git push -u origin HEAD`. Never commit, stage, stash or discard: uncommitted changes stay as they are, out of the PR.\n\
+         2. Read the branch's commits and diff against `{base}` (`git log {base}..HEAD`, `git diff {base}...HEAD`).\n\
+         3. Title: imperative, max. 72 chars, in the repo's commit style. Body: what changed and why, how it was tested. The repo has a PR template (`.github/pull_request_template.md` or similar): fill it in.\n\
+         4. `gh pr create --base {b}{d} --title \"…\" --body-file -` (the body on stdin).\n\n\
+         End with the PR's URL as your last line.",
+        d = if draft { " --draft" } else { "" }
+    )
+}
+
+/// The ship menu's "update PR description": the task of its sub-thread.
+fn pr_desc_task(p: &Pr) -> String {
+    let n = p.number;
+    format!(
+        "Update the title and the description of pull request {label} ({url}) where they no longer match its changes.\n\n\
+         1. Read the PR's title, body and full diff: `gh pr view {n} --json title,body,baseRefName`, `gh pr diff {n}`.\n\
+         2. Rewrite only what is wrong or missing: keep what still holds, keep the template's sections. Title: imperative, max. 72 chars.\n\
+         3. `gh pr edit {n} --title \"…\" --body-file -` (only when a change is needed).\n\n\
+         Change no code, make no commit. End with what changed (title / body), or \"title and body match the changes: 0 edits\".",
+        label = pr_label(p),
+        url = p.url
+    )
+}
+
+/// The ship menu's "ship": the task of its sub-thread; the state of the branch now along, so
+/// the agent skips the steps done.
+fn ship_task(c: &Changes, pr: Option<&Pr>) -> String {
+    let b = base_branch(&c.base);
+    let unpushed = c.commits.list.iter().filter(|x| !x.pushed).count();
+    let pr_now = match pr {
+        Some(p) => format!("open: {} ({}), checks ✓{} ✗{} ●{}", pr_label(p), p.url, p.pass, p.fail, p.pending),
+        None => "none".into(),
+    };
+    format!(
+        "Ship this branch: do each step in order, skip each step already done.\n\n\
+         State now: {files} uncommitted file(s), {unpushed} unpushed commit(s), {ahead} commit(s) ahead of `{base}`, pull request: {pr_now}.\n\n\
+         1. Commit: the uncommitted changes as commits in the repo's commit style (1 commit per topic). Leave out files that do not belong (secrets, local config, scratch).\n\
+         2. Push: `git push -u origin HEAD`.\n\
+         3. Pull request: open one against `{b}` if none exists (`gh pr create --base {b} --title \"…\" --body-file -`; fill in the repo's PR template).\n\
+         4. Review: read the full PR diff as a reviewer, find correctness bugs. Fix the real ones, commit, push. Then bring the PR's title + body up to date.\n\
+         5. CI: `gh pr checks --watch`. A check fails: read its log (`gh run view <id> --log-failed`), fix the cause, commit, push, watch again. Repeat until every check passes.\n\n\
+         Never merge the pull request. End with the PR's URL and the checks' state.",
+        files = c.files.len(),
+        ahead = c.ahead,
+        base = c.base
+    )
+}
+
 /// `src/a.rs` / `3 files`.
 fn files_label(p: &[String]) -> String {
     if p.len() == 1 { p[0].clone() } else { format!("{} files", p.len()) }
@@ -1042,6 +1125,8 @@ pub enum Act {
     Toast(String),
     /// Send this text to the thread (the review comments batch).
     Send(String),
+    /// A sub-thread of the thread does this task (`>sub TASK`; the ship menu's agent steps).
+    Sub(String),
     /// The chat above the prompt: open / folded.
     ToggleChat,
     /// The view on the checkout at this root (its comments).
@@ -3146,19 +3231,20 @@ impl View {
         Act::None
     }
 
-    /// The ship menu's rows: the steps valid now (a stopped rebase: only its steps).
+    /// The ship menu's rows: the steps valid now (a stopped rebase: only its steps), by section.
     fn ship_rows(&self) -> Vec<ShipRow> {
-        let row = |step, label: String, state: String, asks| ShipRow { step, label, state, asks };
+        let row = |step: Ship, label: String, state: String, asks| ShipRow { group: step.group(), agent: step.agent(), step, label, state, asks };
         let c = &self.changes;
         if let Some(files) = &c.stopped {
             return vec![
-                row(Ship::Resolve, "the agents resolve the conflicts".into(), format!("{} conflicts", files.len()), false),
+                row(Ship::Resolve, "resolve the conflicts".into(), format!("{} conflicts", files.len()), false),
                 row(Ship::Continue, "continue the rebase".into(), "git rebase --continue".into(), true),
                 row(Ship::Abort, "abort the rebase".into(), "the branch as before".into(), true),
             ];
         }
 
-        let mut v = vec![row(Ship::Push, "push".into(), format!("{} ahead of {}", c.ahead, c.base), true)];
+        let mut v = vec![row(Ship::Full, "ship: commit, push, PR, review, CI green".into(), "sub-thread".into(), true)];
+        v.push(row(Ship::Push, "push".into(), format!("{} ahead of {}", c.ahead, c.base), true));
         if let Some((top, n)) = self.push_pick() {
             v.push(row(Ship::PushTo, format!("push up to {} (picked)", top.short), format!("{n} commit{}", if n == 1 { "" } else { "s" }), false));
         }
@@ -3166,8 +3252,13 @@ impl View {
             v.push(row(Ship::Update, format!("fetch + rebase on {}", c.base), format!("{} behind", c.behind), true));
         }
         match &self.pr {
-            None => v.push(row(Ship::OpenPr, "push + open the pull request".into(), "gh pr create --fill".into(), true)),
+            None => {
+                v.push(row(Ship::AgentPr { draft: false }, "create PR".into(), "sub-thread".into(), true));
+                v.push(row(Ship::AgentPr { draft: true }, "create PR draft".into(), "sub-thread".into(), true));
+                v.push(row(Ship::OpenPr, "push + open the pull request".into(), "gh pr create --fill".into(), true));
+            }
             Some(p) => {
+                v.push(row(Ship::PrDesc, "update PR description".into(), "sub-thread".into(), true));
                 v.push(row(Ship::Merge, format!("merge PR #{} when its checks pass", p.number), format!("✓{} ✗{} ●{}", p.pass, p.fail, p.pending), true));
                 if p.fail > 0 {
                     v.push(row(Ship::CiLog, "CI failed: the log to the agents".into(), format!("{} failed", p.fail), false));
@@ -3200,6 +3291,22 @@ impl View {
             Ship::Merge => {
                 self.pr_at = None;
                 self.start_op(Op::Merge)
+            }
+            Ship::AgentPr { draft } => {
+                if self.changes.ahead == 0 {
+                    return Act::Toast(format!("0 commits ahead of {}: commit first (uncommitted changes stay out of the PR)", self.changes.base));
+                }
+                self.pr_at = None;
+                Act::Sub(pr_task(&self.changes.base, draft))
+            }
+            Ship::PrDesc => {
+                let Some(p) = self.pr.clone() else { return Act::Toast("0 pull request on this branch".into()) };
+                self.pr_at = None;
+                Act::Sub(pr_desc_task(&p))
+            }
+            Ship::Full => {
+                self.pr_at = None;
+                Act::Sub(ship_task(&self.changes, self.pr.as_ref()))
             }
             Ship::CiLog => {
                 if self.ci.is_some() {
@@ -3419,33 +3526,59 @@ impl View {
                 self.modal_btns.push((Rect { x: row.x + 7, width: 4, ..row }, false));
             }
             Modal::Ship { cur, armed } => {
-                let w = w.min(76);
-                let x = area.x + (area.width.saturating_sub(w)) / 2;
-                let h = (ship_rows.len() as u16 + 4).min(area.height);
-                let r = Rect { x, y: area.y + area.height / 4, width: w, height: h };
-                // a modal: the screen behind it fades
-                theme::dim(f.buffer_mut(), area);
+                // the open PR on top: `codehead#1234` on the accent
+                let head = self.pr.as_ref().filter(|_| self.changes.stopped.is_none()).map(pr_label);
+                let top = u16::from(head.is_some());
+                // a rule between 2 sections
+                let rules = ship_rows.windows(2).filter(|p| p[0].group != p[1].group).count() as u16;
+                let w = w.min(72);
+                let h = (ship_rows.len() as u16 + rules + top + 2).min(area.height);
+                let r = ship_rect(area, self.scm.rect, w, h);
                 f.render_widget(Clear, r);
-                f.render_widget(Block::bordered().border_style(theme::accent()).title(Span::styled(" ship ", theme::accent_bold())).style(theme::text()), r);
-                let inner = Rect { x: r.x + 2, y: r.y + 1, width: w.saturating_sub(4), height: h.saturating_sub(2) };
-                let cur = (*cur).min(ship_rows.len().saturating_sub(1));
-                for (i, row) in ship_rows.iter().enumerate().take(usize::from(inner.height.saturating_sub(2))) {
-                    let on = i == cur;
-                    let state = if on && *armed { format!("enter again: {}", row.label) } else { row.state.clone() };
-                    let state_st = if on && *armed { theme::fg(theme::pal().caution()).add_modifier(Modifier::BOLD) } else { theme::muted() };
-                    let label_w = usize::from(inner.width).saturating_sub(state.width() + 4);
-                    let label = crate::nav::fit(&row.label, label_w);
-                    let gap = usize::from(inner.width).saturating_sub(2 + label.width() + state.width());
-                    let line = Line::from(vec![
-                        Span::styled(if on { "› " } else { "  " }, theme::accent()),
-                        Span::styled(label, if on { theme::accent_bold() } else { theme::text() }),
-                        Span::raw(" ".repeat(gap)),
-                        Span::styled(state, state_st),
-                    ]);
-                    f.render_widget(Paragraph::new(line), Rect { y: inner.y + i as u16, height: 1, ..inner });
+                f.render_widget(Block::bordered().border_type(ratatui::widgets::BorderType::Rounded).border_style(theme::accent()).title(Span::styled(" ship ", theme::accent_bold())).style(theme::text()), r);
+                let inner = Rect { x: r.x + 1, y: r.y + 1, width: r.width.saturating_sub(2), height: r.height.saturating_sub(2) };
+                if let Some(l) = head {
+                    let line = Line::from(vec![Span::styled(format!(" {l} "), theme::pill().add_modifier(Modifier::BOLD))]);
+                    f.render_widget(Paragraph::new(line), Rect { x: inner.x + 1, height: 1, width: inner.width.saturating_sub(1), ..inner });
                 }
-                let hint = Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner };
-                f.render_widget(Paragraph::new(Line::styled("↑↓ · enter: run (push, rebase, PR, merge: enter enter) · esc", theme::muted())), hint);
+                let cur = (*cur).min(ship_rows.len().saturating_sub(1));
+                let mut y = inner.y + top;
+                for (i, row) in ship_rows.iter().enumerate() {
+                    if i > 0 && ship_rows[i - 1].group != row.group {
+                        if y >= inner.bottom() {
+                            break;
+                        }
+                        // ├──┤: the rule joins the border
+                        let buf = f.buffer_mut();
+                        buf[(r.x, y)].set_symbol("├").set_style(theme::accent());
+                        for x in inner.x..inner.right() {
+                            buf[(x, y)].set_symbol("─").set_style(theme::line());
+                        }
+                        buf[(r.right() - 1, y)].set_symbol("┤").set_style(theme::accent());
+                        y += 1;
+                    }
+                    if y >= inner.bottom() {
+                        break;
+                    }
+                    let on = i == cur;
+                    let state = if on && *armed { "enter again".to_string() } else { row.state.clone() };
+                    let state_st = if on && *armed { theme::fg(theme::pal().caution()).add_modifier(Modifier::BOLD) } else { theme::muted() };
+                    let room = usize::from(inner.width).saturating_sub(5);
+                    let label = crate::nav::fit(&row.label, room.saturating_sub(state.width() + 2));
+                    let gap = room.saturating_sub(label.width() + state.width());
+                    let base = if on { theme::pill_dim() } else { theme::text() };
+                    let line = Line::from(vec![
+                        Span::styled(if on { "›" } else { " " }, base.patch(theme::accent())),
+                        // ✦: the step goes to an agent
+                        Span::styled(if row.agent { format!(" {AGENT_GLYPH} ") } else { "   ".into() }, base.patch(theme::accent())),
+                        Span::styled(label, if on { base.add_modifier(Modifier::BOLD) } else { base }),
+                        Span::styled(" ".repeat(gap), base),
+                        Span::styled(state, base.patch(state_st)),
+                        Span::styled(" ", base),
+                    ]);
+                    f.render_widget(Paragraph::new(line), Rect { y, height: 1, ..inner });
+                    y += 1;
+                }
             }
         }
     }
@@ -3587,7 +3720,8 @@ impl View {
         if self.scm.focus && self.scm.msg_focus {
             "commit message · ctrl+⏎: commit the staged files · ctrl+g: draft by model · ↓ pgdn: list · esc: back "
         } else if self.scm.focus {
-            "j k · [ ]: sections · space: pick (on a section: all) · e: IDE · s: stage / unstage · p: stash · → alt: review · x: remove · enter: restore · P: push · S: ship · ctrl+b: review "
+            // the panel: only S, so the ship menu stands out (the panel's keys: README, ? help)
+            "S: ship "
         } else if self.filtering {
             "type to filter · enter: 1st hit · esc: clear "
         } else if self.row_comment(self.at).is_some() {
@@ -4457,6 +4591,12 @@ enum Ship {
     PushTo,
     Update,
     OpenPr,
+    /// The lead opens the pull request in a sub-thread (title + body its own): ready / draft.
+    AgentPr { draft: bool },
+    /// The lead brings the open PR's title + body up to date in a sub-thread.
+    PrDesc,
+    /// The lead ships the branch in a sub-thread: commit, push, PR, review, CI until green.
+    Full,
     Merge,
     CiLog,
     Resolve,
@@ -4464,9 +4604,41 @@ enum Ship {
     Abort,
 }
 
+/// The ship menu's mark of a step an agent does.
+const AGENT_GLYPH: &str = "✦";
+
+/// A section of the ship menu: the agent's whole run, git, the pull request, a stopped rebase.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShipGroup {
+    Ship,
+    Git,
+    Pr,
+    Rebase,
+}
+
+impl Ship {
+    fn group(self) -> ShipGroup {
+        match self {
+            Ship::Full => ShipGroup::Ship,
+            Ship::Push | Ship::PushTo | Ship::Update => ShipGroup::Git,
+            Ship::OpenPr | Ship::AgentPr { .. } | Ship::PrDesc | Ship::Merge | Ship::CiLog => ShipGroup::Pr,
+            Ship::Resolve | Ship::Continue | Ship::Abort => ShipGroup::Rebase,
+        }
+    }
+
+    /// An agent does the step (a sub-thread, a message to the agents).
+    fn agent(self) -> bool {
+        matches!(self, Ship::Full | Ship::AgentPr { .. } | Ship::PrDesc | Ship::CiLog | Ship::Resolve)
+    }
+}
+
 /// A row of the ship menu: its step, label, state, and whether it asks first (enter enter).
 struct ShipRow {
     step: Ship,
+    /// Its section: a rule between 2 sections.
+    group: ShipGroup,
+    /// An agent does it (✦).
+    agent: bool,
     label: String,
     state: String,
     asks: bool,

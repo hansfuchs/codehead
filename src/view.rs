@@ -2157,6 +2157,11 @@ impl View {
                 self.mini_chat = !self.mini_chat;
                 self.dirty = true;
             }
+            // the ship menu's agent steps: a sub-thread (the lead), this thread waits
+            crate::changes::Act::Sub(task) => {
+                self.back = 0;
+                self.start_sub(task);
+            }
             crate::changes::Act::Send(text) => {
                 self.back = 0;
                 let to = self.default_to().join(", ");

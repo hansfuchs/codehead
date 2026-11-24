@@ -1552,8 +1552,9 @@ mod tests {
         assert!(all.contains(" ship ") && all.contains("push") && all.contains("open the pull request"), "{all}");
 
         // push: a 1st enter asks (0 git step), esc closes
+        v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert_eq!(v.key(enter), Act::None);
-        assert!(v.op.is_none() && draw(&mut v, 120, 30).join("\n").contains("enter again: push"));
+        assert!(v.op.is_none() && draw(&mut v, 120, 30).join("\n").contains("enter again"));
         v.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(v.modal.is_none() && v.op.is_none());
 
@@ -1569,6 +1570,66 @@ mod tests {
         v.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert_eq!(v.key(enter), Act::None);
         assert!(v.op.is_none(), "abort: a 1st enter only asks");
+    }
+
+    #[test]
+    fn the_ship_menu_hands_pr_steps_to_a_sub_thread_and_shows_the_open_pr() {
+        let mut v = test_view();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        v.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(v.scm.focus);
+        // the panel's legend: only S
+        assert_eq!(v.hints(), "S: ship ");
+
+        // 0 PR: ship, create PR, create PR draft; right of the panel
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        let rows = draw(&mut v, 140, 30);
+        let all = rows.join("\n");
+        assert!(all.contains("ship: commit, push, PR, review, CI green") && all.contains("create PR draft") && !all.contains("update PR description"), "{all}");
+        // ✦ on the agent steps only; a rule between ship / git / PR
+        assert!(all.contains("✦ ship: commit") && all.contains("✦ create PR draft") && all.contains("   push ") && !all.contains("✦ push"), "{all}");
+        assert_eq!(rows.iter().filter(|l| l.contains('├') && l.contains('┤')).count(), 2, "{all}");
+        let at = rows.iter().find(|l| l.contains("create PR draft")).unwrap();
+        let px = usize::from(v.scm.rect.right());
+        assert!(at.chars().take(px).all(|c| c != '›') && at.chars().nth(px).is_some_and(|c| c == '│' || c == '╭' || c == '╰' || c == '│'), "{at}");
+
+        // create PR draft (row 3 of push, update…): 0 commits ahead → 0 sub-thread
+        let draft = v.ship_rows().iter().position(|r| r.label == "create PR draft").unwrap();
+        for _ in 0..draft {
+            v.key(j);
+        }
+        v.key(enter);
+        assert!(matches!(v.key(enter), Act::Toast(t) if t.contains("commit first")));
+
+        // 2 commits ahead: the sub-thread's task, a draft, the commits only
+        v.changes.ahead = 2;
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        for _ in 0..draft {
+            v.key(j);
+        }
+        v.key(enter);
+        match v.key(enter) {
+            Act::Sub(t) => assert!(t.contains("--draft") && t.contains("--base main") && t.contains("uncommitted changes stay"), "{t}"),
+            a => panic!("{a:?}"),
+        }
+
+        // a PR open: its label on top, update description, 0 create rows
+        v.pr = Some(super::super::Pr { number: 1234, url: "https://github.com/o/codehead/pull/1234".into(), ..Default::default() });
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        let all = draw(&mut v, 140, 30).join("\n");
+        assert!(all.contains("codehead#1234") && all.contains("update PR description") && !all.contains("create PR"), "{all}");
+        let desc = v.ship_rows().iter().position(|r| r.label == "update PR description").unwrap();
+        for _ in 0..desc {
+            v.key(j);
+        }
+        v.key(enter);
+        assert!(matches!(v.key(enter), Act::Sub(t) if t.contains("gh pr edit 1234")));
+
+        // ship: row 0, the state along, never merge
+        v.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        v.key(enter);
+        assert!(matches!(v.key(enter), Act::Sub(t) if t.contains("codehead#1234") && t.contains("Never merge")));
     }
 
     #[test]
@@ -1863,7 +1924,8 @@ mod tests {
         let all = draw(&mut v, 140, 40).join("\n");
         assert!(all.contains("push up to") && all.contains("1 commit"), "{all}");
 
-        // the row: the question lists the commits, 0 push yet
+        // the row (under ship, push): the question lists the commits, 0 push yet
+        press(&mut v, KeyCode::Char('j'));
         press(&mut v, KeyCode::Char('j'));
         press(&mut v, KeyCode::Enter);
         let all = draw(&mut v, 140, 40).join("\n");
