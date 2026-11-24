@@ -136,12 +136,13 @@ mod fixture {
 
 mod cases {
     use std::collections::HashSet;
+    use std::time::{Duration, Instant};
 
     use ratatui::backend::TestBackend;
     use ratatui::widgets::Paragraph;
     use ratatui::Terminal;
 
-    use super::{bench, bench_within, fixture, measure_split, ms, BUDGET};
+    use super::{bench, bench_within, fixture, measure_split, ms, BUDGET, RUNS};
     use crate::ask::Picker;
     use crate::engine::store::Event;
     use crate::stream::{self, Colors, Fold, Look, Thoughts, Thread};
@@ -456,6 +457,117 @@ mod cases {
         eprintln!("     archive job (off UI)         max {:>7.2} ms", ms(job_max));
         let _ = std::fs::remove_dir_all(&root);
         assert!(worst < BUDGET,"archive yes → card gone: {:.2} ms ≥ budget {} ms", ms(worst), BUDGET.as_millis());
+    }
+
+    /// The owner's case: an agent commits in its worktree → the card's label. 80 threads, 30
+    /// worktrees of 1 repo, the real watcher + landed worker. Budget: change → read start and
+    /// read end → card on screen, each < 20 ms; the git read itself prints for reference.
+    #[test]
+    #[ignore = "perf: just perf"]
+    fn landed_refresh_after_commit() {
+        use crate::engine::store;
+        use crate::landed::{self, Land};
+        use crate::nav::Card;
+        use crate::threadlist::{Mode, ThreadList};
+
+        let root = std::env::temp_dir().join(format!("ch-perf-landed-{}", std::process::id()));
+        let repo = fixture::repo_with_origin(&root);
+        let sh = |dir: &std::path::Path, c: &str| {
+            let ok = std::process::Command::new("sh").arg("-c").arg(c).current_dir(dir).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap().success();
+            assert!(ok, "{c}");
+        };
+        sh(&repo, "echo node_modules/ >> .gitignore && git commit -q -am ignore && git push -q origin main");
+        let mut ids = Vec::new();
+        for i in 0..80 {
+            let mut t = store::Thread::new(&format!("perf landed {i}"), "x", &repo, vec!["ada".into()]);
+            if i < 30 {
+                let wt = root.join(format!("wt{i}"));
+                sh(&repo, &format!("git worktree add -q -b feat{i} {} && cd {} && echo w > w.txt && git add w.txt && git commit -q -m w", wt.display(), wt.display()));
+                t.checkouts.push(store::Checkout { dir: wt.display().to_string(), branch: Some(format!("feat{i}")) });
+            }
+            t.save().unwrap();
+            ids.push(t.id);
+        }
+        let target = root.join("wt0");
+
+        crate::watch::start_at(store::threads_dir());
+        landed::start_at(store::threads_dir());
+        let ready = Instant::now();
+        while !ids.iter().all(|id| landed::of(id).is_some()) {
+            assert!(ready.elapsed() < Duration::from_secs(60), "1st read of 80 threads");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        eprintln!("     1st read, 80 threads (off UI)  {:>7.2} ms", ms(ready.elapsed()));
+        // the start's events (worktree setup) read: the worker waits
+        while !landed::quiet() {
+            assert!(ready.elapsed() < Duration::from_secs(60), "worker quiet");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let cards: Vec<Card> = ids.iter().map(|id| Card { id: id.clone(), title: id.clone(), state: "open".into(), land: landed::of(id), ..Default::default() }).collect();
+        let mut l = ThreadList::new(Mode::Switch, None, None, cards);
+        l.inline = false;
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+
+        // commit N in wt0 → (commit → read start, read end → card drawn, the git read)
+        let mut commit = |n: usize| {
+            sh(&target, &format!("echo c{n} > c{n}.txt && git add c{n}.txt && git commit -q -m c{n}"));
+            let at = Instant::now();
+            while landed::of(&ids[0]) != Some(Land::Unpushed(n)) {
+                assert!(at.elapsed() < Duration::from_secs(10), "commit {n}: label {:?}", landed::of(&ids[0]));
+                std::thread::sleep(Duration::from_micros(200));
+            }
+            let total = at.elapsed();
+            let r = landed::last_read();
+            let at = Instant::now();
+            l.poll(true);
+            term.draw(|f| l.draw(f, f.area(), 0)).unwrap();
+            let screen = at.elapsed();
+            assert!(l.cards.iter().any(|c| c.id == ids[0] && c.land == Some(Land::Unpushed(n))));
+            (total.saturating_sub(r), screen, r)
+        };
+        let (mut to_read, mut to_screen, mut read) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+        for n in 2..2 + RUNS + 1 {
+            let (a, b, r) = commit(n);
+            (to_read, to_screen, read) = (to_read.max(a), to_screen.max(b), read.max(r));
+        }
+        let mark = |d: Duration| if d < BUDGET { "ok  " } else { "SLOW" };
+        eprintln!("{} commit → read start (watcher)   max {:>7.2} ms", mark(to_read), ms(to_read));
+        eprintln!("     git read of 1 checkout (off UI) max {:>7.2} ms", ms(read));
+        eprintln!("{} read end → card drawn          max {:>7.2} ms", mark(to_screen), ms(to_screen));
+
+        // idle: 0 topic, 0 read
+        let topics = crate::bus::subscribe();
+        let b0 = landed::batches();
+        std::thread::sleep(Duration::from_secs(3));
+        let seen: Vec<crate::bus::Topic> = topics.try_iter().collect();
+        let (idle_topics, idle_reads) = (seen.len(), landed::batches() - b0);
+        eprintln!("{} idle 3 s: topics, reads        {idle_topics}, {idle_reads}", if idle_topics + idle_reads as usize == 0 { "ok  " } else { "SLOW" });
+
+        // install storm: 20 000 files into wt1's node_modules (ignored); a commit in wt0 meanwhile
+        let nm = root.join("wt1/node_modules");
+        let storm = std::thread::spawn(move || {
+            for i in 0..20_000 {
+                let d = nm.join(format!("p{}", i / 100));
+                let _ = std::fs::create_dir_all(&d);
+                let _ = std::fs::write(d.join(format!("f{i}.js")), "x");
+            }
+        });
+        let b0 = landed::batches();
+        let (storm_read, storm_screen, _) = commit(3 + RUNS);
+        storm.join().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let wt1 = crate::watch::canon(&root.join("wt1"));
+        let storm_work = topics.try_iter().filter(|t| matches!(t, crate::bus::Topic::Work(w) if *w == wt1)).count();
+        let storm_reads = landed::batches() - b0;
+        eprintln!("{} install storm: wt1 topics, reads {storm_work}, {storm_reads} (1: the commit in wt0)", if storm_work == 0 && storm_reads <= 2 { "ok  " } else { "SLOW" });
+        eprintln!("{} storm: commit → read start      max {:>7.2} ms", mark(storm_read), ms(storm_read));
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(to_read < BUDGET && to_screen < BUDGET, "commit → label: {:.2} ms to the read, {:.2} ms to the screen", ms(to_read), ms(to_screen));
+        assert!(idle_topics == 0 && idle_reads == 0, "idle: {idle_topics} topics, {idle_reads} reads");
+        assert!(storm_work == 0 && storm_reads <= 2, "storm: {storm_work} wt1 topics, {storm_reads} reads");
+        assert!(storm_read < BUDGET && storm_screen < BUDGET, "storm: commit → label {:.2} ms to the read", ms(storm_read));
     }
 
     #[test]

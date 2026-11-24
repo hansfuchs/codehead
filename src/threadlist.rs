@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -165,18 +165,17 @@ impl Row {
     }
 }
 
-/// Time between 2 reads of the cards while the list shows.
-const CARDS_EVERY: Duration = Duration::from_secs(2);
 /// A job's result shows this long.
 const STATUS_FOR: Duration = Duration::from_secs(8);
 
 /// Thread cards, read in the background (also saved: the next list shows them at once).
 fn read_cards() -> Receiver<Vec<Card>> {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = crate::bus::channel();
     std::thread::spawn(move || {
         let cards = nav::load();
         crate::background::save("cards", &cards);
         let _ = tx.send(cards);
+        crate::bus::wake();
     });
     rx
 }
@@ -190,6 +189,11 @@ pub struct ThreadList {
     home_repo: Option<PathBuf>,
     loading: Option<Receiver<Vec<Card>>>,
     cards_at: Option<Instant>,
+    /// `landed::version` of the cards' lands.
+    land_v: u64,
+    /// Bus topics: a thread changed → the cards again.
+    topics: std::sync::mpsc::Receiver<crate::bus::Topic>,
+    cards_due: bool,
     /// Data version of the cards (a new read dissolves in).
     version: u64,
     fx: crate::dissolve::Dissolve,
@@ -245,6 +249,9 @@ impl ThreadList {
             here,
             home_repo,
             cards_at: loading.is_some().then(Instant::now),
+            land_v: crate::landed::version(),
+            topics: crate::bus::subscribe(),
+            cards_due: false,
             loading,
             version: 0,
             fx: Default::default(),
@@ -310,9 +317,27 @@ impl ThreadList {
             }
             self.set_cards(c);
         }
-        let due = self.cards_at.is_none_or(|t| t.elapsed() >= CARDS_EVERY);
+        // a thread's files changed (state, log, draft): the cards again (0 timer)
+        for t in self.topics.try_iter() {
+            self.cards_due |= matches!(t, crate::bus::Topic::Thread(..) | crate::bus::Topic::Rescan(_));
+        }
+        let due = self.cards_at.is_none() || self.cards_due;
         if shown && due && self.loading.is_none() && !cfg!(test) {
+            self.cards_due = false;
             self.reload();
+        }
+        // new landed states: on the cards at once (0 wait for the next card read)
+        let lv = crate::landed::version();
+        if shown && lv != self.land_v {
+            self.land_v = lv;
+            let mut c = self.cards.clone();
+            for k in &mut c {
+                k.land = crate::landed::of(&k.id).or(k.land.take());
+            }
+            self.set_cards(c);
+        }
+        if shown {
+            crate::landed::visible();
         }
         if let Some(rx) = &self.job
             && let Ok((text, err)) = rx.try_recv()
@@ -640,7 +665,7 @@ impl ThreadList {
             self.done(text, err);
             return;
         }
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         std::thread::spawn(move || {
             let _ = tx.send(work());
         });
@@ -839,7 +864,7 @@ impl ThreadList {
             self.done(t, err);
             return;
         }
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         std::thread::spawn(move || {
             let _ = tx.send(work());
         });
