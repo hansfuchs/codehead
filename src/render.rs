@@ -305,6 +305,8 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
     opts.insert(Options::ENABLE_TASKLISTS);
     // a table: its rows of cells (each cell: its pieces), rows of the head
     let mut table: Option<(Vec<Vec<Vec<Piece>>>, usize)> = None;
+    // open inline HTML tags with a style (`<a>`, `<b>` …): their closing tag pops it
+    let mut html_open: Vec<String> = Vec::new();
     for (ev, range) in Parser::new_ext(markdown, opts).into_offset_iter() {
         let at = range.start;
         let style = *styles.last().unwrap_or(&Style::default());
@@ -508,12 +510,69 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
                 let w = width.saturating_sub(m.iter().map(|s| s.content.width()).sum());
                 out.push(Row::plain(Line::from([m, vec![Span::styled("─".repeat(w.min(40)), theme::line())]].concat())));
             }
+            Event::Start(Tag::HtmlBlock) => {
+                flush(&mut block, &mut out);
+                gap(&mut out, at);
+            }
+            Event::End(TagEnd::HtmlBlock) => flush(&mut block, &mut out),
+            // HTML (bots' comments): its tags hidden, its text stays
             Event::Html(t) | Event::InlineHtml(t) => {
                 let b = block.get_or_insert_with(|| {
                     let m = margin(quote, lists.len());
                     Block { pieces: Vec::new(), first: m.clone(), rest: m }
                 });
-                b.pieces.push(Piece { text: t.trim_end_matches('\n').to_string(), style: theme::muted(), ..Default::default() });
+                for part in html_parts(&t) {
+                    let st = *styles.last().unwrap_or(&Style::default());
+                    let (name, close, raw) = match part {
+                        HtmlPart::Text(x) => {
+                            html_words(b, &entities(x), st, &link);
+                            continue;
+                        }
+                        HtmlPart::Tag(name, close, raw) => (name, close, raw),
+                    };
+
+                    match name.as_str() {
+                        "a" if !close => {
+                            html_open.push(name.clone());
+                            link = html_attr(raw, "href");
+                            styles.push(st.fg(theme::pal().info()).add_modifier(Modifier::UNDERLINED));
+                        }
+                        "b" | "strong" | "i" | "em" | "s" | "del" | "code" | "kbd" if !close => {
+                            html_open.push(name.clone());
+                            styles.push(match name.as_str() {
+                                "b" | "strong" => st.add_modifier(Modifier::BOLD),
+                                "i" | "em" => st.add_modifier(Modifier::ITALIC),
+                                "s" | "del" => st.add_modifier(Modifier::CROSSED_OUT),
+                                _ => Style::default().fg(code_fg()).bg(theme::pal().surface0),
+                            });
+                        }
+                        _ if close && html_open.last() == Some(&name) => {
+                            html_open.pop();
+                            styles.pop();
+                            if name == "a" {
+                                link = None;
+                            }
+                        }
+                        "img" => {
+                            if let Some(alt) = html_attr(raw, "alt").filter(|a| !a.trim().is_empty()) {
+                                html_words(b, &format!("[image: {}]", alt.trim()), theme::muted(), &link);
+                            }
+                        }
+                        // a cell: a space; elsewhere a new row
+                        "br" | "hr" | "p" | "div" | "tr" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "summary" | "details" | "table" | "ul" | "ol" | "pre" | "blockquote" => {
+                            if table.is_some() {
+                                html_words(b, " ", st, &None);
+                            } else if !b.pieces.is_empty() {
+                                let (first, rest) = (b.first.clone(), b.rest.clone());
+                                let pieces = std::mem::take(&mut b.pieces);
+                                out.extend(wrap(&pieces, width, &first, &rest));
+                                b.first = rest;
+                            }
+                        }
+                        "td" | "th" => html_words(b, " ", st, &None),
+                        _ => {}
+                    }
+                }
             }
             _ => {}
         }
@@ -523,6 +582,145 @@ pub fn markdown(markdown: &str, width: usize, prefix: &[Span<'static>]) -> Vec<R
         out.extend(code_rows(&text, &lang, width, prefix, true, None));
     }
     out
+}
+
+/// HTML elements hidden in rendered Markdown (their text stays), and custom elements (a `-` in
+/// the name: `<relative-time>`). Other `<…>` (`<Foo>`, `<T>`): plain text.
+const HTML_TAGS: &[&str] = &[
+    "a", "abbr", "b", "big", "blockquote", "br", "center", "cite", "code", "dd", "del", "details", "div", "dl", "dt", "em", "figcaption", "figure", "font", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "ins", "kbd", "li", "mark", "ol", "p", "picture", "pre", "q", "s", "samp", "small", "source", "span", "strong", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "tt", "u", "ul", "var", "video",
+];
+
+/// A part of raw HTML.
+enum HtmlPart<'a> {
+    /// A known tag: its lowercase name, closing, its source.
+    Tag(String, bool, &'a str),
+    Text(&'a str),
+}
+
+/// S split into known tags and text; comments dropped.
+fn html_parts(s: &str) -> Vec<HtmlPart<'_>> {
+    let mut out = Vec::new();
+    let (mut i, mut from) = (0, 0);
+    while let Some(lt) = s[i..].find('<').map(|p| i + p) {
+        if s[lt..].starts_with("<!--") {
+            if from < lt {
+                out.push(HtmlPart::Text(&s[from..lt]));
+            }
+
+            let end = s[lt..].find("-->").map_or(s.len(), |e| lt + e + 3);
+            (i, from) = (end, end);
+            continue;
+        }
+
+        let close = s[lt + 1..].starts_with('/');
+        let n0 = lt + 1 + usize::from(close);
+        let n1 = s[n0..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).map_or(s.len(), |e| n0 + e);
+        let name = &s[n0..n1];
+        let lower = name.to_ascii_lowercase();
+        // `<IMG>` too, 0 `<Foo>` (a component in prose)
+        let known = name.starts_with(|c: char| c.is_ascii_alphabetic()) && (name == lower || name == name.to_ascii_uppercase()) && (HTML_TAGS.contains(&lower.as_str()) || lower.contains('-'));
+        let end = s[n1..].find(['>', '<']).filter(|&e| s.as_bytes()[n1 + e] == b'>').map(|e| n1 + e + 1);
+        match end {
+            Some(end) if known => {
+                if from < lt {
+                    out.push(HtmlPart::Text(&s[from..lt]));
+                }
+
+                out.push(HtmlPart::Tag(lower, close, &s[lt..end]));
+                (i, from) = (end, end);
+            }
+            _ => i = lt + 1,
+        }
+    }
+
+    if from < s.len() {
+        out.push(HtmlPart::Text(&s[from..]));
+    }
+
+    out
+}
+
+/// The value of attribute NAME of TAG (`<a href="…">`), entities decoded.
+fn html_attr(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(at) = lower[from..].find(name).map(|p| from + p) {
+        from = at + name.len();
+        let after = lower[from..].trim_start();
+        if !lower[..at].ends_with(char::is_whitespace) || !after.starts_with('=') {
+            continue;
+        }
+
+        // ASCII lowercase keeps the byte offsets: the value from TAG
+        let v = tag[tag.len() - after.len() + 1..].trim_start();
+        let (body, end) = match v.chars().next() {
+            Some(q @ ('"' | '\'')) => (&v[1..], v[1..].find(q)),
+            _ => (v, v.find(|c: char| c.is_whitespace() || c == '>')),
+        };
+        return Some(entities(&body[..end.unwrap_or(body.len())]));
+    }
+
+    None
+}
+
+/// S with its HTML entities decoded (`&amp;` `&lt;` `&#39;` `&#x2014;` …).
+fn entities(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let semi = rest.char_indices().take(12).find(|&(_, c)| c == ';').map(|(e, _)| e);
+        let c = semi.and_then(|e| match &rest[1..e] {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some(' '),
+            n => n.strip_prefix('#').and_then(|d| match d.strip_prefix(['x', 'X']) {
+                Some(h) => u32::from_str_radix(h, 16).ok(),
+                None => d.parse().ok(),
+            }).and_then(char::from_u32),
+        });
+        match (c, semi) {
+            (Some(c), Some(e)) => {
+                out.push(c);
+                rest = &rest[e + 1..];
+            }
+            _ => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+
+    out.push_str(rest);
+    out
+}
+
+/// TEXT of HTML into B: whitespace collapsed (as a browser does), in STYLE, a link on LINK.
+fn html_words(b: &mut Block, text: &str, style: Style, link: &Option<String>) {
+    let space = |b: &mut Block| {
+        if b.pieces.last().is_some_and(|p| p.text != " ") {
+            b.pieces.push(Piece { text: " ".into(), style, ..Default::default() });
+        }
+    };
+    if text.starts_with(char::is_whitespace) {
+        space(b);
+    }
+
+    for (i, w) in text.split_whitespace().enumerate() {
+        if i > 0 {
+            space(b);
+        }
+
+        b.pieces.push(Piece { text: w.to_string(), style, link: link.clone(), ..Default::default() });
+    }
+
+    if text.ends_with(char::is_whitespace) && !text.trim().is_empty() {
+        space(b);
+    }
 }
 
 /// A Markdown table: columns as wide as their widest cell, shrunk to fit WIDTH (cells wrap),
@@ -704,6 +902,27 @@ mod tests {
 
     fn text(rows: &[Row]) -> Vec<String> {
         rows.iter().map(|r| r.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>().trim_end().to_string()).collect()
+    }
+
+    #[test]
+    fn html_tags_are_hidden_their_text_and_links_stay() {
+        // a bot's table (Vercel): inline HTML in the cells
+        let md = "| Project | Updated |\n| :--- | :----- |\n| <a href=\"https://v.com/p\"><sup><img src=\"https://v.com/a.png\" width=\"16\" alt=\"\" /></sup></a> [codehead](https://v.com/c) | <relative-time datetime=\"2026\">Nov 24, 2026 11:56am UTC</relative-time> |";
+        let rows = markdown(md, 80, &[]);
+        let t = text(&rows).join("\n");
+        assert!(!t.contains('<') && !t.contains("src="), "{t}");
+        assert!(t.contains("codehead") && t.contains("Nov 24, 2026 11:56am UTC"), "{t}");
+
+        // an HTML block: tags out, <br> / </p> new rows, entities decoded, comments gone, <a> a link
+        let md = "<!-- hidden -->\n<p align=\"center\">Hello &amp; <b>bye</b><br>next <a href=\"https://x.io\">site</a></p>\n\nafter";
+        let rows = markdown(md, 80, &[]);
+        let t = text(&rows);
+        assert_eq!(t.iter().filter(|l| !l.is_empty()).cloned().collect::<Vec<_>>(), ["Hello & bye", "next site", "after"], "{t:#?}");
+        assert!(rows.iter().any(|r| r.links.iter().any(|l| l.2 == "https://x.io")), "the <a> text links");
+
+        // an image with alt text: as a Markdown image; a component name in prose: text
+        let t = text(&markdown("see <img src=\"x.png\" alt=\"logo\"> and the <Button> component", 80, &[])).join("\n");
+        assert_eq!(t, "see [image: logo] and the <Button> component");
     }
 
     #[test]

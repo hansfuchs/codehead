@@ -185,6 +185,17 @@ pub struct Commit {
     pub date: u64,
 }
 
+/// A PR's entry in the merge queue.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Queued {
+    /// 1: next (0: unknown).
+    pub position: u64,
+    /// `QUEUED`, `AWAITING_CHECKS`, `MERGEABLE`, `UNMERGEABLE`, `LOCKED` ("": unknown).
+    pub state: String,
+    /// Estimated s until the merge (0: unknown).
+    pub eta: u64,
+}
+
 /// Everything the merge tab shows of 1 PR.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pr {
@@ -212,6 +223,18 @@ pub struct Pr {
     pub can_edit: bool,
     /// Auto-merge on: its method.
     pub auto_merge: Option<String>,
+    /// The PR's node id (GraphQL mutations).
+    #[serde(default)]
+    pub id: String,
+    /// The repo allows auto-merge.
+    #[serde(default)]
+    pub auto_allowed: bool,
+    /// The base branch merges through a merge queue.
+    #[serde(default)]
+    pub queue: bool,
+    /// In the merge queue: its entry.
+    #[serde(default)]
+    pub queued: Option<Queued>,
     /// The repo's merge method for the viewer (`MERGE`, `SQUASH`, `REBASE`).
     pub method: String,
     pub labels: Vec<Label>,
@@ -232,6 +255,7 @@ pub enum Ready {
     Merged,
     Closed,
     Draft,
+    Queued,
     Conflicts,
     ChecksFailed,
     ChecksRunning,
@@ -250,6 +274,7 @@ impl Ready {
             Ready::Merged => ("merged", "the pull request is merged"),
             Ready::Closed => ("closed", "the pull request is closed"),
             Ready::Draft => ("draft", "a draft: mark it ready for review to merge"),
+            Ready::Queued => ("in the merge queue", "GitHub merges it after the checks of the queue"),
             Ready::Conflicts => ("conflicts", "the branch has conflicts with the base"),
             Ready::ChecksFailed => ("checks failed", "1 or more checks failed"),
             Ready::ChecksRunning => ("checks running", "checks still run"),
@@ -271,6 +296,11 @@ impl Pr {
             State::Draft => return Ready::Draft,
             State::Open => {}
         }
+
+        if self.queued.is_some() {
+            return Ready::Queued;
+        }
+
         if self.mergeable == "CONFLICTING" || self.merge_state == "DIRTY" {
             return Ready::Conflicts;
         }
@@ -297,7 +327,7 @@ impl Pr {
 
     /// The branch needs an update (behind the base, or conflicts).
     pub fn needs_update(&self) -> bool {
-        matches!(self.state, State::Open | State::Draft) && (self.merge_state == "BEHIND" || self.mergeable == "CONFLICTING" || self.merge_state == "DIRTY")
+        matches!(self.state, State::Open | State::Draft) && self.queued.is_none() && (self.merge_state == "BEHIND" || self.mergeable == "CONFLICTING" || self.merge_state == "DIRTY")
     }
 
     pub fn conflicts(&self) -> bool {
@@ -379,9 +409,10 @@ const COMMENT: &str = "id databaseId author{login} body createdAt url viewerDidA
 
 fn detail_query() -> String {
     format!(
-        "query($o:String!,$r:String!,$n:Int!){{viewer{{login}} repository(owner:$o,name:$r){{viewerDefaultMergeMethod pullRequest(number:$n){{
-number title body url state isDraft createdAt mergedAt closedAt author{{login}} baseRefName headRefName headRefOid additions deletions changedFiles
+        "query($o:String!,$r:String!,$n:Int!){{viewer{{login}} repository(owner:$o,name:$r){{viewerDefaultMergeMethod autoMergeAllowed pullRequest(number:$n){{
+id number title body url state isDraft createdAt mergedAt closedAt author{{login}} baseRefName headRefName headRefOid additions deletions changedFiles
 mergeable mergeStateStatus reviewDecision viewerCanUpdate autoMergeRequest{{mergeMethod}}
+isMergeQueueEnabled isInMergeQueue mergeQueueEntry{{position state estimatedTimeToMerge}}
 labels(first:50){{nodes{{name color}}}}
 reviewRequests(first:20){{nodes{{requestedReviewer{{__typename ... on User{{login}} ... on Team{{name}} ... on Bot{{login}}}}}}}}
 latestOpinionatedReviews(first:20){{nodes{{author{{login}} state}}}}
@@ -497,6 +528,13 @@ fn parse_detail(r: &PrRef, d: &Value) -> Option<Pr> {
         review: s(&p["reviewDecision"]),
         can_edit: p["viewerCanUpdate"].as_bool().unwrap_or(false),
         auto_merge: p["autoMergeRequest"]["mergeMethod"].as_str().map(String::from),
+        id: s(&p["id"]),
+        auto_allowed: repo["autoMergeAllowed"].as_bool().unwrap_or(false),
+        queue: p["isMergeQueueEnabled"].as_bool().unwrap_or(false),
+        queued: (p["isInMergeQueue"] == true || p["mergeQueueEntry"].is_object()).then(|| {
+            let e = &p["mergeQueueEntry"];
+            Queued { position: e["position"].as_u64().unwrap_or(0), state: s(&e["state"]), eta: e["estimatedTimeToMerge"].as_u64().unwrap_or(0) }
+        }),
         method: repo["viewerDefaultMergeMethod"].as_str().unwrap_or("MERGE").to_string(),
         labels: nodes(&p["labels"]).map(|l| Label { name: s(&l["name"]), color: s(&l["color"]) }).collect(),
         requested: nodes(&p["reviewRequests"]).filter_map(|n| n["requestedReviewer"]["login"].as_str().or_else(|| n["requestedReviewer"]["name"].as_str()).map(String::from)).collect(),
@@ -592,6 +630,8 @@ pub enum Op {
     /// METHOD (`MERGE` …), AUTO: when ready.
     Merge(String, bool),
     DisableAuto,
+    /// Out of the merge queue: the PR's node id.
+    Dequeue(String),
 }
 
 impl Op {
@@ -613,6 +653,7 @@ impl Op {
             Op::Merge(_, true) => "auto-merge on: merges when ready",
             Op::Merge(_, false) => "merged",
             Op::DisableAuto => "auto-merge off",
+            Op::Dequeue(_) => "out of the merge queue",
         }
     }
 }
@@ -667,6 +708,7 @@ pub fn run(r: &PrRef, op: &Op) -> Result<(), String> {
             pr(&a, None)
         }
         Op::DisableAuto => pr(&["merge", &n, "--disable-auto"], None),
+        Op::Dequeue(id) => graphql("mutation($id:ID!){dequeuePullRequest(input:{id:$id}){clientMutationId}}", &[("id", json!(id))]).map(|_| ()),
     }
 }
 

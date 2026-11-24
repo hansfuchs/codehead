@@ -41,18 +41,18 @@ pub struct Palette {
     pub mauve: Color,
 }
 
-/// Soft pastel lavender on warm brown #140700, like codehead.sh: the warm paper makes the cool
-/// accent pop (9.4:1). The default: its accent is 0 status hue, so red means "error" only.
+/// Soft pastel lavender on cool violet grays. The default: its accent is 0 status hue, so red
+/// means "error" only.
 pub const LAVENDER: Palette = Palette {
-    base: Color::Rgb(20, 7, 0),
-    surface0: Color::Rgb(34, 18, 10),
-    surface1: Color::Rgb(46, 28, 19),
-    surface2: Color::Rgb(61, 42, 32),
-    overlay0: Color::Rgb(105, 95, 98),
+    base: Color::Rgb(29, 26, 40),
+    surface0: Color::Rgb(43, 39, 57),
+    surface1: Color::Rgb(58, 53, 80),
+    surface2: Color::Rgb(74, 68, 98),
+    overlay0: Color::Rgb(113, 106, 142),
     subtext0: Color::Rgb(173, 167, 198),
     text: Color::Rgb(232, 228, 246),
     accent: Color::Rgb(184, 166, 255),
-    on_accent: Color::Rgb(20, 7, 0),
+    on_accent: Color::Rgb(29, 26, 40),
     red: Color::Rgb(244, 122, 142),
     peach: Color::Rgb(245, 166, 115),
     yellow: Color::Rgb(237, 212, 138),
@@ -573,6 +573,28 @@ mod tests {
             let d = (hue(p.accent) - hue(c)).abs();
             assert!(d.min(360.0 - d) >= 40.0, "{c:?}");
         }
+    }
+
+    #[test]
+    fn lavender_base_is_violet_gray() {
+        // the default's bg: cool violet gray, the site's warm brown #140700 stays on the site
+        assert_eq!(LAVENDER.base, Color::Rgb(29, 26, 40));
+        assert_eq!(LAVENDER.on_accent, LAVENDER.base);
+    }
+
+    #[test]
+    fn lavender_accent_contrast() {
+        // accent on base: ≥ 7:1 (WCAG AAA)
+        let lum = |c: Color| {
+            let (r, g, b) = rgb(c);
+            let lin = |v: u8| {
+                let v = f32::from(v) / 255.0;
+                if v <= 0.040_45 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+        };
+        let ratio = (lum(LAVENDER.accent) + 0.05) / (lum(LAVENDER.base) + 0.05);
+        assert!(ratio >= 7.0, "{ratio}");
     }
 
     #[test]
