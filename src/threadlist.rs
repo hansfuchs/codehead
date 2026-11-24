@@ -1,6 +1,6 @@
 //! The thread list of both threads tabs: the menu's (ctrl+p: a quick switch, type to filter) and
 //! the start screen's (manage: preview, multi-select, letter keys). 1 look: thread cards in
-//! sections (needs you · working · open · shipped · threads), the repo tabs, the view tabs (active ·
+//! sections (needs you · recent · open · stale · shipped), the repo tabs, the view tabs (active ·
 //! archived; the start screen also: worktrees without thread, claude sessions: their rows are the
 //! host's), a name filter.
 //!
@@ -461,8 +461,8 @@ impl ThreadList {
 
     // ---------- rows ----------
 
-    /// Section of card C: 0 needs you, 1 working, 2 open (work not in the base yet), 3 shipped,
-    /// 4 the rest (0 code, agents not done; 0 landed state read yet).
+    /// Section of card C: 0 needs you, 1 recent (working, 0 code yet, 0 landed state read yet),
+    /// 2 open (work not in the base yet), 3 stale (0 code, idle 3 days), 4 shipped.
     fn section(c: &Card) -> u8 {
         if c.blocked {
             0
@@ -471,9 +471,11 @@ impl ThreadList {
         } else if c.land.as_ref().is_some_and(|l| l.open()) {
             2
         } else if c.shipped() {
+            4
+        } else if c.stale(crate::engine::now_ms()) {
             3
         } else {
-            4
+            1
         }
     }
 
@@ -509,10 +511,10 @@ impl ThreadList {
     fn label_text(s: u8, n: usize) -> String {
         match s {
             0 => format!("needs you · {n}"),
-            1 => format!("working · {n}"),
+            1 => format!("recent · {n}"),
             2 => format!("open · {n}"),
-            3 => format!("shipped: archive? · {n}"),
-            4 => format!("threads · {n}"),
+            3 => format!("stale · {n} · 0 code, idle 3+ days: go on or archive"),
+            4 => format!("shipped: archive? · {n}"),
             _ => format!("archived · {n} · branches kept, worktrees gone"),
         }
     }
@@ -1330,10 +1332,13 @@ mod tests {
         (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
     }
 
-    /// Sections: needs you, working, open, shipped, the rest; archived threads only in their view.
+    /// Sections: needs you, recent (working, 0 code yet, 0 state read), open, stale (0 code, idle
+    /// 3 days), shipped; archived threads only in their view.
     #[test]
     fn sections_and_the_archived_view() {
         use crate::landed::Land;
+        let now = crate::engine::now_ms();
+        let hour = 3600 * 1000;
         let cards = vec![
             card("idle", |_| {}),
             card("asks", |c| c.blocked = true),
@@ -1343,20 +1348,28 @@ mod tests {
                 c.land = Some(Land::NoCode);
                 c.done = true;
             }),
-            card("new", |c| c.land = Some(Land::NoCode)),
+            card("new", |c| {
+                c.land = Some(Land::NoCode);
+                c.activity = now - hour;
+            }),
+            card("dusty", |c| {
+                c.land = Some(Land::NoCode);
+                c.activity = now - 5 * 24 * hour - hour;
+            }),
             card("loose", |c| c.land = Some(Land::Unpushed(3))),
             card("old", |c| c.state = "archived".into()),
         ];
         let mut l = ThreadList::new(Mode::Switch, None, None, cards);
         let ids: Vec<String> = l.visible().iter().map(|&i| l.cards[i].id.clone()).collect();
-        // 0 code: shipped only when the agents reported done (a new thread: a plain one)
-        assert_eq!(ids, ["asks", "busy", "loose", "shipped", "talk", "idle", "new"]);
-        let s = screen(&mut l, 70, 70);
-        for x in ["needs you · 1", "working · 1", "open · 1", "shipped: archive? · 2", "threads · 2", "◇ 3 unpushed", "⇲ shipped", "⇲ nothing to ship"] {
+        // 0 code: shipped only when the agents reported done; idle 3 days: stale
+        assert_eq!(ids, ["asks", "idle", "busy", "new", "loose", "dusty", "shipped", "talk"]);
+        let s = screen(&mut l, 80, 80);
+        for x in ["needs you · 1", "recent · 3", "open · 1", "stale · 1", "shipped: archive? · 2", "◇ 3 unpushed", "⇲ shipped", "⇲ nothing to ship", "auto-archive in 25d"] {
             assert!(s.contains(x), "{x}: {s}");
         }
+        assert!(!s.contains("working ·") && !s.contains("threads ·"), "{s}");
         assert_eq!(s.matches("nothing to ship").count(), 1, "{s}");
-        assert!(s.contains("active 7") && s.contains("archived 1") && !s.contains("old"), "{s}");
+        assert!(s.contains("active 8") && s.contains("archived 1") && !s.contains("old"), "{s}");
 
         // ↑ from the 1st card: the view tabs; → archived
         l.key(k(KeyCode::Up));

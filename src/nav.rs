@@ -55,6 +55,11 @@ impl Card {
             _ => false,
         }
     }
+
+    /// 0 code, agents not done, idle 3 days at NOW (unix ms): the owner decides.
+    pub fn stale(&self, now: u64) -> bool {
+        crate::landed::stale(self.land.as_ref(), self.done, self.activity, now)
+    }
 }
 
 impl Card {
@@ -127,7 +132,7 @@ pub fn has_draft(id: &str) -> bool {
 
 /// Time of the last agent event of thread ID (its text, error, question), unix ms. Reads
 /// only the tail of the log.
-fn last_item(id: &str) -> Option<u64> {
+pub fn last_item(id: &str) -> Option<u64> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(crate::engine::store::events_path(id)).ok()?;
     let len = f.metadata().ok()?.len();
@@ -273,6 +278,9 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
     } else if let Some(l) = c.land.as_ref().filter(|_| c.shipped()) {
         let st = if *l == crate::landed::Land::Landed { theme::fg(theme::pal().success()) } else { theme::muted() };
         vec![Span::styled(format!("⇲ {}", l.badge()), st)]
+    } else if c.stale(crate::engine::now_ms()) {
+        let days = crate::landed::archive_in_days(c.activity, crate::engine::now_ms());
+        vec![Span::styled(format!("◌ 0 code · auto-archive in {days}d"), theme::fg(theme::pal().caution()))]
     } else if c.live == 0 {
         vec![Span::styled("◦ ended", theme::muted())]
     } else {
