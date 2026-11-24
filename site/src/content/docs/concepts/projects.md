@@ -47,7 +47,7 @@ Only you make projects. An agent never does.
 
 ## Assign
 
-- **new** tab: the **project** row below the repo row (`←` `→` a project, `space` on / off).
+- **new** tab: the **project** row below the repo row: `enter` opens a dropdown (type to filter, the brief of the project under the cursor beside it; `enter` pick, `tab` add 1 more).
   `auto` (the default): the agents pick.
 - edit form of a thread (`e` on its card): the same picks; `auto` hands them back to the agents.
 - the agents: once the work is clear, `set_projects` puts the thread in the fitting projects.

@@ -563,6 +563,7 @@ struct Regions {
     /// The repo row, its chip (anchor of the repo picker), the open picker's area.
     repo_row: Rect,
     repo_chip: Rect,
+    proj_row: Rect,
     repo_pick: Rect,
     /// The open flow dropdown: its area, rows (area, 0 = 0 flow / I = flow); the steps dropdown:
     /// its rows (area, step).
@@ -572,6 +573,10 @@ struct Regions {
     /// The where chip (anchor of the where dropdown), the rows of the open dropdown (area, choice).
     where_chip: Rect,
     where_rows: Vec<(Rect, usize)>,
+    /// The project chip (anchor of the project dropdown), the rows of the open dropdown (area,
+    /// 0 = auto / I = the I-th project).
+    proj_chip: Rect,
+    proj_rows: Vec<(Rect, usize)>,
     /// Rows of the open harness / model dropdown of the agent form (area, row).
     form_rows: Vec<(Rect, usize)>,
     task_agents: Rect,
@@ -604,11 +609,11 @@ pub struct App {
     flows_tab: crate::flows::FlowsTab,
     projects_tab: crate::projtab::ProjectsTab,
     projects_area: Rect,
-    /// The new form's projects row: the repo's projects (read once per repo), the picks (None:
-    /// auto), the cursor (0: auto, i: the i-th project).
-    proj_cache: Option<(PathBuf, Vec<crate::projects::Project>)>,
+    /// The new form's projects row: the repo's projects (repo, projects dir, its mtime: read
+    /// again when a brief is made / saved / deleted), the picks (None: auto), the open dropdown.
+    proj_cache: Option<(PathBuf, PathBuf, Option<std::time::SystemTime>, Vec<crate::projects::Project>)>,
     proj_picks: Option<Vec<String>>,
-    proj_i: usize,
+    proj_menu: Option<WhereMenu>,
     flows_area: Rect,
     merge_area: Rect,
     /// The new-thread view was open at the last tick (its windows warmed up: engine::warm).
@@ -976,7 +981,7 @@ impl App {
             projects_area: Rect::default(),
             proj_cache: None,
             proj_picks: None,
-            proj_i: 0,
+            proj_menu: None,
             flows_area: Rect::default(),
             merge_area: Rect::default(),
             tab: if cfg.copy_mode { Tab::Notes } else { Tab::New },
@@ -1889,38 +1894,154 @@ impl App {
         }
     }
 
-    /// The active projects of the new form's repo (read once per repo).
+    /// The active projects of the new form's repo: read again when the projects dir changes
+    /// (a brief made, saved, deleted: its mtime).
     fn task_projects(&mut self) -> Vec<crate::projects::Project> {
         let Some(repo) = self.cfg.repo.clone() else { return Vec::new() };
-        if self.proj_cache.as_ref().is_none_or(|(r, _)| *r != repo) {
-            let all: Vec<crate::projects::Project> = crate::projects::list(&repo).into_iter().filter(|p| !p.done).collect();
+        let same_repo = self.proj_cache.as_ref().is_some_and(|c| c.0 == repo);
+        let dir = match &self.proj_cache {
+            Some(c) if same_repo => c.1.clone(),
+            _ => crate::projects::dir(&repo),
+        };
+        let mtime = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+        if !same_repo || self.proj_cache.as_ref().is_some_and(|c| c.2 != mtime) {
+            let all: Vec<crate::projects::Project> = crate::projects::list_in(&dir).into_iter().filter(|p| !p.done).collect();
             // another repo: its own projects, auto again
-            if self.proj_cache.is_some() {
+            if !same_repo && self.proj_cache.is_some() {
                 self.proj_picks = None;
-                self.proj_i = 0;
+                self.proj_menu = None;
             }
-            self.proj_cache = Some((repo, all));
+            self.proj_cache = Some((repo, dir, mtime, all));
         }
-        self.proj_cache.as_ref().map(|c| c.1.clone()).unwrap_or_default()
+        self.proj_cache.as_ref().map(|c| c.3.clone()).unwrap_or_default()
     }
 
-    /// Space on the projects row: auto (cursor 0) on, or the project under the cursor on / off
-    /// (0 projects on: auto again).
-    fn toggle_project(&mut self) {
+    /// Rows of the project dropdown: 0 = auto, I = the I-th project. With Q: the matches (title,
+    /// slug, goal) by score, the best on top; auto only for 0 filter.
+    fn proj_rows(&mut self, q: &str) -> Vec<usize> {
         let all = self.task_projects();
-        if self.proj_i == 0 {
+        let q = q.trim().to_lowercase();
+        if q.is_empty() {
+            return (0..=all.len()).collect();
+        }
+        let mut m: Vec<(i64, usize)> = all.iter().enumerate().filter_map(|(i, p)| fuzzy(&q, &format!("{} {} {}", p.title, p.slug, p.goal)).map(|s| (s, i + 1))).collect();
+        m.sort();
+        m.into_iter().map(|(_, i)| i).collect()
+    }
+
+    /// Enter / space / click on the project row: the dropdown, its cursor on auto or the 1st pick.
+    fn open_projects(&mut self) {
+        let all = self.task_projects();
+        let cursor = self.proj_picks.as_ref().and_then(|v| v.first()).and_then(|s| all.iter().position(|p| p.slug == *s)).map_or(0, |i| i + 1);
+        self.proj_menu = Some(WhereMenu { cursor, offset: 0, query: String::new() });
+    }
+
+    /// Row I of the project dropdown: 0 auto, else the I-th project on / off (0 on: auto again).
+    /// CLOSE: the dropdown closes (enter, click); tab keeps it open, its filter cleared.
+    fn toggle_project(&mut self, i: usize, close: bool) {
+        let all = self.task_projects();
+        if i == 0 {
             self.proj_picks = None;
-            return;
-        }
-        let Some(p) = all.get(self.proj_i - 1) else { return };
-        let mut v = self.proj_picks.clone().unwrap_or_default();
-        match v.iter().position(|x| *x == p.slug) {
-            Some(i) => {
-                v.remove(i);
+        } else if let Some(p) = all.get(i - 1) {
+            let mut v = self.proj_picks.clone().unwrap_or_default();
+            match v.iter().position(|x| *x == p.slug) {
+                Some(j) => {
+                    v.remove(j);
+                }
+                None => v.push(p.slug.clone()),
             }
-            None => v.push(p.slug.clone()),
+            self.proj_picks = (!v.is_empty()).then_some(v);
         }
-        self.proj_picks = (!v.is_empty()).then_some(v);
+        self.proj_menu = if close { None } else { Some(WhereMenu { cursor: i, offset: 0, query: String::new() }) };
+    }
+
+    /// Keys of the open project dropdown: ↑↓ move, type: filter, enter: pick + close, tab: pick,
+    /// esc: close.
+    fn proj_key(&mut self, k: KeyEvent) {
+        let Some(q) = self.proj_menu.as_ref().map(|m| m.query.clone()) else { return };
+        let rows = self.proj_rows(&q);
+        let n = rows.len();
+        let typed = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        let mut query = None;
+        let Some(m) = self.proj_menu.as_mut() else { return };
+        match k.code {
+            KeyCode::Esc => self.proj_menu = None,
+            KeyCode::Up if n > 0 => m.cursor = (m.cursor + n - 1) % n,
+            KeyCode::Down if n > 0 => m.cursor = (m.cursor + 1) % n,
+            KeyCode::PageUp => m.cursor = m.cursor.saturating_sub(dropdown::MAX_ROWS),
+            KeyCode::PageDown if n > 0 => m.cursor = (m.cursor + dropdown::MAX_ROWS).min(n - 1),
+            KeyCode::Enter | KeyCode::Tab => {
+                if let Some(&i) = rows.get(m.cursor) {
+                    self.toggle_project(i, k.code == KeyCode::Enter);
+                }
+            }
+            KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h') if {
+                let mut s = q.clone();
+                crate::textarea::delete_key(&mut s, &k) && {
+                    query = Some(s);
+                    true
+                }
+            } => {}
+            KeyCode::Char(c) if typed => query = Some(format!("{q}{c}")),
+            _ => {}
+        }
+        if let Some(q) = query {
+            self.proj_menu = Some(WhereMenu { cursor: 0, offset: 0, query: q });
+        }
+    }
+
+    /// The project chip's value: auto, or the picked titles.
+    fn proj_value(&mut self) -> String {
+        let all = self.task_projects();
+        match &self.proj_picks {
+            None => "auto".into(),
+            Some(v) => v.iter().map(|s| all.iter().find(|p| p.slug == *s).map_or(s.clone(), |p| p.title.clone())).collect::<Vec<_>>().join(", "),
+        }
+    }
+
+    /// The open project dropdown below the chip (◼ picked), the brief of the current row in a 2nd
+    /// box beside it.
+    fn draw_proj_menu(&mut self, f: &mut Frame, bounds: Rect) {
+        let Some((q, cur, off)) = self.proj_menu.as_ref().map(|m| (m.query.clone(), m.cursor, m.offset)) else { return };
+        let all = self.task_projects();
+        let rows = self.proj_rows(&q);
+        let n = rows.len();
+        let picks = self.proj_picks.clone();
+        let items: Vec<dropdown::Row> = rows
+            .iter()
+            .map(|&i| match i {
+                0 => dropdown::Row { text: format!("{} auto", if picks.is_none() { "◼" } else { "◻" }), detail: "agents assign projects".into(), ..Default::default() },
+                _ => {
+                    let p = &all[i - 1];
+                    let on = picks.as_ref().is_some_and(|v| v.contains(&p.slug));
+                    dropdown::Row { text: format!("{} {}", if on { "◼" } else { "◻" }, p.title), detail: p.slug.clone(), ..Default::default() }
+                }
+            })
+            .collect();
+        let w = items.iter().map(|r| r.text.width() + r.detail.width() + 8).max().unwrap_or(0).clamp(40, 72) as u16;
+        let Some(r) = dropdown::place(self.regions.proj_chip, w, n, bounds, false) else { return };
+        let cur = cur.min(n.saturating_sub(1));
+        let label = if q.is_empty() { "project".to_string() } else { format!("project › {q}") };
+        let note = if q.is_empty() { "type: filter · tab: add".to_string() } else { format!("{n} of {}", all.len() + 1) };
+        let (off, drawn) = dropdown::list(f, r, &label, &note, &items, cur, off, "0 matches");
+        if let Some(m) = self.proj_menu.as_mut() {
+            m.cursor = cur;
+            m.offset = off;
+        }
+        // the 2nd box: the brief of the hovered row, else of the current one
+        let hover = self.hover.and_then(|h| drawn.iter().find(|(r, _)| r.contains(h)).map(|&(_, j)| j));
+        let j = hover.unwrap_or(cur);
+        self.regions.proj_rows = drawn.iter().map(|&(row, j)| (row, rows[j])).collect();
+        if let Some(p) = rows.get(j).filter(|&&i| i > 0).map(|&i| &all[i - 1]) {
+            let text = crate::projects::body_of(&std::fs::read_to_string(&p.path).unwrap_or_default());
+            let text = text.trim_end();
+            let text = if text.is_empty() { "0 brief yet: projects tab (F3)" } else { text };
+            let (bw, br) = crate::shortcuts::box_size(text, bounds);
+            let row_y = drawn.iter().find(|(_, i)| *i == j).map_or(r.y + 1, |(rr, _)| rr.y);
+            if let Some(b) = dropdown::place_beside(r, row_y, bw, br, bounds, r) {
+                crate::shortcuts::text_box(f, b, &p.title, text);
+            }
+        }
     }
 
     // ---------- drafts ----------
@@ -1999,9 +2120,7 @@ impl App {
         self.checkout = true;
         self.stash = false;
         self.proj_picks = None;
-        self.proj_i = 0;
-        // briefs made since: read again
-        self.proj_cache = None;
+        self.proj_menu = None;
         self.where_i = if self.cfg.branch.is_some() { self.wheres.iter().position(|w| *w == Where::NewWorktree).unwrap_or(0) } else { 0 };
         let mut picks: Vec<String> = self.cfg.picks.iter().filter(|n| self.agents.iter().any(|a| &a.name == *n)).cloned().collect();
         if picks.is_empty() && self.agents.iter().any(|a| a.name == self.cfg.agent) {
@@ -2900,6 +3019,10 @@ impl App {
             self.last_esc = None;
             return self.where_key(k);
         }
+        if self.proj_menu.is_some() && self.modal.is_none() {
+            self.last_esc = None;
+            return self.proj_key(k);
+        }
         // flow dropdown (+ its steps): its keys first (esc closes 1 level, 0 double esc)
         if self.flow_menu.is_some() && self.modal.is_none() {
             self.last_esc = None;
@@ -3016,7 +3139,7 @@ impl App {
         let notes = self.screen == Screen::Pick && self.tab == Tab::Notes;
         let pr_open = self.screen == Screen::Pick && ((self.tab == Tab::Merge && (self.merge_tab.is_detail() || self.merge_tab.typing())) || (self.tab == Tab::Flows && self.flows_tab.typing()) || (self.tab == Tab::Projects && self.projects_tab.typing()));
         let threads = self.screen == Screen::Pick && self.tab == Tab::Threads;
-        self.modal.is_none() && self.drafts_menu.is_none() && self.where_menu.is_none() && self.flow_menu.is_none() && self.repo_pick.is_none() && !notes && !pr_open
+        self.modal.is_none() && self.drafts_menu.is_none() && self.where_menu.is_none() && self.proj_menu.is_none() && self.flow_menu.is_none() && self.repo_pick.is_none() && !notes && !pr_open
             && !self.filter_editing && !self.afilter_editing
             && !(threads && (self.tlist.modal() || !self.tlist.query().is_empty() || !self.tlist.sel.is_empty()))
             && !(self.screen == Screen::Pick && self.tab == Tab::Agents && self.afilter.as_deref().is_some_and(|q| !q.is_empty()))
@@ -3027,6 +3150,7 @@ impl App {
         self.modal = None;
         self.drafts_menu = None;
         self.where_menu = None;
+        self.proj_menu = None;
         self.flow_menu = None;
         self.repo_pick = None;
         self.filter_editing = false;
@@ -3111,6 +3235,7 @@ impl App {
 
     fn switch_tab(&mut self, tab: Tab) {
         self.where_menu = None;
+        self.proj_menu = None;
         self.flow_menu = None;
         self.repo_pick = None;
         // leaving the settings: their last edit applies
@@ -3787,11 +3912,8 @@ impl App {
             return;
         }
         if self.field == Field::Projects {
-            let n = self.task_projects().len();
             match k.code {
-                KeyCode::Left | KeyCode::Char('h') => self.proj_i = self.proj_i.saturating_sub(1),
-                KeyCode::Right | KeyCode::Char('l') => self.proj_i = (self.proj_i + 1).min(n),
-                KeyCode::Char(' ') | KeyCode::Enter => self.toggle_project(),
+                KeyCode::Char(' ') | KeyCode::Enter => self.open_projects(),
                 KeyCode::Up => self.go_field(-1),
                 KeyCode::Down => self.go_field(1),
                 _ => {}
@@ -4177,6 +4299,16 @@ impl App {
                 }
                 return;
             }
+            // project dropdown: a click on a row picks it, a click next to it closes it
+            if self.proj_menu.is_some() {
+                if down {
+                    match self.regions.proj_rows.iter().find(|(r, _)| r.contains(at)) {
+                        Some(&(_, i)) => self.toggle_project(i, true),
+                        None => self.proj_menu = None,
+                    }
+                }
+                return;
+            }
             // where dropdown: a click on a row picks it, a click next to it closes it
             if self.where_menu.is_some() {
                 if down {
@@ -4225,6 +4357,9 @@ impl App {
                 } else if self.regions.repo_row.contains(at) {
                     self.field = Field::Repo;
                     return self.open_repo_pick();
+                } else if self.regions.proj_row.contains(at) && self.cfg.repo.is_some() {
+                    self.field = Field::Projects;
+                    return self.open_projects();
                 } else if self.regions.where_row.contains(at) {
                     self.field = Field::Where;
                     return self.open_where();
@@ -4381,6 +4516,7 @@ impl App {
         if self.screen == Screen::Compose {
             self.draw_drafts(f, area);
             self.draw_where_menu(f, area);
+            self.draw_proj_menu(f, area);
             self.draw_flow_menu(f, area);
             let anchor = self.regions.repo_chip;
             if let Some(p) = self.repo_pick.as_mut() {
@@ -4443,6 +4579,9 @@ impl App {
             if self.where_menu.is_some() {
                 return find_rows(&self.regions.where_rows, at);
             }
+            if self.proj_menu.is_some() {
+                return find_rows(&self.regions.proj_rows, at);
+            }
             if self.flow_menu.is_some() {
                 return find_rows(&self.regions.flow_rows, at).or_else(|| find_rows(&self.regions.flow_steps, at));
             }
@@ -4459,7 +4598,7 @@ impl App {
             }
             return find_rows(&self.regions.opts, at)
                 .or_else(|| find_rows(&self.regions.menu_rows, at))
-                .or_else(|| [self.regions.repo_row, self.regions.where_row, self.regions.notes_label].into_iter().find(|r| r.contains(at)));
+                .or_else(|| [self.regions.repo_row, self.regions.proj_row, self.regions.where_row, self.regions.notes_label].into_iter().find(|r| r.contains(at)));
         }
         let list = self.regions.list;
         if !list.contains(at) {
@@ -4917,29 +5056,6 @@ impl App {
         [name, tech, effort, threads]
     }
 
-    /// The new form's projects row: ` project  ◼ auto  ◻ ux-improvements  ◻ bug-fixes`.
-    fn draw_task_projects(&mut self, f: &mut Frame, r: Rect) {
-        let on = self.field == Field::Projects;
-        let all = self.task_projects();
-        let mut spans = vec![Span::styled(format!(" {:<7}", "project"), if on { theme::accent_bold() } else { theme::muted() })];
-        let picks = self.proj_picks.clone();
-        let mut items: Vec<(bool, String)> = vec![(picks.is_none(), "auto".into())];
-        items.extend(all.iter().map(|p| (picks.as_ref().is_some_and(|v| v.contains(&p.slug)), p.title.clone())));
-        for (i, (checked, label)) in items.iter().enumerate() {
-            let cur = on && i == self.proj_i;
-            let st = if cur { theme::pill().add_modifier(Modifier::BOLD) } else if *checked { Style::default().fg(theme::pal().text) } else { theme::muted() };
-            spans.push(Span::styled(format!(" {} {label} ", if *checked { "◼" } else { "◻" }), st));
-            spans.push(Span::raw(" "));
-        }
-        if all.is_empty() {
-            spans.push(Span::styled(" 0 projects in this repo · projects tab (F3)", theme::muted()));
-        } else if on {
-            let hint = if self.proj_i == 0 { "agents assign projects" } else { "space: on / off" };
-            spans.push(Span::styled(format!(" {hint}"), theme::muted()));
-        }
-        f.render_widget(Paragraph::new(Line::from(spans)), r);
-    }
-
     /// Agents tab card: like a task card, 0 pick mark; the default agent named in the border.
     fn draw_agent_card(&self, f: &mut Frame, r: Rect, a: &Agent, cur: bool) {
         let title = (a.name == self.cfg.agent).then(|| Span::styled(" default ", theme::fg(theme::pal().info())));
@@ -5054,7 +5170,12 @@ impl App {
         self.regions.repo_chip = row(f, repo_row, "repo", self.field == Field::Repo, repo_value, repo_text);
         self.regions.repo_row = repo_row;
         if proj_h > 0 {
-            self.draw_task_projects(f, proj_row);
+            let on = self.field == Field::Projects;
+            let n = self.task_projects().len();
+            let value = if n == 0 { "0 projects".to_string() } else { self.proj_value() };
+            let text = if n == 0 { "projects tab (F3): new project".to_string() } else if self.proj_picks.is_none() { format!("agents assign projects · {n} in this repo") } else { format!("{n} in this repo") };
+            self.regions.proj_chip = row(f, proj_row, "project", on, value, text);
+            self.regions.proj_row = proj_row;
         }
         if !self.wheres.is_empty() {
             self.regions.where_chip = row(f, info, "branch", self.field == Field::Where, self.where_chip(), self.where_text());
@@ -5170,12 +5291,13 @@ impl App {
             _ if self.tabs_focus => &[("←→", "tab"), ("↓ / esc", "back"), ("q", "quit")],
             Screen::Compose if self.field == Field::Agents => &[("↑↓←→", "move"), ("space", "pick"), ("f", "flow"), ("enter", "notes"), ("⌘/ctrl+⏎", "start"), ("tab", "next field")],
             Screen::Compose if self.where_menu.is_some() => &[("↑↓", "move"), ("type", "filter"), ("enter", "pick"), ("esc", "close")],
+            Screen::Compose if self.proj_menu.is_some() => &[("↑↓", "move"), ("type", "filter"), ("enter", "pick"), ("tab", "add"), ("esc", "close")],
             Screen::Compose if self.flow_menu.as_ref().is_some_and(|m| m.sub.is_some()) => &[("↑↓", "step"), ("enter", "start here"), ("← esc", "flows")],
             Screen::Compose if self.flow_menu.is_some() => &[("↑↓", "flow"), ("enter →", "its steps"), ("a-z", "jump"), ("0", "0 flow"), ("esc", "close")],
             Screen::Compose if self.repo_pick.is_some() => &[("↑↓", "dir"), ("←→", "out · in"), ("type", "filter"), ("~", "home"), ("enter", "pick"), ("esc", "close")],
             Screen::Compose if self.field == Field::Repo => &[("enter", "pick repo"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.field == Field::Where => &[("enter", "choices"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
-            Screen::Compose if self.field == Field::Projects => &[("←→", "project"), ("space", "on / off"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
+            Screen::Compose if self.field == Field::Projects => &[("enter", "pick projects"), ("↑↓", "field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.field == Field::Opts => &[("space", "check / uncheck"), ("↑↓", "box · field"), ("⌘/ctrl+⏎", "start")],
             Screen::Compose if self.drafts_menu.is_some() => &[("↑↓", "move"), ("enter", "load"), ("d", "delete"), ("esc", "back")],
             Screen::Compose if self.field == Field::Drafts => &[("←→", "button"), ("enter", "press"), ("↓", "prompt"), ("⌘/ctrl+⏎", "start"), ("ctrl+s", "save draft"), ("F1-F7", "tabs")],
@@ -7089,6 +7211,38 @@ mod render_tests {
         assert_eq!(a.tlist.proj_tab(), crate::threadlist::ProjTab::Project("website-refinement".into()));
         assert_eq!(a.tlist.visible().len(), 2);
         println!("--- threads by project\n{}", dump(&mut a, 110, 30));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The new form's project row: a dropdown with a filter and the brief beside it; a project
+    /// made after the 1st read shows at once.
+    #[test]
+    fn the_project_dropdown_filters_shows_the_brief_and_sees_new_projects() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut a = app();
+        let repo = std::env::temp_dir().join(format!("ch-app-projdd-{}", std::process::id())).join("shop");
+        let dir = crate::projects::dir(&repo);
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::projects::create_in(&dir, "Website refinement").unwrap();
+        a.cfg.repo = Some(repo.clone());
+        a.screen = Screen::Compose;
+        assert_eq!(a.task_projects().len(), 1);
+        let p = crate::projects::create_in(&dir, "Bug fixes").unwrap();
+        crate::engine::write_atomic(&p.path, crate::projects::merge("", "Bug fixes", "Goal: 0 crashes").as_bytes()).unwrap();
+        assert_eq!(a.task_projects().len(), 2, "a new brief: read again");
+        a.field = Field::Projects;
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.proj_menu.is_some());
+        for c in "bug".chars() {
+            key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        let out = dump(&mut a, 130, 40);
+        println!("--- project dropdown\n{out}");
+        assert!(out.contains("project › bug") && out.contains("Goal: 0 crashes"), "{out}");
+        assert!(!out.contains("◻ Website refinement"), "{out}");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.proj_menu.is_none());
+        assert_eq!(a.proj_picks, Some(vec!["bug-fixes".to_string()]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

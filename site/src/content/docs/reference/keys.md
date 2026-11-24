@@ -44,7 +44,7 @@ Rules on every screen:
 | `←` `→` | the **where** row: branch or worktree |
 | `enter` | the **repo** row: the repo picker (a repo not on disk gets cloned at the start) |
 | `←` `→` | threads tab: the previous / next repo (menu → filter by repo: the dropdown); on the **project** row: the previous / next project |
-| `←` `→` · `space` | the **project** row of the new tab: a project · on / off (`auto`: the agents pick) |
+| `enter` | the **project** row of the new tab: a dropdown (type: filter, the brief beside it); `enter` pick, `tab` add 1 more (`auto`: the agents pick) |
 | `n` · `enter` · `x` · `d d` · `o` | projects tab: new · edit the brief · done / active · delete · open in the IDE ([Projects](/docs/concepts/projects/)) |
 | `ctrl+v` | paste a clipboard image |
 | `ctrl+s` / `ctrl+r` | settings: save / reload |
