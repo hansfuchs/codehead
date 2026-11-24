@@ -366,7 +366,7 @@ impl View {
         // a running push: its commits on their own, above UNPUSHED
         let going = |i: usize| !cs.list[i].pushed && self.pushing.contains(&cs.list[i].oid);
         let gone: Vec<usize> = (0..cs.list.len()).filter(|&i| going(i)).collect();
-        if !gone.is_empty() {
+        if !gone.is_empty() || self.push_by.is_some() {
             v.push(PRow::Pushing(gone.len()));
             v.extend(gone.into_iter().map(PRow::PushingCommit));
         }
@@ -537,6 +537,9 @@ impl View {
 
     /// The ship menu's "push up to": the question lists every commit that goes.
     pub(super) fn ask_push_to(&mut self) -> Act {
+        if self.pushing() {
+            return Act::Toast(super::PUSH_RUNS.into());
+        }
         let Some((top, _)) = self.push_pick() else { return Act::Toast("0 commits picked".into()) };
         let oid = top.oid.clone();
         self.ask_push(oid)
@@ -545,6 +548,9 @@ impl View {
     /// P / the UNPUSHED row's push: every unpushed commit to the upstream, after the question
     /// (picks: up to the newest pick, as the ship menu).
     pub(super) fn ask_push_all(&mut self) -> Act {
+        if self.pushing() {
+            return Act::Toast(super::PUSH_RUNS.into());
+        }
         if self.pr_src.is_some() || self.commit_src.is_some() || self.all {
             return self.start_op(Op::Push);
         }
@@ -570,6 +576,9 @@ impl View {
 
     /// The question of a push up to unpushed commit OID: it lists every commit that goes.
     fn ask_push(&mut self, oid: String) -> Act {
+        if self.pushing() {
+            return Act::Toast(super::PUSH_RUNS.into());
+        }
         let cs = &self.changes.commits;
         let un: Vec<String> = cs.list.iter().filter(|c| !c.pushed).map(|c| c.oid.clone()).collect();
         let k = un.iter().position(|o| *o == oid).unwrap_or(0);
@@ -907,7 +916,8 @@ impl View {
                     let label = "↑ push ";
                     let bw = label.width() as u16;
                     self.scm.buttons.push((Rect { x: rect.right().saturating_sub(bw), width: bw, ..rect }, Btn::Push));
-                    spans.push(Span::styled(label, theme::accent()));
+                    // a push runs: grayed (a click toasts why)
+                    spans.push(Span::styled(label, if self.pushing() { theme::muted() } else { theme::accent() }));
                 }
                 right_fill(&[Span::styled(format!("   {} {label}", fold(Fold::Push(*pushed))), st)], &spans)
             }
@@ -916,7 +926,9 @@ impl View {
                 let st = theme::accent_bold();
                 let tick = self.pushing_at.map_or(0, |t| (t.elapsed().as_millis() / crate::nav::WAVE_MS) as usize);
                 let wave = crate::nav::WAVE[tick % crate::nav::WAVE.len()];
-                right_fill(&[Span::styled("   PUSHING", st), Span::styled(format!("  {n}"), theme::muted())], &[Span::styled(wave, theme::accent())])
+                // another process's push: who (an agent, shell)
+                let by = self.push_by.as_ref().map(|b| format!(" · {b}")).unwrap_or_default();
+                right_fill(&[Span::styled("   PUSHING", st), Span::styled(format!("  {n}{by}"), theme::muted())], &[Span::styled(wave, theme::accent())])
             }
             PRow::PushingCommit(ci) => {
                 let Some(c) = self.changes.commits.list.get(*ci) else { return Line::raw("") };
@@ -2118,6 +2130,41 @@ mod tests {
         assert!(v.pushing.is_empty() && v.pushing_at.is_none());
         assert!(v.changes.commits.find(&c3).is_some_and(|c| c.pushed));
         assert!(!draw(&mut v, 140, 40).join("\n").contains("PUSHING"));
+        drop(&w);
+    }
+
+    #[test]
+    fn an_agents_push_shows_as_pushing_with_its_name_and_blocks_the_panels_pushes() {
+        use super::super::commits::fixture::*;
+        let w = repo("agentpush");
+        let mut v = commit_view(&w, "commits-agentpush-1");
+        wait_read(&mut v);
+        let gd = v.changes.git_dir.clone().expect("git dir");
+
+        // GIGAS's push runs (a live process holds the lock)
+        let mut holder = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        std::mem::forget(crate::pushlock::acquire_in(&gd, "GIGAS", holder.id()).unwrap());
+        let all = draw(&mut v, 140, 40).join("\n");
+        assert!(all.contains("PUSHING  2 · GIGAS") && !all.contains("▾ UNPUSHED"), "{all}");
+        v.scm.focus = true;
+        assert!(matches!(press(&mut v, KeyCode::Char('P')), Act::Toast(t) if t.contains("push")));
+        assert!(v.modal.is_none() && v.op.is_none());
+        // the ship menu: push grayed, enter on it toasts
+        press(&mut v, KeyCode::Char('S'));
+        assert!(v.ship_rows().iter().find(|r| r.label == "push").is_some_and(|r| r.off && r.state == "a push runs"));
+        press(&mut v, KeyCode::Char('j'));
+        assert!(matches!(press(&mut v, KeyCode::Enter), Act::Toast(_)));
+        // the panel's own git step: the lock says no
+        assert!(super::super::run_op(&w, &Op::Push).unwrap_err().contains("GIGAS"));
+
+        // the push ends: a read, then the commits leave PUSHING
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        draw(&mut v, 140, 40);
+        assert!(v.push_by.is_none() && v.push_hold);
+        wait_read(&mut v);
+        let all = draw(&mut v, 140, 40).join("\n");
+        assert!(!all.contains("PUSHING") && all.contains("▾ UNPUSHED"), "{all}");
         drop(&w);
     }
 

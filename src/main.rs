@@ -54,6 +54,7 @@ mod picker;
 mod prlist;
 mod portless;
 mod preview;
+mod pushlock;
 mod rank;
 mod screensel;
 mod search;
@@ -530,7 +531,12 @@ fn enable_artifacts() {
 }
 
 fn main() {
+    // called as `git` (the shim on the agents' PATH): the push lock, then the real git
+    if std::env::args_os().next().is_some_and(|a| Path::new(&a).file_name().is_some_and(|n| n == "git")) {
+        pushlock::shim_main();
+    }
     engine::trace("main");
+    pushlock::install();
     enable_artifacts();
     sub();
     // the palette before any screen (`--cost` draws in parse); a broken file fails in start

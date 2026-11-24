@@ -347,6 +347,8 @@ pub struct Changes {
     pub commits: commits::Commits,
     /// Ids of open comments on files with 0 uncommitted changes (they resolve).
     pub committed: Vec<String>,
+    /// The checkout's git dir (its push lock).
+    pub git_dir: Option<PathBuf>,
 }
 
 /// A rebase / merge of DIR stopped (its state dir or MERGE_HEAD exists).
@@ -400,7 +402,8 @@ fn load_from(dir: &Path, all: bool) -> Result<Changes, String> {
         (it.next().unwrap_or(0), it.next().unwrap_or(0))
     };
     let commits = commits::list(dir, &mb);
-    Ok(Changes { base: label, rev, untracked: fresh, files, staged, stopped, ahead, behind, commits, committed: Vec::new() })
+    let git_dir = crate::pushlock::git_dir(dir, &[]);
+    Ok(Changes { base: label, rev, untracked: fresh, files, staged, stopped, ahead, behind, commits, committed: Vec::new(), git_dir })
 }
 
 /// The branch's pull request (gh): number, url, state, checks passed / failed / pending.
@@ -527,7 +530,15 @@ pub enum Op {
     PushTo(String),
 }
 
+/// The toast of a push step while a push of the thread runs.
+pub const PUSH_RUNS: &str = "a push runs in this thread: wait for it to end";
+
 impl Op {
+    /// The step pushes commits.
+    pub fn pushes(&self) -> bool {
+        matches!(self, Op::Push | Op::PushTo(_) | Op::OpenPr)
+    }
+
     pub fn label(&self) -> String {
         match self {
             Op::Stage(p) => format!("staged {p}"),
@@ -752,6 +763,11 @@ fn stash_items(dir: &Path, thread: &str, rev: &str, items: &[(String, String, pa
 
 /// Run OP in DIR: Ok(what happened) / Err(git's 1st error line).
 pub fn run_op(dir: &Path, op: &Op) -> Result<String, String> {
+    // a push: the checkout's push lock first (an agent's / shell mode's push runs: 0 push)
+    let _lock = match (op.pushes(), crate::pushlock::git_dir(dir, &[])) {
+        (true, Some(d)) => Some(crate::pushlock::acquire_in(&d, "you", std::process::id()).map_err(|h| crate::pushlock::busy_text(&h))?),
+        _ => None,
+    };
     match op {
         Op::StageFiles(ps) => {
             let mut args = vec!["add", "-A", "--"];
@@ -1730,6 +1746,10 @@ pub struct View {
     /// The commits a running push takes (oids, newest first): the PUSHING group, since when.
     pub(super) pushing: Vec<String>,
     pub(super) pushing_at: Option<Instant>,
+    /// The push of another process (an agent, shell mode) its lock shows: who. HOLD: it ended,
+    /// its commits stay in PUSHING until the read after it.
+    pub(super) push_by: Option<String>,
+    push_hold: bool,
     /// Tests: the branch the agent steps name (0 git repo).
     #[cfg(test)]
     pub(crate) branch_override: Option<String>,
@@ -1935,6 +1955,8 @@ impl View {
             pr_at: None,
             pushing: Vec::new(),
             pushing_at: None,
+            push_by: None,
+            push_hold: false,
             #[cfg(test)]
             branch_override: None,
             ci: None,
@@ -2178,6 +2200,9 @@ impl View {
             return Act::Toast("all changes: 0 git steps (esc: the uncommitted changes)".into());
         }
 
+        if self.pushing() && op.pushes() {
+            return Act::Toast(PUSH_RUNS.into());
+        }
         if self.op.is_some() {
             return Act::Toast("git: 1 step at a time".into());
         }
@@ -2202,7 +2227,34 @@ impl View {
 
     /// A push runs: its PUSHING group's wave moves (the view draws at the wave's pace).
     pub fn pushing(&self) -> bool {
-        !self.pushing.is_empty()
+        !self.pushing.is_empty() || self.push_by.is_some()
+    }
+
+    /// The push lock of the checkout: another process (an agent, shell mode) takes it → its
+    /// commits (the unpushed ones now) into PUSHING; it ends → a read, then they leave. True:
+    /// the rows changed.
+    pub(super) fn poll_push_lock(&mut self) -> bool {
+        let Some(d) = self.changes.git_dir.as_deref() else { return false };
+        let other = crate::pushlock::held_in(d).filter(|h| h.pid != std::process::id());
+        match (other, self.push_by.is_some()) {
+            (Some(h), false) => {
+                self.push_by = Some(h.by);
+                self.push_hold = false;
+                self.pushing = self.changes.commits.list.iter().filter(|c| !c.pushed).map(|c| c.oid.clone()).collect();
+                self.pushing_at = Some(Instant::now());
+                // 0 unpushed known yet: the label shows the push all the same
+                true
+            }
+            (None, true) => {
+                self.push_by = None;
+                self.push_hold = true;
+                // a read on its way started before the push ended: a new one
+                self.loading = None;
+                self.refresh(true);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// What the last git step did, once (the thread view toasts it).
@@ -2386,6 +2438,12 @@ impl View {
         let Ok(r) = rx.try_recv() else { return false };
         self.loading = None;
         self.loaded = Some(Instant::now());
+        // another process's push ended: the read after it has the commits' state
+        if self.push_hold {
+            self.push_hold = false;
+            self.pushing.clear();
+            self.pushing_at = None;
+        }
         match r {
             Ok(mut c) => {
                 if resolve_committed(&mut self.comments, &std::mem::take(&mut c.committed)) {
@@ -3274,7 +3332,13 @@ impl View {
 
     /// The ship menu's rows: the steps valid now (a stopped rebase: only its steps), by section.
     fn ship_rows(&self) -> Vec<ShipRow> {
-        let row = |step: Ship, label: String, state: String, asks| ShipRow { group: step.group(), agent: step.agent(), step, label, state, asks };
+        let busy = self.pushing();
+        let row = |step: Ship, label: String, state: String, asks| {
+            // a push runs: every step that pushes, grayed
+            let off = busy && step.pushes();
+            let state = if off { "a push runs".into() } else { state };
+            ShipRow { group: step.group(), agent: step.agent(), off, step, label, state, asks }
+        };
         let c = &self.changes;
         if let Some(files) = &c.stopped {
             return vec![
@@ -3410,6 +3474,9 @@ impl View {
                     self.modal = None;
                     return Act::None;
                 };
+                if r.off {
+                    return Act::Toast(PUSH_RUNS.into());
+                }
                 if r.asks && !*armed {
                     *armed = true;
                     return Act::None;
@@ -3633,11 +3700,13 @@ impl View {
                     let label = crate::nav::fit(&row.label, room.saturating_sub(state.width() + 2));
                     let gap = room.saturating_sub(label.width() + state.width());
                     let base = if on { theme::pill_dim() } else { theme::text() };
+                    // grayed: label and glyph muted, 0 bold
+                    let (lab_st, mark_st) = if row.off { (base.patch(theme::muted()), base.patch(theme::muted())) } else { (if on { base.add_modifier(Modifier::BOLD) } else { base }, base.patch(theme::accent())) };
                     let line = Line::from(vec![
                         Span::styled(if on { "›" } else { " " }, base.patch(theme::accent())),
                         // ✦: the step goes to an agent
-                        Span::styled(if row.agent { format!(" {AGENT_GLYPH} ") } else { "   ".into() }, base.patch(theme::accent())),
-                        Span::styled(label, if on { base.add_modifier(Modifier::BOLD) } else { base }),
+                        Span::styled(if row.agent { format!(" {AGENT_GLYPH} ") } else { "   ".into() }, mark_st),
+                        Span::styled(label, lab_st),
                         Span::styled(" ".repeat(gap), base),
                         Span::styled(state, base.patch(state_st)),
                         Span::styled(" ", base),
@@ -3921,6 +3990,9 @@ impl View {
             self.built = None;
         }
         if self.poll_op() {
+            self.built = None;
+        }
+        if self.poll_push_lock() {
             self.built = None;
         }
         if self.poll_rank() {
@@ -4692,6 +4764,11 @@ impl Ship {
         }
     }
 
+    /// The step pushes commits (git or the agent).
+    fn pushes(self) -> bool {
+        matches!(self, Ship::Push | Ship::PushTo | Ship::OpenPr | Ship::AgentPr { .. } | Ship::Full)
+    }
+
     /// An agent does the step (a sub-thread, a message to the agents).
     fn agent(self) -> bool {
         matches!(self, Ship::Full | Ship::AgentPr { .. } | Ship::PrDesc | Ship::CiLog | Ship::Resolve)
@@ -4705,6 +4782,8 @@ struct ShipRow {
     group: ShipGroup,
     /// An agent does it (✦).
     agent: bool,
+    /// Grayed: 0 run now (a push runs and the step pushes).
+    off: bool,
     label: String,
     state: String,
     asks: bool,

@@ -856,6 +856,14 @@ impl View {
             self.set_shell_cwd(if dir.is_empty() { "~" } else { dir });
             return;
         }
+        // a push of the checkout runs (the panel, an agent): 0 2nd push from shell mode (the
+        // shim on its PATH holds the line too; this says so at once)
+        if git_push(&command)
+            && let Some(h) = crate::pushlock::git_dir(&self.shell_cwd, &[]).and_then(|d| crate::pushlock::held_in(&d))
+        {
+            self.toast(crate::pushlock::busy_text(&h));
+            return;
+        }
         self.shell_running += 1;
         self.toast(format!("! {command}"));
         let (cwd, tx) = (self.shell_cwd.clone(), self.tx.clone());
@@ -5605,7 +5613,7 @@ fn shell(dir: &Path, command: &str) -> (String, i32) {
     let sh = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "sh".into());
     let Ok((mut reader, writer)) = std::io::pipe() else { return ("pipe failed".into(), -1) };
     let Ok(w2) = writer.try_clone() else { return ("pipe failed".into(), -1) };
-    let child = std::process::Command::new(&sh).arg("-c").arg(command).current_dir(dir).stdin(std::process::Stdio::null()).stdout(writer).stderr(w2).spawn();
+    let child = std::process::Command::new(&sh).arg("-c").arg(command).current_dir(dir).env("PATH", crate::pushlock::path_with_shim()).stdin(std::process::Stdio::null()).stdout(writer).stderr(w2).spawn();
     let mut child = match child {
         Ok(c) => c,
         Err(e) => return (format!("{sh}: {e}"), -1),
@@ -5643,6 +5651,30 @@ fn shell(dir: &Path, command: &str) -> (String, i32) {
         out.push_str(&format!("\n(killed after {} s)", SHELL_TIMEOUT.as_secs()));
     }
     (out, code)
+}
+
+/// COMMAND runs `git push` (any of its parts: `;`, `&&`, `||`, `|`, new lines; `git -C x push`).
+fn git_push(command: &str) -> bool {
+    command.split(['\n', ';', '&', '|']).any(|part| {
+        let mut w = part.split_whitespace().skip_while(|t| t.contains('=') && !t.starts_with('-'));
+        if w.next().is_none_or(|t| t != "git" && !t.ends_with("/git")) {
+            return false;
+        }
+        // the 1st word that is no option nor an option's value: the subcommand
+        let mut skip = false;
+        for t in w {
+            if skip {
+                skip = false;
+                continue;
+            }
+            if t.starts_with('-') {
+                skip = matches!(t, "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace");
+                continue;
+            }
+            return t == "push";
+        }
+        false
+    })
 }
 
 /// P with the home dir as `~`.
@@ -6247,5 +6279,19 @@ mod agents_box_tests {
         assert!(!v.prompt_focus);
         key(&mut v, KeyCode::Char('m'), KeyModifiers::CONTROL);
         assert!(v.prompt_focus);
+    }
+}
+
+#[cfg(test)]
+mod git_push_tests {
+    #[test]
+    fn git_push_finds_a_push_in_any_part_of_the_command() {
+        assert!(super::git_push("git push"));
+        assert!(super::git_push("cargo test && git -C ../x push -u origin HEAD"));
+        assert!(super::git_push("GIT_TRACE=1 /usr/bin/git push"));
+        assert!(super::git_push("git -c a=b push; echo ok"));
+        assert!(!super::git_push("git status"));
+        assert!(!super::git_push("echo git push"));
+        assert!(!super::git_push("git log --grep push"));
     }
 }
