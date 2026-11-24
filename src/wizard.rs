@@ -16,7 +16,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -656,11 +656,15 @@ pub fn run(dry: bool) -> ! {
                 continue;
             }
             term.draw(|f| w.draw(f))?;
-            if event::poll(Duration::from_millis(33))? {
-                match event::read()? {
+            // read_ready, not crossterm: a hung-up terminal ends the wizard
+            for (ev, _) in crate::read_ready(Duration::from_millis(33)).map_err(io::Error::other)? {
+                match ev {
                     Event::Key(k) if k.kind != KeyEventKind::Release => w.key(k),
                     Event::Paste(s) => w.paste(&s),
                     _ => {}
+                }
+                if w.quit {
+                    break;
                 }
             }
         }

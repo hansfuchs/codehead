@@ -599,8 +599,10 @@ fn size_gate(top: &mut Terminal<ratatui::backend::CrosstermBackend<crate::frames
             let r = Rect { x: full.width.saturating_sub(bw) / 2, y: full.height.saturating_sub(bh) / 2, width: bw, height: bh };
             f.render_widget(Paragraph::new(lines), r);
         });
-        // codehead's own reader (the one stdin reader of the process)
-        for (ev, _) in crate::read_ready(Duration::from_millis(200)).unwrap_or_default() {
+        // codehead's own reader (the one stdin reader of the process). Err: a signal or the
+        // terminal gone, the tutorial ends
+        let Ok(batch) = crate::read_ready(Duration::from_millis(200)) else { return Some(QUIT) };
+        for (ev, _) in batch {
             match ev {
                 Ev::Key(k) if k.kind != KeyEventKind::Release => match k.code {
                     KeyCode::Enter => return None,
@@ -879,7 +881,9 @@ fn new_thread(top: &mut Terminal<ratatui::backend::CrosstermBackend<crate::frame
         }
         // an editor on a note / the prompt: not in the tutorial
         let _ = app.suspend.take();
-        for (ev, _) in crate::read_ready(Duration::from_millis(50)).ok()? {
+        // Err: a signal or the terminal gone, the tutorial ends
+        let Ok(batch) = crate::read_ready(Duration::from_millis(50)) else { return Some(Form::Quit) };
+        for (ev, _) in batch {
             match ev {
                 ratatui::crossterm::event::Event::Key(k) if k.kind != ratatui::crossterm::event::KeyEventKind::Release => {
                     // esc esc: back to the thread before (the real form goes to the start
