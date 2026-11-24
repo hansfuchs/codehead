@@ -2,7 +2,7 @@
 //! agent's flow, its current step, a wait (gate, loop max), a pending / queued switch, warnings.
 //! A click (or the agents box: flow) opens its box:
 //! - steps: the rail (marks, arcs), enter: the step's text; s skip, j jump, c change the flow,
-//!   e edit it in the flows screen, x x remove it.
+//!   e edit it in the flows screen, d removes it.
 //! - change flow: the flows (typed text filters) → `switch now` / `after current flow` / cancel
 //!   (asked at once in the same box: 0 frame where the chat waits on a hidden choice) → the start
 //!   step. `now`: the host stops the running turn at its next tool boundary.
@@ -55,8 +55,6 @@ pub struct FlowBar {
     offset: usize,
     /// enter on a step: its text below the rail.
     detail: bool,
-    /// x once: armed, x again: the flow goes.
-    armed: bool,
     // the agent's flow, read from thread.json
     pub state: Option<FlowState>,
     nodes: Vec<Resolved>,
@@ -83,7 +81,6 @@ impl Default for FlowBar {
             cur: 0,
             offset: 0,
             detail: false,
-            armed: false,
             state: None,
             nodes: Vec::new(),
             name: String::new(),
@@ -231,7 +228,6 @@ impl FlowBar {
     pub fn open(&mut self) {
         self.open = true;
         self.detail = false;
-        self.armed = false;
         self.lib_at = None;
         let dir = self.dir.clone();
         self.lib = Library::load(Some(&dir));
@@ -278,9 +274,6 @@ impl FlowBar {
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let n = self.len();
-        if !matches!(k.code, KeyCode::Char('x')) {
-            self.armed = false;
-        }
         match k.code {
             KeyCode::Esc => {
                 match &self.mode {
@@ -392,16 +385,11 @@ impl FlowBar {
                     self.open = false;
                     Act::Edit(slug)
                 }
-                KeyCode::Char('x') if self.state.is_some() => {
-                    if self.armed {
-                        self.armed = false;
-                        self.state = None;
-                        self.open = false;
-                        Act::Host("flow_clear", json!({"op": "flow_clear"}))
-                    } else {
-                        self.armed = true;
-                        Act::None
-                    }
+                // d: the flow goes, 0 confirm
+                KeyCode::Char('d') if self.state.is_some() => {
+                    self.state = None;
+                    self.open = false;
+                    Act::Host("flow_clear", json!({"op": "flow_clear"}))
                 }
                 _ => Act::None,
             },
@@ -584,10 +572,9 @@ impl FlowBar {
 
     fn frame_text(&self) -> (String, &'static str) {
         match &self.mode {
-            Mode::Steps if self.armed => (format!("flow · {} · @{}", self.name, self.agent), "x again: remove the flow · any key: keep"),
             Mode::Steps if self.state.as_ref().is_some_and(|s| s.wait.is_some()) => (format!("flow · {} · @{}", self.name, self.agent), "the wait: answer below the stream · ↑↓ · enter text · s skip · j jump · c change · e edit · esc"),
             Mode::Steps if self.state.as_ref().is_some_and(|s| s.pending.is_some() || s.queued.is_some()) => (format!("flow · {} · @{}", self.name, self.agent), "↑↓ · enter text · u undo switch · s skip · j jump · c change · e edit · esc"),
-            Mode::Steps => (format!("flow · {} · @{}", self.name, self.agent), "↑↓ · enter text · s skip · j jump here · c change · e edit · x x remove · esc"),
+            Mode::Steps => (format!("flow · {} · @{}", self.name, self.agent), "↑↓ · enter text · s skip · j jump here · c change · e edit · d remove · esc"),
             Mode::Pick(_) => (format!("pick a flow for @{}", self.agent), "type: filter · ↑↓ · enter · esc"),
             Mode::How(_) => (format!("change the flow of @{}", self.agent), "↑↓ · enter · esc: back"),
             Mode::Start(_) => ("start step".into(), "↑↓ · enter: switch · esc: back"),
@@ -704,5 +691,23 @@ mod wait_tests {
 
         assert!(matches!(b.wait_answer("next"), Some(Act::Answer(c)) if c == "next"));
         assert!(b.wait_ask().is_none(), "answered: 0 wait");
+    }
+
+    #[test]
+    fn d_removes_the_flow_at_once_x_does_not() {
+        let press = |b: &mut FlowBar, c: char| b.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        let mut b = FlowBar::new("ada");
+        b.state = Some(FlowState { flow: "chore".into(), title: "chore".into(), ..Default::default() });
+        b.open = true;
+        b.mode = Mode::Steps;
+        assert!(b.frame_text().1.contains("d remove"));
+
+        // x: 0 effect
+        assert!(matches!(press(&mut b, 'x'), Some(Act::None)));
+        assert!(b.state.is_some() && b.open);
+
+        // d: the flow goes, 0 confirm
+        assert!(matches!(press(&mut b, 'd'), Some(Act::Host("flow_clear", _))));
+        assert!(b.state.is_none() && !b.open);
     }
 }
