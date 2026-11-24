@@ -11,6 +11,7 @@ mod cards;
 mod changes;
 mod chatsearch;
 mod background;
+mod branchpin;
 mod bus;
 mod claude;
 mod clip;

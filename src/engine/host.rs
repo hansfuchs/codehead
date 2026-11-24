@@ -763,7 +763,8 @@ impl Host {
         let repo = PathBuf::from(&t.dir);
         std::thread::spawn(move || {
             let r = crate::threads::add_worktree(&repo, &branch).map(|p| {
-                // local files (.env …), a port block
+                // the worktree stays on the branch; local files (.env …), a port block
+                pin_branch(&p, &branch);
                 crate::setup::copy_includes(&repo, &p);
                 (p, crate::setup::free_port(&store::all()))
             });
@@ -1365,6 +1366,13 @@ fn bind(id: &str) -> Result<(UnixListener, std::fs::File), String> {
 }
 
 /// Run the host of thread ID until idle or `stop`.
+/// Worktree WT stays on BRANCH (`crate::branchpin`); a failure: in the host's log.
+fn pin_branch(wt: &Path, branch: &str) {
+    if let Err(e) = crate::branchpin::pin(wt, branch) {
+        eprintln!("codehead host: pin {} to {branch}: {e}", wt.display());
+    }
+}
+
 pub fn run(id: &str) -> ! {
     let Some(t) = store::load(id) else {
         eprintln!("codehead host: no thread {id}");
@@ -1405,6 +1413,10 @@ pub fn run(id: &str) -> ! {
     h.subagents = subs;
     for (a, k) in lost {
         h.log(Some(&a), k);
+    }
+    // the hooks of the repo change: each host start pins the worktree again
+    if let (Some(wt), Some(b), None) = (t.worktree.clone(), t.branch.clone(), &t.worktree_pending) {
+        std::thread::spawn(move || pin_branch(Path::new(&wt), &b));
     }
     if t.worktree_pending.is_some() {
         h.start_worktree(&t, tx.clone());
