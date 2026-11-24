@@ -312,12 +312,13 @@ impl MergeBtn {
 
     /// What it does (a toast), or why not.
     fn verb(&self, p: &Pr) -> String {
-        let m = p.method.to_lowercase();
+        // `MERGE`: 0 method (0 "merge (merge)")
+        let m = if p.method == "MERGE" { String::new() } else { format!(" ({})", p.method.to_lowercase()) };
         match self {
             MergeBtn::Now if p.queue => "add to the merge queue".into(),
-            MergeBtn::Now => format!("merge ({m})"),
+            MergeBtn::Now => format!("merge{m}"),
             MergeBtn::WhenReady if p.queue => "auto-merge: join the merge queue when ready".into(),
-            MergeBtn::WhenReady => format!("merge when ready ({m})"),
+            MergeBtn::WhenReady => format!("merge when ready{m}"),
             MergeBtn::CancelAuto => "auto-merge off".into(),
             MergeBtn::Dequeue => "out of the merge queue".into(),
             MergeBtn::Off(why) => why.to_string(),
@@ -327,12 +328,12 @@ impl MergeBtn {
     /// The button's text, its color.
     fn label(&self, p: &Pr) -> (String, Color) {
         let pal = theme::pal();
-        let m = p.method.to_lowercase();
+        let m = if p.method == "MERGE" { String::new() } else { format!("· {} ", p.method.to_lowercase()) };
         match self {
             MergeBtn::Now if p.queue => (" add to merge queue ".into(), pal.success()),
-            MergeBtn::Now => (format!(" merge · {m} "), pal.success()),
+            MergeBtn::Now => (format!(" merge {m}"), pal.success()),
             MergeBtn::WhenReady if p.queue => (" queue when ready ".into(), pal.success()),
-            MergeBtn::WhenReady => (format!(" merge when ready · {m} "), pal.success()),
+            MergeBtn::WhenReady => (format!(" merge when ready {m}"), pal.success()),
             MergeBtn::CancelAuto => (" cancel auto-merge ".into(), pal.attention()),
             MergeBtn::Dequeue => (" leave merge queue ".into(), pal.attention()),
             MergeBtn::Off(_) if p.state == State::Draft => (" merge when ready ".into(), pal.overlay0),
@@ -1580,6 +1581,13 @@ impl Merge {
         {
             detail = format!("{detail} · {why}");
         }
+
+        // ready, but checks failed that are not required: say so (0 "all requirements are met" alone)
+        let failed = p.checks.iter().filter(|c| c.verdict == Verdict::Fail).count();
+        if ready == Ready::Mergeable && failed > 0 {
+            detail = format!("{detail} · {failed} check{} failed (not required)", if failed == 1 { "" } else { "s" });
+        }
+
         let reviewers: Vec<String> = p.reviewers.iter().map(|(l, s)| format!("{l} {}", if s == "APPROVED" { "✓" } else if s == "CHANGES_REQUESTED" { "✕" } else { "·" })).chain(p.requested.iter().map(|r| format!("{r} ◷"))).collect();
         if !reviewers.is_empty() {
             detail = format!("{detail} · reviews: {}", reviewers.join(", "));
@@ -1672,6 +1680,7 @@ impl Merge {
             let line_c = if picked { theme::accent_bold() } else { Style::default().fg(theme::pal().overlay0) };
             let on_line = th.path.as_ref().map(|pa| format!(" · {pa}:{}", th.line.unwrap_or(0))).unwrap_or_default();
             let state = if th.resolved { " · resolved" } else if th.outdated { " · outdated" } else { "" };
+            let top = rows.len();
             for (k, c) in std::iter::once(&th.root).chain(&th.replies).enumerate() {
                 let s = Stop::Comment(i, k);
                 let verdict = match c.verdict.as_str() {
@@ -1708,7 +1717,9 @@ impl Merge {
             {
                 rows.push(Row { line: Line::raw(""), stops: Vec::new(), input: input_rows(ta, false) });
             }
-            rows.push(Row::new(Line::styled(format!("╰{}", "─".repeat(w.saturating_sub(1).min(40))), line_c)));
+            // the bottom line: as wide as the box's widest row (a table), min. 40
+            let widest = rows[top..].iter().map(|r| r.line.width()).max().unwrap_or(0);
+            rows.push(Row::new(Line::styled(format!("╰{}", "─".repeat(widest.saturating_sub(1).max(40).min(w.saturating_sub(1)))), line_c)));
         }
         rows.push(Row::new(Line::raw("")));
         // the description
@@ -2079,7 +2090,8 @@ pub mod tests {
         let t = m.tab().unwrap();
         assert!(t.pr.is_some(), "{:?}", t.error);
         t.checks_open = true;
-        println!("{}", draw(&mut m, 120, 90));
+        let w = std::env::var("CODEHEAD_GH_W").ok().and_then(|w| w.parse().ok()).unwrap_or(120);
+        println!("{}", draw(&mut m, w, 90));
         m.set_sub(Sub::Changes);
         let backend = ratatui::backend::TestBackend::new(140, 40);
         let mut term = ratatui::Terminal::new(backend).unwrap();
@@ -2219,6 +2231,22 @@ pub mod tests {
             let b = buffer(&mut m, 100, 40);
             assert_eq!(bg_of(&b, text), full, "{s:?}");
         }
+    }
+
+    #[test]
+    fn the_merge_method_merge_is_not_named_twice_failed_optional_checks_show() {
+        let mut p = pr();
+        p.method = "MERGE".into();
+        p.merge_state = "UNSTABLE".into();
+        p.checks[0].required = false;
+        let mut m = with(p);
+        let s = draw(&mut m, 100, 40);
+        assert!(s.contains("✓ ready to merge") && s.contains(" merge ") && !s.contains("merge · merge"), "{s}");
+        assert!(s.contains("all requirements are met · 1 check failed (not required)"), "{s}");
+
+        m.tab().unwrap().focus = Some(Stop::Merge);
+        let a = key(&mut m, KeyCode::Enter);
+        assert_eq!(a, Act::Toast("enter again: merge".into()));
     }
 
     #[test]
