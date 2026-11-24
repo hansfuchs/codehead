@@ -6,6 +6,8 @@
 //! dir without git count as 0 code: the owner handles main. A branch landed when its content is
 //! in `origin/<default>` or the local `<default>` (a local merge): ancestor, same patches
 //! (`git cherry`: rebase merges), or a merge that changes 0 (`git merge-tree`: squash merges).
+//! A new branch (0 commit since its creation) counts as 0 code too. 0 code: shipped only when
+//! every agent reported done; until then a plain thread (a new thread has 0 changes yet).
 //! A background pass reads every thread (archived ones: their kept branch, 5 min), `git fetch`
 //! per repo every 5 min.
 
@@ -40,7 +42,8 @@ pub enum Land {
     Abandoned(String),
     /// The branch's content is in the base.
     Landed,
-    /// 0 task branch: 0 git, or the default branch.
+    /// 0 task branch (0 git, the default branch) or a new branch without a commit. Shipped only
+    /// when every agent reported done (`Card::shipped`).
     NoCode,
 }
 
@@ -170,6 +173,11 @@ fn checkout(dir: &Path, branch: Option<&str>, dirty: bool, prs: &[PrSeen], seen:
     }
     let Some(rev) = oid(dir, &format!("refs/heads/{b}")) else { return Land::NoCode };
     let bases: Vec<String> = def.iter().flat_map(|d| [format!("origin/{d}"), d.clone()]).filter_map(|r| oid(dir, &r)).collect();
+    // a new branch (0 move since its creation, its tip in the base): 0 work yet, not shipped
+    let fresh = git(dir, &["reflog", "show", "--format=%H", &format!("refs/heads/{b}")]).1.lines().count() == 1;
+    if fresh && bases.iter().any(|base| git(dir, &["merge-base", "--is-ancestor", &rev, base]).0) {
+        return Land::NoCode;
+    }
     if bases.iter().any(|base| contained(dir, &rev, base, seen)) {
         return Land::Landed;
     }
@@ -281,6 +289,12 @@ mod tests {
         let (base, repo, wt) = setup("path");
         assert_eq!(land(&repo, &[]), Land::NoCode, "main checkout: skipped");
         assert_eq!(land(&base, &[]), Land::NoCode, "0 git");
+
+        // a new thread's branch, 0 commit yet: 0 code (not shipped); a branch made at commits
+        // not in the base (a colleague's, fetched): open
+        sh(&repo, "git worktree add -q -b fresh ../f && git branch theirs feat");
+        assert_eq!(land(&base.join("f"), &[]), Land::NoCode);
+        assert_eq!(checkout(&repo, Some("theirs"), false, &[], &mut Seen::new()), Land::Unpushed(1));
 
         sh(&wt, "echo x > new.txt");
         assert_eq!(land(&wt, &[]), Land::Dirty(1));

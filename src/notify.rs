@@ -280,6 +280,11 @@ fn reply_notes(t: &store::Thread) -> Vec<Note> {
 
 static NOTES: Mutex<Vec<Note>> = Mutex::new(Vec::new());
 
+/// Every agent on thread ID reported done, 0 turn since (the last pass's notes, seen or not).
+pub fn reported_done(id: &str) -> bool {
+    NOTES.lock().is_ok_and(|n| n.iter().any(|n| n.thread == id && n.kind == Kind::Done))
+}
+
 /// Every PR of a thread done, 1 merged at least: STATES of its PRs (several repos too).
 pub fn all_merged(states: &[crate::gh::State]) -> bool {
     use crate::gh::State;

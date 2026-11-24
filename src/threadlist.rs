@@ -462,18 +462,18 @@ impl ThreadList {
     // ---------- rows ----------
 
     /// Section of card C: 0 needs you, 1 working, 2 open (work not in the base yet), 3 shipped,
-    /// 4 the rest (0 landed state read yet).
+    /// 4 the rest (0 code, agents not done; 0 landed state read yet).
     fn section(c: &Card) -> u8 {
         if c.blocked {
             0
         } else if c.busy {
             1
+        } else if c.land.as_ref().is_some_and(|l| l.open()) {
+            2
+        } else if c.shipped() {
+            3
         } else {
-            match &c.land {
-                Some(l) if l.open() => 2,
-                Some(_) => 3,
-                None => 4,
-            }
+            4
         }
     }
 
@@ -1339,18 +1339,24 @@ mod tests {
             card("asks", |c| c.blocked = true),
             card("busy", |c| c.busy = true),
             card("shipped", |c| c.land = Some(Land::Landed)),
-            card("talk", |c| c.land = Some(Land::NoCode)),
+            card("talk", |c| {
+                c.land = Some(Land::NoCode);
+                c.done = true;
+            }),
+            card("new", |c| c.land = Some(Land::NoCode)),
             card("loose", |c| c.land = Some(Land::Unpushed(3))),
             card("old", |c| c.state = "archived".into()),
         ];
         let mut l = ThreadList::new(Mode::Switch, None, None, cards);
         let ids: Vec<String> = l.visible().iter().map(|&i| l.cards[i].id.clone()).collect();
-        assert_eq!(ids, ["asks", "busy", "loose", "shipped", "talk", "idle"]);
-        let s = screen(&mut l, 70, 60);
-        for x in ["needs you · 1", "working · 1", "open · 1", "shipped: archive? · 2", "threads · 1", "◇ 3 unpushed", "⇲ shipped", "⇲ nothing to ship"] {
+        // 0 code: shipped only when the agents reported done (a new thread: a plain one)
+        assert_eq!(ids, ["asks", "busy", "loose", "shipped", "talk", "idle", "new"]);
+        let s = screen(&mut l, 70, 70);
+        for x in ["needs you · 1", "working · 1", "open · 1", "shipped: archive? · 2", "threads · 2", "◇ 3 unpushed", "⇲ shipped", "⇲ nothing to ship"] {
             assert!(s.contains(x), "{x}: {s}");
         }
-        assert!(s.contains("active 6") && s.contains("archived 1") && !s.contains("old"), "{s}");
+        assert_eq!(s.matches("nothing to ship").count(), 1, "{s}");
+        assert!(s.contains("active 7") && s.contains("archived 1") && !s.contains("old"), "{s}");
 
         // ↑ from the 1st card: the view tabs; → archived
         l.key(k(KeyCode::Up));
