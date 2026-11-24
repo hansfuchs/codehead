@@ -221,6 +221,11 @@ impl Thread {
 }
 
 /// Thread ID (full id, or a unique prefix).
+/// Thread ID of threads dir DIR (exact id, 0 prefix match).
+pub fn load_in(dir: &Path, id: &str) -> Option<Thread> {
+    serde_json::from_slice(&std::fs::read(dir.join(id).join("thread.json")).ok()?).ok()
+}
+
 pub fn load(id: &str) -> Option<Thread> {
     let exact = thread_dir(id).join("thread.json");
     let path = if exact.is_file() {
@@ -267,7 +272,12 @@ pub fn latest() -> Option<Thread> {
 }
 
 pub fn all() -> Vec<Thread> {
-    let Ok(rd) = std::fs::read_dir(threads_dir()) else { return Vec::new() };
+    all_in(&threads_dir())
+}
+
+/// `all` of the threads dir DIR (tests: a temp dir).
+pub fn all_in(dir: &Path) -> Vec<Thread> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut v: Vec<Thread> = rd
         .flatten()
         .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path().join("thread.json")).ok()?).ok())
