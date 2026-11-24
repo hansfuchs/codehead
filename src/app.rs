@@ -2652,6 +2652,7 @@ impl App {
             Tab::New => "task",
             Tab::Notes => "notes",
             Tab::Threads => "threads",
+            Tab::Projects => "projects",
             Tab::Merge => "merge",
             Tab::Agents => "agents",
             Tab::Flows => "flows",

@@ -300,18 +300,19 @@ impl Menu {
     }
 
     /// Tab (BACK: shift+tab): the next / previous region of the tab: the bar, its groups
-    /// (threads: repos, views; merge: states), its list.
+    /// (threads: repos, projects, views; merge: states), its list.
     fn cycle(&mut self, back: bool) {
         #[derive(Clone, Copy, PartialEq)]
         enum R {
             Bar,
             Group,
             Repos,
+            Projects,
             Views,
             Body,
         }
         let rs: &[R] = match self.tab {
-            Tab::Threads => &[R::Bar, R::Repos, R::Views, R::Body],
+            Tab::Threads => &[R::Bar, R::Repos, R::Projects, R::Views, R::Body],
             Tab::Merge => &[R::Bar, R::Group, R::Body],
             _ => &[R::Bar, R::Body],
         };
@@ -320,6 +321,7 @@ impl Menu {
             (Level::Group, _) => R::Group,
             (Level::Body, Tab::Threads) => match self.list.focus {
                 threadlist::Focus::Repos => R::Repos,
+                threadlist::Focus::Projects => R::Projects,
                 threadlist::Focus::Views => R::Views,
                 threadlist::Focus::List => R::Body,
             },
@@ -334,6 +336,7 @@ impl Menu {
         };
         match to {
             R::Repos => self.list.focus = threadlist::Focus::Repos,
+            R::Projects => self.list.focus = threadlist::Focus::Projects,
             R::Views => self.list.focus = threadlist::Focus::Views,
             R::Body if self.tab == Tab::Threads => self.list.focus = threadlist::Focus::List,
             _ => {}
