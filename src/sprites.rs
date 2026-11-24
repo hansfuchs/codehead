@@ -65,13 +65,28 @@ pub fn random(cat: Cat) -> Sprite {
 }
 
 
-/// H lines of the live frame (status S) in COLOR, SIDE[i] appended to row i.
+/// H lines of the live frame (status S) in COLOR, SIDE[i] appended to row i. Each cell dimmed
+/// toward the background by its tone (regi: a line that moves by less than 1 dot fades first);
+/// 1 span per run of cells in 1 tone.
 pub fn lines_as(s: &Sprite, color: Color, st: Status, side: Vec<Vec<Span<'static>>>) -> Vec<Line<'static>> {
     let mut side = side.into_iter();
-    s.frame(st)
-        .into_iter()
-        .map(|r| {
-            let mut spans = vec![Span::styled(r, Style::default().fg(color))];
+    let (rows, tones) = s.avatar.toned(st, crate::avatar::now());
+    let base = crate::theme::pal().base;
+    rows.into_iter()
+        .enumerate()
+        .map(|(y, r)| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let (mut run, mut tone) = (String::new(), 1.0);
+            let style = |k: f32| Style::default().fg(if k < 1.0 { crate::theme::tint(color, base, k) } else { color });
+            for (x, ch) in r.chars().enumerate() {
+                let k = tones.get(y * W + x).copied().unwrap_or(1.0);
+                if k != tone && !run.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut run), style(tone)));
+                }
+                tone = k;
+                run.push(ch);
+            }
+            spans.push(Span::styled(run, style(tone)));
             spans.extend(side.next().unwrap_or_default());
             Line::from(spans)
         })
@@ -109,5 +124,30 @@ mod tests {
         let s = from_id("geo:3 speed=2").unwrap();
         assert_eq!((s.avatar.cat, s.avatar.idx, s.avatar.speed), (Cat::Geo, 3, 2.0));
         assert!(s.rows.iter().all(|r| r.width() == W));
+    }
+
+    #[test]
+    fn regi_lines_dim_faint_cells() {
+        // a regi over 10 s of float: the text of the live frame, some cells in the agent color
+        // dimmed (the tones of the line coverage), never brighter than the agent color
+        let s = from_id("regi:36 eyes=11").unwrap();
+        let red = Color::Rgb(200, 10, 10);
+        let mut dimmed = 0;
+        for f in 0..100 {
+            let t = f as f32 / 10.0;
+            crate::avatar::freeze(Some(t));
+            let lines = lines_as(&s, red, Status::Working, Vec::new());
+            let rows = s.avatar.rows(Status::Working, t);
+            for (line, row) in lines.iter().zip(&rows) {
+                assert_eq!(line.spans.iter().map(|p| p.content.as_ref()).collect::<String>(), *row, "t {t}: the text");
+                for p in &line.spans {
+                    let Some(Color::Rgb(r, _, _)) = p.style.fg else { continue };
+                    assert!(r <= 200, "t {t}: brighter than the agent color");
+                    dimmed += usize::from(r < 200 && p.content.chars().any(|c| c != '\u{2800}' && c != ' '));
+                }
+            }
+        }
+        crate::avatar::freeze(None);
+        assert!(dimmed > 0, "0 dimmed cells in 10 s");
     }
 }

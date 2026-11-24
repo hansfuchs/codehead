@@ -160,6 +160,18 @@ impl Avatar {
         rows(&self.cells(s, t))
     }
 
+    /// The 4 rows at time T for status S and the tone of each cell (0..1 of the color, row by row;
+    /// regi: by line coverage, see `regi::render_toned`; geo: 1).
+    pub fn toned(&self, s: Status, t: f32) -> ([String; H], Vec<f32>) {
+        match self.cat {
+            Cat::Regi => {
+                let (cells, tones) = regi::render_toned(&regi::all()[self.idx], s.index(), t, &self.look());
+                (rows(&cells), tones)
+            }
+            _ => (self.rows(s, t), vec![1.0; W * H]),
+        }
+    }
+
     pub fn cells(&self, s: Status, t: f32) -> Vec<glyph::Cell> {
         match self.cat {
             Cat::Regi => regi::render(&regi::all()[self.idx], s.index(), t, &self.look()),

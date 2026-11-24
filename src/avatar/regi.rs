@@ -590,16 +590,27 @@ pub fn all() -> &'static [Regi] {
 
 /// 7x4 cells of R at time T for status S (0 working, 1 thinking, 2 idle, 3 blocked, 4 done).
 pub fn render(r: &Regi, s: usize, t: f32, look: &Look) -> Vec<Cell> {
+    render_toned(r, s, t, look).0
+}
+
+/// [`render`] and the tone of each cell (0..1 of its color; see [`tones`]): views that paint the
+/// avatar in 1 color of their own (the agent color) dim each cell by it.
+pub fn render_toned(r: &Regi, s: usize, t: f32, look: &Look) -> (Vec<Cell>, Vec<f32>) {
     let pat = look.pattern.unwrap_or(r.pattern);
     render_with(r, pat, s, t, look.speed, |k| lit(pat, r.talk, r.blink, s, t + r.phase, k))
 }
 
-fn render_with(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn(usize) -> bool) -> Vec<Cell> {
+fn render_with(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn(usize) -> bool) -> (Vec<Cell>, Vec<f32>) {
     let (eye_c, frame_c) = colors(s);
     let (dots, cov) = dots_cov(r, pat, s, t, speed, on);
     let mut out = cells(&dots, eye_c, frame_c);
-    shade(&mut out, &dots, &cov, frame_c);
-    out
+    let tones = tones(&dots, &cov);
+    for (c, &k) in out.iter_mut().zip(&tones) {
+        if c.fg == frame_c {
+            c.fg = super::glyph::mix(super::glyph::BG, frame_c, k);
+        }
+    }
+    (out, tones)
 }
 
 /// The 14x16 dots of R (0 off, 1 frame, 2 eye). The eyes: 1 rigid pattern, whatever the pose
@@ -625,10 +636,12 @@ fn dots_cov(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn(us
     }
 }
 
-/// Each cell of OUT with frame dots in FRAME_C, dimmed toward the background by the mean
-/// coverage COV of its frame dots in DOTS, in 3 tones (pixel art's sub-pixel motion: a line that
-/// moves by less than 1 dot shows in the color first, the dots follow).
-fn shade(out: &mut [Cell], dots: &[u8], cov: &[f32], frame_c: super::glyph::Rgb) {
+/// The tone of each of the 7x4 cells: the mean coverage COV of its frame dots in DOTS, in 3 tones
+/// (0.53, 0.77, 1: a share of the color, the rest the background); 1 for a cell without frame
+/// dots. Pixel art's sub-pixel motion: a line that moves by less than 1 dot shows in the color
+/// first, the dots follow.
+fn tones(dots: &[u8], cov: &[f32]) -> Vec<f32> {
+    let mut out = vec![1.0; 28];
     for cy in 0..4 {
         for cx in 0..7 {
             let (mut sum, mut n) = (0.0, 0);
@@ -641,15 +654,15 @@ fn shade(out: &mut [Cell], dots: &[u8], cov: &[f32], frame_c: super::glyph::Rgb)
                     }
                 }
             }
-            let c = &mut out[cy * 7 + cx];
-            if n > 0 && c.fg == frame_c {
-                // the mean coverage, 0.8 and up full; 3 tones: 1/3, 2/3, 1
+            if n > 0 {
+                // the mean coverage, 0.8 and up full; 3 steps: 1/3, 2/3, 1
                 let b = (sum / n as f32 / 0.8).min(1.0);
                 let b = (b * 3.0).round().clamp(1.0, 3.0) / 3.0;
-                c.fg = super::glyph::mix(super::glyph::BG, frame_c, 0.3 + 0.7 * b);
+                out[cy * 7 + cx] = 0.3 + 0.7 * b;
             }
         }
     }
+    out
 }
 
 pub const DW: usize = 14;
