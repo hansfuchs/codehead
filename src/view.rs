@@ -1264,7 +1264,7 @@ impl View {
     /// Something on screen moves: an agent at work (wave), monitors, the threads row, a toast.
     fn animating(&self) -> bool {
         // the avatars of the agents box move
-        !self.members.is_empty() || !self.thread.busy.is_empty() || self.monitors.active() || crate::subagents::Subagents::active(&self.thread.subs) || self.subthreads.active() || self.changes.pushing() || self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(4))
+        !self.members.is_empty() || !self.thread.busy.is_empty() || self.monitors.active() || crate::subagents::Subagents::active(&self.thread.subs) || self.subthreads.active() || self.changes.pushing() || self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(4)) || (self.pane == Pane::Merge && self.merge.armed())
     }
 
     /// Fire an interrupt armed by a single Esc once DOUBLE_ESC ends. True: state changed.

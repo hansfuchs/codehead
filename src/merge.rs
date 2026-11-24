@@ -138,14 +138,13 @@ struct Tab {
     read_at: Option<Instant>,
     reading: bool,
     fast_until: Option<Instant>,
-    armed_merge: Option<Instant>,
-    /// A 1st enter on a stop that changes the PR at once (remove a label, update prompt,
+    /// A 1st enter on a stop that changes the PR at once (remove a label, update prompt, merge,
     /// auto-merge off, close): a 2nd enter on it within ARM acts.
     armed: Option<(Stop, Instant)>,
     /// The last esc in an edit: a 2nd within 2 s drops edited text.
     esc_at: Option<Instant>,
     /// An edit on its way.
-    busy: Option<String>,
+    busy: Option<Op>,
     changes: Option<crate::changes::View>,
     /// The disk cache of the PR was read (once per tab).
     cached: bool,
@@ -246,9 +245,110 @@ fn hex(c: &str) -> Color {
 
 /// Text on a label of color BG: dark on light, light on dark.
 fn on(bg: Color) -> Color {
-    match bg {
-        Color::Rgb(r, g, b) if (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000 > 140 => Color::Rgb(20, 20, 24),
-        _ => Color::Rgb(240, 240, 244),
+    let (r, g, b) = theme::rgb(bg);
+    if (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000 > 140 { Color::Rgb(20, 20, 24) } else { Color::Rgb(240, 240, 244) }
+}
+
+/// A label / button / pill of COLOR: a dim tint of it without the focus, the full color with it.
+fn chip(color: Color, focus: bool) -> Style {
+    if focus {
+        return Style::default().bg(color).fg(on(color)).add_modifier(Modifier::BOLD);
+    }
+
+    let pal = theme::pal();
+    Style::default().bg(theme::tint(color, pal.base, 0.22)).fg(theme::tint(color, pal.text, 0.6))
+}
+
+/// What the merge button of a PR does.
+#[derive(Clone, Debug, PartialEq)]
+enum MergeBtn {
+    /// Merge now (a merge queue: into it).
+    Now,
+    /// Auto-merge on: merges (joins the merge queue) when ready.
+    WhenReady,
+    /// Auto-merge on: off.
+    CancelAuto,
+    /// In the merge queue: out of it.
+    Dequeue,
+    /// 0 action: why.
+    Off(&'static str),
+}
+
+impl MergeBtn {
+    fn of(p: &Pr) -> MergeBtn {
+        if p.queued.is_some() {
+            return MergeBtn::Dequeue;
+        }
+
+        if p.auto_merge.is_some() {
+            return MergeBtn::CancelAuto;
+        }
+
+        match p.state {
+            State::Open => {}
+            State::Draft => return MergeBtn::Off("a draft: mark it ready for review first"),
+            State::Merged => return MergeBtn::Off("merged: 0 merge"),
+            State::Closed => return MergeBtn::Off("closed: 0 merge"),
+        }
+
+        if p.ready() == Ready::Mergeable {
+            MergeBtn::Now
+        } else if !p.auto_allowed {
+            MergeBtn::Off("auto-merge is off in the repo settings: merge once ready")
+        } else {
+            MergeBtn::WhenReady
+        }
+    }
+
+    fn op(&self, p: &Pr) -> Option<Op> {
+        match self {
+            MergeBtn::Now => Some(Op::Merge(p.method.clone(), false)),
+            MergeBtn::WhenReady => Some(Op::Merge(p.method.clone(), true)),
+            MergeBtn::CancelAuto => Some(Op::DisableAuto),
+            MergeBtn::Dequeue => Some(Op::Dequeue(p.id.clone())),
+            MergeBtn::Off(_) => None,
+        }
+    }
+
+    /// What it does (a toast), or why not.
+    fn verb(&self, p: &Pr) -> String {
+        let m = p.method.to_lowercase();
+        match self {
+            MergeBtn::Now if p.queue => "add to the merge queue".into(),
+            MergeBtn::Now => format!("merge ({m})"),
+            MergeBtn::WhenReady if p.queue => "auto-merge: join the merge queue when ready".into(),
+            MergeBtn::WhenReady => format!("merge when ready ({m})"),
+            MergeBtn::CancelAuto => "auto-merge off".into(),
+            MergeBtn::Dequeue => "out of the merge queue".into(),
+            MergeBtn::Off(why) => why.to_string(),
+        }
+    }
+
+    /// The button's text, its color.
+    fn label(&self, p: &Pr) -> (String, Color) {
+        let pal = theme::pal();
+        let m = p.method.to_lowercase();
+        match self {
+            MergeBtn::Now if p.queue => (" add to merge queue ".into(), pal.success()),
+            MergeBtn::Now => (format!(" merge · {m} "), pal.success()),
+            MergeBtn::WhenReady if p.queue => (" queue when ready ".into(), pal.success()),
+            MergeBtn::WhenReady => (format!(" merge when ready · {m} "), pal.success()),
+            MergeBtn::CancelAuto => (" cancel auto-merge ".into(), pal.attention()),
+            MergeBtn::Dequeue => (" leave merge queue ".into(), pal.attention()),
+            MergeBtn::Off(_) if p.state == State::Draft => (" merge when ready ".into(), pal.overlay0),
+            MergeBtn::Off(_) => (" merge ".into(), pal.overlay0),
+        }
+    }
+}
+
+/// A merge-state op on its way: the button's text.
+fn busy_label(op: &Op) -> Option<&'static str> {
+    match op {
+        Op::Merge(_, false) => Some(" merging… "),
+        Op::Merge(_, true) => Some(" auto-merge on… "),
+        Op::DisableAuto => Some(" auto-merge off… "),
+        Op::Dequeue(_) => Some(" leaving queue… "),
+        _ => None,
     }
 }
 
@@ -461,7 +561,25 @@ impl Merge {
                     t.fast_until = Some(Instant::now() + FAST_FOR);
                     match r {
                         Ok(()) => {
-                            self.note = Some(op.done().to_string());
+                            let queue = t.pr.as_ref().is_some_and(|p| p.queue);
+                            self.note = Some(match (&op, queue) {
+                                (Op::Merge(_, false), true) => "added to the merge queue".into(),
+                                (Op::Merge(_, true), true) => "auto-merge on: joins the merge queue when ready".into(),
+                                _ => op.done().to_string(),
+                            });
+
+                            // the merge state at once on screen; the read confirms
+                            if let Some(p) = t.pr.as_mut() {
+                                match &op {
+                                    Op::Merge(m, true) => p.auto_merge = Some(m.clone()),
+                                    Op::Merge(_, false) if queue => p.queued = Some(gh::Queued::default()),
+                                    Op::Merge(_, false) => p.state = State::Merged,
+                                    Op::DisableAuto => p.auto_merge = None,
+                                    Op::Dequeue(_) => p.queued = None,
+                                    _ => {}
+                                }
+                            }
+
                             if let (Some(p), Op::AddLabel(l) | Op::RemoveLabel(l)) = (t.pr.as_mut(), &op) {
                                 // at once on screen; the read confirms
                                 if matches!(op, Op::AddLabel(_)) {
@@ -515,6 +633,11 @@ impl Merge {
         dirty
     }
 
+    /// A stop waits for its 2nd enter (its button says so): redraws until the arm ends.
+    pub fn armed(&self) -> bool {
+        self.tab_ref().and_then(|t| t.armed).is_some_and(|(_, at)| at.elapsed() < ARM + Duration::from_millis(500))
+    }
+
     /// The owner is at work (a key anywhere in the view): 0 sleep.
     pub fn touch(&mut self) {
         self.active = Instant::now();
@@ -545,7 +668,7 @@ impl Merge {
         if t.busy.is_some() {
             return Act::Toast("gh: 1 edit at a time".into());
         }
-        t.busy = Some(format!("{op:?}"));
+        t.busy = Some(op.clone());
         let o = op.clone();
         self.spawn(move || {
             let r = gh::run(&pr, &o);
@@ -801,8 +924,7 @@ impl Merge {
 
     fn activate(&mut self, s: Stop) -> Act {
         let Some(p) = self.tab_ref().and_then(|t| t.pr.clone()) else { return Act::None };
-        let mine = p.author == p.viewer;
-        let edit = |t: &mut Tab, e: Edit, text: &str, single: bool| {
+        let edit =|t: &mut Tab, e: Edit, text: &str, single: bool| {
             let mut ta = TextArea::new(single, "");
             ta.set_text(text);
             ta.move_end();
@@ -831,6 +953,7 @@ impl Merge {
                 }
                 t.menu = Some(Menu::Status(0, opts));
             }
+            Stop::Label(_) if !p.can_edit => return Act::Toast("0 rights to change the labels".into()),
             Stop::Label(i) => {
                 if let Some(l) = p.labels.get(i) {
                     if !twice(t, s) {
@@ -858,23 +981,20 @@ impl Merge {
                 return Act::Prompt(self.update_prompt(&p));
             }
             Stop::Merge => {
-                if p.auto_merge.is_some() {
-                    if !twice(t, s) {
-                        return Act::Toast("enter again: auto-merge off".into());
-                    }
-                    return self.run(Op::DisableAuto);
+                let b = MergeBtn::of(&p);
+                let Some(op) = b.op(&p) else {
+                    return Act::Toast(b.verb(&p));
+                };
+
+                if t.busy.is_some() {
+                    return Act::Toast("gh: 1 edit at a time".into());
                 }
-                if !matches!(p.state, State::Open) {
-                    return Act::Toast(if p.state == State::Draft { "a draft: mark it ready for review first".into() } else { format!("{}: 0 merge", p.state.label()) });
+
+                if !twice(t, s) {
+                    return Act::Toast(format!("enter again: {}", b.verb(&p)));
                 }
-                let ready = p.ready() == Ready::Mergeable;
-                if !t.armed_merge.is_some_and(|a| a.elapsed() < ARM) {
-                    t.armed_merge = Some(Instant::now());
-                    let what = if ready { "merge" } else { "merge when ready" };
-                    return Act::Toast(format!("enter again: {what} ({})", p.method.to_lowercase()));
-                }
-                t.armed_merge = None;
-                return self.run(Op::Merge(p.method.clone(), !ready));
+
+                return self.run(op);
             }
             Stop::Checks => t.checks_open = !t.checks_open,
             Stop::Check(_) => {}
@@ -892,7 +1012,7 @@ impl Merge {
                 }
             }
         }
-        let _ = mine;
+
         Act::None
     }
 
@@ -1251,7 +1371,7 @@ impl Merge {
         let inner = Rect { x: body.x + 1, width: body.width.saturating_sub(2), ..body };
         let rows = self.rows(&p, inner.width as usize, focused);
         // the focused stop in view (an input: all of it)
-        let fi = rows.iter().position(|r| r.stops.iter().any(|s| Some(s.2) == focus) || r.input > 0 && self.tab_ref().is_some_and(|t| t.edit.is_some()) && r.stops.is_empty() && false);
+        let fi = rows.iter().position(|r| r.stops.iter().any(|s| Some(s.2) == focus));
         let h = inner.height as usize;
         let scroll = {
             let t = self.tab().expect("a tab");
@@ -1332,8 +1452,7 @@ impl Merge {
         };
         let status = format!(" {sl} ▾ ");
         let sw = status.width() as u16;
-        let st = Style::default().bg(sc).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD);
-        let st = if focus == Some(Stop::Status) { st.add_modifier(Modifier::UNDERLINED | Modifier::REVERSED) } else { st };
+        let st = chip(sc, focus == Some(Stop::Status));
         let mut meta = format!("  {} · opened {}", p.author, gh::stamp(p.created));
         if let Some(m) = p.merged {
             meta.push_str(&format!(" · merged {}", gh::stamp(m)));
@@ -1352,26 +1471,21 @@ impl Merge {
             Span::styled(format!("−{}", p.deletions), Style::default().fg(theme::pal().error())),
             Span::styled(format!(" · {} files · {} commits", p.files, p.commits.len()), theme::muted()),
         ])));
-        // the labels: x removes, + adds
+        // the labels: × removes, + adds
         let mut spans = Vec::new();
         let mut stops = Vec::new();
         let mut x = 0u16;
         for (i, l) in p.labels.iter().enumerate() {
-            let bg = hex(&l.color);
-            let text = format!(" {} × ", l.name);
+            let text = if p.can_edit { format!(" {} × ", l.name) } else { format!(" {} ", l.name) };
             let tw = text.width() as u16;
-            let mut st = Style::default().bg(bg).fg(on(bg));
-            if focus == Some(Stop::Label(i)) {
-                st = st.add_modifier(Modifier::REVERSED | Modifier::BOLD);
-            }
-            spans.push(Span::styled(text, st));
+            spans.push(Span::styled(text, chip(hex(&l.color), focus == Some(Stop::Label(i)))));
             spans.push(Span::raw(" "));
             stops.push((x, tw, Stop::Label(i)));
             x += tw + 1;
         }
+
         if p.can_edit {
-            let st = hl(Stop::AddLabel, theme::muted());
-            spans.push(Span::styled(" + label ", st));
+            spans.push(Span::styled(" + label ", chip(theme::pal().accent, focus == Some(Stop::AddLabel))));
             stops.push((x, 9, Stop::AddLabel));
         } else if p.labels.is_empty() {
             spans.push(Span::styled("0 labels", theme::muted()));
@@ -1385,48 +1499,86 @@ impl Merge {
             Ready::Mergeable => ("✓", theme::pal().success()),
             Ready::Merged => ("◆", theme::pal().merged()),
             Ready::Conflicts | Ready::ChecksFailed | Ready::ChangesRequested | Ready::Closed => ("✕", theme::pal().error()),
-            Ready::ChecksRunning | Ready::Unknown => ("◷", theme::pal().progress()),
+            Ready::ChecksRunning | Ready::Unknown | Ready::Queued => ("◷", theme::pal().progress()),
             _ => ("!", theme::pal().attention()),
         };
         let edge = Style::default().fg(color);
         rows.push(Row::new(Line::styled(format!("╭{}╮", "─".repeat(w.saturating_sub(2))), edge)));
+
+        // a 1st enter armed it: a 2nd acts; a gh call on its way: its text
+        let armed = |s: Stop| t.and_then(|t| t.armed).is_some_and(|(a, at)| a == s && at.elapsed() < ARM);
+        let busy = t.and_then(|t| t.busy.as_ref()).and_then(busy_label);
+        let btn = MergeBtn::of(p);
         let mut buttons: Vec<(String, Stop, Style)> = Vec::new();
         if p.needs_update() {
-            buttons.push((if p.conflicts() { " resolve conflicts ".into() } else { " update branch ".into() }, Stop::Update, Style::default().bg(theme::pal().surface0).fg(theme::pal().text)));
+            let label = if armed(Stop::Update) { " ⏎ again: update " } else if p.conflicts() { " resolve conflicts " } else { " update branch " };
+            buttons.push((label.into(), Stop::Update, chip(theme::pal().info(), focus == Some(Stop::Update) || armed(Stop::Update))));
         }
+
         if matches!(p.state, State::Open | State::Draft) {
-            let (label, st) = match (&p.auto_merge, ready) {
-                (Some(m), _) => (format!(" cancel auto-merge ({}) ", m.to_lowercase()), Style::default().bg(theme::pal().surface0).fg(theme::pal().text)),
-                (None, Ready::Mergeable) => (format!(" merge · {} ", p.method.to_lowercase()), Style::default().bg(theme::pal().success()).fg(theme::pal().on_accent).add_modifier(Modifier::BOLD)),
-                (None, Ready::Draft) => (" merge when ready ".into(), Style::default().bg(theme::pal().surface0).fg(theme::pal().subtext0)),
-                (None, _) => (format!(" merge when ready · {} ", p.method.to_lowercase()), Style::default().bg(theme::pal().success()).fg(theme::pal().on_accent)),
+            let (label, c) = btn.label(p);
+            let (label, st) = match busy {
+                Some(b) => (b.to_string(), chip(theme::pal().progress(), true)),
+                None if armed(Stop::Merge) => (format!(" ⏎ again:{label}"), chip(c, true)),
+                None => (label, chip(c, focus == Some(Stop::Merge))),
             };
             buttons.push((label, Stop::Merge, st));
         }
+
         let bw: usize = buttons.iter().map(|b| b.0.width() + 1).sum();
         let head = format!("{icon} {title}");
         let left_w = w.saturating_sub(bw + 4);
-        let mut spans = vec![Span::styled("│ ", edge), Span::styled(crate::nav::fit(&head, left_w), Style::default().fg(color).add_modifier(Modifier::BOLD))];
-        let used = 2 + crate::nav::fit(&head, left_w).width();
+        let head = crate::nav::fit(&head, left_w);
+        // auto-merge on: next to the state, in the merge color
+        let auto = p.auto_merge.as_ref().filter(|_| p.queued.is_none()).map(|m| format!(" · auto-merge on ({})", m.to_lowercase())).unwrap_or_default();
+        let auto = crate::nav::fit(&auto, left_w.saturating_sub(head.width()));
+        let mut spans = vec![Span::styled("│ ", edge), Span::styled(head.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD))];
+        if !auto.is_empty() {
+            spans.push(Span::styled(auto.clone(), Style::default().fg(theme::pal().success()).add_modifier(Modifier::BOLD)));
+        }
+
+        let used = 2 + head.width() + auto.width();
         spans.push(Span::raw(" ".repeat(w.saturating_sub(used + bw + 1))));
         let mut stops = Vec::new();
         let mut x = w.saturating_sub(bw + 1) as u16;
         for (label, s, st) in buttons {
-            let st = if focus == Some(s) { st.add_modifier(Modifier::REVERSED | Modifier::BOLD) } else { st };
             let lw = label.width() as u16;
             stops.push((x, lw, s));
             spans.push(Span::styled(label, st));
             spans.push(Span::raw(" "));
             x += lw + 1;
         }
+
         spans.push(Span::styled("│", edge));
         rows.push(Row { line: Line::from(spans), stops, input: 0 });
-        let armed = t.and_then(|t| t.armed_merge).is_some_and(|a| a.elapsed() < ARM);
         let mut detail = detail.to_string();
-        if armed {
-            detail = "enter again: merge".into();
-        } else if let Some(m) = &p.auto_merge {
-            detail = format!("{detail} · auto-merge on ({})", m.to_lowercase());
+        if let Some(q) = &p.queued {
+            let mut parts = Vec::new();
+            if q.position > 0 {
+                parts.push(format!("position {}", q.position));
+            }
+
+            if !q.state.is_empty() {
+                parts.push(q.state.to_lowercase().replace('_', " "));
+            }
+
+            if q.eta > 0 {
+                parts.push(format!("merges in ~{}", secs(q.eta)));
+            }
+
+            if !parts.is_empty() {
+                detail = parts.join(" · ");
+            }
+        }
+
+        if armed(Stop::Merge) {
+            detail = format!("enter again: {}", btn.verb(p));
+        } else if busy.is_some() {
+            detail = format!("gh: {}…", btn.verb(p));
+        } else if let MergeBtn::Off(why) = btn
+            && p.state == State::Open
+        {
+            detail = format!("{detail} · {why}");
         }
         let reviewers: Vec<String> = p.reviewers.iter().map(|(l, s)| format!("{l} {}", if s == "APPROVED" { "✓" } else if s == "CHANGES_REQUESTED" { "✕" } else { "·" })).chain(p.requested.iter().map(|r| format!("{r} ◷"))).collect();
         if !reviewers.is_empty() {
@@ -1697,6 +1849,7 @@ pub mod tests {
             review: "APPROVED".into(),
             can_edit: true,
             method: "SQUASH".into(),
+            auto_allowed: true,
             labels: vec![gh::Label { name: "bug".into(), color: "d73a4a".into() }],
             checks: vec![
                 gh::Check { name: "lint".into(), group: "CI".into(), verdict: Verdict::Fail, url: "u1".into(), required: true, secs: 12, description: String::new() },
@@ -1914,11 +2067,12 @@ pub mod tests {
         assert_eq!(m.label_opts("b").first().map(|l| l.name.as_str()), Some("backend"));
     }
 
-    /// CODEHEAD_GH_LIVE=1 cargo test live_merge -- --ignored --nocapture: a real PR drawn.
+    /// CODEHEAD_GH_LIVE=1 cargo test live_merge -- --ignored --nocapture: a real PR drawn
+    /// (CODEHEAD_GH_PR=owner/repo#n: that PR).
     #[test]
     #[ignore]
     fn live_merge_draws_a_real_pr() {
-        let pr = PrRef::new("cli/cli", 15100);
+        let pr = std::env::var("CODEHEAD_GH_PR").ok().and_then(|s| s.split_once('#').and_then(|(r, n)| Some(PrRef::new(r, n.parse().ok()?)))).unwrap_or_else(|| PrRef::new("cli/cli", 15100));
         let mut m = Merge::one(pr.clone());
         m.read(pr);
         m.poll(false);
@@ -1945,6 +2099,139 @@ pub mod tests {
         term.draw(|f| m.draw(f, f.area(), true)).unwrap();
         let buf = term.backend().buffer().clone();
         println!("{}", (0..40).map(|y| (0..140).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n"));
+    }
+
+    fn buffer(m: &mut Merge, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        term.draw(|f| m.draw(f, f.area(), true)).unwrap();
+        term.backend().buffer().clone()
+    }
+
+    /// The bg of the 1st cell of TEXT on screen.
+    fn bg_of(buf: &ratatui::buffer::Buffer, text: &str) -> Color {
+        let a = buf.area;
+        for y in 0..a.height {
+            let row: Vec<String> = (0..a.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            let line = row.concat();
+            if let Some(i) = line.find(text) {
+                let x = line[..i].chars().count() as u16;
+                return buf[(x, y)].bg;
+            }
+        }
+
+        panic!("{text} not on screen");
+    }
+
+    /// A gh result as the background thread sends it.
+    fn done(m: &mut Merge, op: Op) {
+        m.poll(false);
+        let _ = m.tx.send(Res::Op(pr().pr, op, Ok(())));
+        m.poll(false);
+    }
+
+    #[test]
+    fn merge_when_ready_shows_its_state_at_each_step() {
+        let mut m = with(pr());
+        m.tab().unwrap().focus = Some(Stop::Merge);
+
+        // the 1st enter arms: the button and the banner say so
+        key(&mut m, KeyCode::Enter);
+        let s = draw(&mut m, 100, 40);
+        assert!(s.contains("⏎ again: merge when ready · squash") && s.contains("enter again: merge when ready (squash)"), "{s}");
+
+        // the 2nd: the gh call on its way
+        key(&mut m, KeyCode::Enter);
+        assert_eq!(m.tab_ref().unwrap().busy, Some(Op::Merge("SQUASH".into(), true)));
+        let s = draw(&mut m, 100, 40);
+        assert!(s.contains("auto-merge on…") && s.contains("gh: merge when ready (squash)…"), "{s}");
+
+        // done: auto-merge on next to the state at once, the button turns it off
+        done(&mut m, Op::Merge("SQUASH".into(), true));
+        assert_eq!(m.note.as_deref(), Some("auto-merge on: merges when ready"));
+        let s = draw(&mut m, 100, 40);
+        assert!(s.contains("checks failed · auto-merge on (squash)") && s.contains("cancel auto-merge"), "{s}");
+
+        let a = key(&mut m, KeyCode::Enter);
+        assert!(matches!(a, Act::Toast(ref t) if t == "enter again: auto-merge off"), "{a:?}");
+
+        key(&mut m, KeyCode::Enter);
+        assert_eq!(m.tab_ref().unwrap().busy, Some(Op::DisableAuto));
+        done(&mut m, Op::DisableAuto);
+        assert!(draw(&mut m, 100, 40).contains("merge when ready · squash"));
+    }
+
+    #[test]
+    fn a_merge_queue_shows_its_entry_and_lets_the_pr_leave_it() {
+        let mut p = pr();
+        p.queue = true;
+        p.id = "PR_1".into();
+        p.checks.clear();
+        p.merge_state = "CLEAN".into();
+        let mut m = with(p);
+        m.tab().unwrap().focus = Some(Stop::Merge);
+        assert!(draw(&mut m, 100, 40).contains(" add to merge queue "));
+
+        let a = key(&mut m, KeyCode::Enter);
+        assert!(matches!(a, Act::Toast(ref t) if t == "enter again: add to the merge queue"), "{a:?}");
+
+        key(&mut m, KeyCode::Enter);
+        done(&mut m, Op::Merge("SQUASH".into(), false));
+        assert_eq!(m.note.as_deref(), Some("added to the merge queue"));
+        let s = draw(&mut m, 100, 40);
+        assert!(s.contains("◷ in the merge queue") && s.contains("leave merge queue") && !s.contains("merged"), "{s}");
+
+        // the read: its position, state, time
+        m.tab().unwrap().pr.as_mut().unwrap().queued = Some(gh::Queued { position: 2, state: "AWAITING_CHECKS".into(), eta: 508 });
+        let s = draw(&mut m, 100, 40);
+        assert!(s.contains("position 2 · awaiting checks · merges in ~8m 28s"), "{s}");
+
+        key(&mut m, KeyCode::Enter);
+        key(&mut m, KeyCode::Enter);
+        assert_eq!(m.tab_ref().unwrap().busy, Some(Op::Dequeue("PR_1".into())));
+    }
+
+    #[test]
+    fn merge_when_ready_says_why_when_the_repo_has_auto_merge_off() {
+        let mut p = pr();
+        p.auto_allowed = false;
+        let mut m = with(p);
+        m.tab().unwrap().focus = Some(Stop::Merge);
+
+        let a = key(&mut m, KeyCode::Enter);
+        assert!(matches!(a, Act::Toast(ref t) if t.contains("auto-merge is off in the repo settings")), "{a:?}");
+
+        // 0 arm, 0 call
+        key(&mut m, KeyCode::Enter);
+        assert!(m.tab_ref().unwrap().busy.is_none());
+        assert!(draw(&mut m, 100, 40).contains("auto-merge is off in the repo settings"));
+    }
+
+    #[test]
+    fn labels_and_buttons_are_dim_without_the_focus_full_with_it() {
+        let mut m = with(pr());
+        m.tab().unwrap().focus = Some(Stop::Title);
+        let b = buffer(&mut m, 100, 40);
+        let (bug, merge, status) = (bg_of(&b, " bug × "), bg_of(&b, " merge when ready"), bg_of(&b, " ● open"));
+        assert!(bug != hex("d73a4a") && merge != theme::pal().success() && status != theme::pal().success(), "{bug:?} {merge:?} {status:?}");
+
+        for (s, text, full) in [(Stop::Label(0), " bug × ", hex("d73a4a")), (Stop::Merge, " merge when ready", theme::pal().success()), (Stop::Status, " ● open", theme::pal().success())] {
+            m.tab().unwrap().focus = Some(s);
+            let b = buffer(&mut m, 100, 40);
+            assert_eq!(bg_of(&b, text), full, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn a_label_without_rights_has_no_remove_mark() {
+        let mut p = pr();
+        p.can_edit = false;
+        let mut m = with(p);
+        let s = draw(&mut m, 100, 40);
+        assert!(s.contains(" bug ") && !s.contains("bug ×"), "{s}");
+
+        m.tab().unwrap().focus = Some(Stop::Label(0));
+        let a = key(&mut m, KeyCode::Enter);
+        assert!(matches!(a, Act::Toast(ref t) if t.contains("0 rights")), "{a:?}");
     }
 
     #[test]
