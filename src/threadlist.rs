@@ -1,6 +1,6 @@
 //! The thread list of both threads tabs: the menu's (ctrl+p: a quick switch, type to filter) and
 //! the start screen's (manage: preview, multi-select, letter keys). 1 look: thread cards in
-//! sections (needs you · working · PRs merged · threads), the repo tabs, the view tabs (active ·
+//! sections (open · stale · shipped), the repo tabs, the view tabs (active ·
 //! archived; the start screen also: worktrees without thread, claude sessions: their rows are the
 //! host's), a name filter.
 //!
@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -165,18 +165,17 @@ impl Row {
     }
 }
 
-/// Time between 2 reads of the cards while the list shows.
-const CARDS_EVERY: Duration = Duration::from_secs(2);
 /// A job's result shows this long.
 const STATUS_FOR: Duration = Duration::from_secs(8);
 
 /// Thread cards, read in the background (also saved: the next list shows them at once).
 fn read_cards() -> Receiver<Vec<Card>> {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = crate::bus::channel();
     std::thread::spawn(move || {
         let cards = nav::load();
         crate::background::save("cards", &cards);
         let _ = tx.send(cards);
+        crate::bus::wake();
     });
     rx
 }
@@ -190,6 +189,11 @@ pub struct ThreadList {
     home_repo: Option<PathBuf>,
     loading: Option<Receiver<Vec<Card>>>,
     cards_at: Option<Instant>,
+    /// `landed::version` of the cards' lands.
+    land_v: u64,
+    /// Bus topics: a thread changed → the cards again.
+    topics: std::sync::mpsc::Receiver<crate::bus::Topic>,
+    cards_due: bool,
     /// Data version of the cards (a new read dissolves in).
     version: u64,
     fx: crate::dissolve::Dissolve,
@@ -245,6 +249,9 @@ impl ThreadList {
             here,
             home_repo,
             cards_at: loading.is_some().then(Instant::now),
+            land_v: crate::landed::version(),
+            topics: crate::bus::subscribe(),
+            cards_due: false,
             loading,
             version: 0,
             fx: Default::default(),
@@ -310,9 +317,27 @@ impl ThreadList {
             }
             self.set_cards(c);
         }
-        let due = self.cards_at.is_none_or(|t| t.elapsed() >= CARDS_EVERY);
+        // a thread's files changed (state, log, draft): the cards again (0 timer)
+        for t in self.topics.try_iter() {
+            self.cards_due |= matches!(t, crate::bus::Topic::Thread(..) | crate::bus::Topic::Rescan(_));
+        }
+        let due = self.cards_at.is_none() || self.cards_due;
         if shown && due && self.loading.is_none() && !cfg!(test) {
+            self.cards_due = false;
             self.reload();
+        }
+        // new landed states: on the cards at once (0 wait for the next card read)
+        let lv = crate::landed::version();
+        if shown && lv != self.land_v {
+            self.land_v = lv;
+            let mut c = self.cards.clone();
+            for k in &mut c {
+                k.land = crate::landed::of(&k.id).or(k.land.take());
+            }
+            self.set_cards(c);
+        }
+        if shown {
+            crate::landed::visible();
         }
         if let Some(rx) = &self.job
             && let Ok((text, err)) = rx.try_recv()
@@ -461,16 +486,20 @@ impl ThreadList {
 
     // ---------- rows ----------
 
-    /// Section of card C: 0 needs you, 1 working, 2 PRs merged, 3 the rest.
+    /// Section of card C: 0 open (working, a question, work not in the base yet, 0 code yet, 0
+    /// landed state read yet), 1 stale (open, 0 code, idle 3 days), 2 shipped.
     fn section(c: &Card) -> u8 {
-        if c.blocked {
+        let stale = || c.stale(crate::engine::now_ms());
+        if c.busy || c.land.as_ref().is_some_and(|l| l.open()) {
             0
-        } else if c.busy {
-            1
-        } else if c.merged {
+        } else if c.blocked {
+            if stale() { 1 } else { 0 }
+        } else if c.shipped() {
             2
+        } else if stale() {
+            1
         } else {
-            3
+            0
         }
     }
 
@@ -505,10 +534,9 @@ impl ThreadList {
 
     fn label_text(s: u8, n: usize) -> String {
         match s {
-            0 => format!("needs you · {n}"),
-            1 => format!("working · {n}"),
-            2 => format!("PRs merged: archive? · {n}"),
-            3 => format!("threads · {n}"),
+            0 => format!("open · {n}"),
+            1 => format!("stale · {n} · 0 code, idle 3+ days: go on or archive"),
+            2 => format!("shipped: archive? · {n}"),
             _ => format!("archived · {n} · branches kept, worktrees gone"),
         }
     }
@@ -637,7 +665,7 @@ impl ThreadList {
             self.done(text, err);
             return;
         }
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         std::thread::spawn(move || {
             let _ = tx.send(work());
         });
@@ -836,7 +864,7 @@ impl ThreadList {
             self.done(t, err);
             return;
         }
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         std::thread::spawn(move || {
             let _ = tx.send(work());
         });
@@ -955,8 +983,15 @@ impl ThreadList {
         let foot = Rect { y: list.bottom().saturating_sub(1), height: 1, ..list };
         let foot_line = if let Some(p) = &self.pending {
             let n = p.ids.len();
+            // threads with work not in the base: the question names it
+            let open: Vec<String> = p.ids.iter().filter_map(|id| self.cards.iter().find(|c| &c.id == id)?.land.clone().filter(|l| l.open())).map(|l| l.badge()).collect();
+            let ask_archive = match open.as_slice() {
+                [] => format!(" archive {n} thread(s)? "),
+                [one] if n == 1 => format!(" {one}: archive anyway? "),
+                _ => format!(" archive {n} thread(s), {} open (work not landed)? ", open.len()),
+            };
             let (ask, why) = match p.act {
-                Act::Archive => (format!(" archive {n} thread(s)? "), "hosts stop, worktrees go (uncommitted files → git stash), branches stay"),
+                Act::Archive => (ask_archive, "hosts stop, worktrees go (uncommitted files → git stash), branches stay"),
                 _ => (format!(" delete {n} thread(s) + worktree(s)? "), "uncommitted files → git stash, pushed branches go"),
             };
             Some(Line::from(vec![Span::styled(ask, theme::pill().add_modifier(Modifier::BOLD)), Span::styled(" enter: yes · esc: no  ", theme::accent()), Span::styled(why, theme::muted())]))
@@ -1319,22 +1354,55 @@ mod tests {
         (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
     }
 
-    /// Sections: needs you, working, PRs merged, the rest; archived threads only in their view.
+    /// Sections: open (working, a question, code not landed, 0 code yet, 0 state read), stale
+    /// (open with 0 code, idle 3 days: a question too), shipped; archived threads only in their
+    /// view.
     #[test]
     fn sections_and_the_archived_view() {
+        use crate::landed::Land;
+        let now = crate::engine::now_ms();
+        let hour = 3600 * 1000;
         let cards = vec![
             card("idle", |_| {}),
             card("asks", |c| c.blocked = true),
             card("busy", |c| c.busy = true),
-            card("merged", |c| c.merged = true),
+            card("shipped", |c| c.land = Some(Land::Landed)),
+            card("talk", |c| {
+                c.land = Some(Land::NoCode);
+                c.done = true;
+            }),
+            card("new", |c| {
+                c.land = Some(Land::NoCode);
+                c.activity = now - hour;
+            }),
+            card("dusty", |c| {
+                c.land = Some(Land::NoCode);
+                c.activity = now - 5 * 24 * hour - hour;
+            }),
+            card("loose", |c| {
+                c.land = Some(Land::Unpushed(3));
+                c.activity = now - 9 * 24 * hour;
+            }),
+            card("waits", |c| {
+                c.blocked = true;
+                c.land = Some(Land::NoCode);
+                c.activity = now - 4 * 24 * hour;
+            }),
             card("old", |c| c.state = "archived".into()),
         ];
         let mut l = ThreadList::new(Mode::Switch, None, None, cards);
         let ids: Vec<String> = l.visible().iter().map(|&i| l.cards[i].id.clone()).collect();
-        assert_eq!(ids, ["asks", "busy", "merged", "idle"]);
-        let s = screen(&mut l, 70, 40);
-        assert!(s.contains("needs you · 1") && s.contains("working · 1") && s.contains("PRs merged: archive? · 1"), "{s}");
-        assert!(s.contains("active 4") && s.contains("archived 1") && !s.contains("old"), "{s}");
+        // 0 code: shipped only when the agents reported done; idle 3 days: stale (code: never)
+        assert_eq!(ids, ["idle", "asks", "busy", "new", "loose", "dusty", "waits", "shipped", "talk"]);
+        let s = screen(&mut l, 80, 90);
+        for x in ["open · 5", "stale · 2", "shipped: archive? · 2", "◇ 3 unpushed", "⇲ shipped", "⇲ nothing to ship", "auto-archive in 25d"] {
+            assert!(s.contains(x), "{x}: {s}");
+        }
+        for x in ["needs you ·", "recent ·", "working ·", "threads ·"] {
+            assert!(!s.contains(x), "{x}: {s}");
+        }
+        assert_eq!(s.matches("nothing to ship").count(), 1, "{s}");
+        assert!(s.contains("active 9") && s.contains("archived 1") && !s.contains("old"), "{s}");
 
         // ↑ from the 1st card: the view tabs; → archived
         l.key(k(KeyCode::Up));
@@ -1382,6 +1450,25 @@ mod tests {
         l.key(k(KeyCode::Char('a')));
         assert_eq!(l.key(k(KeyCode::Char('y'))), Out::Home);
         let _ = crate::engine::store::delete(&t.id);
+    }
+
+    /// Archive of a thread with work not landed: the question names the work; 2 picks, 1 open:
+    /// the count.
+    #[test]
+    fn archive_of_an_open_thread_names_the_work() {
+        use crate::landed::Land;
+        let cards = vec![card("loose", |c| c.land = Some(Land::Unpushed(3))), card("done", |c| c.land = Some(Land::Landed))];
+        let mut l = ThreadList::new(Mode::Manage, None, None, cards);
+        l.key(k(KeyCode::Char('a')));
+        let s = screen(&mut l, 120, 30);
+        assert!(s.contains("3 unpushed: archive anyway?"), "{s}");
+        l.key(k(KeyCode::Esc));
+
+        l.key(k(KeyCode::Char(' ')));
+        l.key(k(KeyCode::Char(' ')));
+        l.key(k(KeyCode::Char('a')));
+        let s = screen(&mut l, 120, 30);
+        assert!(s.contains("archive 2 thread(s), 1 open (work not landed)?"), "{s}");
     }
 
     /// The start screen: space picks, a asks for every pick, esc says no; e opens the form,

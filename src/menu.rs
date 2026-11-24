@@ -5,7 +5,7 @@
 //! list: up 1 level; ↓: down 1 level. ←→ on the tab bar (a list without a tab group too): next /
 //! previous tab; on a tab group: its tabs. enter: run, a single esc or tab closes.
 
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use ratatui::Frame;
@@ -183,7 +183,7 @@ impl Menu {
         }
         let due = self.detail_at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2));
         if self.tab == Tab::Tokens && self.detail_rx.is_none() && due && !cfg!(test) {
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = crate::bus::channel();
             let id = self.thread.clone();
             std::thread::spawn(move || {
                 let _ = tx.send(crate::cost::detail(id.as_deref()));
@@ -214,7 +214,7 @@ impl Menu {
         }
         // the search tab: a new read on its 1st show, then every 5s while it shows
         if self.tab == Tab::Search && self.msgs_rx.is_none() && due(self.msgs_at, MSGS_EVERY) && !cfg!(test) {
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = crate::bus::channel();
             std::thread::spawn(move || {
                 let _ = tx.send(crate::search::load());
             });
@@ -961,20 +961,20 @@ mod tests {
 
     #[test]
     fn threads_tab_marks_the_thread_in_view_and_sorts_by_section() {
-        let mut busy = card("t2", "older");
-        busy.busy = true;
-        let cards = vec![card("t1", "newest"), busy, card("t3", "this one")];
+        let mut done = card("t2", "older");
+        done.land = Some(crate::landed::Land::Landed);
+        let cards = vec![card("t1", "newest"), done, card("t3", "this one")];
         let mut m = Menu::new(Vec::new(), Some("t3".into()), Vec::new(), cards);
         m.key(k(KeyCode::Right));
         // a letter on the tab bar: the filter takes it
         m.key(k(KeyCode::Char('e')));
         let ids = |m: &Menu| m.list.visible().iter().map(|&i| m.list.cards[i].id.clone()).collect::<Vec<_>>();
-        assert_eq!(ids(&m), ["t2", "t1", "t3"], "working first");
+        assert_eq!(ids(&m), ["t1", "t3", "t2"], "shipped last");
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 34)).unwrap();
         t.draw(|f| m.render(f, f.area())).unwrap();
         let b = t.backend().buffer().clone();
         let s: String = (0..34).map(|y| (0..90).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
-        assert!(s.contains(" here ") && s.contains("working · 1") && s.contains("ctrl+o"), "{s}");
+        assert!(s.contains(" here ") && s.contains("open · 2") && s.contains("ctrl+o"), "{s}");
         m.key(k(KeyCode::Backspace));
         for c in "older".chars() {
             m.key(k(KeyCode::Char(c)));

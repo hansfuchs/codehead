@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::Receiver;
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -33,7 +33,7 @@ pub struct HistSearch {
     offset: usize,
     /// Run counter: a result of an older run is dropped.
     run: u64,
-    tx: Sender<(u64, String, Vec<String>)>,
+    tx: crate::bus::Tx<(u64, String, Vec<String>)>,
     rx: Receiver<(u64, String, Vec<String>)>,
     /// The pick of the last enter: the new input text.
     pub picked: Option<String>,
@@ -42,7 +42,7 @@ pub struct HistSearch {
 
 impl Default for HistSearch {
     fn default() -> Self {
-        let (tx, rx) = channel();
+        let (tx, rx) = crate::bus::channel();
         HistSearch { open: false, all: None, query: String::new(), matches: Vec::new(), cursor: 0, offset: 0, run: 0, tx, rx, picked: None, fzf: crate::engine::harnesses::on_path("fzf") }
     }
 }

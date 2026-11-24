@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -226,7 +226,7 @@ impl PrList {
         if cfg!(test) {
             return;
         }
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         std::thread::spawn(move || {
             let _ = tx.send(load());
         });

@@ -203,6 +203,13 @@ pub struct View {
     texts: HashMap<(PathBuf, u64), String>,
     scroll: usize,
     loaded: Option<Instant>,
+    /// A change came: 1 more read (after the one under way).
+    again: bool,
+    /// Bus topics: the thread's log, its work tree, the home repo → 1 read (0 timer).
+    topics: std::sync::mpsc::Receiver<crate::bus::Topic>,
+    /// The work trees the list comes from (canonical), watched while the view lives.
+    roots: Vec<PathBuf>,
+    _shown: Vec<crate::watch::Shown>,
     /// The list's read (the thread log, the home repo's notes): off the UI thread.
     reads: crate::background::Reads<(), Vec<Entry>>,
     /// Preview renders (markdown, code highlight): off the UI thread.
@@ -243,6 +250,8 @@ impl View {
     pub fn new(id: &str, dir: &Path) -> View {
         let mut filter = crate::textarea::TextArea::new(true, "f: fuzzy search names and content");
         filter.style = Some(theme::text());
+        // the work dir (agent files) and the home repo (notes): their changes read the list again
+        let roots: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(crate::config::home_repo()).filter(|r| r.is_dir()).collect();
         View {
             id: id.to_string(),
             dir: dir.to_path_buf(),
@@ -253,6 +262,10 @@ impl View {
             texts: HashMap::new(),
             scroll: 0,
             loaded: None,
+            again: false,
+            topics: crate::bus::subscribe(),
+            roots: roots.iter().map(|r| crate::watch::canon(r)).collect(),
+            _shown: roots.iter().map(|r| crate::watch::show(r)).collect(),
             reads: crate::background::Reads::default(),
             renders: crate::background::Reads::default(),
             images: HashMap::new(),
@@ -336,21 +349,30 @@ impl View {
         t
     }
 
-    /// Read the list again (NOW: even if fresh; else every 3 s while open).
+    /// Read the list: the 1st time, and after a change (NOW: a bus topic named this list).
     pub fn refresh(&mut self, now: bool) {
-        if !now && self.loaded.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) {
+        self.again |= now;
+        if !self.again && self.loaded.is_some() {
             return;
         }
         self.loaded = Some(Instant::now());
         // tests: at once
         if cfg!(test) {
+            self.again = false;
             let files = load(&self.id, &self.dir);
             let _ = self.apply(files);
             return;
         }
+        // a read under way: 1 more after it (the change came after its start)
         if !self.reads.waiting(&()) {
+            self.again = false;
+            self.reads.forget(&());
             let (id, dir) = (self.id.clone(), self.dir.clone());
-            self.reads.request((), move || load(&id, &dir));
+            self.reads.request((), move || {
+                let v = load(&id, &dir);
+                crate::bus::wake();
+                v
+            });
         }
     }
 
@@ -597,7 +619,15 @@ impl View {
 
     pub fn draw(&mut self, f: &mut Frame, area: Rect) {
         self.poll();
-        self.refresh(false);
+        let mut hit = false;
+        for t in self.topics.try_iter() {
+            hit |= match &t {
+                crate::bus::Topic::Thread(id, crate::bus::Part::Log | crate::bus::Part::Other) => *id == self.id,
+                crate::bus::Topic::Work(w) | crate::bus::Topic::Rescan(w) => self.roots.iter().any(|r| r.starts_with(w) || w.starts_with(r)),
+                _ => false,
+            };
+        }
+        self.refresh(hit);
         if self.files.is_empty() {
             f.render_widget(Paragraph::new(Line::styled("  0 files yet: the files the agents write, and the home repo's notes of this thread · menu: yazi", theme::muted())), area);
             return;
@@ -770,7 +800,7 @@ impl View {
                 if cfg!(test) {
                     return Act::Toast(run());
                 }
-                let (tx, rx) = std::sync::mpsc::channel();
+                let (tx, rx) = crate::bus::channel();
                 self.shared = Some(rx);
                 std::thread::spawn(move || {
                     let _ = tx.send(run());

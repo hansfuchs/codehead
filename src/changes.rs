@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
@@ -33,8 +33,6 @@ pub const SIDE_MIN: u16 = 170;
 const MAX_UNTRACKED: usize = 300;
 /// An untracked file larger than this: shown as binary.
 const MAX_FILE: u64 = 512 * 1024;
-/// The view re-reads git this often while it is open.
-const REFRESH: Duration = Duration::from_secs(4);
 /// Git's empty tree: the base of a branch with 0 commits.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
@@ -782,6 +780,25 @@ fn stash_items(dir: &Path, thread: &str, rev: &str, items: &[(String, String, pa
 }
 
 /// Run OP in DIR: Ok(what happened) / Err(git's 1st error line).
+/// The landed state OP should leave (C: the changes before it, NOW: the state before it). None: 0
+/// guess (a step that keeps the state, a checkout on the default branch).
+fn expected(op: &Op, c: &Changes, now: Option<crate::landed::Land>) -> Option<crate::landed::Land> {
+    use crate::landed::Land;
+    let task = !matches!(now, None | Some(Land::NoCode));
+    match op {
+        Op::Commit(_) if task && !c.staged.is_empty() => {
+            let left = c.files.iter().filter(|f| c.staged.get(&f.path) != Some(&true)).count();
+            Some(match (left, now) {
+                (n, _) if n > 0 => Land::Dirty(n),
+                (_, Some(Land::Unpushed(n))) => Land::Unpushed(n + 1),
+                _ => Land::Unpushed(1),
+            })
+        }
+        Op::Push | Op::OpenPr if matches!(now, Some(Land::Unpushed(_))) => Some(Land::Unmerged),
+        _ => None,
+    }
+}
+
 pub fn run_op(dir: &Path, op: &Op) -> Result<String, String> {
     // a push: the checkout's push lock first (an agent's / shell mode's push runs: 0 push)
     let _lock = match (op.pushes(), crate::pushlock::git_dir(dir, &[])) {
@@ -1381,7 +1398,8 @@ pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
 /// The paths of ROOT with uncommitted changes (staged, unstaged, untracked; both sides of a
 /// rename). None: 0 git read.
 fn uncommitted(root: &Path) -> Option<HashSet<String>> {
-    let out = Command::new("git").arg("-C").arg(root).args(["status", "--porcelain=v1", "-z", "--untracked-files=all"]).output().ok()?;
+    // 0 index refresh: a write of the index would come back as a watcher topic (a loop)
+    let out = Command::new("git").arg("-C").arg(root).args(["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"]).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1704,6 +1722,14 @@ pub struct View {
     top: usize,
     loading: Option<Receiver<Result<Changes, String>>>,
     loaded: Option<Instant>,
+    /// Bus topics: a change in this checkout reads git again (0 timer).
+    topics: Receiver<crate::bus::Topic>,
+    /// This checkout's work tree stays watched while the view lives.
+    _shown: crate::watch::Shown,
+    /// (top dir, common git dir, own git dir), canonical: the watcher's paths.
+    git: Option<(PathBuf, PathBuf, PathBuf)>,
+    /// A change came while a read ran: 1 more read after it.
+    stale: bool,
     pub error: Option<String>,
     /// The rows' area; the summary row and the filter row above it (0 height: too little room).
     area: Rect,
@@ -1921,6 +1947,10 @@ impl View {
             fx: Default::default(),
             id: id.to_string(),
             dir: dir.to_path_buf(),
+            topics: crate::bus::subscribe(),
+            _shown: crate::watch::show(dir),
+            git: crate::watch::git_dirs(dir).map(|(t, c, o)| (crate::watch::canon(&t), crate::watch::canon(&c), crate::watch::canon(&o))),
+            stale: false,
             changes: Changes::default(),
             marks: read_marks(id),
             toggled: HashSet::new(),
@@ -2044,7 +2074,7 @@ impl View {
         if (force || !fresh) && self.ranking.is_none() && !self.changes.files.is_empty()
             && let Some(by) = self.classifier.clone()
         {
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = crate::bus::channel();
             let (id, dir, files) = (self.id.clone(), self.dir.clone(), self.changes.files.clone());
             std::thread::spawn(move || {
                 let _ = tx.send(crate::rank::run(&id, &dir, &files, &by));
@@ -2171,7 +2201,7 @@ impl View {
         if self.reviewing.is_some() {
             return Act::Toast("review: on its way".into());
         }
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         let (id, dir, files) = (self.id.clone(), self.dir.clone(), self.changes.files.clone());
         std::thread::spawn(move || {
             let _ = tx.send(crate::review::run(&id, &dir, &files, &model));
@@ -2234,9 +2264,13 @@ impl View {
             _ => Vec::new(),
         };
         self.pushing_at = (!self.pushing.is_empty()).then(Instant::now);
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         let dir = self.dir.clone();
         let label = op.label();
+        // the card shows the result at once; the git read after the step confirms it
+        if let Some(l) = expected(&op, &self.changes, crate::landed::of(&self.id)) {
+            crate::landed::expect(&self.id, l);
+        }
         std::thread::spawn(move || {
             let _ = tx.send(run_op(&dir, &op));
         });
@@ -2300,7 +2334,7 @@ impl View {
         let on_branch = !cfg!(test) && self.pr_src.is_none() && self.commit_src.is_none() && self.changes.base != "HEAD" && !self.changes.base.is_empty();
         if on_branch && self.pr_read.is_none() && self.pr_at.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
             self.pr_at = Some(Instant::now());
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = crate::bus::channel();
             let dir = self.dir.clone();
             std::thread::spawn(move || {
                 let _ = tx.send(pr_state(&dir));
@@ -2344,6 +2378,8 @@ impl View {
             Ok(s) => format!("git: {s}"),
             Err(e) => format!("git: {e}"),
         });
+        // the expected state of `start_op`: confirmed or corrected by a read
+        crate::landed::refresh(&self.id);
         self.refresh(true);
         self.sync_stash(true);
         true
@@ -2405,9 +2441,28 @@ impl View {
         !self.changes.staged.is_empty()
     }
 
-    /// Read git in the background (NOW: even if the last read is fresh).
+    /// A bus topic since the last call touches this checkout: its work tree, its repo's refs, its
+    /// own HEAD / index (another worktree's: 0).
+    fn git_changed(&mut self) -> bool {
+        use crate::bus::{Git, Topic};
+        let mut hit = false;
+        for t in self.topics.try_iter() {
+            let Some((top, common, own)) = &self.git else { continue };
+            hit |= match &t {
+                Topic::Work(w) => w == top,
+                Topic::Git(g, Git::Worktree(n)) => g == common && (if n.is_empty() { own == common } else { own.file_name().is_some_and(|f| f == n.as_str()) }),
+                Topic::Git(g, _) => g == common,
+                Topic::Rescan(r) => top.starts_with(r) || common.starts_with(r),
+                Topic::Thread(..) => false,
+            };
+        }
+        hit
+    }
+
+    /// Read git in the background (NOW: even if a read happened; else only the 1st read: later
+    /// ones come from bus topics).
     pub fn refresh(&mut self, now: bool) {
-        if self.loading.is_some() || (!now && self.loaded.is_some_and(|t| t.elapsed() < REFRESH)) {
+        if self.loading.is_some() || (!now && self.loaded.is_some()) {
             return;
         }
         // PR mode: a read on a new head only (gh calls are counted)
@@ -2419,7 +2474,7 @@ impl View {
             return;
         }
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         if let Some(c) = self.commit_src.clone() {
             let dir = self.dir.clone();
             std::thread::spawn(move || {
@@ -3476,7 +3531,7 @@ impl View {
                 if self.ci.is_some() {
                     return Act::Toast("CI: reading the log…".into());
                 }
-                let (tx, rx) = mpsc::channel();
+                let (tx, rx) = crate::bus::channel();
                 let dir = self.dir.clone();
                 std::thread::spawn(move || {
                     let _ = tx.send(ci_fix_message(&dir));
@@ -4038,6 +4093,11 @@ impl View {
         }
         self.sync_stash(false);
         self.sync_comments();
+        self.stale |= self.git_changed();
+        if self.stale && self.loading.is_none() {
+            self.stale = false;
+            self.refresh(true);
+        }
         self.refresh(false);
         // the panel left (ctrl+b; room permitting), a line, the review right
         let panel = self.scm.shown && area.width >= PANEL_MIN;
@@ -5401,7 +5461,7 @@ Binary files a/img.png and b/img.png differ
         assert!(s[2].starts_with("┌─ ☐ src/a.rs"), "the head pinned: {s:#?}");
         assert!(!s.iter().skip(3).any(|l| l.contains("┌─ ☐ src/a.rs")), "{s:#?}");
         // a call on its way: classifying…
-        let (_tx, rx) = mpsc::channel();
+        let (_tx, rx) = crate::bus::channel();
         v.ranking = Some(rx);
         assert!(screen(&mut v, 100, 12)[0].contains("classifying…"));
     }
@@ -5454,7 +5514,7 @@ Binary files a/img.png and b/img.png differ
         }
         let at = v.at;
         let read = |v: &mut View, c: Changes| {
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = crate::bus::channel();
             tx.send(Ok(c)).unwrap();
             v.loading = Some(rx);
             v.poll()

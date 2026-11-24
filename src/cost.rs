@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -15,7 +15,8 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::{agents, theme};
 
-const POLL: Duration = Duration::from_secs(2);
+/// The last-hour sparkline moves with the clock: 1 read per CLOCK without a log change.
+const CLOCK: Duration = Duration::from_secs(30);
 const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 #[derive(Default, Clone)]
@@ -535,36 +536,35 @@ fn names() -> Names {
 
 fn run_loop(term: &mut DefaultTerminal, id: &str) -> std::io::Result<()> {
     let names = names();
-    let log = crate::engine::store::events_path(id);
-    let stamp_of = || std::fs::metadata(&log).ok().map(|m| (m.len(), m.modified().ok()));
-    let mut stamp = stamp_of();
+    // the log's changes come from the watcher (0 stat poll); the last-hour sparkline moves with
+    // the clock: 1 read per CLOCK anyway
+    crate::watch::start();
+    let topics = crate::bus::subscribe();
     let mut snap = fetch(id, &names);
     let mut at = Instant::now();
+    let mut morph = Instant::now();
     loop {
-        term.draw(|f| draw(f, &snap, at.elapsed(), now()))?;
-        if event::poll(Duration::from_millis(500))?
-            && let Event::Key(k) = event::read()?
-            && k.kind != KeyEventKind::Release
-        {
+        term.draw(|f| draw(f, &snap, morph.elapsed(), now()))?;
+        // the morph animation: frames until it ends; else sleep until a key, a change, the clock
+        let wait = if morph.elapsed() < MORPH_TIME { Duration::from_millis(33) } else { CLOCK.saturating_sub(at.elapsed()).max(Duration::from_millis(1)) };
+        let mut read = at.elapsed() >= CLOCK;
+        for (ev, _) in crate::read_ready(wait).map_err(std::io::Error::other)? {
+            let Event::Key(k) = ev else { continue };
+            if k.kind == KeyEventKind::Release {
+                continue;
+            }
             match k.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
-                KeyCode::Char('r') => {
-                    at = Instant::now() - POLL;
-                    stamp = None;
-                }
+                KeyCode::Char('r') => read = true,
                 _ => {}
             }
         }
-        // a read only after the log changed; every 30s anyway (the last-hour sparkline moves
-        // with the clock, the live agents change)
-        if at.elapsed() >= POLL {
-            let now_stamp = stamp_of();
-            if now_stamp != stamp || at.elapsed() >= Duration::from_secs(30) {
-                snap = fetch(id, &names);
-                stamp = now_stamp;
-                at = Instant::now();
-            }
+        read |= topics.try_iter().any(|t| matches!(t, crate::bus::Topic::Thread(tid, crate::bus::Part::Log) if tid == id));
+        if read {
+            snap = fetch(id, &names);
+            at = Instant::now();
+            morph = Instant::now();
         }
     }
 }

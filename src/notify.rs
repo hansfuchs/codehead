@@ -279,13 +279,10 @@ fn reply_notes(t: &store::Thread) -> Vec<Note> {
 }
 
 static NOTES: Mutex<Vec<Note>> = Mutex::new(Vec::new());
-/// Threads whose PRs are all merged / closed (1 merged at least): the thread lists offer an
-/// archive. From the last PR pass.
-static MERGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Threads whose PRs are all merged / closed, 1 merged at least (the last PR pass).
-pub fn merged() -> Vec<String> {
-    MERGED.lock().map(|m| m.clone()).unwrap_or_default()
+/// Every agent on thread ID reported done, 0 turn since (the last pass's notes, seen or not).
+pub fn reported_done(id: &str) -> bool {
+    NOTES.lock().is_ok_and(|n| n.iter().any(|n| n.thread == id && n.kind == Kind::Done))
 }
 
 /// Every PR of a thread done, 1 merged at least: STATES of its PRs (several repos too).
@@ -366,53 +363,112 @@ pub fn start() {
     if cfg!(test) || ON.set(()).is_err() {
         return;
     }
-    std::thread::spawn(|| {
-        let mut c = Cache { logs: HashMap::new(), prs: HashMap::new(), first: load_map("prs.json"), replies: HashMap::new() };
-        let mut pr_at: Option<Instant> = None;
-        loop {
-            let threads: Vec<store::Thread> = store::all().into_iter().filter(|t| t.state != "archived" && t.state != "deleted").collect();
-            let do_prs = pr_at.is_none_or(|t| t.elapsed() > Duration::from_secs(180));
-            if do_prs {
-                pr_at = Some(Instant::now());
-                pr_pass(&threads, &mut c);
-            }
-            let mut all = Vec::new();
-            let mut last = HashMap::new();
-            for t in &threads {
-                let p = store::events_path(&t.id);
-                let Ok(m) = std::fs::metadata(&p) else { continue };
-                let key = (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH));
-                let fresh = c.logs.get(&t.id).is_none_or(|x| x.0 != key);
-                if fresh {
-                    let ev = store::events_tail(&t.id, 512 << 10);
-                    let end = ev.last().map_or(0, |e| e.ts);
-                    let dir = t.work_dir();
-                    let notes = derive(&ev, &t.agents).into_iter().map(|(kind, agents, ts, text)| Note { thread: t.id.clone(), title: t.title.clone(), dir: dir.clone(), kind, agents, ts, text, comment: String::new() }).collect();
-                    c.logs.insert(t.id.clone(), (key, notes, end));
+    // event driven: bus topics name the threads to read again; the PR pass (GitHub: 0 push) on
+    // its own timer
+    let topics = crate::bus::subscribe();
+    std::thread::Builder::new()
+        .name("notify".into())
+        .spawn(move || {
+            use crate::bus::{Part, Topic};
+            let open = |t: &store::Thread| t.state != "archived" && t.state != "deleted";
+            let mut c = Cache { logs: HashMap::new(), prs: HashMap::new(), first: load_map("prs.json"), replies: HashMap::new() };
+            let mut threads: HashMap<String, store::Thread> = store::all().into_iter().filter(open).map(|t| (t.id.clone(), t)).collect();
+            let mut due: HashSet<String> = threads.keys().cloned().collect();
+            let mut pr_at: Option<Instant> = None;
+            loop {
+                if pr_at.is_none_or(|t| t.elapsed() > PR_EVERY) {
+                    pr_at = Some(Instant::now());
+                    let list: Vec<store::Thread> = threads.values().cloned().collect();
+                    pr_pass(&list, &mut c);
                 }
-                // unseen agent replies on comments: read when the comments file changed
-                let at = crate::changes::comments_stamp(&t.id);
-                if c.replies.get(&t.id).is_none_or(|r| r.0 != at) {
-                    c.replies.insert(t.id.clone(), (at, reply_notes(t)));
+                for id in due.drain() {
+                    let Some(t) = threads.get(&id) else {
+                        c.logs.remove(&id);
+                        c.replies.remove(&id);
+                        continue;
+                    };
+                    read_thread(t, &mut c);
                 }
-                all.extend(c.replies[&t.id].1.iter().cloned());
-                let (_, notes, end) = &c.logs[&t.id];
-                all.extend(notes.iter().cloned());
-                all.extend(c.prs.get(&t.id).into_iter().flatten().cloned());
-                last.insert(t.id.clone(), *end);
+                publish(&threads, &c);
+                // the next topic, or the next PR pass
+                let wait = pr_at.map_or(Duration::ZERO, |t| PR_EVERY.saturating_sub(t.elapsed()));
+                let first = match topics.recv_timeout(wait) {
+                    Ok(t) => Some(t),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                };
+                for t in first.into_iter().chain(std::iter::from_fn(|| topics.try_recv().ok())) {
+                    match t {
+                        Topic::Thread(id, Part::Meta) => {
+                            match store::load(&id).filter(|t| open(t) && t.of.is_none()) {
+                                Some(t) => threads.insert(id.clone(), t),
+                                None => threads.remove(&id),
+                            };
+                            due.insert(id);
+                        }
+                        Topic::Thread(id, Part::Log | Part::Comments) if threads.contains_key(&id) => {
+                            due.insert(id);
+                        }
+                        Topic::Rescan(r) if r == crate::watch::canon(&store::threads_dir()) => {
+                            threads = store::all().into_iter().filter(open).map(|t| (t.id.clone(), t)).collect();
+                            due.extend(threads.keys().cloned());
+                        }
+                        _ => {}
+                    }
+                }
             }
-            if let Ok(mut l) = LAST.get_or_init(|| Mutex::new(HashMap::new())).lock() {
-                *l = last;
-            }
-            if let Ok(mut n) = NOTES.lock()
-                && *n != all
-            {
-                *n = all;
-                VERSION.fetch_add(1, Ordering::Relaxed);
-            }
-            std::thread::sleep(Duration::from_secs(2));
+        })
+        .ok();
+}
+
+/// Time between 2 PR passes (GitHub sends 0 push to codehead).
+const PR_EVERY: Duration = Duration::from_secs(180);
+
+/// Read thread T's log (when it changed) and its comment replies (when the file changed).
+fn read_thread(t: &store::Thread, c: &mut Cache) {
+    let p = store::events_path(&t.id);
+    if let Ok(m) = std::fs::metadata(&p) {
+        let key = (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH));
+        if c.logs.get(&t.id).is_none_or(|x| x.0 != key) {
+            let ev = store::events_tail(&t.id, 512 << 10);
+            let end = ev.last().map_or(0, |e| e.ts);
+            let dir = t.work_dir();
+            let notes = derive(&ev, &t.agents).into_iter().map(|(kind, agents, ts, text)| Note { thread: t.id.clone(), title: t.title.clone(), dir: dir.clone(), kind, agents, ts, text, comment: String::new() }).collect();
+            c.logs.insert(t.id.clone(), (key, notes, end));
         }
-    });
+    }
+    // unseen agent replies on comments: read when the comments file changed
+    let at = crate::changes::comments_stamp(&t.id);
+    if c.replies.get(&t.id).is_none_or(|r| r.0 != at) {
+        c.replies.insert(t.id.clone(), (at, reply_notes(t)));
+    }
+}
+
+/// The notes of every thread from the caches (0 read); a change wakes the UI.
+fn publish(threads: &HashMap<String, store::Thread>, c: &Cache) {
+    let mut all = Vec::new();
+    let mut last = HashMap::new();
+    let mut ids: Vec<&String> = threads.keys().collect();
+    // a fixed order: the same notes compare equal
+    ids.sort_by_key(|id| std::cmp::Reverse(threads[*id].updated));
+    for id in ids {
+        all.extend(c.replies.get(id).into_iter().flat_map(|r| r.1.iter().cloned()));
+        if let Some((_, notes, end)) = c.logs.get(id) {
+            all.extend(notes.iter().cloned());
+            last.insert(id.clone(), *end);
+        }
+        all.extend(c.prs.get(id).into_iter().flatten().cloned());
+    }
+    if let Ok(mut l) = LAST.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        *l = last;
+    }
+    if let Ok(mut n) = NOTES.lock()
+        && *n != all
+    {
+        *n = all;
+        VERSION.fetch_add(1, Ordering::Relaxed);
+        crate::bus::wake();
+    }
 }
 
 /// The remembered PRs of each thread (the merge tab found them): conflicts, failed checks, the
@@ -422,11 +478,11 @@ fn pr_pass(threads: &[store::Thread], c: &mut Cache) {
     let now = crate::engine::now_ms();
     let mut live: HashSet<String> = HashSet::new();
     c.prs.clear();
-    let mut merged = Vec::new();
     for t in threads {
         let mut notes = Vec::new();
         let prs = crate::prlist::remembered(&t.id);
         let mut states = Vec::new();
+        let mut seen = Vec::new();
         for r in &prs {
             let Ok(p) = gh::fetch(r) else {
                 // a PR not read: 0 verdict on the thread
@@ -434,6 +490,7 @@ fn pr_pass(threads: &[store::Thread], c: &mut Cache) {
                 continue;
             };
             states.push(p.state);
+            seen.push(crate::landed::PrSeen { label: r.label(), state: p.state, head: p.head.clone(), head_oid: p.head_oid.clone() });
             if !matches!(p.state, gh::State::Open | gh::State::Draft) {
                 continue;
             }
@@ -454,20 +511,18 @@ fn pr_pass(threads: &[store::Thread], c: &mut Cache) {
                 add(Kind::Review, String::new(), Some(m.created * 1000), format!("{}: {}: {}", r.label(), m.author, first_line(&m.body)));
             }
         }
-        if all_merged(&states) {
+        crate::landed::set_prs(&t.id, seen);
+        // work after the merge (new commits, files): 0 archive offer
+        if all_merged(&states) && !crate::landed::of(&t.id).is_some_and(|l| l.open()) {
             let key = format!("merged:{}", t.id);
             let ts = *c.first.entry(key.clone()).or_insert(now);
             live.insert(key);
             let text = if prs.len() == 1 { format!("{} merged: archive the thread?", prs[0].label()) } else { format!("all {} PRs merged / closed: archive the thread?", prs.len()) };
             notes.push(Note { thread: t.id.clone(), title: t.title.clone(), dir: t.work_dir(), kind: Kind::Merged, agents: Vec::new(), ts, text, comment: String::new() });
-            merged.push(t.id.clone());
         }
         if !notes.is_empty() {
             c.prs.insert(t.id.clone(), notes);
         }
-    }
-    if let Ok(mut m) = MERGED.lock() {
-        *m = merged;
     }
     let before = c.first.len();
     c.first.retain(|k, _| live.contains(k));

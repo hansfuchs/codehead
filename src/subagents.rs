@@ -36,7 +36,12 @@ pub struct Subagents {
     /// What each running subagent does now (id → its last step), read in the background.
     now: HashMap<String, String>,
     read: Option<std::sync::mpsc::Receiver<HashMap<String, String>>>,
-    read_at: Option<std::time::Instant>,
+    /// The transcript dirs of the running subagents, watched while they run (canonical dir,
+    /// its guard).
+    watched: Vec<(PathBuf, crate::watch::Shown)>,
+    topics: Option<std::sync::mpsc::Receiver<crate::bus::Topic>>,
+    /// A transcript changed (or a new subagent runs): 1 read.
+    due: bool,
     /// Box rows of the last draw: (row in the box text, subagent id).
     rows: Vec<(usize, String)>,
     /// A 1st d: a 2nd d stops the selected subagent.
@@ -84,18 +89,34 @@ impl Subagents {
         subs.iter().any(Sub::running)
     }
 
-    /// Each second: what the running subagents of SUBS do now (their transcripts). True: news.
+    /// What the running subagents of SUBS do now (their transcripts): read when a transcript
+    /// changed (its dir is watched while it runs), 1 read at a time. True: news.
     pub fn tick(&mut self, subs: &[Sub]) -> bool {
         let files: Vec<(String, PathBuf)> = subs.iter().filter(|s| s.running() && !s.transcript.is_empty()).map(|s| (s.id.clone(), PathBuf::from(&s.transcript))).collect();
-        // 1 read per second at most, 1 at a time
-        let due = self.read.is_none() && self.read_at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1));
-        if !files.is_empty() && due && !cfg!(test) {
-            let (tx, rx) = std::sync::mpsc::channel();
+        let dirs: Vec<PathBuf> = files.iter().filter_map(|(_, p)| p.parent().map(crate::watch::canon)).collect();
+        let before = self.watched.len();
+        self.watched.retain(|(d, _)| dirs.contains(d));
+        for d in &dirs {
+            if !self.watched.iter().any(|(w, _)| w == d) {
+                self.watched.push((d.clone(), crate::watch::show(d)));
+                self.due = true;
+            }
+        }
+        self.due |= self.watched.len() != before;
+        let topics = self.topics.get_or_insert_with(crate::bus::subscribe);
+        for t in topics.try_iter() {
+            if let crate::bus::Topic::Work(w) | crate::bus::Topic::Rescan(w) = t {
+                self.due |= dirs.iter().any(|d| d.starts_with(&w));
+            }
+        }
+        if !files.is_empty() && self.due && self.read.is_none() && !cfg!(test) {
+            self.due = false;
+            let (tx, rx) = crate::bus::channel();
             std::thread::spawn(move || {
                 let _ = tx.send(files.into_iter().filter_map(|(id, p)| Some((id, crate::engine::subagents::activity_of(&p)?))).collect());
+                crate::bus::wake();
             });
             self.read = Some(rx);
-            self.read_at = Some(std::time::Instant::now());
         }
         let mut changed = false;
         if let Some(now) = self.read.as_ref().and_then(|r| r.try_recv().ok()) {

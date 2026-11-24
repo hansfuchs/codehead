@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Receiver;
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -1092,7 +1092,7 @@ impl View {
         if !self.has_staged() {
             return Act::Toast("0 staged files: 0 draft".into());
         }
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         let dir = self.dir.clone();
         let model = crate::config::rank_model().unwrap_or_else(|| "haiku".into());
         std::thread::spawn(move || {

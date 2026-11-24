@@ -11,6 +11,8 @@ mod cards;
 mod changes;
 mod chatsearch;
 mod background;
+mod branchpin;
+mod bus;
 mod claude;
 mod clip;
 mod code;
@@ -39,6 +41,7 @@ mod dropdown;
 mod mention;
 mod merge;
 mod mergetab;
+mod landed;
 mod models;
 mod monitors;
 mod nav;
@@ -82,6 +85,7 @@ mod workspot;
 mod update;
 mod urls;
 mod view;
+mod watch;
 
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
@@ -425,6 +429,13 @@ pub fn read_ready(wait: Duration) -> Result<Vec<(Event, Instant)>, String> {
     }
     let mut out = Vec::new();
     let mut wait = wait;
+    // a tty on stdin (crossterm reads it): sleep on it and on the bus's wake pipe, new data wakes
+    // the loop at once. Events crossterm buffered already: read first.
+    // SAFETY: isatty on fd 0 reads no memory.
+    if !wait.is_zero() && unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 && !event::poll(Duration::ZERO).map_err(|e| e.to_string())? {
+        bus::wait(libc::STDIN_FILENO, wait);
+        wait = Duration::ZERO;
+    }
     while out.len() < 512 && event::poll(wait).map_err(|e| e.to_string())? {
         let ev = event::read().map_err(|e| e.to_string())?;
         key_log(&ev);
@@ -641,6 +652,8 @@ fn start(args: Args) {
     let latest = plain.then(engine::store::latest).flatten().map(|t| t.id);
     // the thread view first: the start screen (App) is built when it ends
     notify::start();
+    watch::start();
+    landed::start();
     let mut back: Option<Option<menu::Home>> = None;
     if let Some(id) = args.view.as_ref().or(latest.as_ref()) {
         // 1 thread.json (an id prefix: the newest match), 0 scan of every thread's host and log
@@ -671,12 +684,12 @@ fn start(args: Args) {
     // draws only after an event, a background read or once per second (relative times):
     // an idle start screen builds 1 frame per second, not 12
     let mut dirty = true;
-    let mut notes_v = crate::notify::version();
+    let mut notes_v = crate::notify::version() + bus::version();
     let mut drawn = Instant::now();
     'screens: loop {
     loop {
         // new notifications / seen marks: the header redraws
-        let nv = crate::notify::version();
+        let nv = crate::notify::version() + bus::version();
         if nv != notes_v {
             notes_v = nv;
             dirty = true;
@@ -722,7 +735,9 @@ fn start(args: Args) {
             continue;
         }
         // every waiting event before the next draw: a burst (OS text substitution) stays 1 burst
-        let mut wait = Duration::from_millis(if dissolve::active() { 33 } else { 80 });
+        // sleep until the next frame is due (1 per second: relative times); keys, background
+        // results and bus changes wake the loop sooner
+        let mut wait = if dissolve::active() { Duration::from_millis(33) } else { Duration::from_secs(1).saturating_sub(drawn.elapsed()).max(Duration::from_millis(1)) };
         let mut failed = false;
         'events: loop {
             let batch = match read_ready(wait) {

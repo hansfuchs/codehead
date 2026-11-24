@@ -36,7 +36,7 @@ fn render(path: &PathBuf, width: u16) -> String {
 impl Previews {
     pub fn new() -> Previews {
         let (tx, job_rx) = channel::<Key>();
-        let (done_tx, rx) = channel();
+        let (done_tx, rx) = crate::bus::channel();
         std::thread::spawn(move || {
             while let Ok(mut key) = job_rx.recv() {
                 // only the newest request matters (fast scrolling)

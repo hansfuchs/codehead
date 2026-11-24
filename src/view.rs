@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use ratatui::Terminal;
@@ -209,6 +209,8 @@ struct View {
     checkout_picked: bool,
     /// The repo tabs on top of the changes view (shift+←→, ctrl+w, a click): 1 per checkout.
     checkout_tabs: crate::tabgroup::TabGroup,
+    /// The repo tabs have the keys (↑ from the diff's top, a click): ←→ pick a repo.
+    repo_focus: bool,
     checkout_labels: Vec<String>,
     /// Under the prompt: the repos, branches, worktrees the thread works in (read again every 3 s).
     spots: Vec<crate::workspot::Spot>,
@@ -322,13 +324,13 @@ struct View {
     mouse_exit: bool,
     /// Where the drag started (drawn row, col).
     drag_from: Option<(usize, u16)>,
-    tx: Sender<Msg>,
+    tx: crate::bus::Tx<Msg>,
     /// How the stream draws messages (setting `messages`).
     look: stream::Look,
 }
 
 impl View {
-    fn new(id: &str, cwd: &Path, title: &str, tx: Sender<Msg>) -> View {
+    fn new(id: &str, cwd: &Path, title: &str, tx: crate::bus::Tx<Msg>) -> View {
         // a big log: the 1st frame from its last 256 KiB, the rest parsed in the background
         let (tail, head_end) = if cfg!(test) { (store::Tail::new(id), 0) } else { store::Tail::from_end(id, 256 << 10) };
         if head_end > 0 {
@@ -395,6 +397,7 @@ impl View {
             checkout: 0,
             checkout_picked: false,
             checkout_tabs: crate::tabgroup::TabGroup::default(),
+            repo_focus: false,
             checkout_labels: Vec::new(),
             spots: Vec::new(),
             spots_at: None,
@@ -1369,7 +1372,7 @@ impl View {
             self.toast("branch: on its way");
             return false;
         }
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         let id = self.id.clone();
         let copy = move || {
             let _ = tx.send(store::fork(&id));
@@ -1441,7 +1444,7 @@ impl View {
             return;
         }
         let Some(model) = crate::config::review_model() else { return self.toast("handoff: the review model is off (setting review)") };
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         let id = self.id.clone();
         std::thread::spawn(move || {
             let _ = tx.send(crate::handoff::write(&id, &model));
@@ -1705,6 +1708,20 @@ impl View {
                 self.prompt_focus = true;
                 return false;
             }
+            // the repo tabs with the keys: ←→ / h l pick a repo; ↓, enter, esc: back to the diff;
+            // other keys: 0 effect (ctrl+c, ctrl+w: as in the diff)
+            if self.pane == Pane::Changes && self.repo_focus && !(ctrl && matches!(k.code, KeyCode::Char('c' | 'w'))) {
+                match k.code {
+                    KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') if !ctrl && !alt => {
+                        let d = if matches!(k.code, KeyCode::Right | KeyCode::Char('l')) { 1 } else { -1 };
+                        self.step_checkout(d);
+                    }
+                    KeyCode::Down | KeyCode::Enter | KeyCode::Esc => self.repo_focus = false,
+                    _ => {}
+                }
+                self.dirty = true;
+                return false;
+            }
             // the changes view's filter, selection: esc is the view's
             let esc_here = k.code == KeyCode::Esc && ((self.pane == Pane::Changes && self.changes.takes_esc()) || (self.pane == Pane::Merge && self.merge.takes_esc()));
             let through = (k.code == KeyCode::Esc && !esc_here) || (ctrl && k.code == KeyCode::Char('c'));
@@ -1723,14 +1740,16 @@ impl View {
                     self.next_checkout();
                     return false;
                 }
-                // shift+←→: the repo tabs (←→ alone fold the changes)
+                // shift+←→: the repo tabs (← alone: the panel)
                 if self.pane == Pane::Changes && k.modifiers.contains(KeyModifiers::SHIFT) && matches!(k.code, KeyCode::Left | KeyCode::Right) && !self.changes.typing() {
-                    self.load_checkouts();
-                    let n = self.checkouts.len();
-                    self.checkout_tabs.i = self.checkout;
-                    if self.checkout_tabs.step(if k.code == KeyCode::Right { 1 } else { -1 }, n) {
-                        self.pick_checkout(self.checkout_tabs.i);
-                    }
+                    self.step_checkout(if k.code == KeyCode::Right { 1 } else { -1 });
+                    return false;
+                }
+
+                // ↑ on the diff's 1st row, 2+ repos: the repo tabs (as the merge view's PR tabs)
+                if self.pane == Pane::Changes && k.code == KeyCode::Up && k.modifiers.is_empty() && self.checkouts.len() > 1 && self.changes.at_top() {
+                    self.repo_focus = true;
+                    self.dirty = true;
                     return false;
                 }
                 if self.pane == Pane::Files {
@@ -1997,6 +2016,7 @@ impl View {
         }
         self.pane = p;
         self.prompt_focus = false;
+        self.repo_focus = false;
         self.dirty = true;
         if p == Pane::Files {
             self.files.refresh(true);
@@ -2099,6 +2119,10 @@ impl View {
         }
 
         self.checkout = self.checkout.min(self.checkouts.len().saturating_sub(1));
+        // 1 repo left: 0 repo tabs to step through
+        if self.checkouts.len() < 2 {
+            self.repo_focus = false;
+        }
         // the changes view on the checkout picked (the view opened on another dir: a work dir
         // without git, the dir of the thread before)
         if let Some(d) = self.checkouts.get(self.checkout).filter(|d| **d != self.changes.dir()).cloned() {
@@ -2106,6 +2130,16 @@ impl View {
             self.changes_agents();
             self.changes.refresh(true);
             self.dirty = true;
+        }
+    }
+
+    /// The repo D tabs right (-1: left) of the picked one, wrapping.
+    fn step_checkout(&mut self, d: isize) {
+        self.load_checkouts();
+        let n = self.checkouts.len();
+        self.checkout_tabs.i = self.checkout;
+        if self.checkout_tabs.step(d, n) {
+            self.pick_checkout(self.checkout_tabs.i);
         }
     }
 
@@ -2238,7 +2272,7 @@ impl View {
         if !crate::portless::active() {
             return;
         }
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         std::thread::spawn(move || {
             let _ = tx.send(crate::portless::urls_of(&crate::portless::routes(), &prefix));
         });
@@ -2898,12 +2932,15 @@ impl View {
         // a repo tab of the changes view
         if click && self.pane == Pane::Changes && self.checkout_tabs.click(at) {
             self.pick_checkout(self.checkout_tabs.i);
+            self.repo_focus = self.checkouts.len() > 1;
+            self.prompt_focus = false;
             return;
         }
         let in_stream = self.stream_rect.contains(at);
         if self.pane != Pane::Chat {
             if self.view_rect.contains(at) {
                 self.prompt_focus = self.prompt_focus && !click;
+                self.repo_focus = self.repo_focus && !click;
                 if self.pane == Pane::Files {
                     self.files.mouse(m);
                 } else if self.pane == Pane::Merge {
@@ -3494,7 +3531,8 @@ impl View {
             let st = if st.height > 6 && !self.checkout_labels.is_empty() {
                 self.checkout_tabs.i = self.checkout;
                 let labels = self.checkout_labels.clone();
-                self.checkout_tabs.draw(f, Rect { height: 1, ..st }, "repo", &labels, !self.prompt_focus);
+                // the accent pill: the tabs have the keys; else the picked repo as a panel pill
+                self.checkout_tabs.draw(f, Rect { height: 1, ..st }, "repo", &labels, self.repo_focus && !self.prompt_focus);
                 Rect { y: st.y + 2, height: st.height - 2, ..st }
             } else {
                 st
@@ -3733,6 +3771,7 @@ impl View {
         let right = match &self.toast {
             Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Line::from(Span::styled(format!("{m} "), theme::fg(theme::pal().info()))),
             _ if self.agents_focus.is_some() => Line::from(theme::hints("←→ agent · ↑↓ · enter · 1-3 · esc / ctrl+m: prompt ")),
+            _ if self.pane == Pane::Changes && !self.prompt_focus && self.repo_focus => Line::from(theme::hints("←→ repo · ↓ / enter / esc: the changes · ctrl+w: next repo · tab: prompt ")),
             _ if self.pane == Pane::Changes && !self.prompt_focus => Line::from(theme::hints(self.changes.hints())),
             _ if self.pane == Pane::Merge && !self.prompt_focus => Line::from(theme::hints(&self.merge.hints())),
             _ if self.pane == Pane::Files && !self.prompt_focus => Line::from(theme::hints("j k · ctrl+f filter · pgup pgdn: scroll · o e i: IDE · y: yazi · c: copy path · S S: share · ctrl+m: prompt ")),
@@ -3938,7 +3977,7 @@ impl Drop for Unsub {
 
 /// Lines of the host of thread ID (`live`, `delta`, `wake`) → TX. 0 host: a retry each second.
 /// Never starts a host.
-fn subscribe(id: &str, tx: Sender<Msg>) -> Unsub {
+fn subscribe(id: &str, tx: crate::bus::Tx<Msg>) -> Unsub {
     use std::io::{BufRead, BufReader, Write};
     use std::sync::atomic::Ordering;
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3972,6 +4011,8 @@ fn subscribe(id: &str, tx: Sender<Msg>) -> Unsub {
                             if tx.send(m).is_err() {
                                 return;
                             }
+                            // the view loop sleeps on the tty: wake it for the new line
+                            crate::bus::wake();
                         }
                         // the read timeout: a check of `done`, the partial line stays in LINE
                         Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
@@ -4018,7 +4059,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title: &str
 /// Perf suite: the view of thread ID up to its 1st frame on TERM, as `run_with` opens it.
 #[cfg(test)]
 pub fn open_1st_frame<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path) -> Result<(), String> {
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = crate::bus::channel();
     let _sub = subscribe(id, tx.clone());
     let mut v = View::new(id, cwd, "", tx);
     v.save_prompt();
@@ -4053,7 +4094,7 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
     let of = me.of;
     // a new thread: its host logs the task within ms; 0 host after 5 s → the task in the prompt
     let mut kick_at = me.kickoff.then(Instant::now);
-    let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
+    let (tx, rx): (crate::bus::Tx<Msg>, Receiver<Msg>) = crate::bus::channel();
     let _sub = subscribe(id, tx.clone());
     crate::engine::trace("view new …");
     let opened = Instant::now();
@@ -4082,18 +4123,18 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
     v.save_prompt();
     crate::nav::mark_seen_now(id);
     let mut opening = Some(opened);
-    let mut roster_at = Instant::now();
-    let mut flows_at = Instant::now();
     let mut drawn = Instant::now() - Duration::from_secs(1);
     let mut dirty = true;
-    // the tail: on a `wake` of the host; each second as a fallback (0 host, a lost line)
+    // the tail: on a `wake` of the host, on a log change (0 host: another writer)
     let mut wake = true;
-    let mut read_at = Instant::now();
-    let mut notes_v = crate::notify::version();
+    // this thread's files: the log → the tail, thread.json → the flow rows, the roster (0 timer)
+    let topics = crate::bus::subscribe();
+    let mut flows_due = true;
+    let mut notes_v = crate::notify::version() + crate::bus::version();
     let mut count_sec = 0;
     loop {
         // new notifications / seen marks: the header redraws
-        let nv = crate::notify::version();
+        let nv = crate::notify::version() + crate::bus::version();
         if nv != notes_v {
             notes_v = nv;
             dirty = true;
@@ -4122,7 +4163,8 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
         {
             return Ok(None);
         }
-        for (ev, at) in crate::read_ready(Duration::from_millis(50))? {
+        // sleep until the next frame is due; a key, a host line or a bus change wakes it sooner
+        for (ev, at) in crate::read_ready(every.saturating_sub(drawn.elapsed()).max(Duration::from_millis(1)))? {
             let tag = if crate::engine::trace_on() { format!("view {:?}{}: {ev:?}", v.pane, if v.menu.is_some() { " + menu" } else { "" }) } else { String::new() };
             let _w = crate::engine::watch(move || tag);
             crate::textarea::stamp(Some(at));
@@ -4258,18 +4300,32 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
             v.dirty = true;
             dirty = true;
         }
-        if wake || read_at.elapsed() >= Duration::from_secs(1) {
+        let mut roster_due = false;
+        for t in topics.try_iter() {
+            match t {
+                crate::bus::Topic::Thread(tid, crate::bus::Part::Log) if tid == id => {
+                    wake = true;
+                    roster_due = true;
+                }
+                crate::bus::Topic::Thread(tid, crate::bus::Part::Meta) if tid == id => {
+                    flows_due = true;
+                    roster_due = true;
+                }
+                _ => {}
+            }
+        }
+        if wake {
             wake = false;
-            read_at = Instant::now();
             dirty |= v.read();
         }
-        dirty |= v.monitors.tick(id);
+        let kids: Vec<String> = v.subthreads.kids.iter().map(|k| k.id.clone()).collect();
+        dirty |= v.monitors.tick(id, &kids);
         dirty |= v.subagents.tick(&v.thread.subs);
         dirty |= v.subthreads.tick(id);
-        // the flow rows: 1 read of the thread per second for all of them
+        // the flow rows: 1 read of the thread per change of thread.json (a kickoff: its 5 s end)
         let mut flows_changed = false;
-        if flows_at.elapsed() >= Duration::from_secs(1) {
-            flows_at = Instant::now();
+        if flows_due || kick_at.is_some_and(|at| at.elapsed() > Duration::from_secs(5)) {
+            flows_due = false;
             if let Some(t) = store::load(id) {
                 for b in &mut v.flowbars {
                     flows_changed |= b.sync(&t, false);
@@ -4291,8 +4347,7 @@ pub fn run_with<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: &Path, title:
             v.dirty = true;
             dirty = true;
         }
-        if roster_at.elapsed() > Duration::from_secs(5) {
-            roster_at = Instant::now();
+        if roster_due {
             v.set_roster(crate::agents::roster_only());
             crate::nav::mark_seen(id);
         }
@@ -4329,7 +4384,7 @@ mod ask_tests {
     use ratatui::backend::TestBackend;
 
     fn view(multi: bool) -> View {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("asktest-0000", Path::new("/tmp"), "t", tx);
         let input = json!({"questions": [{"question": "Which keys?", "header": "Keys", "multiSelect": multi, "options": [
             {"label": "alpha", "description": "1st"}, {"label": "beta", "description": "2nd"}, {"label": "gamma", "description": "3rd"}]}]});
@@ -4365,7 +4420,7 @@ mod ask_tests {
         t.checkouts_pruned = true;
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(&t.id, &plain, "no git", tx);
         v.load_checkouts();
         assert_eq!(v.checkouts, std::slice::from_ref(&repo));
@@ -4385,7 +4440,7 @@ mod ask_tests {
         t.flow = Some(st);
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(&t.id, Path::new("/tmp"), "gate input", tx);
         v.members = t.agents.clone();
         v.sync_flowbars();
@@ -4437,7 +4492,7 @@ mod ask_tests {
         t.checkouts_pruned = true;
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(&t.id, &repo, "moved", tx);
 
         v.load_checkouts();
@@ -4458,7 +4513,7 @@ mod ask_tests {
         t.checkouts_pruned = true;
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(&t.id, &wt, "own worktree", tx);
 
         v.load_checkouts();
@@ -4476,7 +4531,7 @@ mod ask_tests {
         let t = store::Thread::new("commits", "task", &w, vec!["ada".into()]);
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(&t.id, &w, "commits", tx);
         let k = |v: &mut View, c: KeyCode, m: KeyModifiers| {
             v.key(KeyEvent::new(c, m));
@@ -4537,7 +4592,7 @@ mod ask_tests {
         t.flow = Some(st);
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(&t.id, Path::new("/tmp"), "flow view", tx);
         v.members = t.agents.clone();
         v.sync_flowbars();
@@ -4660,7 +4715,7 @@ mod ask_tests {
 
     #[test]
     fn a_pending_send_colors_its_mentions() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("asktest-0002", Path::new("/tmp"), "t", tx);
         v.names = vec![("ada".into(), Color::Rgb(200, 10, 10))];
         v.pending.push(("@ada go on".into(), Instant::now(), None));
@@ -4681,7 +4736,7 @@ mod ask_tests {
         t.branch = Some("task/x".into());
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(&t.id, Path::new("/tmp"), "main", tx);
         v.members = vec!["ada".into(), "bob".into()];
 
@@ -4711,7 +4766,7 @@ mod ask_tests {
 
     #[test]
     fn a_pasted_image_goes_out_with_its_marker_next_to_its_path() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("asktest-0002", Path::new("/tmp"), "t", tx);
         v.input.set_text("look at [Image #1]");
         v.attachments = vec![("[Image #1]".into(), PathBuf::from("/x/shot.png"))];
@@ -4724,7 +4779,7 @@ mod ask_tests {
 
     #[test]
     fn ctrl_s_never_sends_ctrl_enter_does() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("asktest-0001", Path::new("/tmp"), "t", tx);
         v.input.set_text("hello agents");
         v.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
@@ -4753,7 +4808,7 @@ mod pane_tests {
     use super::*;
 
     fn view() -> View {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         View::new("panetest-0000", Path::new("/tmp"), "thread p", tx)
     }
 
@@ -4790,7 +4845,7 @@ mod pane_tests {
     fn archiving_this_thread_from_the_menu_goes_home() {
         let t = crate::engine::store::Thread::new("archive from view", "task", Path::new("/tmp"), vec!["ada".into()]);
         t.save().unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(&t.id, Path::new("/tmp"), "archive from view", tx);
         v.input.set_text("half a message");
         v.open_menu();
@@ -4955,7 +5010,7 @@ mod comment_tests {
 
     #[test]
     fn a_leading_bang_runs_a_shell_command_its_output_goes_along_with_the_next_message() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         let mut v = View::new("shelltest-0000", Path::new("/tmp"), "t", tx);
         let mut t = Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
         t.draw(|f| v.draw(f)).unwrap();
@@ -4994,7 +5049,7 @@ mod comment_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::write(dir.join("justfile"), "# build the app\nbuild:\n    true\n\n# run the tests\ntest:\n    true\n").unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("shelltest-0002", &dir, "t", tx);
         v.shell_cwd = dir.clone();
         v.comp.history = Some(std::sync::Arc::new(Vec::new()));
@@ -5031,7 +5086,7 @@ mod comment_tests {
 
     #[test]
     fn shell_mode_cycles_its_commands_and_down_below_them_edits_the_dir() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("shelltest-0001", Path::new("/tmp"), "t", tx);
         let key = |v: &mut View, c: KeyCode| {
             v.key(KeyEvent::new(c, KeyModifiers::NONE));
@@ -5076,7 +5131,7 @@ mod comment_tests {
         key(&mut v, KeyCode::Enter);
         assert_eq!(v.shell_cwd, std::fs::canonicalize(std::env::temp_dir()).unwrap());
         assert_eq!(v.shell_running, 0);
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let w = View::new("shelltest-0001", Path::new("/"), "t", tx);
         assert_eq!(w.shell_cwd, std::fs::canonicalize(std::env::temp_dir()).unwrap(), "the pick stays");
         let _ = std::fs::remove_dir_all(&dir);
@@ -5096,7 +5151,7 @@ mod comment_tests {
 
     #[test]
     fn a_comment_opens_a_modal_and_the_prompt_keeps_its_draft() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("commenttest-0000", Path::new("/tmp"), "t", tx);
         v.set_pane(Pane::Changes);
         v.changes.set_files(crate::changes::parse("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n x\n-a\n+b\n y\n"));
@@ -5125,7 +5180,7 @@ mod comment_tests {
 
     #[test]
     fn the_commit_message_lives_in_the_panel() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("committest-0000", Path::new("/tmp"), "t", tx);
         v.set_pane(Pane::Changes);
         v.input.set_text("draft");
@@ -5141,7 +5196,7 @@ mod comment_tests {
 
     #[test]
     fn a_message_from_the_changes_view_takes_the_selection_along() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("contexttest-0000", Path::new("/tmp"), "t", tx);
         v.set_pane(Pane::Changes);
         v.changes.set_files(crate::changes::parse("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n x\n-a\n+b\n y\n"));
@@ -5169,7 +5224,7 @@ mod comment_tests {
     fn an_agent_named_in_a_comment_gets_it_at_once_with_its_thread() {
         let id = "mentiontest-0000";
         let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(id));
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(id, Path::new("/tmp"), "t", tx);
         v.members = vec!["REV".into(), "LEAD".into()];
         v.changes_agents();
@@ -5203,7 +5258,7 @@ mod default_to_tests {
 
     #[test]
     fn a_message_without_a_name_goes_to_the_agents_of_the_last_one() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("defaulttest-0000", Path::new("/tmp"), "t", tx);
         v.members = vec!["ada".into(), "bob".into()];
         // 0 owner message yet: the lead
@@ -5234,7 +5289,7 @@ mod files_pane_tests {
 
     #[test]
     fn merge_is_the_3rd_view_its_keys_its_context() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("mergetest-0000", Path::new("/tmp"), "t", tx);
         v.key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::ALT));
         assert_eq!(v.pane, Pane::Merge);
@@ -5254,7 +5309,7 @@ mod files_pane_tests {
 
     #[test]
     fn the_files_filter_takes_every_letter_and_esc() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("filesfilter-0000", Path::new("/tmp"), "t", tx);
         v.key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::ALT));
         assert_eq!(v.pane, Pane::Files);
@@ -5270,7 +5325,7 @@ mod files_pane_tests {
 
     #[test]
     fn files_is_the_4th_view_with_its_keys() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("filestest-0000", Path::new("/tmp"), "t", tx);
         v.key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::ALT));
         assert_eq!(v.pane, Pane::Files);
@@ -5303,7 +5358,7 @@ mod split_tests {
 
     #[test]
     fn wide_changes_view_has_the_chat_right_and_alt_backslash_toggles() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("splittest-0000", Path::new("/tmp"), "t", tx);
         v.set_pane(Pane::Changes);
         let s = screen(&mut v, 220);
@@ -5323,7 +5378,7 @@ mod split_tests {
 
     #[test]
     fn a_thread_outside_git_opens_in_the_chat_even_when_wide() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("splittest-0001", Path::new("/"), "t", tx);
         screen(&mut v, 220);
         assert_eq!(v.pane, Pane::Chat);
@@ -5349,7 +5404,7 @@ mod select_tests {
 
     #[test]
     fn a_drag_stays_in_its_message_and_copies_unwrapped_lines() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("selecttest-0000", Path::new("/tmp"), "t", tx);
         v.members = vec!["ada".into()];
         let long = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho";
@@ -5380,7 +5435,7 @@ mod select_tests {
     /// The chat beside the changes view (wide split): the same selection + copy.
     #[test]
     fn the_chat_of_the_split_selects_and_copies() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("selecttest-0001", Path::new("/tmp"), "t", tx);
         v.members = vec!["ada".into()];
         v.thread.push(&store::Event { ts: 2, agent: Some("ada".into()), kind: store::Kind::Text { text: "copy me from the split".into() } });
@@ -5428,7 +5483,7 @@ mod subagent_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let img = dir.join("shot.png");
         std::fs::write(&img, b"x").unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("selecttest-0001", Path::new("/tmp"), "t", tx);
         v.members = vec!["ada".into()];
         let text = format!("see [Image #1]\n\nAttachments (read these files):\n- [Image #1]: {}", img.display());
@@ -5462,7 +5517,7 @@ mod subagent_tests {
 
     #[test]
     fn running_subagents_show_grouped_by_master_and_stop_with_d() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("subtest-0000", Path::new("/tmp"), "t", tx);
         v.members = vec!["ada".into(), "bob".into()];
         let now = crate::engine::now_ms();
@@ -5499,7 +5554,7 @@ mod subagent_tests {
 
     #[test]
     fn a_report_is_a_message_of_the_master_folded_and_a_lost_one_can_be_picked_up() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new("subtest-0001", Path::new("/tmp"), "t", tx);
         v.members = vec!["ada".into()];
         v.thread.push(&ev("ada", 1_000, start("t1", None, "scan the repo", false)));
@@ -5539,7 +5594,7 @@ mod prompt_draft_tests {
     #[test]
     fn the_unsent_prompt_and_unlogged_sends_survive_a_new_view() {
         let id = "drafttest-0000";
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(id, Path::new("/tmp"), "t", tx.clone());
         v.input.set_text("half a message");
         v.save_prompt();
@@ -5575,7 +5630,7 @@ mod prompt_draft_tests {
         t.kickoff = true;
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(&t.id, &repo, "wt view", tx);
         v.load_checkouts();
         assert_eq!(v.changes.dir(), repo.as_path());
@@ -5773,7 +5828,7 @@ mod ide_tests {
         let t = store::Thread::new("ide", "task", &a.join("src"), vec!["ada".into()]);
         std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
         t.save().unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(&t.id, &a.join("src"), "ide", tx);
         v.input.set_text("draft");
         v.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
@@ -5819,7 +5874,7 @@ mod key_fix_tests {
     use super::*;
 
     fn view(id: &str) -> View {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         View::new(id, Path::new("/tmp"), "t", tx)
     }
 
@@ -5997,7 +6052,7 @@ mod chat_search_tests {
     use ratatui::backend::TestBackend;
 
     fn view(id: &str) -> View {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(id, Path::new("/tmp"), "t", tx);
         for i in 0..40u64 {
             let text = if i % 10 == 3 { format!("message {i}: the needle is here") } else { format!("message {i}: filler text") };
@@ -6108,7 +6163,7 @@ mod agents_box_tests {
     use ratatui::backend::TestBackend;
 
     fn view(id: &str) -> View {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let mut v = View::new(id, Path::new("/tmp"), "t", tx);
         v.members = vec!["ada".into(), "zed".into()];
         v.roster = ["ada", "zed", "nova"].iter().map(|n| crate::agents::Agent { name: (*n).into(), harness: "claude".into(), ..Default::default() }).collect();
@@ -6293,5 +6348,170 @@ mod git_push_tests {
         assert!(!super::git_push("git status"));
         assert!(!super::git_push("echo git push"));
         assert!(!super::git_push("git log --grep push"));
+    }
+}
+
+/// The repo row on top of the changes view: ↑ from the diff's top, ←→ there, back to the diff.
+#[cfg(test)]
+mod repo_row_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    /// A thread in repo `alpha` with a checkout in repo `beta` (2 repo tabs); ONE: `alpha` only.
+    fn two_repos(name: &str, one: bool) -> (View, PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("codehead-reporow-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (a, b) = (root.join("alpha"), root.join("beta"));
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).unwrap();
+            assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(d).status().unwrap().success());
+        }
+        let mut t = store::Thread::new(name, "task", &a, vec!["ada".into()]);
+        if !one {
+            t.checkouts.push(store::Checkout { dir: b.display().to_string(), branch: None });
+        }
+        t.checkouts_pruned = true;
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let mut v = View::new(&t.id, &a, name, tx);
+        v.set_pane(Pane::Changes);
+        v.prompt_focus = false;
+        (v, root, a, b)
+    }
+
+    fn key(v: &mut View, c: KeyCode, m: KeyModifiers) {
+        v.key(KeyEvent::new(c, m));
+    }
+
+    fn screen(v: &mut View) -> String {
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| v.draw(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height).map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    fn done(v: &View, root: &Path) {
+        let _ = store::delete(&v.id);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The keys of the repo tabs before the repo row took the focus: they stay.
+    #[test]
+    fn the_old_repo_keys_stay() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut v, root, a, b) = two_repos("old-keys", false);
+        assert_eq!(v.checkouts, vec![a.clone(), b.clone()]);
+
+        // shift+←→: the next / previous repo
+        key(&mut v, KeyCode::Right, KeyModifiers::SHIFT);
+        assert_eq!(v.changes.dir(), b.as_path());
+        key(&mut v, KeyCode::Left, KeyModifiers::SHIFT);
+        assert_eq!(v.changes.dir(), a.as_path());
+
+        // ctrl+w: the next repo
+        key(&mut v, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(v.changes.dir(), b.as_path());
+
+        // ← in the diff: the panel, 0 repo switch
+        key(&mut v, KeyCode::Left, KeyModifiers::NONE);
+        assert!(v.changes.panel_focus());
+        assert_eq!(v.changes.dir(), b.as_path());
+        done(&v, &root);
+    }
+
+    /// Tab I's background in a fresh draw.
+    fn tab_bg(v: &mut View, i: usize) -> ratatui::style::Color {
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| v.draw(f)).unwrap();
+        let r = v.checkout_tabs.rect_of(i).unwrap();
+        term.backend().buffer()[(r.x + 1, r.y)].bg
+    }
+
+    #[test]
+    fn up_from_the_diffs_top_gives_the_repo_tabs_the_arrow_keys() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut v, root, a, b) = two_repos("up-keys", false);
+        let s = screen(&mut v);
+        assert!(s.contains("alpha") && s.contains("beta"), "{s}");
+        assert_eq!(tab_bg(&mut v, 0), theme::panel().bg.unwrap(), "the diff has the keys: 0 accent pill");
+
+        // ↑ at the top: the repo tabs, the accent pill, the footer names the keys
+        key(&mut v, KeyCode::Up, KeyModifiers::NONE);
+        assert!(v.repo_focus);
+        assert_eq!(tab_bg(&mut v, 0), theme::pill().bg.unwrap());
+        assert!(screen(&mut v).contains("←→ repo"));
+
+        // →, l: the next repo (wrapping); ←, h: back; the tabs keep the keys
+        key(&mut v, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(v.changes.dir(), b.as_path());
+        assert!(v.repo_focus && !v.changes.panel_focus());
+        key(&mut v, KeyCode::Char('l'), KeyModifiers::NONE);
+        assert_eq!(v.changes.dir(), a.as_path());
+        key(&mut v, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(v.changes.dir(), b.as_path());
+        key(&mut v, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert_eq!(v.changes.dir(), a.as_path());
+
+        // a letter: 0 effect, 0 leak into the diff
+        key(&mut v, KeyCode::Char('w'), KeyModifiers::NONE);
+        assert!(v.repo_focus && !v.changes.panel_focus());
+
+        // ↓, enter, esc: the diff again
+        for c in [KeyCode::Down, KeyCode::Enter, KeyCode::Esc] {
+            key(&mut v, KeyCode::Up, KeyModifiers::NONE);
+            assert!(v.repo_focus);
+            key(&mut v, c, KeyModifiers::NONE);
+            assert!(!v.repo_focus, "{c:?}");
+            assert_eq!(v.pane, Pane::Changes);
+        }
+
+        // tab: the prompt; tab again: the view, the tabs still have the keys
+        key(&mut v, KeyCode::Up, KeyModifiers::NONE);
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(v.prompt_focus);
+        assert_eq!(tab_bg(&mut v, 0), theme::panel().bg.unwrap(), "the prompt has the keys");
+
+        // another view: the focus resets
+        key(&mut v, KeyCode::F(1), KeyModifiers::NONE);
+        key(&mut v, KeyCode::F(2), KeyModifiers::NONE);
+        assert!(!v.repo_focus);
+        done(&v, &root);
+    }
+
+    #[test]
+    fn up_keeps_the_diff_with_1_repo_or_the_panel_focused() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut v, root, ..) = two_repos("up-one", true);
+        let _ = screen(&mut v);
+        key(&mut v, KeyCode::Up, KeyModifiers::NONE);
+        assert!(!v.repo_focus, "1 repo: 0 tabs to step");
+        done(&v, &root);
+
+        let (mut v, root, ..) = two_repos("up-panel", false);
+        key(&mut v, KeyCode::Left, KeyModifiers::NONE);
+        assert!(v.changes.panel_focus());
+        key(&mut v, KeyCode::Up, KeyModifiers::NONE);
+        assert!(!v.repo_focus, "the panel's ↑");
+        done(&v, &root);
+    }
+
+    #[test]
+    fn a_click_on_a_repo_tab_picks_it_and_gives_the_tabs_the_keys() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut v, root, _, b) = two_repos("click", false);
+        v.prompt_focus = true;
+        let _ = screen(&mut v);
+        let r = v.checkout_tabs.rect_of(1).unwrap();
+        v.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
+        assert_eq!(v.changes.dir(), b.as_path());
+        assert!(v.repo_focus && !v.prompt_focus);
+
+        // a click in the diff: the diff has the keys
+        let _ = screen(&mut v);
+        let d = v.view_rect;
+        v.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: d.x + 2, row: d.y + 1, modifiers: KeyModifiers::NONE });
+        assert!(!v.repo_focus);
+        done(&v, &root);
     }
 }

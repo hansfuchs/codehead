@@ -5,7 +5,7 @@
 //! up to 1 min.) and a probe of codehead's servers.
 
 use std::collections::BTreeMap;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::Receiver;
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -95,7 +95,7 @@ pub struct McpTab {
     agents: Vec<Agent>,
     /// claude.ai connectors Claude Code ever connected (`claudeAiMcpEverConnected`).
     ever: std::collections::HashSet<String>,
-    tx: Sender<Msg>,
+    tx: crate::bus::Tx<Msg>,
     rx: Receiver<Msg>,
     /// Jobs running: CLI refresh, probe, sign-in.
     refreshing: bool,
@@ -132,7 +132,7 @@ fn harness_label(h: &str) -> &'static str {
 
 impl McpTab {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         let mut filter = TextArea::new(true, "filter servers ( / )");
         filter.style = Some(theme::text());
         let mut t = Self {
