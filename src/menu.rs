@@ -961,20 +961,20 @@ mod tests {
 
     #[test]
     fn threads_tab_marks_the_thread_in_view_and_sorts_by_section() {
-        let mut asks = card("t2", "older");
-        asks.blocked = true;
-        let cards = vec![card("t1", "newest"), asks, card("t3", "this one")];
+        let mut done = card("t2", "older");
+        done.land = Some(crate::landed::Land::Landed);
+        let cards = vec![card("t1", "newest"), done, card("t3", "this one")];
         let mut m = Menu::new(Vec::new(), Some("t3".into()), Vec::new(), cards);
         m.key(k(KeyCode::Right));
         // a letter on the tab bar: the filter takes it
         m.key(k(KeyCode::Char('e')));
         let ids = |m: &Menu| m.list.visible().iter().map(|&i| m.list.cards[i].id.clone()).collect::<Vec<_>>();
-        assert_eq!(ids(&m), ["t2", "t1", "t3"], "needs you first");
+        assert_eq!(ids(&m), ["t1", "t3", "t2"], "shipped last");
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 34)).unwrap();
         t.draw(|f| m.render(f, f.area())).unwrap();
         let b = t.backend().buffer().clone();
         let s: String = (0..34).map(|y| (0..90).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
-        assert!(s.contains(" here ") && s.contains("needs you · 1") && s.contains("ctrl+o"), "{s}");
+        assert!(s.contains(" here ") && s.contains("open · 2") && s.contains("ctrl+o"), "{s}");
         m.key(k(KeyCode::Backspace));
         for c in "older".chars() {
             m.key(k(KeyCode::Char(c)));

@@ -6787,10 +6787,10 @@ mod render_tests {
         a.switch_tab(Tab::Threads);
         a.tabs_focus = false;
         let s = dump(&mut a, 120, 40);
-        for l in ["needs you · 1", "recent · 2", "shipped: archive? · 1", "show", "active 4", "archived 0", "worktrees 0"] {
+        for l in ["open · 3", "shipped: archive? · 1", "show", "active 4", "archived 0", "worktrees 0"] {
             assert!(s.contains(l), "{l}: {s}");
         }
-        // the shipped card: 4th (needs you, 2 recent, shipped)
+        // the shipped card: 4th (3 open, shipped)
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
