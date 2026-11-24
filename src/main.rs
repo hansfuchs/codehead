@@ -481,16 +481,23 @@ fn input_fd() -> std::os::fd::RawFd {
 /// gone). None: live. crossterm 0.29 reads a hung-up tty in an endless loop (EOF reads as "more
 /// to come"): 100% CPU, a SIGTERM never reaches `read_ready`. So no crossterm call after a hang-up.
 fn tty_gone(fd: std::os::fd::RawFd) -> Option<String> {
-    // SAFETY: isatty reads no memory; a bad fd gives 0.
-    if fd < 0 || unsafe { libc::isatty(fd) } != 1 {
+    if fd < 0 {
         return Some("no terminal".into());
     }
+
+    // the hang-up first: Linux reports a hung-up pty as 0 tty (isatty fails), macOS does not
     let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
     // SAFETY: P is 1 live pollfd; 0 ms: no wait.
     let n = unsafe { libc::poll(&mut p, 1, 0) };
     if n > 0 && p.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
         return Some("terminal closed".into());
     }
+
+    // SAFETY: isatty reads no memory; a bad fd gives 0.
+    if unsafe { libc::isatty(fd) } != 1 {
+        return Some("no terminal".into());
+    }
+
     None
 }
 
