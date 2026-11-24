@@ -209,6 +209,8 @@ struct View {
     checkout_picked: bool,
     /// The repo tabs on top of the changes view (shift+←→, ctrl+w, a click): 1 per checkout.
     checkout_tabs: crate::tabgroup::TabGroup,
+    /// The repo tabs have the keys (↑ from the diff's top, a click): ←→ pick a repo.
+    repo_focus: bool,
     checkout_labels: Vec<String>,
     /// Under the prompt: the repos, branches, worktrees the thread works in (read again every 3 s).
     spots: Vec<crate::workspot::Spot>,
@@ -395,6 +397,7 @@ impl View {
             checkout: 0,
             checkout_picked: false,
             checkout_tabs: crate::tabgroup::TabGroup::default(),
+            repo_focus: false,
             checkout_labels: Vec::new(),
             spots: Vec::new(),
             spots_at: None,
@@ -1697,6 +1700,20 @@ impl View {
                 self.prompt_focus = true;
                 return false;
             }
+            // the repo tabs with the keys: ←→ / h l pick a repo; ↓, enter, esc: back to the diff;
+            // other keys: 0 effect (ctrl+c, ctrl+w: as in the diff)
+            if self.pane == Pane::Changes && self.repo_focus && !(ctrl && matches!(k.code, KeyCode::Char('c' | 'w'))) {
+                match k.code {
+                    KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') if !ctrl && !alt => {
+                        let d = if matches!(k.code, KeyCode::Right | KeyCode::Char('l')) { 1 } else { -1 };
+                        self.step_checkout(d);
+                    }
+                    KeyCode::Down | KeyCode::Enter | KeyCode::Esc => self.repo_focus = false,
+                    _ => {}
+                }
+                self.dirty = true;
+                return false;
+            }
             // the changes view's filter, selection: esc is the view's
             let esc_here = k.code == KeyCode::Esc && ((self.pane == Pane::Changes && self.changes.takes_esc()) || (self.pane == Pane::Merge && self.merge.takes_esc()));
             let through = (k.code == KeyCode::Esc && !esc_here) || (ctrl && k.code == KeyCode::Char('c'));
@@ -1715,14 +1732,16 @@ impl View {
                     self.next_checkout();
                     return false;
                 }
-                // shift+←→: the repo tabs (←→ alone fold the changes)
+                // shift+←→: the repo tabs (← alone: the panel)
                 if self.pane == Pane::Changes && k.modifiers.contains(KeyModifiers::SHIFT) && matches!(k.code, KeyCode::Left | KeyCode::Right) && !self.changes.typing() {
-                    self.load_checkouts();
-                    let n = self.checkouts.len();
-                    self.checkout_tabs.i = self.checkout;
-                    if self.checkout_tabs.step(if k.code == KeyCode::Right { 1 } else { -1 }, n) {
-                        self.pick_checkout(self.checkout_tabs.i);
-                    }
+                    self.step_checkout(if k.code == KeyCode::Right { 1 } else { -1 });
+                    return false;
+                }
+
+                // ↑ on the diff's 1st row, 2+ repos: the repo tabs (as the merge view's PR tabs)
+                if self.pane == Pane::Changes && k.code == KeyCode::Up && k.modifiers.is_empty() && self.checkouts.len() > 1 && self.changes.at_top() {
+                    self.repo_focus = true;
+                    self.dirty = true;
                     return false;
                 }
                 if self.pane == Pane::Files {
@@ -1989,6 +2008,7 @@ impl View {
         }
         self.pane = p;
         self.prompt_focus = false;
+        self.repo_focus = false;
         self.dirty = true;
         if p == Pane::Files {
             self.files.refresh(true);
@@ -2091,6 +2111,10 @@ impl View {
         }
 
         self.checkout = self.checkout.min(self.checkouts.len().saturating_sub(1));
+        // 1 repo left: 0 repo tabs to step through
+        if self.checkouts.len() < 2 {
+            self.repo_focus = false;
+        }
         // the changes view on the checkout picked (the view opened on another dir: a work dir
         // without git, the dir of the thread before)
         if let Some(d) = self.checkouts.get(self.checkout).filter(|d| **d != self.changes.dir()).cloned() {
@@ -2098,6 +2122,16 @@ impl View {
             self.changes_agents();
             self.changes.refresh(true);
             self.dirty = true;
+        }
+    }
+
+    /// The repo D tabs right (-1: left) of the picked one, wrapping.
+    fn step_checkout(&mut self, d: isize) {
+        self.load_checkouts();
+        let n = self.checkouts.len();
+        self.checkout_tabs.i = self.checkout;
+        if self.checkout_tabs.step(d, n) {
+            self.pick_checkout(self.checkout_tabs.i);
         }
     }
 
@@ -2885,12 +2919,15 @@ impl View {
         // a repo tab of the changes view
         if click && self.pane == Pane::Changes && self.checkout_tabs.click(at) {
             self.pick_checkout(self.checkout_tabs.i);
+            self.repo_focus = self.checkouts.len() > 1;
+            self.prompt_focus = false;
             return;
         }
         let in_stream = self.stream_rect.contains(at);
         if self.pane != Pane::Chat {
             if self.view_rect.contains(at) {
                 self.prompt_focus = self.prompt_focus && !click;
+                self.repo_focus = self.repo_focus && !click;
                 if self.pane == Pane::Files {
                     self.files.mouse(m);
                 } else if self.pane == Pane::Merge {
@@ -3481,7 +3518,8 @@ impl View {
             let st = if st.height > 6 && !self.checkout_labels.is_empty() {
                 self.checkout_tabs.i = self.checkout;
                 let labels = self.checkout_labels.clone();
-                self.checkout_tabs.draw(f, Rect { height: 1, ..st }, "repo", &labels, !self.prompt_focus);
+                // the accent pill: the tabs have the keys; else the picked repo as a panel pill
+                self.checkout_tabs.draw(f, Rect { height: 1, ..st }, "repo", &labels, self.repo_focus && !self.prompt_focus);
                 Rect { y: st.y + 2, height: st.height - 2, ..st }
             } else {
                 st
@@ -3720,6 +3758,7 @@ impl View {
         let right = match &self.toast {
             Some((m, at)) if at.elapsed() < Duration::from_secs(3) => Line::from(Span::styled(format!("{m} "), theme::fg(theme::pal().info()))),
             _ if self.agents_focus.is_some() => Line::from(theme::hints("←→ agent · ↑↓ · enter · 1-3 · esc / ctrl+m: prompt ")),
+            _ if self.pane == Pane::Changes && !self.prompt_focus && self.repo_focus => Line::from(theme::hints("←→ repo · ↓ / enter / esc: the changes · ctrl+w: next repo · tab: prompt ")),
             _ if self.pane == Pane::Changes && !self.prompt_focus => Line::from(theme::hints(self.changes.hints())),
             _ if self.pane == Pane::Merge && !self.prompt_focus => Line::from(theme::hints(&self.merge.hints())),
             _ if self.pane == Pane::Files && !self.prompt_focus => Line::from(theme::hints("j k · ctrl+f filter · pgup pgdn: scroll · o e i: IDE · y: yazi · c: copy path · S S: share · ctrl+m: prompt ")),
@@ -6242,5 +6281,170 @@ mod agents_box_tests {
         assert!(!v.prompt_focus);
         key(&mut v, KeyCode::Char('m'), KeyModifiers::CONTROL);
         assert!(v.prompt_focus);
+    }
+}
+
+/// The repo row on top of the changes view: ↑ from the diff's top, ←→ there, back to the diff.
+#[cfg(test)]
+mod repo_row_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    /// A thread in repo `alpha` with a checkout in repo `beta` (2 repo tabs); ONE: `alpha` only.
+    fn two_repos(name: &str, one: bool) -> (View, PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("codehead-reporow-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (a, b) = (root.join("alpha"), root.join("beta"));
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).unwrap();
+            assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(d).status().unwrap().success());
+        }
+        let mut t = store::Thread::new(name, "task", &a, vec!["ada".into()]);
+        if !one {
+            t.checkouts.push(store::Checkout { dir: b.display().to_string(), branch: None });
+        }
+        t.checkouts_pruned = true;
+        std::fs::create_dir_all(store::thread_dir(&t.id)).unwrap();
+        t.save().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut v = View::new(&t.id, &a, name, tx);
+        v.set_pane(Pane::Changes);
+        v.prompt_focus = false;
+        (v, root, a, b)
+    }
+
+    fn key(v: &mut View, c: KeyCode, m: KeyModifiers) {
+        v.key(KeyEvent::new(c, m));
+    }
+
+    fn screen(v: &mut View) -> String {
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| v.draw(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height).map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    fn done(v: &View, root: &Path) {
+        let _ = store::delete(&v.id);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The keys of the repo tabs before the repo row took the focus: they stay.
+    #[test]
+    fn the_old_repo_keys_stay() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut v, root, a, b) = two_repos("old-keys", false);
+        assert_eq!(v.checkouts, vec![a.clone(), b.clone()]);
+
+        // shift+←→: the next / previous repo
+        key(&mut v, KeyCode::Right, KeyModifiers::SHIFT);
+        assert_eq!(v.changes.dir(), b.as_path());
+        key(&mut v, KeyCode::Left, KeyModifiers::SHIFT);
+        assert_eq!(v.changes.dir(), a.as_path());
+
+        // ctrl+w: the next repo
+        key(&mut v, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(v.changes.dir(), b.as_path());
+
+        // ← in the diff: the panel, 0 repo switch
+        key(&mut v, KeyCode::Left, KeyModifiers::NONE);
+        assert!(v.changes.panel_focus());
+        assert_eq!(v.changes.dir(), b.as_path());
+        done(&v, &root);
+    }
+
+    /// Tab I's background in a fresh draw.
+    fn tab_bg(v: &mut View, i: usize) -> ratatui::style::Color {
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| v.draw(f)).unwrap();
+        let r = v.checkout_tabs.rect_of(i).unwrap();
+        term.backend().buffer()[(r.x + 1, r.y)].bg
+    }
+
+    #[test]
+    fn up_from_the_diffs_top_gives_the_repo_tabs_the_arrow_keys() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut v, root, a, b) = two_repos("up-keys", false);
+        let s = screen(&mut v);
+        assert!(s.contains("alpha") && s.contains("beta"), "{s}");
+        assert_eq!(tab_bg(&mut v, 0), theme::panel().bg.unwrap(), "the diff has the keys: 0 accent pill");
+
+        // ↑ at the top: the repo tabs, the accent pill, the footer names the keys
+        key(&mut v, KeyCode::Up, KeyModifiers::NONE);
+        assert!(v.repo_focus);
+        assert_eq!(tab_bg(&mut v, 0), theme::pill().bg.unwrap());
+        assert!(screen(&mut v).contains("←→ repo"));
+
+        // →, l: the next repo (wrapping); ←, h: back; the tabs keep the keys
+        key(&mut v, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(v.changes.dir(), b.as_path());
+        assert!(v.repo_focus && !v.changes.panel_focus());
+        key(&mut v, KeyCode::Char('l'), KeyModifiers::NONE);
+        assert_eq!(v.changes.dir(), a.as_path());
+        key(&mut v, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(v.changes.dir(), b.as_path());
+        key(&mut v, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert_eq!(v.changes.dir(), a.as_path());
+
+        // a letter: 0 effect, 0 leak into the diff
+        key(&mut v, KeyCode::Char('w'), KeyModifiers::NONE);
+        assert!(v.repo_focus && !v.changes.panel_focus());
+
+        // ↓, enter, esc: the diff again
+        for c in [KeyCode::Down, KeyCode::Enter, KeyCode::Esc] {
+            key(&mut v, KeyCode::Up, KeyModifiers::NONE);
+            assert!(v.repo_focus);
+            key(&mut v, c, KeyModifiers::NONE);
+            assert!(!v.repo_focus, "{c:?}");
+            assert_eq!(v.pane, Pane::Changes);
+        }
+
+        // tab: the prompt; tab again: the view, the tabs still have the keys
+        key(&mut v, KeyCode::Up, KeyModifiers::NONE);
+        key(&mut v, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(v.prompt_focus);
+        assert_eq!(tab_bg(&mut v, 0), theme::panel().bg.unwrap(), "the prompt has the keys");
+
+        // another view: the focus resets
+        key(&mut v, KeyCode::F(1), KeyModifiers::NONE);
+        key(&mut v, KeyCode::F(2), KeyModifiers::NONE);
+        assert!(!v.repo_focus);
+        done(&v, &root);
+    }
+
+    #[test]
+    fn up_keeps_the_diff_with_1_repo_or_the_panel_focused() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut v, root, ..) = two_repos("up-one", true);
+        let _ = screen(&mut v);
+        key(&mut v, KeyCode::Up, KeyModifiers::NONE);
+        assert!(!v.repo_focus, "1 repo: 0 tabs to step");
+        done(&v, &root);
+
+        let (mut v, root, ..) = two_repos("up-panel", false);
+        key(&mut v, KeyCode::Left, KeyModifiers::NONE);
+        assert!(v.changes.panel_focus());
+        key(&mut v, KeyCode::Up, KeyModifiers::NONE);
+        assert!(!v.repo_focus, "the panel's ↑");
+        done(&v, &root);
+    }
+
+    #[test]
+    fn a_click_on_a_repo_tab_picks_it_and_gives_the_tabs_the_keys() {
+        let _g = crate::engine::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut v, root, _, b) = two_repos("click", false);
+        v.prompt_focus = true;
+        let _ = screen(&mut v);
+        let r = v.checkout_tabs.rect_of(1).unwrap();
+        v.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE });
+        assert_eq!(v.changes.dir(), b.as_path());
+        assert!(v.repo_focus && !v.prompt_focus);
+
+        // a click in the diff: the diff has the keys
+        let _ = screen(&mut v);
+        let d = v.view_rect;
+        v.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: d.x + 2, row: d.y + 1, modifiers: KeyModifiers::NONE });
+        assert!(!v.repo_focus);
+        done(&v, &root);
     }
 }
