@@ -185,10 +185,11 @@ enum Row {
 }
 
 impl Row {
-    fn height(self) -> u16 {
+    /// Rows of the row; H: rows of the card at a position.
+    fn height(self, h: impl Fn(usize) -> u16) -> u16 {
         match self {
             Row::Label(..) => 1,
-            Row::Card(_) => nav::CARD_H,
+            Row::Card(pos) => h(pos),
         }
     }
 }
@@ -1137,18 +1138,19 @@ impl ThreadList {
         }
         self.cursor = self.cursor.min(vis.len() - 1);
         let rows = self.layout(&vis);
+        let h = |pos: usize| nav::card_h(&self.cards[vis[pos]]);
         // virtual y of each row
         let mut ys = Vec::with_capacity(rows.len());
         let mut y = 0u16;
         for r in &rows {
             ys.push(y);
-            y += r.height();
+            y += r.height(h);
         }
         let total = y;
         let ci = rows.iter().position(|r| *r == Row::Card(self.cursor)).unwrap_or(0);
         // the label above the cursor's card stays in view with it
         let top = if ci > 0 && matches!(rows[ci - 1], Row::Label(..)) { ys[ci - 1] } else { ys[ci] };
-        let bottom = ys[ci] + nav::CARD_H;
+        let bottom = ys[ci] + rows.get(ci).map_or(nav::CARD_H, |r| r.height(h));
         if top < self.offset {
             self.offset = top;
         } else if bottom > self.offset + list.height {
@@ -1158,7 +1160,7 @@ impl ThreadList {
         let notes = crate::notify::unseen(self.here.as_deref());
         let focused = self.focus == Focus::List && !self.filtering;
         for (r, &vy) in rows.iter().zip(&ys) {
-            if vy < self.offset || vy + r.height() > self.offset + list.height {
+            if vy < self.offset || vy + r.height(h) > self.offset + list.height {
                 continue;
             }
             let y = list.y + vy - self.offset;
@@ -1168,7 +1170,7 @@ impl ThreadList {
                     f.render_widget(Paragraph::new(Span::styled(Self::label_text(s, n), st)), Rect { y, height: 1, ..list });
                 }
                 Row::Card(pos) => {
-                    let rect = Rect { y, height: nav::CARD_H, ..list };
+                    let rect = Rect { y, height: h(pos), ..list };
                     let c = &self.cards[vis[pos]];
                     nav::draw_card(f.buffer_mut(), rect, c, pos == self.cursor && focused, self.here.as_deref() == Some(c.id.as_str()), true, tick);
                     crate::notify::card_badge(f.buffer_mut(), rect, &notes, &c.id);
@@ -1183,7 +1185,7 @@ impl ThreadList {
         }
         self.fx.apply(f, list, self.version);
         let above = rows.iter().zip(&ys).filter(|(r, y)| matches!(r, Row::Card(_)) && **y < self.offset).count();
-        let below = rows.iter().zip(&ys).filter(|(r, y)| matches!(r, Row::Card(_)) && **y + nav::CARD_H > self.offset + list.height).count();
+        let below = rows.iter().zip(&ys).filter(|(r, y)| matches!(r, Row::Card(_)) && **y + r.height(h) > self.offset + list.height).count();
         if above + below > 0 {
             let r = Rect { y: list.y.saturating_sub(1), height: 1, ..list };
             f.render_widget(Paragraph::new(Span::styled(format!("{above}↑ · {below}↓"), theme::muted())).right_aligned(), r);

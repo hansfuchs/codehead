@@ -249,6 +249,11 @@ pub const WAVE_MS: u128 = 150;
 /// Rows of a card: border, title, status, border.
 pub const CARD_H: u16 = 4;
 
+/// Rows of card C: CARD_H, +1 for its projects line.
+pub fn card_h(c: &Card) -> u16 {
+    CARD_H + u16::from(!c.projects.is_empty())
+}
+
 /// S cut to W display columns (… at the cut).
 pub fn fit(s: &str, w: usize) -> String {
     use unicode_width::UnicodeWidthChar;
@@ -319,7 +324,12 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
             status.push(Span::styled(fit(&format!(" · {tail}"), w - used), theme::muted()));
         }
     }
-    let lines = vec![Line::from(Span::styled(fit(&c.name(), w), title_st)), Line::from(status)];
+    let mut lines = vec![Line::from(Span::styled(fit(&c.name(), w), title_st))];
+    // the projects: own line, below the title, above the status line
+    if !c.projects.is_empty() {
+        lines.push(Line::from(Span::styled(fit(&c.projects.join(" · "), w), theme::muted())));
+    }
+    lines.push(Line::from(status));
     let body = ratatui::layout::Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
     Paragraph::new(lines).render(body, buf);
     if cur {
@@ -330,14 +340,6 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
         Paragraph::new(Span::styled("●", theme::fg(theme::pal().info()).add_modifier(Modifier::BOLD))).render(dot, buf);
     }
 
-    // the projects: on the bottom border, left
-    if !c.projects.is_empty() && r.width > 12 {
-        let room = r.width.saturating_sub(if c.draft { 16 } else { 4 }) as usize;
-        let text = fit(&format!(" {} ", c.projects.join(" · ")), room);
-        let w = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
-        let at = ratatui::layout::Rect { x: r.x + 2, y: r.bottom() - 1, width: w.min(r.width.saturating_sub(4)), height: 1 };
-        Paragraph::new(Span::styled(text, if cur { theme::accent() } else { theme::muted() })).render(at, buf);
-    }
     // an unsent message in the prompt: on the bottom border, right
     let tag = " ✎ unsent ";
     if c.draft && r.width >= tag.chars().count() as u16 + 8 {
@@ -363,6 +365,22 @@ mod tests {
         draw_card(&mut buf, area, &c, false, false, false, 0);
         let text: String = (0..CARD_H).flat_map(|y| (0..40).map(move |x| (x, y))).map(|p| buf[p].symbol().to_string()).collect();
         assert!(text.contains("? blocked") && !text.contains("working"), "{text}");
+    }
+
+    /// The projects of a thread: own line below the title, above the status line; the bottom border stays plain.
+    #[test]
+    fn a_card_shows_its_projects_below_the_title() {
+        let c = Card { live: 1, projects: vec!["bug-fixes".into(), "ux".into()], ..card("t", "open", 0) };
+        let h = card_h(&c);
+        assert_eq!(h, CARD_H + 1);
+        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, h));
+        let area = buf.area;
+        draw_card(&mut buf, area, &c, false, false, false, 0);
+        let row = |y: u16| (0..40).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
+        assert!(row(1).contains('t') && !row(1).contains("bug-fixes"), "{}", row(1));
+        assert!(row(2).contains("bug-fixes · ux") && !row(2).contains("idle"), "{}", row(2));
+        assert!(row(3).contains("◦ idle") && !row(3).contains("bug-fixes"), "{}", row(3));
+        assert!(!row(h - 1).contains("bug-fixes"), "{}", row(h - 1));
     }
 
     /// A monitor or background command runs, 0 turn: `monitoring…`, not `idle` or `working…`.
