@@ -24,7 +24,7 @@ Rules on every screen:
 | `ctrl+p` | menu, from every field: quick commands (`n`: new thread, `f`: search; in a thread per agent: its flow, remove, replace with), threads, merge, search, tokens (`tab` / `shift+tab`: tabs, `←→` too outside threads and merge, where they step the repos / states; `esc` / `ctrl+p`: close) |
 | `ctrl+n` | notifications, from everywhere: questions, blocked agents, flow gates, errors, usage limits, PR conflicts / failed checks / comments, `@owner` mentions, context ≥ 90 %, threads done (`↑↓` move, `enter` jump to the event, `x` mark seen, `esc` close). The header shows the counts; a note goes once its event was on screen for 1 s |
 | `tab` / `shift+tab` | next / previous field (a question: its choices ↔ the prompt; a view: the view ↔ the prompt; a row of tabs: into its content) |
-| `F1`-`F6`, `alt+1`-`alt+6` | start screen: the tabs new, threads, merge, agents, flows, settings (macOS: Option as Meta) |
+| `F1`-`F7`, `alt+1`-`alt+7` | start screen: the tabs new, threads, projects, merge, agents, flows, settings (macOS: Option as Meta) |
 | `ctrl+←` `ctrl+→`, `alt+←` `alt+→` | word jumps in a text field |
 | `esc` | 1 level back: never saves, never drops edits unasked (edited text: `esc` again within 2 s) |
 | `ctrl+z` / `ctrl+shift+z`, `ctrl+y` | undo / redo in any text field (`⌘z` / `⌘⇧z`) |
@@ -43,7 +43,9 @@ Rules on every screen:
 | `f` | agents field: the flow of the card under the cursor (the flows, `→` its steps: the start step); the card shows it under its effort row. A flow picks the agent. The repo's last flow: the lead's default |
 | `←` `→` | the **where** row: branch or worktree |
 | `enter` | the **repo** row: the repo picker (a repo not on disk gets cloned at the start) |
-| `←` `→` | threads tab: the previous / next repo (menu → filter by repo: the dropdown) |
+| `←` `→` | threads tab: the previous / next repo (menu → filter by repo: the dropdown); on the **project** row: the previous / next project |
+| `←` `→` · `space` | the **project** row of the new tab: a project · on / off (`auto`: the agents pick) |
+| `n` · `enter` · `x` · `d d` · `o` | projects tab: new · edit the brief · done / active · delete · open in the IDE ([Projects](/docs/concepts/projects/)) |
 | `ctrl+v` | paste a clipboard image |
 | `ctrl+s` / `ctrl+r` | settings: save / reload |
 | `esc` | settings: undo the field's edit (0 apply); agent form with edits: asks first |
@@ -216,7 +218,7 @@ click on an attachment's marker or `📎` row in the chat opens this view on it.
 
 ## Merge view
 
-The thread's pull requests (`alt+3`), or a pull request of the start screen's merge tab (`F3`).
+The thread's pull requests (`alt+3`), or a pull request of the start screen's merge tab (`F4`).
 An overview of stops (title, body, status, labels, update, merge, checks, comments) and the
 PR's diff (the changes view, read only).
 

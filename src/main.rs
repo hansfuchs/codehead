@@ -55,6 +55,8 @@ mod paths;
 mod perf;
 mod picker;
 mod prlist;
+mod projects;
+mod projtab;
 mod portless;
 mod preview;
 mod pushlock;
@@ -135,7 +137,7 @@ config:  ~/.config/codehead.toml ($CODEHEAD_CONFIG overrides). keys, each overri
            [colors] scheme = \"lavender\" | \"coral\" | \"amber\" ($CODEHEAD_SCHEME); accent, text, … = \"#RRGGBB\"
            [aliases]
            \"project:platform\" = \"~/projects/exampleorg/project/notes/platform/\"
-settings: 6th tab (F6). edit fields and path aliases; ctrl+s saves, ctrl+r discards edits / reloads.
+settings: 7th tab (F7). edit fields and path aliases; ctrl+s saves, ctrl+r discards edits / reloads.
           enter on + add (menu: add path alias) adds an alias; ctrl+d / d removes the current alias, on a
           field ctrl+d: back to its default (↺ too).
           path fields use the prompt's path suggestions: tab completes, esc closes suggestions.
@@ -179,7 +181,7 @@ esc:     1 level back: never saves, never drops edits unasked (edited text: esc 
          it; the agent form and reset ask).
 keys:    1 key, 1 meaning: a letter key never acts with ctrl / alt / ⌘ held (alt+P never pushes).
          outward or destructive keys ask first: a 2nd press (d d, S S, ctrl+d ctrl+d, enter enter).
-tabs:    start screen: F1-F6 (alt+1-6) switch tabs (word jumps: ctrl / alt+←→). tab / shift+tab: next /
+tabs:    start screen: F1-F7 (alt+1-7) switch tabs (word jumps: ctrl / alt+←→). tab / shift+tab: next /
          previous field (on a row of tabs: into its content). ←→ on a row of tabs: the next / previous tab.
 quit:    esc esc on the start screen; ctrl+c 2× within 1 s (a 1st ctrl+c on text: clears it, ctrl+z back);
          menu → quit codehead. q never quits.
@@ -886,7 +888,7 @@ fn start(args: Args) {
             }
             break 'screens;
         }
-        Outcome::New { message, target, agents: picked, clone, flows } => {
+        Outcome::New { message, target, agents: picked, clone, flows, projects, title_set } => {
             engine::trace("start: submit");
             engine::transition_begin("start: submit → thread view");
             // a home repo not on disk yet: clone it first
@@ -923,7 +925,7 @@ fn start(args: Args) {
             if plan.prep.is_some() {
                 let _ = term.draw(|f| app::draw_status(f, &format!("starting {} · {}…", plan.label, picked.join(", ")), 0));
             }
-            let s = start::Start { repo: &repo, target: &target, message: &message, agents: &picked, flows: &flows };
+            let s = start::Start { repo: &repo, target: &target, message: &message, agents: &picked, flows: &flows, projects: projects.as_deref(), title_set };
             let (t, note) = match start::launch(&s, &plan, engine::client::start) {
                 Ok(r) => r,
                 Err(e) => {

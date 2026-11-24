@@ -64,6 +64,7 @@ impl View {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Repos,
+    Projects,
     Views,
     List,
 }
@@ -93,7 +94,7 @@ impl Act {
             Act::Open => "open",
             Act::Archive => "archive: worktree goes, branch stays",
             Act::Unarchive => "unarchive",
-            Act::Edit => "edit: title, repo, linked repos, agents",
+            Act::Edit => "edit: title, repo, projects, linked repos, agents",
             Act::Delete => "delete: thread + worktree",
         }
     }
@@ -101,6 +102,7 @@ impl Act {
 
 /// What the host does after a key / click.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Out {
     /// Done here.
     None,
@@ -135,6 +137,32 @@ impl RepoTab {
             RepoTab::Repo(p) => repo_name(p),
             RepoTab::Outside => "outside git".into(),
             RepoTab::All => "all".into(),
+        }
+    }
+}
+
+/// A project tab: every thread, the threads of a project (slug), the threads of 0 projects.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProjTab {
+    All,
+    Project(String),
+    None,
+}
+
+impl ProjTab {
+    pub fn keeps(&self, projects: &[String]) -> bool {
+        match self {
+            ProjTab::All => true,
+            ProjTab::Project(p) => projects.contains(p),
+            ProjTab::None => projects.is_empty(),
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            ProjTab::All => "all".into(),
+            ProjTab::Project(p) => p.clone(),
+            ProjTab::None => "0 projects".into(),
         }
     }
 }
@@ -207,6 +235,8 @@ pub struct ThreadList {
     pub sel: HashSet<String>,
     repos: TabGroup,
     repo_pick: Option<RepoTab>,
+    projs: TabGroup,
+    proj_pick: ProjTab,
     views: TabGroup,
     pub view: View,
     pub focus: Focus,
@@ -262,6 +292,8 @@ impl ThreadList {
             sel: HashSet::new(),
             repos: TabGroup::default(),
             repo_pick: None,
+            projs: TabGroup::default(),
+            proj_pick: ProjTab::All,
             views: TabGroup::default(),
             view: View::Active,
             focus: Focus::List,
@@ -468,6 +500,47 @@ impl ThreadList {
         self.offset = 0;
     }
 
+    /// The project tabs: all, the projects of the cards of the repo tab and view (most threads
+    /// first, then A→Z), 0 projects (when a card has 0 and another has 1+).
+    pub fn proj_tabs(&self) -> Vec<ProjTab> {
+        let tab = self.repo_tab();
+        let archived = self.view == View::Archived;
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        let mut none = false;
+        for c in self.cards.iter().filter(|c| c.archived() == archived && tab.keeps(c.repo.as_deref())) {
+            none |= c.projects.is_empty();
+            for p in &c.projects {
+                match counts.iter_mut().find(|x| &x.0 == p) {
+                    Some(x) => x.1 += 1,
+                    None => counts.push((p.clone(), 1)),
+                }
+            }
+        }
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut v = vec![ProjTab::All];
+        let any = !counts.is_empty();
+        v.extend(counts.into_iter().map(|(p, _)| ProjTab::Project(p)));
+        if none && any {
+            v.push(ProjTab::None);
+        }
+        v
+    }
+
+    /// The project tab in use: the pick (while the repo tab has it), else all.
+    pub fn proj_tab(&self) -> ProjTab {
+        if self.proj_tabs().contains(&self.proj_pick) { self.proj_pick.clone() } else { ProjTab::All }
+    }
+
+    pub fn step_proj(&mut self, d: isize) {
+        let tabs = self.proj_tabs();
+        let cur = self.proj_tab();
+        self.projs.i = tabs.iter().position(|t| *t == cur).unwrap_or(0);
+        self.projs.step(d, tabs.len());
+        self.proj_pick = tabs.get(self.projs.i).cloned().unwrap_or(ProjTab::All);
+        self.cursor = 0;
+        self.offset = 0;
+    }
+
     pub fn step_view(&mut self, d: isize) {
         let all = self.views_all();
         self.views.i = all.iter().position(|v| *v == self.view).unwrap_or(0);
@@ -509,8 +582,12 @@ impl ThreadList {
             return Vec::new();
         }
         let tab = self.repo_tab();
+        let proj = self.proj_tab();
         let archived = self.view == View::Archived;
-        let mut v: Vec<usize> = nav::filter(&self.cards, &self.filter.text()).into_iter().filter(|&i| self.cards[i].archived() == archived && tab.keeps(self.cards[i].repo.as_deref())).collect();
+        let mut v: Vec<usize> = nav::filter(&self.cards, &self.filter.text())
+            .into_iter()
+            .filter(|&i| self.cards[i].archived() == archived && tab.keeps(self.cards[i].repo.as_deref()) && proj.keeps(&self.cards[i].projects))
+            .collect();
         if !archived {
             v.sort_by_key(|&i| Self::section(&self.cards[i]));
         }
@@ -732,7 +809,7 @@ impl ThreadList {
             Focus::Repos => {
                 match k.code {
                     KeyCode::Up => return Out::Up,
-                    KeyCode::Down => self.focus = Focus::Views,
+                    KeyCode::Down => self.focus = Focus::Projects,
                     KeyCode::Enter => self.focus = Focus::List,
                     KeyCode::Left | KeyCode::Right => self.step_repo(if k.code == KeyCode::Right { 1 } else { -1 }),
                     KeyCode::Char(_) if self.mode == Mode::Switch && !ctrl => {
@@ -743,9 +820,23 @@ impl ThreadList {
                 }
                 Out::None
             }
-            Focus::Views => {
+            Focus::Projects => {
                 match k.code {
                     KeyCode::Up => self.focus = Focus::Repos,
+                    KeyCode::Down => self.focus = Focus::Views,
+                    KeyCode::Enter => self.focus = Focus::List,
+                    KeyCode::Left | KeyCode::Right => self.step_proj(if k.code == KeyCode::Right { 1 } else { -1 }),
+                    KeyCode::Char(_) if self.mode == Mode::Switch && !ctrl => {
+                        self.focus = Focus::List;
+                        self.type_filter(k);
+                    }
+                    _ => return Out::Pass,
+                }
+                Out::None
+            }
+            Focus::Views => {
+                match k.code {
+                    KeyCode::Up => self.focus = Focus::Projects,
                     KeyCode::Down | KeyCode::Enter => self.focus = Focus::List,
                     KeyCode::Left | KeyCode::Right => self.step_view(if k.code == KeyCode::Right { 1 } else { -1 }),
                     KeyCode::Char(_) if self.mode == Mode::Switch && !ctrl => {
@@ -898,6 +989,13 @@ impl ThreadList {
                     self.offset = 0;
                     return Out::None;
                 }
+                if self.projs.click(at) {
+                    self.focus = Focus::Projects;
+                    self.proj_pick = self.proj_tabs().get(self.projs.i).cloned().unwrap_or(ProjTab::All);
+                    self.cursor = 0;
+                    self.offset = 0;
+                    return Out::None;
+                }
                 if self.views.click(at) {
                     self.focus = Focus::Views;
                     let all = self.views_all();
@@ -938,7 +1036,7 @@ impl ThreadList {
         self.poll(true);
         self.rows.clear();
         self.act_rows.clear();
-        if area.height < 5 {
+        if area.height < 6 {
             return;
         }
         let row = |i: u16| Rect { y: area.y + i, height: 1, ..area };
@@ -973,12 +1071,17 @@ impl ThreadList {
         let cur = self.repo_tab();
         self.repos.i = tabs.iter().position(|t| *t == cur).unwrap_or(0);
         let labels: Vec<String> = tabs.iter().map(RepoTab::label).collect();
-        self.repos.draw(f, row(1), "repo", &labels, self.focus == Focus::Repos);
+        self.repos.draw(f, row(1), "repo   ", &labels, self.focus == Focus::Repos);
+        let ptabs = self.proj_tabs();
+        let pcur = self.proj_tab();
+        self.projs.i = ptabs.iter().position(|t| *t == pcur).unwrap_or(0);
+        let labels: Vec<String> = ptabs.iter().map(ProjTab::label).collect();
+        self.projs.draw(f, row(2), "project", &labels, self.focus == Focus::Projects);
         let all = self.views_all();
         self.views.i = all.iter().position(|v| *v == self.view).unwrap_or(0);
         let labels: Vec<String> = all.iter().map(|v| self.view_label(*v)).collect();
-        self.views.draw(f, row(2), "show", &labels, self.focus == Focus::Views);
-        let mut list = Rect { y: area.y + 4, height: area.height.saturating_sub(4), ..area };
+        self.views.draw(f, row(3), "show   ", &labels, self.focus == Focus::Views);
+        let mut list = Rect { y: area.y + 5, height: area.height.saturating_sub(5), ..area };
         // the question / the status: the last row
         let foot = Rect { y: list.bottom().saturating_sub(1), height: 1, ..list };
         let foot_line = if let Some(p) = &self.pending {
@@ -1131,8 +1234,9 @@ impl ThreadList {
             return vec![("↑↓", "move"), ("enter", "run"), ("letter", "its action"), ("esc", "close")];
         }
         match (self.mode, self.focus) {
-            (_, Focus::Repos) => vec![("←→", "repo"), ("↓", "views"), ("↑", "tabs")],
-            (_, Focus::Views) => vec![("←→", "view"), ("↑", "repos"), ("↓", "list")],
+            (_, Focus::Repos) => vec![("←→", "repo"), ("↓", "projects"), ("↑", "tabs")],
+            (_, Focus::Projects) => vec![("←→", "project"), ("↑", "repos"), ("↓", "views")],
+            (_, Focus::Views) => vec![("←→", "view"), ("↑", "projects"), ("↓", "list")],
             (Mode::Switch, Focus::List) => vec![("type", "filter"), ("←→", "repo"), ("↑↓", "move"), ("enter", "open"), ("ctrl+o", "actions")],
             (Mode::Manage, Focus::List) => vec![("space", "select"), ("a", "archive"), ("u", "unarchive"), ("e", "edit"), ("d", "delete"), ("ctrl+o", "actions")],
         }
@@ -1167,6 +1271,8 @@ struct Form {
     repos: Vec<Option<String>>,
     auto: String,
     repo_i: usize,
+    /// Row 0: auto (the agents assign), then the projects of the repo: (slug, on).
+    projs: Vec<(String, bool)>,
     links: Vec<(String, bool)>,
     agents: Vec<(String, bool)>,
     row: usize,
@@ -1194,9 +1300,19 @@ impl Form {
                 agents.push((a.clone(), false));
             }
         }
+        let all = crate::threads::repo_of_thread_store(&t).map(|r| crate::projects::list(&r)).unwrap_or_default();
+        let mut projs: Vec<(String, bool)> = vec![("auto".into(), !t.projects_set)];
+        for p in all.iter().filter(|p| !p.done || t.projects.contains(&p.slug)) {
+            projs.push((p.slug.clone(), t.projects.contains(&p.slug)));
+        }
+        // gone briefs: kept until dropped here
+        for p in t.projects.iter().filter(|p| !all.iter().any(|x| &x.slug == *p)) {
+            projs.push((p.clone(), true));
+        }
         Some(Form {
             id: t.id.clone(),
             title,
+            projs,
             repos,
             auto: auto.map_or_else(|| "outside git".into(), |p| repo_name(&p)),
             repo_i,
@@ -1208,7 +1324,7 @@ impl Form {
     }
 
     fn n_rows(&self) -> usize {
-        2 + self.links.len() + self.agents.len()
+        2 + self.projs.len() + self.links.len() + self.agents.len()
     }
 
     fn key(&mut self, k: KeyEvent) -> FormOut {
@@ -1227,8 +1343,22 @@ impl Form {
                 let d: isize = if k.code == KeyCode::Right { 1 } else { -1 };
                 self.repo_i = (self.repo_i as isize + d).rem_euclid(self.repos.len() as isize) as usize;
             }
-            KeyCode::Char(' ') | KeyCode::Enter if self.row >= 2 => {
+            KeyCode::Char(' ') | KeyCode::Enter if self.row >= 2 && self.row < 2 + self.projs.len() => {
                 let i = self.row - 2;
+                self.projs[i].1 = !self.projs[i].1;
+                if i == 0 {
+                    // auto: the agents' pick from now on; off: the current picks stay
+                    if self.projs[0].1 {
+                        for p in self.projs.iter_mut().skip(1) {
+                            p.1 = false;
+                        }
+                    }
+                } else {
+                    self.projs[0].1 = false;
+                }
+            }
+            KeyCode::Char(' ') | KeyCode::Enter if self.row >= 2 => {
+                let i = self.row - 2 - self.projs.len();
                 match self.links.get_mut(i) {
                     Some(l) => l.1 = !l.1,
                     None => {
@@ -1259,13 +1389,14 @@ impl Form {
             repo: self.repos.get(self.repo_i).cloned().flatten(),
             checkouts: self.links.iter().filter(|l| l.1).map(|l| l.0.clone()).collect(),
             agents,
+            projects: (!self.projs[0].1).then(|| self.projs.iter().skip(1).filter(|p| p.1).map(|p| p.0.clone()).collect()),
         };
         FormOut::Save(self.id.clone(), e)
     }
 
     fn draw(&mut self, f: &mut Frame, area: Rect) {
         let w = area.width.saturating_sub(4).min(76);
-        let body = 2 + 1 + self.links.len().max(1) + 1 + self.agents.len() + 2 + usize::from(self.error.is_some());
+        let body = 2 + 1 + self.projs.len() + 1 + self.links.len().max(1) + 1 + self.agents.len() + 2 + usize::from(self.error.is_some());
         let h = (body as u16 + 2).min(area.height);
         let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + 1.min(area.height.saturating_sub(h)), width: w, height: h };
         f.render_widget(Clear, r);
@@ -1296,6 +1427,17 @@ impl Form {
             let st = if hl { theme::pill() } else { theme::text() };
             vec![Span::styled(if on { "◼ " } else { "◻ " }, if on { theme::accent() } else { theme::line() }), Span::styled(text, st)]
         };
+        line(f, y, Line::styled("projects (space: on / off; auto: the agents pick)", theme::muted().add_modifier(Modifier::BOLD)));
+        y += 1;
+        for (i, (slug, on)) in self.projs.iter().enumerate() {
+            let mut s = vec![Span::raw("  ")];
+            s.extend(check(*on, self.row == 2 + i, slug.clone()));
+            if i == 0 && self.projs.len() == 1 {
+                s.push(Span::styled("  0 projects in this repo: projects tab (F3)", theme::muted()));
+            }
+            line(f, y, Line::from(s));
+            y += 1;
+        }
         line(f, y, Line::styled("linked repos (space: keep / drop)", theme::muted().add_modifier(Modifier::BOLD)));
         y += 1;
         if self.links.is_empty() {
@@ -1304,7 +1446,7 @@ impl Form {
         }
         for (i, (dir, on)) in self.links.iter().enumerate() {
             let mut s = vec![Span::raw("  ")];
-            s.extend(check(*on, self.row == 2 + i, dir.clone()));
+            s.extend(check(*on, self.row == 2 + self.projs.len() + i, dir.clone()));
             line(f, y, Line::from(s));
             y += 1;
         }
@@ -1313,7 +1455,7 @@ impl Form {
         let lead = self.agents.iter().position(|a| a.1);
         for (i, (name, on)) in self.agents.iter().enumerate() {
             let mut s = vec![Span::raw("  ")];
-            s.extend(check(*on, self.row == 2 + self.links.len() + i, name.clone()));
+            s.extend(check(*on, self.row == 2 + self.projs.len() + self.links.len() + i, name.clone()));
             if Some(i) == lead {
                 s.push(Span::styled("  lead", theme::muted()));
             }
@@ -1501,14 +1643,15 @@ mod tests {
         for c in "new title".chars() {
             l.key(k(KeyCode::Char(c)));
         }
-        // agents: bob on (rows: title, repo, 0 links, ada, bob)
-        l.key(k(KeyCode::Down));
-        l.key(k(KeyCode::Down));
-        l.key(k(KeyCode::Down));
+        // agents: bob on (rows: title, repo, projects: auto, 0 links, ada, bob)
+        for _ in 0..4 {
+            l.key(k(KeyCode::Down));
+        }
         l.key(k(KeyCode::Char(' ')));
         l.key(ctrl('s'));
         let s = crate::engine::store::load(&t.id).unwrap();
         assert_eq!((s.title.as_str(), s.agents.clone()), ("new title", vec!["ada".to_string(), "bob".to_string()]));
+        assert!(s.title_set && !s.projects_set, "the owner's title; projects: auto");
         let _ = crate::engine::store::delete(&t.id);
     }
 

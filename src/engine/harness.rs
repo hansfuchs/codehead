@@ -634,6 +634,10 @@ Thread: {title}\nAgents on the thread: {list}",
     if let Some(h) = crate::config::home_repo() {
         s.push_str(&home_block(&h));
     }
+    // a sub-thread runs for another thread: 0 own name, 0 own projects
+    if thread.of.is_none() {
+        s.push_str(&crate::projects::prompt(thread));
+    }
     if crate::portless::active() {
         s.push_str(&crate::portless::prompt(thread.worktree.as_ref().and(thread.branch.as_deref())));
     }

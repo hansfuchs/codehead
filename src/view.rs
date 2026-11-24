@@ -4850,8 +4850,8 @@ mod pane_tests {
         v.input.set_text("half a message");
         v.open_menu();
         v.menu.as_mut().unwrap().list.set_cards(vec![crate::nav::Card { id: t.id.clone(), title: "archive from view".into(), state: "open".into(), ..Default::default() }]);
-        // quick → threads (tab bar), ↓ repos, ↓ views, ↓ the list
-        for k in [KeyCode::Right, KeyCode::Down, KeyCode::Down, KeyCode::Down] {
+        // quick → threads (tab bar), ↓ repos, ↓ projects, ↓ views, ↓ the list
+        for k in [KeyCode::Right, KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Down] {
             press(&mut v, k, KeyModifiers::NONE);
         }
         press(&mut v, KeyCode::Char('o'), KeyModifiers::CONTROL);

@@ -54,6 +54,9 @@ pub struct Thread {
     /// The owner's repo pick (`store::Thread::repo`): wins over DIR / WORKTREE.
     #[serde(default)]
     pub repo: Option<String>,
+    /// Projects (`store::Thread::projects`).
+    #[serde(default)]
+    pub projects: Vec<String>,
 }
 
 /// From the tail of thread ID's log: an open question, the last error (a turn that ended in
@@ -395,6 +398,7 @@ fn scan(full: bool) -> Vec<Thread> {
                 urls: t.worktree.as_ref().and(t.branch.as_deref()).map(|b| crate::portless::urls_of(&routes, &crate::portless::prefix(b))).unwrap_or_default(),
                 updated: t.updated / 1000,
                 repo: t.repo.clone(),
+                projects: t.projects.clone(),
                 worktree: t.worktree.clone(),
                 branch: t.branch.clone(),
                 dir: Some(t.dir.clone()),
@@ -799,6 +803,8 @@ pub struct Edit {
     pub repo: Option<String>,
     pub checkouts: Vec<String>,
     pub agents: Vec<String>,
+    /// The owner's projects (slugs); None: auto (the agents assign them).
+    pub projects: Option<Vec<String>>,
 }
 
 /// Save edit E of thread ID. A live host: agents that leave / join go through it (their
@@ -807,8 +813,16 @@ pub fn edit(id: &str, e: &Edit) -> Result<String, String> {
     let t = store::load(id).ok_or_else(|| format!("no thread {id}"))?;
     let mut changed = Vec::new();
     let title = e.title.trim().to_string();
-    if !title.is_empty() && title != t.title {
+    let title_new = !title.is_empty() && title != t.title.lines().next().unwrap_or_default();
+    if title_new {
         changed.push("title");
+    }
+    let projects_new = match &e.projects {
+        Some(p) => !t.projects_set || *p != t.projects,
+        None => t.projects_set,
+    };
+    if projects_new {
+        changed.push("projects");
     }
     let derived = repo_root(Path::new(&t.dir)).or_else(|| t.worktree.as_deref().and_then(|p| repo_root(Path::new(p)))).map(|p| p.display().to_string());
     // the pick of the repo of its dirs: 0 override
@@ -838,8 +852,15 @@ pub fn edit(id: &str, e: &Edit) -> Result<String, String> {
         changed.push("agents");
     }
     store::update(&t.id, |s| {
-        if !title.is_empty() {
+        if title_new {
             s.title = title.clone();
+            s.title_set = true;
+        }
+        if projects_new {
+            s.projects_set = e.projects.is_some();
+            if let Some(p) = &e.projects {
+                s.projects = p.clone();
+            }
         }
         s.repo = repo.clone();
         s.checkouts = keep.clone();
@@ -898,11 +919,19 @@ mod tests {
         let mut t = store::Thread::new("old", "task", &dir, vec!["ada".into()]);
         t.checkouts = vec![store::Checkout { dir: "/a".into(), branch: None }, store::Checkout { dir: "/b".into(), branch: None }];
         t.save().unwrap();
-        let e = Edit { title: "new title".into(), repo: Some("/repos/other".into()), checkouts: vec!["/b".into()], agents: vec!["ada".into()] };
+        let e = Edit { title: "new title".into(), repo: Some("/repos/other".into()), checkouts: vec!["/b".into()], agents: vec!["ada".into()], projects: Some(vec!["ux".into()]) };
         let out = edit(&t.id, &e).unwrap();
-        assert!(out.contains("title") && out.contains("repo") && out.contains("linked repos"), "{out}");
+        assert!(out.contains("title") && out.contains("repo") && out.contains("linked repos") && out.contains("projects"), "{out}");
         let s = store::load(&t.id).unwrap();
         assert_eq!((s.title.as_str(), s.repo.as_deref(), s.checkouts.len()), ("new title", Some("/repos/other"), 1));
+        // the owner's title and projects: the agents' tools leave them
+        assert!(s.title_set && s.projects_set && s.projects == ["ux"]);
+        assert!(crate::projects::set_title(&t.id, "menu: other name", None).unwrap().contains("title kept"));
+        assert!(crate::projects::set_projects(&t.id, &[]).unwrap().contains("projects kept"));
+        // projects back to auto
+        let out = edit(&t.id, &Edit { projects: None, ..Edit { title: "new title".into(), repo: Some("/repos/other".into()), checkouts: vec!["/b".into()], agents: vec!["ada".into()], projects: None } }).unwrap();
+        assert!(out.contains("projects") && !out.contains("title"), "{out}");
+        assert!(!store::load(&t.id).unwrap().projects_set);
         let lite = Thread { repo: s.repo.clone(), dir: Some(s.dir.clone()), ..Default::default() };
         assert_eq!(repo_of_thread(&lite), Some(PathBuf::from("/repos/other")));
         assert!(edit(&t.id, &Edit { agents: Vec::new(), ..e }).is_err(), "0 agents refused");

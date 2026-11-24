@@ -38,6 +38,9 @@ pub struct Card {
     /// DIR is a linked worktree codehead made (delete / archive remove it).
     #[serde(default)]
     pub worktree: bool,
+    /// Projects of the thread (slugs of its repo's projects).
+    #[serde(default)]
+    pub projects: Vec<String>,
 }
 
 impl Card {
@@ -179,6 +182,7 @@ pub fn load() -> Vec<Card> {
                 land: crate::landed::of(&t.id),
                 done: crate::notify::reported_done(&t.id),
                 worktree: t.worktree.as_deref().is_some_and(|p| std::path::Path::new(p).is_dir()),
+                projects: t.projects,
                 id: t.id,
                 title: t.title,
                 state: t.state,
@@ -195,14 +199,36 @@ pub fn load() -> Vec<Card> {
 
 /// Fuzzy filter (title, branch) of CARDS: best match first; empty Q: all, order kept.
 pub fn filter(cards: &[Card], q: &str) -> Vec<usize> {
-    let q = q.trim();
+    // `kind:fix`, `area:menu`, `project:slug`: exact filters; the other words: the fuzzy match
+    let mut words = Vec::new();
+    let mut keep: Vec<Box<dyn Fn(&Card) -> bool>> = Vec::new();
+    for w in q.split_whitespace() {
+        match w.split_once(':') {
+            Some(("kind", v)) if !v.is_empty() => {
+                let v = v.to_lowercase();
+                keep.push(Box::new(move |c: &Card| crate::projects::kind_of(&c.branch) == Some(v.as_str())));
+            }
+            Some(("area", v)) if !v.is_empty() => {
+                let v = v.to_lowercase();
+                keep.push(Box::new(move |c: &Card| crate::projects::area_of(&c.title).as_deref() == Some(v.as_str())));
+            }
+            Some(("project", v)) if !v.is_empty() => {
+                let v = v.to_lowercase();
+                keep.push(Box::new(move |c: &Card| c.projects.iter().any(|p| p.starts_with(&v))));
+            }
+            _ => words.push(w),
+        }
+    }
+    let q = words.join(" ");
+    let passes = |c: &Card| keep.iter().all(|f| f(c));
     if q.is_empty() {
-        return (0..cards.len()).collect();
+        return (0..cards.len()).filter(|&i| passes(&cards[i])).collect();
     }
     let mut hits: Vec<(i64, usize)> = cards
         .iter()
         .enumerate()
-        .filter_map(|(i, c)| crate::app::fuzzy(q, &format!("{} {}", c.name(), c.branch)).map(|s| (s, i)))
+        .filter(|(_, c)| passes(c))
+        .filter_map(|(i, c)| crate::app::fuzzy(&q, &format!("{} {}", c.name(), c.branch)).map(|s| (s, i)))
         .collect();
     hits.sort_by_key(|(s, i)| (std::cmp::Reverse(*s), *i));
     hits.into_iter().map(|(_, i)| i).collect()
@@ -304,6 +330,14 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
         Paragraph::new(Span::styled("●", theme::fg(theme::pal().info()).add_modifier(Modifier::BOLD))).render(dot, buf);
     }
 
+    // the projects: on the bottom border, left
+    if !c.projects.is_empty() && r.width > 12 {
+        let room = r.width.saturating_sub(if c.draft { 16 } else { 4 }) as usize;
+        let text = fit(&format!(" {} ", c.projects.join(" · ")), room);
+        let w = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
+        let at = ratatui::layout::Rect { x: r.x + 2, y: r.bottom() - 1, width: w.min(r.width.saturating_sub(4)), height: 1 };
+        Paragraph::new(Span::styled(text, if cur { theme::accent() } else { theme::muted() })).render(at, buf);
+    }
     // an unsent message in the prompt: on the bottom border, right
     let tag = " ✎ unsent ";
     if c.draft && r.width >= tag.chars().count() as u16 + 8 {

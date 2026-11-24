@@ -7,7 +7,7 @@ A task is what you write on the **new** tab before a thread starts: a prompt, a 
 agents and a place to work. Starting it makes a thread and sends the task to every picked
 agent as its first message. The prompt comes first; the title is optional: 0 title, the
 prompt's 1st line names the thread (and its branch). Type, then `ctrl+enter`. `tab` / `shift+tab`
-walk the fields; `F1`-`F5` (`alt+1`-`alt+5`) switch tabs.
+walk the fields; `F1`-`F7` (`alt+1`-`alt+7`) switch tabs.
 
 ## Prompt
 
@@ -37,6 +37,10 @@ The **where** row (`←` `→`) picks the branch:
   `~/.local/share/codehead/worktrees/<repo>/<branch>`.
 
 Outside a git repository, the thread works in the current directory.
+
+The **project** row below the repo row puts the thread in [projects](/docs/concepts/projects/)
+of the repo (`←` `→`, `space`); `auto`: its agents pick. 0 title: the agents name the thread
+(and its branch) after its work.
 
 ## Drafts
 

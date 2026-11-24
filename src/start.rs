@@ -71,6 +71,10 @@ pub struct Start<'a> {
     pub agents: &'a [String],
     /// (agent, flow slug, start step) per agent with a flow.
     pub flows: &'a [(String, String, usize)],
+    /// The owner's projects (None: auto, the agents pick).
+    pub projects: Option<&'a [String]>,
+    /// The owner wrote the title: the agents' `set_title` leaves it.
+    pub title_set: bool,
 }
 
 /// Start thread S along PLAN: the branch switch (if any), thread.json, its host (HOST: starts the
@@ -95,6 +99,11 @@ pub fn launch(s: &Start, plan: &Plan, host: impl FnOnce(&str) -> Result<(), Stri
     engine::trace("start: git ready");
     let title = s.message.lines().next().unwrap_or_default().to_string();
     let mut t = Thread::new(&title, s.message, &plan.dir, s.agents.to_vec());
+    t.title_set = s.title_set;
+    if let Some(p) = s.projects {
+        t.projects = p.to_vec();
+        t.projects_set = true;
+    }
     // a thread on main in an existing checkout: the host pulls main (ff only) before the 1st turn,
     // the view opens at once; a failed pull: the agents get a note on it
     t.pull = plan.worktree.is_none() && matches!(s.target, Target::Checkout { .. } | Target::Worktree { .. }) && (plan.label == "main" || plan.label == "master");

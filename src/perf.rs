@@ -310,7 +310,7 @@ mod cases {
                 };
                 let message = format!("perf start {n}");
                 let plan = crate::start::plan(&repo, &repo, &target);
-                let s = crate::start::Start { repo: &repo, target: &target, message: &message, agents: &agents, flows: &[] };
+                let s = crate::start::Start { repo: &repo, target: &target, message: &message, agents: &agents, flows: &[], projects: None, title_set: false };
                 let (t, note) = crate::start::launch(&s, &plan, |id| client::start_with(id, &exe)).expect("start");
                 clean.1.borrow_mut().push(t.id.clone());
                 assert!(note.is_none(), "{note:?}");
