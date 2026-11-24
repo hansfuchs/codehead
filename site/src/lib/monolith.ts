@@ -112,7 +112,7 @@ function lit(p: Pattern, s: number, t: number, k: number): boolean {
 
 export class AsciiMonolith extends HTMLElement {
   #pre?: HTMLPreElement;
-  /** The eye dots alone, over the stone: only the dots an eye lights turn coral, 0 glow. */
+  /** The eye dots alone, over the stone: only the dots an eye lights turn lavender (the accent), 0 glow. */
   #eyes?: HTMLPreElement;
   #label?: HTMLParagraphElement;
   #data?: Data;

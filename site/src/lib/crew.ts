@@ -1,6 +1,6 @@
 /**
  * The crew: codehead's agent avatars on the website, from the real renderer (examples/lab,
- * `just lab avatar-frames 10 4 "regi:45" "regi:40" "regi:30 eyes=11 speed=0.5" "regi:61" >
+ * `just lab avatar-frames 10 4 "regi:47" "geob:20" "regi:48 speed=0.5" "geob:27" >
  * site/public/crew.json`): per avatar, 4 s of frames per status and 1 spawn (the goo forming
  * the sprite). 1 scripted thread plays on a 24 s loop, the same clock for every element:
  *
@@ -36,12 +36,13 @@ interface Agent {
   color: string;
 }
 
-/** The crew, in crew.json's order. */
+/** The crew, in crew.json's order. Colors: the TUI's agent pastels (src/agents.rs PALETTE: lavender,
+ * glacier, orchid, sage); 0 yellow, yellow is a blocked agent. */
 const AGENTS: Agent[] = [
-  { name: 'EVA', harness: 'Claude Code · opus', color: 'var(--coral)' },
-  { name: 'HAL', harness: 'Codex · gpt-5.5', color: '#8fb3d9' },
-  { name: 'DMON', harness: 'Claude Code · sonnet', color: '#b9a0d9' },
-  { name: 'ENOCH', harness: 'OpenCode · kimi-k2', color: '#9cc28a' },
+  { name: 'EVA', harness: 'Claude Code · opus', color: 'var(--accent)' },
+  { name: 'HAL', harness: 'Codex · gpt-5.5', color: '#a0d0f0' },
+  { name: 'DMON', harness: 'Claude Code · sonnet', color: '#e696d6' },
+  { name: 'ENOCH', harness: 'OpenCode · kimi-k2', color: '#a2c494' },
 ];
 
 /** 1 beat of the scripted thread: from T (s), the agents' states and the line it adds. */

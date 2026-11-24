@@ -5,6 +5,6 @@ export default defineConfig({
   site: 'https://codehead.sh',
   trailingSlash: 'always',
   markdown: {
-    shikiConfig: { theme: 'vitesse-dark', wrap: false },
+    shikiConfig: { theme: 'catppuccin-mocha', wrap: false },
   },
 });

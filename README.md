@@ -1,7 +1,7 @@
 # codehead
 
 <p>
-  <a href="https://github.com/hansfuchs/codehead/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/hansfuchs/codehead?color=ff7565"></a>
+  <a href="https://github.com/hansfuchs/codehead/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/hansfuchs/codehead?color=b8a6ff"></a>
   <img alt="Linux and macOS" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-150700">
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-e3d2be"></a>
 </p>

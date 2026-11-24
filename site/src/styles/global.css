@@ -1,6 +1,8 @@
-/* codehead.sh. Brutalist terminal look: sharp corners, 1px lines, flat surfaces, a mono
- * (Server Mono) for headings and code, Rethink Sans for copy. Dark only. 3 colors: brown paper, bone ink, coral
- * (the TUI's default accent, #FF7565). */
+/* codehead.sh. The TUI's look on the web: sharp corners, 1px plain lines, flat surfaces, a mono
+ * (Server Mono) for headings and code, Rethink Sans for copy. Dark only. Colors: the TUI's
+ * lavender scheme (src/theme.rs LAVENDER: text ramp, accent, hues) on warm brown paper, so the
+ * pastel lavender accent pops. Rules from the TUI: the accent marks focus, selection and the 1
+ * action; a hue means a state (attention: waits on you, success, error, info). */
 @import '@fontsource/ibm-plex-mono/400.css';
 @import '@fontsource-variable/rethink-sans';
 
@@ -15,15 +17,25 @@
 
 :root {
   color-scheme: dark;
-  --paper: #150700;
-  --raise: #1e0d05;
-  --ink: #e3d2be;
-  --coral: #ff7565;
+  /* surfaces (TUI slots base < surface0 < surface1 < surface2), warm: hue 20 */
+  --paper: #140700;
+  --raise: #22120a;
+  --hover: #2e1c13;
+  --surface2: #3d2a20;
+  --code-bg: #0d0400;
+  /* text ramp + accent: the TUI's lavender scheme. accent on paper: 9.4:1, text: 15.9:1 */
+  --ink: #e8e4f6;
+  --soft: #ada7c6;
+  --accent: #b8a6ff;
+  --on-accent: var(--paper);
+  /* roles (src/theme.rs): 1 hue, 1 meaning */
+  --attention: #edd48a;
+  --success: #9ddb98;
+  --error: #f47a8e;
+  --info: #8ccef0;
   --tint: var(--ink);
-  --line: color-mix(in oklab, var(--ink) 32%, transparent);
-  --line-faint: color-mix(in oklab, var(--ink) 16%, transparent);
-  --soft: color-mix(in oklab, var(--ink) 66%, transparent);
-  --code-bg: #0f0500;
+  --line: color-mix(in oklab, var(--ink) 26%, var(--paper));
+  --line-faint: color-mix(in oklab, var(--ink) 13%, var(--paper));
   /* headings + code: Server Mono; copy: Rethink Sans */
   --mono: 'Server Mono', 'IBM Plex Mono', ui-monospace, monospace;
   --sans: 'Rethink Sans Variable', 'Rethink Sans', system-ui, sans-serif;
@@ -31,7 +43,7 @@
   --bar: 56px;
   --side: 248px;
   --gutter: 16px;
-  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 .46 0 0 0 0 .4 .16 0 0 0 -.07'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 .62 0 0 0 0 .5 .14 0 0 0 -.07'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 /* reverse-video surfaces: the dither in paper */
@@ -78,8 +90,8 @@ body {
 }
 
 ::selection {
-  background: var(--coral);
-  color: var(--paper);
+  background: var(--accent);
+  color: var(--on-accent);
 }
 
 a {
@@ -115,7 +127,7 @@ th {
 .frame:focus-visible,
 a:focus-visible,
 button:focus-visible {
-  outline: 1px solid var(--coral);
+  outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
 
@@ -153,13 +165,13 @@ button:focus-visible {
   align-items: center;
   gap: 12px;
   padding: 12px 20px;
-  border: 1px solid var(--coral);
+  border: 1px solid var(--accent);
   font: inherit;
   font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 0.1em;
   text-decoration: none;
-  background: var(--coral);
+  background: var(--accent);
   color: var(--paper);
   cursor: pointer;
 }
@@ -192,7 +204,7 @@ kbd {
   padding: 14px 16px;
   overflow-x: auto;
   background: transparent !important;
-  color: #e3d2be;
+  color: var(--ink);
   line-height: 1.55;
 }
 .code .copy {
@@ -204,7 +216,7 @@ kbd {
   border-left: 1px solid var(--line-faint);
   border-bottom: 1px solid var(--line-faint);
   background: transparent;
-  color: #e3d2be;
+  color: var(--ink);
   font: inherit;
   font-size: 11px;
   text-transform: uppercase;
@@ -263,8 +275,8 @@ kbd {
   color: var(--ink);
 }
 .side li a[aria-current='page'] {
-  background: var(--coral);
-  color: var(--paper);
+  background: var(--accent);
+  color: var(--on-accent);
 }
 .side .foot {
   display: flex;
@@ -403,7 +415,7 @@ kbd {
   text-underline-offset: 3px;
 }
 .prose a:hover {
-  text-decoration-color: var(--coral);
+  text-decoration-color: var(--accent);
   color: var(--ink);
 }
 .prose strong {
@@ -433,7 +445,7 @@ kbd {
 .prose blockquote {
   margin: 24px 0;
   padding: 12px 16px;
-  border: 1px solid var(--coral);
+  border: 1px solid var(--accent);
 }
 .prose blockquote p:last-child {
   margin: 0;
@@ -539,16 +551,16 @@ kbd {
   padding: 20px;
   overflow-x: auto;
   background: var(--code-bg);
-  color: #e3d2be;
+  color: var(--ink);
   font-size: 13px;
   line-height: 1.45;
   white-space: pre;
 }
 .term .a {
-  color: var(--coral);
+  color: var(--accent);
 }
 .term .d {
-  color: color-mix(in oklab, #e3d2be 55%, transparent);
+  color: color-mix(in oklab, var(--ink) 55%, transparent);
 }
 .term .r {
   background: var(--ink);
@@ -581,7 +593,7 @@ kbd {
   position: absolute;
   display: block;
   pointer-events: none;
-  color: var(--coral);
+  color: var(--accent);
   opacity: 0.5;
 }
 .glow canvas {
@@ -597,7 +609,7 @@ kbd {
   position: absolute;
 }
 [data-life] {
-  --life-color: var(--coral);
+  --life-color: var(--accent);
   --life-alpha: 0.14;
 }
 
@@ -662,11 +674,11 @@ body {
   cursor: pointer;
 }
 .demo-tabs button[aria-selected='true'] {
-  background: var(--coral);
-  color: var(--paper);
+  background: var(--accent);
+  color: var(--on-accent);
 }
 .demo-screen {
-  background: #150700;
+  background: var(--paper);
   line-height: 0;
 }
 .demo-screen video {
@@ -764,3 +776,36 @@ h4 {
 }
 
 
+
+/* ---------- TUI rules on the web (src/theme.rs) ---------- */
+/* hover: the surface1 bg; the current page: the accent pill (accent bg, paper text) */
+.side li a:hover {
+  background: var(--hover);
+}
+.pager a:hover {
+  background: var(--raise);
+  box-shadow: inset 2px 0 0 0 var(--accent);
+}
+html {
+  scrollbar-color: var(--surface2) var(--paper);
+}
+/* blockquote: a note, as the TUI's info boxes: the accent bar left, the raise bg */
+.prose blockquote {
+  border: 0;
+  border-left: 2px solid var(--accent);
+  background: var(--raise);
+}
+
+/* agent color swatches (docs: agents) */
+.prose .swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.prose .swatches span {
+  padding: 0 8px;
+  background: var(--c);
+  color: var(--paper);
+  font-family: var(--mono);
+  font-size: 13px;
+}
