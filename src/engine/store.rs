@@ -378,7 +378,7 @@ pub enum Kind {
     },
     /// A harness session started: its id, model.
     Session { session: String, model: String },
-    /// The agent reported its state (`working`, `blocked`, `done`) with the `set_status` tool.
+    /// The agent reported its state (`working`, `blocked`, `review`, `done`) with the `set_status` tool.
     Status { state: String, note: String },
     /// The agent joined / left the thread.
     Join,

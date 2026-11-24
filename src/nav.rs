@@ -35,6 +35,9 @@ pub struct Card {
     /// Every agent on the thread reported done (0 turn since).
     #[serde(default)]
     pub done: bool,
+    /// An agent finished a step, the next one waits on the owner (`set_status` review).
+    #[serde(default)]
+    pub review: bool,
     /// DIR is a linked worktree codehead made (delete / archive remove it).
     #[serde(default)]
     pub worktree: bool,
@@ -49,9 +52,12 @@ impl Card {
     }
 
     /// 0 work left to land: the branch landed / abandoned, or 0 code and every agent done (a new
-    /// thread has 0 code too: not shipped). On main: never.
+    /// thread has 0 code too: not shipped). On main: never; a step to review: not yet.
     pub fn shipped(&self) -> bool {
         use crate::landed::Land;
+        if self.review {
+            return false;
+        }
         match &self.land {
             Some(Land::Landed | Land::Abandoned(_)) => true,
             Some(Land::NoCode) => self.done,
@@ -181,6 +187,7 @@ pub fn load() -> Vec<Card> {
                 draft: has_draft(&t.id),
                 land: crate::landed::of(&t.id),
                 done: crate::notify::reported_done(&t.id),
+                review: crate::notify::reported_review(&t.id),
                 worktree: t.worktree.as_deref().is_some_and(|p| std::path::Path::new(p).is_dir()),
                 projects: t.projects,
                 id: t.id,
@@ -304,6 +311,8 @@ pub fn draw_card(buf: &mut ratatui::buffer::Buffer, r: ratatui::layout::Rect, c:
     } else if c.busy {
         let word = if c.monitoring { "monitoring…" } else { "working…" };
         vec![Span::styled(format!("{} ", WAVE[tick % WAVE.len()]), theme::fg(theme::pal().progress())), Span::styled(word, theme::muted())]
+    } else if c.review {
+        vec![Span::styled("▷ step to review", theme::fg(theme::pal().info()))]
     } else if let Some(l) = open {
         vec![Span::styled(format!("◇ {}", l.badge()), theme::fg(theme::pal().caution()))]
     } else if let Some(l) = c.land.as_ref().filter(|_| c.shipped()) {

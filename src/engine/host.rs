@@ -502,8 +502,8 @@ impl Host {
             }
             "status" => {
                 let state = s("state");
-                if !["working", "blocked", "done"].contains(&state.as_str()) {
-                    return Err("status: working, blocked or done".into());
+                if !["working", "blocked", "review", "done"].contains(&state.as_str()) {
+                    return Err("status: working, blocked, review or done".into());
                 }
                 self.log(Some(&s("agent")), Kind::Status { state, note: s("note") });
                 Ok(json!({}))

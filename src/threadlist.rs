@@ -1515,6 +1515,10 @@ mod tests {
                 c.land = Some(Land::NoCode);
                 c.done = true;
             }),
+            card("plan", |c| {
+                c.land = Some(Land::Landed);
+                c.review = true;
+            }),
             card("onmain", |c| {
                 c.land = Some(Land::Main);
                 c.done = true;
@@ -1547,17 +1551,17 @@ mod tests {
         let mut l = ThreadList::new(Mode::Switch, None, None, cards);
         let ids: Vec<String> = l.visible().iter().map(|&i| l.cards[i].id.clone()).collect();
         // 0 code: shipped only when the agents reported done; idle 3 days: stale (code: never);
-        // on main: never shipped (done or not), stale after 3 days
-        assert_eq!(ids, ["idle", "asks", "busy", "onmain", "new", "loose", "mainidle", "dusty", "waits", "shipped", "talk"]);
+        // a step to review: open; on main: never shipped (done or not), stale after 3 days
+        assert_eq!(ids, ["idle", "asks", "busy", "plan", "onmain", "new", "loose", "mainidle", "dusty", "waits", "shipped", "talk"]);
         let s = screen(&mut l, 80, 120);
-        for x in ["open · 6", "stale · 3", "shipped: archive? · 2", "◇ 3 unpushed", "⇲ shipped", "⇲ nothing to ship", "auto-archive in 25d", "◌ on main · auto-archive in 26d"] {
+        for x in ["open · 7", "stale · 3", "shipped: archive? · 2", "◇ 3 unpushed", "⇲ shipped", "⇲ nothing to ship", "auto-archive in 25d", "▷ step to review", "◌ on main · auto-archive in 26d"] {
             assert!(s.contains(x), "{x}: {s}");
         }
         for x in ["needs you ·", "recent ·", "working ·", "threads ·"] {
             assert!(!s.contains(x), "{x}: {s}");
         }
         assert_eq!(s.matches("nothing to ship").count(), 1, "{s}");
-        assert!(s.contains("active 11") && s.contains("archived 1") && !s.contains("old"), "{s}");
+        assert!(s.contains("active 12") && s.contains("archived 1") && !s.contains("old"), "{s}");
 
         // ↑ from the 1st card: the view tabs; → archived
         l.key(k(KeyCode::Up));

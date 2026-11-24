@@ -19,9 +19,9 @@ fn tools() -> Value {
         },
         {
             "name": "set_status",
-            "description": "Report to the owner: blocked (say on what in note) or done. Never for working: codehead shows each turn as working.",
+            "description": "Report to the owner at the end of a turn: blocked, review or done. Never for working: codehead shows each turn as working. done ends the task: a thread whose agents all report done counts as shipped.",
             "inputSchema": {"type": "object", "properties": {
-                "state": {"type": "string", "enum": ["blocked", "done"]},
+                "state": {"type": "string", "enum": ["blocked", "review", "done"], "description": "blocked: you cannot go on (say on what in note). review: a step is finished (a plan, a draft, a part of the work) and the next step waits for the owner's OK or input. done: the whole task is finished, 0 steps left."},
                 "note": {"type": "string"}
             }, "required": ["state"]}
         },

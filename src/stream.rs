@@ -262,6 +262,7 @@ impl Thread {
                 let text = if note.is_empty() { state.clone() } else { format!("{state} · {note}") };
                 let color = match state.as_str() {
                     "blocked" => theme::pal().attention(),
+                    "review" => theme::pal().info(),
                     "done" => theme::pal().success(),
                     _ => theme::pal().subtext0,
                 };

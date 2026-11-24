@@ -40,6 +40,8 @@ pub enum Kind {
     Review,
     /// An agent wrote `@owner`.
     Mention,
+    /// An agent finished a step (`set_status` review): the next step waits on the owner.
+    Step,
     /// An agent replied on a review comment (changes view), unseen.
     Reply,
     /// An agent's context window ≥ 90 %.
@@ -62,6 +64,7 @@ impl Kind {
             Kind::Ci => "✗",
             Kind::Review => "✎",
             Kind::Mention => "@",
+            Kind::Step => "▷",
             Kind::Reply => "↳",
             Kind::Context => "◔",
             Kind::Done => "✓",
@@ -80,6 +83,7 @@ impl Kind {
             Kind::Ci => "ci failed",
             Kind::Review => "review",
             Kind::Mention => "mention",
+            Kind::Step => "step to review",
             Kind::Reply => "reply",
             Kind::Context => "context",
             Kind::Done => "done",
@@ -93,7 +97,7 @@ impl Kind {
             Kind::Error | Kind::Conflict | Kind::Ci => p.error(),
             Kind::Ask | Kind::Blocked | Kind::Gate => p.attention(),
             Kind::Limit | Kind::Context => p.caution(),
-            Kind::Review | Kind::Mention | Kind::Reply => p.info(),
+            Kind::Review | Kind::Mention | Kind::Step | Kind::Reply => p.info(),
             Kind::Done | Kind::Merged => p.success(),
         }
     }
@@ -220,6 +224,12 @@ pub fn derive(events: &[Event], members: &[String]) -> Vec<(Kind, Vec<String>, u
         {
             push(Kind::Blocked, n, *ts, if note.is_empty() { "blocked".into() } else { first_line(note) });
         }
+
+        if let Some((s, note, ts)) = &a.status
+            && s == "review"
+        {
+            push(Kind::Step, n, *ts, if note.is_empty() { "step done".into() } else { first_line(note) });
+        }
         if let Some((ts, m)) = &a.error {
             push(Kind::Error, n, *ts, m.clone());
         }
@@ -282,7 +292,16 @@ static NOTES: Mutex<Vec<Note>> = Mutex::new(Vec::new());
 
 /// Every agent on thread ID reported done, 0 turn since (the last pass's notes, seen or not).
 pub fn reported_done(id: &str) -> bool {
-    NOTES.lock().is_ok_and(|n| n.iter().any(|n| n.thread == id && n.kind == Kind::Done))
+    has_note(id, Kind::Done)
+}
+
+/// An agent on thread ID finished a step (`set_status` review), 0 turn since.
+pub fn reported_review(id: &str) -> bool {
+    has_note(id, Kind::Step)
+}
+
+fn has_note(id: &str, k: Kind) -> bool {
+    NOTES.lock().is_ok_and(|n| n.iter().any(|n| n.thread == id && n.kind == k))
 }
 
 /// Every PR of a thread done, 1 merged at least: STATES of its PRs (several repos too).
@@ -728,6 +747,17 @@ mod tests {
         assert_eq!((d[0].1.len(), d[0].2), (2, 3));
         e.push(ev("ada", 4, Ev::TurnStart));
         assert!(derive(&e, &m).is_empty(), "a turn after done: working again");
+    }
+
+    /// review: a step note, never done (the thread is not shipped); a turn after it clears it.
+    #[test]
+    fn review_is_a_step_not_done() {
+        let m = vec!["ada".to_string()];
+        let mut e = vec![status("ada", 1, "review")];
+        assert_eq!(kinds(&derive(&e, &m)), vec![Kind::Step]);
+        e.push(ev("ada", 2, Ev::TurnStart));
+        e.push(status("ada", 3, "done"));
+        assert_eq!(kinds(&derive(&e, &m)), vec![Kind::Done]);
     }
 
     #[test]

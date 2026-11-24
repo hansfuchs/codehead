@@ -4073,10 +4073,10 @@ fn cards_w(cards: &[Card]) -> u16 {
 }
 
 /// The home pill of the view bar: ` ⌂ home ` + ` ?N` (N: other threads that need the owner: an
-/// ask, a blocked agent, a gate, an error). True: N > 0.
+/// ask, a blocked agent, a gate, an error, a step to review). True: N > 0.
 fn home_label(notes: &[crate::notify::Note]) -> (String, bool) {
     use crate::notify::Kind;
-    let mut ids: Vec<&str> = notes.iter().filter(|n| matches!(n.kind, Kind::Ask | Kind::Blocked | Kind::Gate | Kind::Error)).map(|n| n.thread.as_str()).collect();
+    let mut ids: Vec<&str> = notes.iter().filter(|n| matches!(n.kind, Kind::Ask | Kind::Blocked | Kind::Gate | Kind::Error | Kind::Step)).map(|n| n.thread.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();
     if ids.is_empty() { (" ⌂ home ".into(), false) } else { (format!(" ⌂ home ?{} ", ids.len()), true) }
