@@ -596,12 +596,20 @@ pub fn render(r: &Regi, s: usize, t: f32, look: &Look) -> Vec<Cell> {
 
 fn render_with(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn(usize) -> bool) -> Vec<Cell> {
     let (eye_c, frame_c) = colors(s);
-    cells(&dots_with(r, pat, s, t, speed, on), eye_c, frame_c)
+    let (dots, cov) = dots_cov(r, pat, s, t, speed, on);
+    let mut out = cells(&dots, eye_c, frame_c);
+    shade(&mut out, &dots, &cov, frame_c);
+    out
 }
 
 /// The 14x16 dots of R (0 off, 1 frame, 2 eye). The eyes: 1 rigid pattern, whatever the pose
 /// (only its anchor moves), a blink only takes dots out of it.
 fn dots_with(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn(usize) -> bool) -> Vec<u8> {
+    dots_cov(r, pat, s, t, speed, on).0
+}
+
+/// [`dots_with`] and the line coverage of each dot (0..1, see [`draw3d_cov`]).
+fn dots_cov(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn(usize) -> bool) -> (Vec<u8>, Vec<f32>) {
     match r.kind {
         Kind::Solid(solid, motion) => {
             let t = t + r.phase;
@@ -612,7 +620,34 @@ fn dots_with(r: &Regi, pat: Pattern, s: usize, t: f32, speed: f32, on: impl Fn(u
             // offsets in whole dots from the anchor (the pattern's center on the front face)
             let marks: Vec<(i32, i32, u8)> = pat.dots().iter().enumerate().filter(|(k, _)| on(*k)).map(|(_, &(x, y))| ((x * eye.0).round() as i32, (y * eye.1).round() as i32, 2)).collect();
             let fit = fit(&mesh, motion, r.yaw);
-            draw3d_in(&mesh, &[], (0.0, ey), &marks, (yaw, pitch, roll), bob, fit)
+            draw3d_cov(&mesh, &[], (0.0, ey), &marks, (yaw, pitch, roll), bob, fit)
+        }
+    }
+}
+
+/// Each cell of OUT with frame dots in FRAME_C, dimmed toward the background by the mean
+/// coverage COV of its frame dots in DOTS, in 3 tones (pixel art's sub-pixel motion: a line that
+/// moves by less than 1 dot shows in the color first, the dots follow).
+fn shade(out: &mut [Cell], dots: &[u8], cov: &[f32], frame_c: super::glyph::Rgb) {
+    for cy in 0..4 {
+        for cx in 0..7 {
+            let (mut sum, mut n) = (0.0, 0);
+            for dy in 0..4 {
+                for dx in 0..2 {
+                    let i = (cy * 4 + dy) * DW + cx * 2 + dx;
+                    if dots[i] == 1 {
+                        sum += cov[i];
+                        n += 1;
+                    }
+                }
+            }
+            let c = &mut out[cy * 7 + cx];
+            if n > 0 && c.fg == frame_c {
+                // the mean coverage, 0.8 and up full; 3 tones: 1/3, 2/3, 1
+                let b = (sum / n as f32 / 0.8).min(1.0);
+                let b = (b * 3.0).round().clamp(1.0, 3.0) / 3.0;
+                c.fg = super::glyph::mix(super::glyph::BG, frame_c, 0.3 + 0.7 * b);
+            }
         }
     }
 }
@@ -736,7 +771,24 @@ pub fn fit(mesh: &Mesh, motion: Motion, yaw: f32) -> Fit {
 }
 
 /// [`draw3d`] placed by FIT.
-pub fn draw3d_in(mesh: &Mesh, wires: &[(P3, P3)], anchor: (f32, f32), marks: &[(i32, i32, u8)], (yaw, pitch, roll): (f32, f32, f32), bob: f32, fit: Fit) -> Vec<u8> {
+pub fn draw3d_in(mesh: &Mesh, wires: &[(P3, P3)], anchor: (f32, f32), marks: &[(i32, i32, u8)], pose: (f32, f32, f32), bob: f32, fit: Fit) -> Vec<u8> {
+    draw3d_cov(mesh, wires, anchor, marks, pose, bob, fit).0
+}
+
+/// Distance of P to the segment A B.
+fn seg_dist(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let l = dx * dx + dy * dy;
+    let u = if l < 1e-6 { 0.0 } else { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / l).clamp(0.0, 1.0) };
+    (p.0 - a.0 - dx * u).hypot(p.1 - a.1 - dy * u)
+}
+
+/// [`draw3d_in`] and the line coverage of each line dot (1 elsewhere). The lines: a 1-dot-wide
+/// strip along each float segment; a dot on where the strip covers 6/16 of its square (4x4
+/// samples). Every dot follows the float line on its own, 0 snap of the ends to whole dots: a
+/// move by less than 1 dot flips single dots (fluid), never the whole outline at once.
+#[allow(clippy::too_many_arguments)]
+fn draw3d_cov(mesh: &Mesh, wires: &[(P3, P3)], anchor: (f32, f32), marks: &[(i32, i32, u8)], (yaw, pitch, roll): (f32, f32, f32), bob: f32, fit: Fit) -> (Vec<u8>, Vec<f32>) {
     let vr: Vec<P3> = mesh.verts.iter().map(|&p| rot(p, yaw, pitch, roll)).collect();
     let proj = |p: P3| -> (f32, f32) {
         let (x, y) = persp(p, bob);
@@ -745,38 +797,8 @@ pub fn draw3d_in(mesh: &Mesh, wires: &[(P3, P3)], anchor: (f32, f32), marks: &[(
     let normal = |f: &[usize]| unit(cross(sub(vr[f[1]], vr[f[0]]), sub(vr[f[2]], vr[f[0]])));
     let norms: Vec<P3> = mesh.faces.iter().map(|f| normal(f)).collect();
     let vis: Vec<bool> = norms.iter().map(|n| n.2 > 0.0).collect();
-    let mut dots = vec![0u8; DW * DH];
-    let mut set = |x: f32, y: f32, v: u8| {
-        let (x, y) = (x.round(), y.round());
-        if x >= 0.0 && y >= 0.0 && (x as usize) < DW && (y as usize) < DH {
-            let i = y as usize * DW + x as usize;
-            dots[i] = dots[i].max(v);
-        }
-    };
-    // Bresenham between the rounded ends: 1 dot per step, 0 doubled dots at the steps, and the
-    // edges of 1 vertex all end on the same dot (sharp corners)
-    let line = |a: (f32, f32), b: (f32, f32), set: &mut dyn FnMut(f32, f32, u8)| {
-        let (mut x, mut y) = (a.0.round() as i32, a.1.round() as i32);
-        let (x1, y1) = (b.0.round() as i32, b.1.round() as i32);
-        let (dx, dy) = ((x1 - x).abs(), -(y1 - y).abs());
-        let (sx, sy) = ((x1 - x).signum(), (y1 - y).signum());
-        let mut err = dx + dy;
-        loop {
-            set(x as f32, y as f32, 1);
-            if x == x1 && y == y1 {
-                break;
-            }
-            let e2 = 2 * err;
-            if e2 >= dy {
-                err += dy;
-                x += sx;
-            }
-            if e2 <= dx {
-                err += dx;
-                y += sy;
-            }
-        }
-    };
+    // the segments in view: the silhouette, the creases, the wires
+    let mut segs: Vec<((f32, f32), (f32, f32))> = Vec::new();
     let mut edges: Vec<(usize, usize, usize)> = Vec::new();
     for (fi, f) in mesh.faces.iter().enumerate() {
         for i in 0..f.len() {
@@ -791,12 +813,38 @@ pub fn draw3d_in(mesh: &Mesh, wires: &[(P3, P3)], anchor: (f32, f32), marks: &[(
         if !(vis[fa] || vis[fb]) || (vis[fa] && vis[fb] && !crease) {
             continue;
         }
-        line(proj(vr[a]), proj(vr[b]), &mut set);
+        segs.push((proj(vr[a]), proj(vr[b])));
     }
     for &(a, b) in wires {
-        line(proj(rot(a, yaw, pitch, roll)), proj(rot(b, yaw, pitch, roll)), &mut set);
+        segs.push((proj(rot(a, yaw, pitch, roll)), proj(rot(b, yaw, pitch, roll))));
     }
-    clean(&mut dots, wires.is_empty());
+    // 4x4 samples per dot: sample (gx, gy) at ((gx - 1.5) / 4, (gy - 1.5) / 4); each segment marks
+    // the samples of its box 0.5 or less off it
+    let (sw, sh) = (DW * 4, DH * 4);
+    let mut hit = vec![false; sw * sh];
+    for &(a, b) in &segs {
+        let span = |lo: f32, hi: f32, n: usize| ((4.0 * (lo - 0.5) + 1.5).ceil().max(0.0) as usize, ((4.0 * (hi + 0.5) + 1.5).floor().max(-1.0) + 1.0).min(n as f32) as usize);
+        let (x0, x1) = span(a.0.min(b.0), a.0.max(b.0), sw);
+        let (y0, y1) = span(a.1.min(b.1), a.1.max(b.1), sh);
+        for gy in y0..y1 {
+            for gx in x0..x1 {
+                if !hit[gy * sw + gx] && seg_dist(((gx as f32 - 1.5) / 4.0, (gy as f32 - 1.5) / 4.0), a, b) <= 0.5 {
+                    hit[gy * sw + gx] = true;
+                }
+            }
+        }
+    }
+    let mut dots = vec![0u8; DW * DH];
+    let mut cov = vec![1.0f32; DW * DH];
+    for y in 0..DH {
+        for x in 0..DW {
+            let k = (0..16).filter(|j| hit[(y * 4 + j / 4) * sw + x * 4 + j % 4]).count();
+            if k >= 6 {
+                dots[y * DW + x] = 1;
+                cov[y * DW + x] = k as f32 / 16.0;
+            }
+        }
+    }
     if norms[0].2 > 0.2 {
         let (ax, ay) = proj(rot((anchor.0, anchor.1, mesh.front_z(anchor.0, anchor.1)), yaw, pitch, roll));
         let (ax, ay) = (ax.round() as i32, ay.round() as i32);
@@ -808,7 +856,7 @@ pub fn draw3d_in(mesh: &Mesh, wires: &[(P3, P3)], anchor: (f32, f32), marks: &[(
             }
         }
     }
-    dots
+    (dots, cov)
 }
 
 /// The line dots (1) of DOTS, cleaned: lone dots out, then (SPURS) 1-dot spurs off a line
