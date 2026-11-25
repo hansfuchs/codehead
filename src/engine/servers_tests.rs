@@ -15,23 +15,23 @@ fn check_names_and_kinds() {
     assert!(!valid_name("2x"));
     assert!(!valid_name("a b"));
 
-    let mut text = server("files", "stdio");
+    let mut stdio = server("files", "stdio");
 
-    assert!(text.check().is_err());
+    assert!(stdio.check().is_err());
 
-    text.command = Some("npx".into());
+    stdio.command = Some("npx".into());
 
-    assert!(text.check().is_ok());
+    assert!(stdio.check().is_ok());
 
-    let mut height = server("lin", "http");
+    let mut http = server("lin", "http");
 
-    height.url = Some("ftp://x".into());
+    http.url = Some("ftp://x".into());
 
-    assert!(height.check().is_err());
+    assert!(http.check().is_err());
 
-    height.url = Some("https://x/mcp".into());
+    http.url = Some("https://x/mcp".into());
 
-    assert!(height.check().is_ok());
+    assert!(http.check().is_ok());
     assert!(server("x", "ws").check().is_err());
 }
 
@@ -63,28 +63,28 @@ fn references_resolve_and_plain_values_show() {
     assert!(resolve("${CODEHEAD_TEST_UNSET_9}").is_err());
     assert_eq!(resolve("plain").unwrap(), "plain");
 
-    let mut text = server("x", "stdio");
+    let mut stdio = server("x", "stdio");
 
-    text.env.insert("A".into(), "${X}".into());
-    text.env.insert("B".into(), "plain".into());
+    stdio.env.insert("A".into(), "${X}".into());
+    stdio.env.insert("B".into(), "plain".into());
 
-    assert_eq!(text.plain_secrets(), ["B"]);
+    assert_eq!(stdio.plain_secrets(), ["B"]);
 }
 
 #[test]
 fn claude_config_keeps_secrets_out_of_the_argument() {
     unsafe { std::env::set_var("CODEHEAD_TEST_SECRET_8", "tok") };
-    let mut height = server("lin", "http");
+    let mut linear = server("lin", "http");
 
-    height.url = Some("https://x/mcp".into());
-    height
+    linear.url = Some("https://x/mcp".into());
+    linear
         .headers
         .insert("Authorization".into(), "${CODEHEAD_TEST_SECRET_8}".into());
     let mut bad = server("bad", "stdio");
 
     bad.command = Some("x".into());
     bad.env.insert("K".into(), "${CODEHEAD_TEST_UNSET_8}".into());
-    let (entries, env, errors) = claude_config(&[height, bad]);
+    let (entries, env, errors) = claude_config(&[linear, bad]);
 
     assert_eq!(entries["lin"]["headers"]["Authorization"], "${CODEHEAD_MCP_0}");
     assert!(!Value::Object(entries.clone()).to_string().contains("tok"));
@@ -95,19 +95,19 @@ fn claude_config_keeps_secrets_out_of_the_argument() {
 
 #[test]
 fn acp_config_skips_transports_the_agent_lacks() {
-    let mut height = server("lin", "http");
+    let mut linear = server("lin", "http");
 
-    height.url = Some("https://x/mcp".into());
+    linear.url = Some("https://x/mcp".into());
     let mut file = server("files", "stdio");
 
     file.command = Some("npx".into());
-    let (out, errors) = acp_config(&[height.clone(), file.clone()], false, false);
+    let (out, errors) = acp_config(&[linear.clone(), file.clone()], false, false);
 
     assert_eq!(out.len(), 1);
     assert_eq!(out[0]["name"], "files");
     assert!(errors[0].1.contains("HTTP"), "{errors:?}");
 
-    let (out, errors) = acp_config(&[height, file], true, false);
+    let (out, errors) = acp_config(&[linear, file], true, false);
 
     assert_eq!((out.len(), errors.len()), (2, 0));
     assert_eq!(out[0]["type"], "http");
@@ -117,14 +117,14 @@ fn acp_config_skips_transports_the_agent_lacks() {
 #[test]
 #[ignore = "writes to the OS keychain"]
 fn keychain_round_trip() {
-    let result = store_secret("codehead-test", "TOKEN", "s3cret").expect("keychain");
+    let reference = store_secret("codehead-test", "TOKEN", "s3cret").expect("keychain");
 
-    assert_eq!(result, "keychain:codehead-test/TOKEN");
-    assert_eq!(resolve(&result).unwrap(), "s3cret");
+    assert_eq!(reference, "keychain:codehead-test/TOKEN");
+    assert_eq!(resolve(&reference).unwrap(), "s3cret");
 
-    forget_secret(&result);
+    forget_secret(&reference);
 
-    assert!(resolve(&result).is_err());
+    assert!(resolve(&reference).is_err());
 }
 
 #[test]
@@ -132,13 +132,13 @@ fn acp_tool_titles_match_their_server() {
     let mut off = server("slack", "http");
 
     off.auto_allow = false;
-    let text = [server("linear", "http"), off];
+    let servers = [server("linear", "http"), off];
 
-    assert!(acp_auto_allowed("linear__save_issue", &text));
-    assert!(acp_auto_allowed("mcp__linear__get_issue", &text));
-    assert!(acp_auto_allowed("Linear/get_issue", &text));
-    assert!(!acp_auto_allowed("linearize", &text));
-    assert!(!acp_auto_allowed("slack__send", &text));
+    assert!(acp_auto_allowed("linear__save_issue", &servers));
+    assert!(acp_auto_allowed("mcp__linear__get_issue", &servers));
+    assert!(acp_auto_allowed("Linear/get_issue", &servers));
+    assert!(!acp_auto_allowed("linearize", &servers));
+    assert!(!acp_auto_allowed("slack__send", &servers));
 }
 
 #[test]
@@ -147,23 +147,16 @@ fn init_events_give_states_and_tool_counts() {
     let value = json!({"mcp_servers": [{"name": "claude.ai Linear", "status": "connected", "source": "claudeai"}, {"name": "plugin:general:figma", "status": "needs-auth", "source": "plugin"},
         {"name": "codehead", "status": "connected"}, {"name": "slow", "status": "pending"}, {"name": "plugin:x:y", "status": "connected", "source": "plugin"}],
         "tools": ["Bash", "mcp__claude_ai_Linear__get_issue", "mcp__claude_ai_Linear__save_issue", "mcp__codehead__send", "mcp__plugin_x_y__a"]});
-    let result = from_init(&value);
+    let rows = from_init(&value);
 
     assert_eq!(
-        result
-            .iter()
-            .map(|result_value| result_value.0.as_str())
-            .collect::<Vec<_>>(),
+        rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
         ["claude.ai Linear", "plugin:general:figma", "plugin:x:y"]
     );
     assert_eq!(
-        (
-            result[0].1.state.as_str(),
-            result[0].1.tools,
-            result[0].1.source.as_str()
-        ),
+        (rows[0].1.state.as_str(), rows[0].1.tools, rows[0].1.source.as_str()),
         ("connected", Some(2), "claudeai")
     );
-    assert_eq!((result[1].1.state.as_str(), result[1].1.tools), ("needs-auth", None));
-    assert_eq!(result[2].1.tools, Some(1));
+    assert_eq!((rows[1].1.state.as_str(), rows[1].1.tools), ("needs-auth", None));
+    assert_eq!(rows[2].1.tools, Some(1));
 }

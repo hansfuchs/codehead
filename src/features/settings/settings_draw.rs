@@ -31,10 +31,10 @@ struct FormLayout {
 
 impl FormLayout {
     fn at(&self, y: usize, height: usize) -> Option<Rect> {
-        let offset_value = y.checked_sub(self.offset)?;
+        let row = y.checked_sub(self.offset)?;
 
-        (offset_value + height <= self.body.height as usize).then_some(Rect {
-            y: self.body.y + offset_value as u16,
+        (row + height <= self.body.height as usize).then_some(Rect {
+            y: self.body.y + row as u16,
             height: height as u16,
             ..self.body
         })
@@ -134,32 +134,32 @@ fn draw_form(form: &mut Form, frame: &mut Frame, area: Rect, active: bool) {
     }
 
     draw_form_path(form, frame, area);
-    let items = form_rows(form);
-    let layout = form_layout(form, area, &items);
+    let rows = form_rows(form);
+    let layout = form_layout(form, area, &rows);
 
-    draw_form_headings(form, frame, &items, &layout);
+    draw_form_headings(form, frame, &rows, &layout);
     let palette = theme::pal();
 
     for i in 0..form.plain() {
-        let Some(row) = layout.at(items.items[i].0, 1) else {
+        let Some(row) = layout.at(rows.items[i].0, 1) else {
             continue;
         };
 
         draw_plain_field(form, frame, row, i, active, &layout, &palette);
-        draw_field_hint(form, frame, i, active, &layout, &items);
+        draw_field_hint(form, frame, i, active, &layout, &rows);
     }
 
-    for key_value in 0..super::aliases(form) {
-        let item = form.plain() + key_value;
+    for alias in 0..super::aliases(form) {
+        let item = form.plain() + alias;
 
-        let Some(result) = layout.at(items.items[item].0, 4) else {
+        let Some(alias_area) = layout.at(rows.items[item].0, 4) else {
             continue;
         };
 
-        draw_alias_box(form, frame, result, item, key_value, active);
+        draw_alias_box(form, frame, alias_area, item, alias, active);
     }
 
-    draw_alias_add(form, frame, active, &items, &layout);
+    draw_alias_add(form, frame, active, &rows, &layout);
     draw_form_footer(form, frame, area, active);
 }
 
@@ -205,7 +205,7 @@ fn draw_plain_field(
     i: usize,
     active: bool,
     layout: &FormLayout,
-    palette_value: &crate::domain::palette::Palette,
+    palette: &crate::domain::palette::Palette,
 ) {
     let focused = active && form.focus == i;
 
@@ -224,7 +224,7 @@ fn draw_plain_field(
     let swatch = form.specs[i]
         .key
         .strip_prefix("colors.")
-        .and_then(|key_value| palette_value.get(key_value));
+        .and_then(|color| palette.get(color));
     let tail = 3 + if swatch.is_some() { 3 } else { 0 };
     let input = Rect {
         x: row.x + layout.label_width,
@@ -245,25 +245,25 @@ fn draw_plain_field(
     }
 
     if !form.fields[i].text().is_empty() {
-        let area_2 = Rect { x, width: 1, ..row };
+        let reset_area = Rect { x, width: 1, ..row };
 
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "↺",
                 if focused { theme::accent() } else { theme::muted() },
             )),
-            area_2,
+            reset_area,
         );
-        form.rows.push((area_2, Hit::Reset(i)));
+        form.rows.push((reset_area, Hit::Reset(i)));
     }
 
     form.rows.push((row, Hit::Field(i)));
 }
 
-fn draw_field_hint(form: &Form, frame: &mut Frame, i: usize, active: bool, layout: &FormLayout, items: &FormRows) {
+fn draw_field_hint(form: &Form, frame: &mut Frame, i: usize, active: bool, layout: &FormLayout, rows: &FormRows) {
     let focused = active && form.focus == i;
 
-    if let Some(hint_row) = layout.at(items.items[i].0 + 1, 1) {
+    if let Some(hint_row) = layout.at(rows.items[i].0 + 1, 1) {
         let env = form.specs[i].env;
 
         let hint = (!env.is_empty())
@@ -271,11 +271,11 @@ fn draw_field_hint(form: &Form, frame: &mut Frame, i: usize, active: bool, layou
             .flatten()
             .map_or_else(
                 || {
-                    let reset = reset(form, i, focused);
+                    let reset = reset_hint(form, i, focused);
 
                     format!("{}{reset}", form.specs[i].help)
                 },
-                |value_value| format!("{env} override: {value_value}"),
+                |value| format!("{env} override: {value}"),
             );
 
         frame.render_widget(
@@ -289,7 +289,7 @@ fn draw_field_hint(form: &Form, frame: &mut Frame, i: usize, active: bool, layou
     }
 }
 
-fn reset(form: &Form, i: usize, focused: bool) -> &str {
+fn reset_hint(form: &Form, i: usize, focused: bool) -> &str {
     if focused && !form.fields[i].text().is_empty() {
         " · ctrl+d / ↺: default"
     } else {
@@ -297,15 +297,15 @@ fn reset(form: &Form, i: usize, focused: bool) -> &str {
     }
 }
 
-fn draw_alias_box(form: &mut Form, frame: &mut Frame, result: Rect, item: usize, key_value: usize, active: bool) {
+fn draw_alias_box(form: &mut Form, frame: &mut Frame, area: Rect, item: usize, alias: usize, active: bool) {
     let selected = active && form.focus == item;
     let open = selected && form.editing.is_some();
     let border = if selected { theme::accent_bold() } else { theme::line() };
 
     let title = match (selected, open) {
-        (true, true) => format!(" alias {} · enter: done ", key_value + 1),
-        (true, false) => format!(" alias {} · enter: edit · d: delete ", key_value + 1),
-        _ => format!(" alias {} ", key_value + 1),
+        (true, true) => format!(" alias {} · enter: done ", alias + 1),
+        (true, false) => format!(" alias {} · enter: edit · d: delete ", alias + 1),
+        _ => format!(" alias {} ", alias + 1),
     };
 
     let block = Block::new()
@@ -316,26 +316,26 @@ fn draw_alias_box(form: &mut Form, frame: &mut Frame, result: Rect, item: usize,
             title,
             if selected { theme::accent_bold() } else { theme::muted() },
         ));
-    let inner = block.inner(result);
+    let inner = block.inner(area);
 
-    frame.render_widget(block, result);
+    frame.render_widget(block, area);
 
     if selected && !open {
         // locked + highlighted: the whole box
         frame.render_widget(Paragraph::new("").style(theme::panel()), inner);
     }
 
-    draw_alias_inputs(form, frame, inner, key_value, open);
+    draw_alias_inputs(form, frame, inner, alias, open);
 
     if selected && !open {
         // locked + highlighted: accent bar on the far left column
-        theme::accent_edge(frame.buffer_mut(), result);
+        theme::accent_edge(frame.buffer_mut(), area);
     }
 }
 
-fn draw_alias_inputs(form: &mut Form, frame: &mut Frame, inner: Rect, key_value: usize, open: bool) {
+fn draw_alias_inputs(form: &mut Form, frame: &mut Frame, inner: Rect, alias: usize, open: bool) {
     for (j, label) in ["name", "target"].into_iter().enumerate() {
-        let i = form.plain() + key_value * 2 + j;
+        let i = form.plain() + alias * 2 + j;
         let row = Rect {
             y: inner.y + j as u16,
             height: 1,
@@ -368,9 +368,9 @@ fn draw_alias_inputs(form: &mut Form, frame: &mut Frame, inner: Rect, key_value:
     }
 }
 
-fn draw_alias_add(form: &mut Form, frame: &mut Frame, active: bool, items: &FormRows, layout: &FormLayout) {
+fn draw_alias_add(form: &mut Form, frame: &mut Frame, active: bool, rows: &FormRows, layout: &FormLayout) {
     if form.aliases_on
-        && let Some(row) = layout.at(items.items[super::add_item(form)].0, 1)
+        && let Some(row) = layout.at(rows.items[super::add_item(form)].0, 1)
     {
         let focused = active && form.focus == super::add_item(form);
 
@@ -415,8 +415,8 @@ fn draw_alias_input_background(frame: &mut Frame<'_>, open: bool, input: Rect) {
     }
 }
 
-fn draw_settings(settings_value: &mut Settings, frame: &mut Frame, area: Rect, active: bool) {
-    settings_value.bar_hits.clear();
+fn draw_settings(settings: &mut Settings, frame: &mut Frame, area: Rect, active: bool) {
+    settings.bar_hits.clear();
 
     if area.height < 6 || area.width < 16 {
         return;
@@ -425,40 +425,40 @@ fn draw_settings(settings_value: &mut Settings, frame: &mut Frame, area: Rect, a
     let mut x = area.x;
     let mut spans = Vec::new();
 
-    for (text_value, label) in SUBS {
-        let selected = text_value == settings_value.sub;
+    for (sub, label) in SUBS {
+        let selected = sub == settings.sub;
 
-        let style = match (selected, active && settings_value.bar) {
+        let style = match (selected, active && settings.bar) {
             (true, true) => theme::pill(),
             (true, false) => theme::accent_bold(),
             _ => theme::muted(),
         };
 
         let text = format!(" {label} ");
-        let width_value = text.chars().count() as u16;
+        let width = text.chars().count() as u16;
 
-        settings_value.bar_hits.push((
+        settings.bar_hits.push((
             Rect {
                 x,
                 y: area.y,
-                width: width_value,
+                width,
                 height: 1,
             },
-            text_value,
+            sub,
         ));
-        x += width_value + 1;
+        x += width + 1;
         spans.push(Span::styled(text, style));
         spans.push(Span::raw(" "));
     }
 
-    if settings_value.sub == Sub::Harnesses {
+    if settings.sub == Sub::Harnesses {
         let missing = crate::features::settings::harness_tab::missing();
 
         if !missing.is_empty() {
             spans.push(Span::styled(
                 format!(
                     "  not installed: {}",
-                    missing.iter().map(|message| message.0).collect::<Vec<_>>().join(", ")
+                    missing.iter().map(|harness| harness.0).collect::<Vec<_>>().join(", ")
                 ),
                 theme::muted(),
             ));
@@ -471,12 +471,12 @@ fn draw_settings(settings_value: &mut Settings, frame: &mut Frame, area: Rect, a
         height: area.height - 2,
         ..area
     };
-    let inner = active && !settings_value.bar;
+    let inner = active && !settings.bar;
 
-    match settings_value.sub {
-        Sub::Codehead => settings_value.form.draw(frame, body, inner),
-        Sub::Harnesses => settings_value.harness.draw(frame, body, inner),
-        Sub::Mcp => settings_value.mcp.draw(frame, body, inner),
-        Sub::Shortcuts => settings_value.shortcuts.draw(frame, body, inner),
+    match settings.sub {
+        Sub::Codehead => settings.form.draw(frame, body, inner),
+        Sub::Harnesses => settings.harness.draw(frame, body, inner),
+        Sub::Mcp => settings.mcp.draw(frame, body, inner),
+        Sub::Shortcuts => settings.shortcuts.draw(frame, body, inner),
     }
 }

@@ -39,12 +39,12 @@ pub(super) fn flow_turn(agent: &mut Agent, text: &str) {
 
 /// An owner message that asks for a pull request.
 pub(super) fn asks_pr(text: &str) -> bool {
-    let thread = text.to_lowercase();
+    let lower = text.to_lowercase();
 
-    thread.contains("pull request")
-        || thread
+    lower.contains("pull request")
+        || lower
             .split(|character: char| !character.is_alphanumeric())
-            .any(|width| width == "pr")
+            .any(|word| word == "pr")
 }
 
 /// The turns of the script: ROLE, the prompt TEXT, turns done before.
@@ -115,12 +115,12 @@ pub(super) fn turn(agent: &mut Agent, role: &str, kv: &HashMap<String, String>, 
 pub(crate) fn agent(args: &[String]) -> ! {
     let kv: HashMap<String, String> = args
         .iter()
-        .filter_map(|agent_value| agent_value.split_once('='))
+        .filter_map(|arg| arg.split_once('='))
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect();
     let role = kv.get("role").cloned().unwrap_or_default();
     let me = std::env::var("CODEHEAD_AGENT").unwrap_or_default();
-    let path = Agent {
+    let tutor = Agent {
         out: io::stdout(),
         session: format!("tutor-{me}"),
         cwd: PathBuf::from("."),
@@ -130,18 +130,18 @@ pub(crate) fn agent(args: &[String]) -> ! {
     };
     let turns = 0u32;
 
-    serve_tutorial_agent(&(kv), &(role), path, turns)
+    serve_tutorial_agent(&(kv), &(role), tutor, turns)
 }
 
-fn serve_tutorial_agent(kv: &HashMap<String, String>, role: &str, mut path: Agent, mut turns: u32) -> ! {
+fn serve_tutorial_agent(kv: &HashMap<String, String>, role: &str, mut agent: Agent, mut turns: u32) -> ! {
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
 
-        let Ok(value_value) = serde_json::from_str::<Value>(&line) else {
+        let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
 
-        handle_agent_method(&mut path, role, kv, &mut turns, &value_value);
+        handle_agent_method(&mut agent, role, kv, &mut turns, &message);
     }
 
     std::process::exit(0)
@@ -153,10 +153,10 @@ impl Agent {
         let _ = self.out.flush();
     }
 
-    fn update(&mut self, user: &Value) {
-        let value = json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": self.session, "update": user}});
+    fn update(&mut self, update: &Value) {
+        let message = json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": self.session, "update": update}});
 
-        self.send(&value);
+        self.send(&message);
     }
 
     /// TEXT word by word, as a model streams.
@@ -194,8 +194,8 @@ impl Agent {
             "Edit hello.md",
             "edit",
             &(json!({"file_path": path.display().to_string()})),
-            move |directory| {
-                let _ = std::fs::write(directory.join("hello.md"), text);
+            move |cwd| {
+                let _ = std::fs::write(cwd.join("hello.md"), text);
 
                 "ok".into()
             },
@@ -256,12 +256,11 @@ impl Agent {
     }
 }
 
-fn stream_text(widget_state: &mut Agent, text: &str) {
-    for (i, width) in text.split(' ').enumerate() {
-        let chunk = if i == 0 { width.to_string() } else { format!(" {width}") };
+fn stream_text(agent: &mut Agent, text: &str) {
+    for (i, word) in text.split(' ').enumerate() {
+        let chunk = if i == 0 { word.to_string() } else { format!(" {word}") };
 
-        widget_state
-            .update(&(json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": chunk}})));
+        agent.update(&(json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": chunk}})));
         std::thread::sleep(WORD);
     }
 }
@@ -276,52 +275,46 @@ fn announce_pull_request(agent: &mut Agent) {
     agent.say(&format!("PR opened: {PR_URL}"));
 }
 
-fn handle_agent_method(
-    path: &mut Agent,
-    role: &str,
-    kv: &HashMap<String, String>,
-    turns: &mut u32,
-    value_value: &Value,
-) {
-    let id = value_value.get("id").cloned();
+fn handle_agent_method(agent: &mut Agent, role: &str, kv: &HashMap<String, String>, turns: &mut u32, message: &Value) {
+    let id = message.get("id").cloned();
 
-    let reply = |agent_2: &mut Agent, result: Value| {
+    let reply = |agent: &mut Agent, result: Value| {
         if let Some(id) = &id {
-            agent_2.send(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            agent.send(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
         }
     };
 
-    match value_value["method"].as_str() {
+    match message["method"].as_str() {
         Some("initialize") => reply(
-            path,
+            agent,
             json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": false}}),
         ),
         Some("session/new") => {
-            if let Some(character) = value_value["params"]["cwd"].as_str() {
-                path.cwd = PathBuf::from(character);
+            if let Some(cwd) = message["params"]["cwd"].as_str() {
+                agent.cwd = PathBuf::from(cwd);
             }
 
-            let sid = path.session.clone();
+            let sid = agent.session.clone();
 
-            reply(path, json!({"sessionId": sid}));
+            reply(agent, json!({"sessionId": sid}));
         }
         Some("session/prompt") => {
-            let text: String = value_value["params"]["prompt"]
+            let text: String = message["params"]["prompt"]
                 .as_array()
-                .map(|path_value| {
-                    path_value
+                .map(|blocks| {
+                    blocks
                         .iter()
-                        .filter_map(|bytes| bytes["text"].as_str())
+                        .filter_map(|block| block["text"].as_str())
                         .collect::<Vec<_>>()
                         .join("\n")
                 })
                 .unwrap_or_default();
 
-            turn(path, role, kv, &text, *turns);
+            turn(agent, role, kv, &text, *turns);
             *turns += 1;
-            reply(path, json!({"stopReason": "end_turn"}));
+            reply(agent, json!({"stopReason": "end_turn"}));
         }
-        Some(_) if id.is_some() => reply(path, json!({})),
+        Some(_) if id.is_some() => reply(agent, json!({})),
         _ => {}
     }
 }

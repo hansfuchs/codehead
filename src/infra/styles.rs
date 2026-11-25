@@ -22,7 +22,7 @@ fn parse(id: &str, text: &str) -> Style {
     if let Some(rest) = text.strip_prefix("---\n")
         && let Some(end) = rest.find("\n---")
     {
-        body = parse_value(&mut name, rest, end);
+        body = read_front_matter(&mut name, rest, end);
     }
 
     Style {
@@ -32,7 +32,7 @@ fn parse(id: &str, text: &str) -> Style {
     }
 }
 
-fn parse_value<'source>(name: &mut String, rest: &'source str, end: usize) -> &'source str {
+fn read_front_matter<'source>(name: &mut String, rest: &'source str, end: usize) -> &'source str {
     for line in rest[..end].lines() {
         if let Some(value) = line.strip_prefix("name:") {
             *name = value.trim().trim_matches('"').to_string();
@@ -47,19 +47,15 @@ pub(crate) fn load(dir: &Path) -> Vec<Style> {
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|error| {
-            let path_value = error.path();
-            let id = path_value.file_stem()?.to_string_lossy().into_owned();
+        .filter_map(|entry| {
+            let path = entry.path();
+            let id = path.file_stem()?.to_string_lossy().into_owned();
 
-            (path_value.extension()? == "md").then(|| {
-                std::fs::read_to_string(&path_value)
-                    .ok()
-                    .map(|thread| parse(&id, &thread))
-            })?
+            (path.extension()? == "md").then(|| std::fs::read_to_string(&path).ok().map(|text| parse(&id, &text)))?
         })
         .collect();
 
-    out.sort_by(|agent, bytes| agent.id.cmp(&bytes.id));
+    out.sort_by(|left, right| left.id.cmp(&right.id));
     out
 }
 

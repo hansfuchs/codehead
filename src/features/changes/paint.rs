@@ -7,21 +7,21 @@ pub(super) struct Painted {
     pub(super) marks: Vec<bool>,
 }
 
-/// The diff text of F (its lines and hunk contexts): what the filter matches as content.
+/// The diff text of FILE (its lines and hunk contexts): what the filter matches as content.
 pub(super) fn body_text(file: &FileDiff) -> String {
-    let mut text_value = String::new();
+    let mut text = String::new();
 
     for hunk in &file.hunks {
-        text_value.push_str(&hunk.ctx);
-        text_value.push('\n');
+        text.push_str(&hunk.ctx);
+        text.push('\n');
 
         for line in &hunk.lines {
-            text_value.push_str(&line.text);
-            text_value.push('\n');
+            text.push_str(&line.text);
+            text.push('\n');
         }
     }
 
-    text_value
+    text
 }
 
 /// Syntax token of PATH: its extension (`rs`, `ts` …), else `text`.
@@ -29,7 +29,7 @@ pub(super) fn lang_of(path: &str) -> &str {
     let name = path.rsplit('/').next().unwrap_or(path);
 
     match name.rsplit_once('.') {
-        Some((_, error)) if !error.is_empty() => error,
+        Some((_, ext)) if !ext.is_empty() => ext,
         _ if name.eq_ignore_ascii_case("dockerfile") => "dockerfile",
         _ if name.eq_ignore_ascii_case("makefile") || name == "justfile" => "makefile",
         _ => "text",
@@ -39,18 +39,18 @@ pub(super) fn lang_of(path: &str) -> &str {
 /// Word tokens of CHARS: a run of letters / digits / `_`, a run of spaces, else 1 char.
 pub(super) fn tokens(chars: &[char]) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
-    let mut text = 0;
+    let mut start = 0;
 
-    while text < chars.len() {
-        let key = token_class(chars[text]);
-        let mut error = text + 1;
+    while start < chars.len() {
+        let class = token_class(chars[start]);
+        let mut end = start + 1;
 
-        while key != 2 && error < chars.len() && token_class(chars[error]) == key {
-            error += 1;
+        while class != 2 && end < chars.len() && token_class(chars[end]) == class {
+            end += 1;
         }
 
-        out.push(text..error);
-        text = error;
+        out.push(start..end);
+        start = end;
     }
 
     out
@@ -67,8 +67,9 @@ pub(crate) fn word_marks(old: &[char], new: &[char]) -> (Vec<bool>, Vec<bool>) {
         return none();
     }
 
-    let equal =
-        |agent: &std::ops::Range<usize>, bytes: &std::ops::Range<usize>| old[agent.clone()] == new[bytes.clone()];
+    let equal = |old_range: &std::ops::Range<usize>, new_range: &std::ops::Range<usize>| {
+        old[old_range.clone()] == new[new_range.clone()]
+    };
 
     // LCS table over tokens
     let (old_count, new_count) = (old_tokens.len(), new_tokens.len());
@@ -154,12 +155,12 @@ fn changed_chars(tokens: &[std::ops::Range<usize>], length: usize, kept: &[bool]
     marks
 }
 
-/// The lines of hunk H of F painted: syntax colors (old side / new side highlighted apart), the
+/// The lines of HUNK of FILE painted: syntax colors (old side / new side highlighted apart), the
 /// changed words of each removed line and the added line it pairs with.
 pub(super) fn paint(file: &FileDiff, hunk: &Hunk) -> Vec<Painted> {
     let lang = lang_of(&file.path);
 
-    let (new_c, old_c) = (
+    let (new_colors, old_colors) = (
         highlight_side(hunk, lang, Kind::Del),
         highlight_side(hunk, lang, Kind::Add),
     );
@@ -167,48 +168,47 @@ pub(super) fn paint(file: &FileDiff, hunk: &Hunk) -> Vec<Painted> {
     // the theme's colors, more saturated (a dozen colors per hunk: memo)
     let mut memo: HashMap<ratatui::style::Color, ratatui::style::Color> = HashMap::new();
 
-    let mut vivid = |color: &Vec<(ratatui::style::Color, char)>| -> Vec<(ratatui::style::Color, char)> {
-        color
+    let mut vivid = |colored: &Vec<(ratatui::style::Color, char)>| -> Vec<(ratatui::style::Color, char)> {
+        colored
             .iter()
-            .map(|&(col, ch)| {
+            .map(|&(color, character)| {
                 (
-                    *memo.entry(col).or_insert_with(|| theme::desaturate(col, SATURATION)),
-                    ch,
+                    *memo
+                        .entry(color)
+                        .or_insert_with(|| theme::desaturate(color, SATURATION)),
+                    character,
                 )
             })
             .collect()
     };
 
-    let (mut io, mut inew) = (0, 0);
+    let (mut old_index, mut new_index) = (0, 0);
 
     let mut out: Vec<Painted> = hunk
         .lines
         .iter()
-        .map(|line_2| {
-            let src = match line_2.kind {
+        .map(|line| {
+            let colors = match line.kind {
                 Kind::Del => {
-                    io += 1;
-                    old_c.get(io - 1)
+                    old_index += 1;
+                    old_colors.get(old_index - 1)
                 }
                 Kind::Add => {
-                    inew += 1;
-                    new_c.get(inew - 1)
+                    new_index += 1;
+                    new_colors.get(new_index - 1)
                 }
                 Kind::Ctx => {
-                    io += 1;
-                    inew += 1;
-                    new_c.get(inew - 1)
+                    old_index += 1;
+                    new_index += 1;
+                    new_colors.get(new_index - 1)
                 }
             };
 
-            let plain: Vec<char> = line_2.text.chars().collect();
+            let plain: Vec<char> = line.text.chars().collect();
 
-            let chars = match src {
-                Some(character) if character.len() == plain.len() => vivid(character),
-                _ => plain
-                    .iter()
-                    .map(|&character_value| (theme::pal().text, character_value))
-                    .collect(),
+            let chars = match colors {
+                Some(colored) if colored.len() == plain.len() => vivid(colored),
+                _ => plain.iter().map(|&character| (theme::pal().text, character)).collect(),
             };
 
             Painted {
@@ -225,32 +225,29 @@ pub(super) fn paint(file: &FileDiff, hunk: &Hunk) -> Vec<Painted> {
 }
 
 fn apply_word_marks(hunk: &Hunk, out: &mut [Painted]) {
-    let lines_value = &hunk.lines;
+    let lines = &hunk.lines;
     let mut offset = 0;
 
-    while offset < lines_value.len() {
-        if lines_value[offset].kind != Kind::Del {
+    while offset < lines.len() {
+        if lines[offset].kind != Kind::Del {
             offset += 1;
             continue;
         }
 
-        let removed = lines_value[offset..]
+        let removed = lines[offset..].iter().take_while(|line| line.kind == Kind::Del).count();
+        let added = lines[offset + removed..]
             .iter()
-            .take_while(|line_3| line_3.kind == Kind::Del)
-            .count();
-        let added = lines_value[offset + removed..]
-            .iter()
-            .take_while(|line_4| line_4.kind == Kind::Add)
+            .take_while(|line| line.kind == Kind::Add)
             .count();
 
         for j in 0..removed.min(added) {
-            let (output, count_value) = (offset + j, offset + removed + j);
-            let oc: Vec<char> = out[output].chars.iter().map(|x| x.1).collect();
-            let nc: Vec<char> = out[count_value].chars.iter().map(|x| x.1).collect();
-            let (mo, mn) = word_marks(&oc, &nc);
+            let (removed_at, added_at) = (offset + j, offset + removed + j);
+            let old_chars: Vec<char> = out[removed_at].chars.iter().map(|&(_, character)| character).collect();
+            let new_chars: Vec<char> = out[added_at].chars.iter().map(|&(_, character)| character).collect();
+            let (old_marks, new_marks) = word_marks(&old_chars, &new_chars);
 
-            out[output].marks = mo;
-            out[count_value].marks = mn;
+            out[removed_at].marks = old_marks;
+            out[added_at].marks = new_marks;
         }
 
         offset += removed + added;
@@ -270,9 +267,9 @@ pub(super) fn sign_span(kind: Kind) -> Span<'static> {
         Kind::Ctx => " ",
     };
 
-    let st = Style::default().fg(theme::pal().text).add_modifier(Modifier::BOLD);
+    let style = Style::default().fg(theme::pal().text).add_modifier(Modifier::BOLD);
 
-    Span::styled(format!(" {sign} "), bg.map_or(st, |bytes| st.bg(bytes)))
+    Span::styled(format!(" {sign} "), bg.map_or(style, |bg| style.bg(bg)))
 }
 
 /// Sign column color and changed-word tint of KIND (0 for context lines).
@@ -292,60 +289,60 @@ pub(super) fn tints(kind: Kind) -> (Option<ratatui::style::Color>, Option<ratatu
     }
 }
 
-/// P as spans in ROOM columns (cut with `…`), padded to ROOM; changed words on their tint.
-pub(super) fn painted_spans(path: &Painted, kind: Kind, room: usize) -> Vec<Span<'static>> {
+/// PAINTED as spans in ROOM columns (cut with `…`), padded to ROOM; changed words on their tint.
+pub(super) fn painted_spans(painted: &Painted, kind: Kind, room: usize) -> Vec<Span<'static>> {
     let (_, mark) = tints(kind);
 
     let style = |color, marked: bool| {
-        let style_value = Style::default().fg(color);
+        let plain = Style::default().fg(color);
 
         match (marked, mark) {
-            (true, Some(message)) => style_value.bg(message),
-            _ => style_value,
+            (true, Some(tint)) => plain.bg(tint),
+            _ => plain,
         }
     };
 
-    let total: usize = path
+    let total: usize = painted
         .chars
         .iter()
-        .map(|x| unicode_width::UnicodeWidthChar::width(x.1).unwrap_or(0))
+        .map(|&(_, character)| unicode_width::UnicodeWidthChar::width(character).unwrap_or(0))
         .sum();
     let limit = if total > room { room.saturating_sub(1) } else { room };
     let mut out: Vec<Span<'static>> = Vec::new();
-    let (mut run, mut key, mut width_value) = (String::new(), None, 0);
+    let (mut run, mut run_key, mut width) = (String::new(), None, 0);
 
-    for (i, &(color, character)) in path.chars.iter().enumerate() {
-        let cw = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+    for (i, &(color, character)) in painted.chars.iter().enumerate() {
+        let char_width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
 
-        if width_value + cw > limit {
+        if width + char_width > limit {
             break;
         }
 
-        let key_value = (color, path.marks.get(i).copied().unwrap_or(false));
+        let next_key = (color, painted.marks.get(i).copied().unwrap_or(false));
 
-        if key != Some(key_value) && !run.is_empty() {
-            let (c0, m0) = key.unwrap_or(key_value);
+        if run_key != Some(next_key) && !run.is_empty() {
+            let (run_color, run_marked) = run_key.unwrap_or(next_key);
 
-            out.push(Span::styled(std::mem::take(&mut run), style(c0, m0)));
+            out.push(Span::styled(std::mem::take(&mut run), style(run_color, run_marked)));
         }
 
-        key = Some(key_value);
+        run_key = Some(next_key);
         run.push(character);
-        width_value += cw;
+        width += char_width;
     }
 
-    if let Some((c0, m0)) = key
+    if let Some((run_color, run_marked)) = run_key
         && !run.is_empty()
     {
-        out.push(Span::styled(run, style(c0, m0)));
+        out.push(Span::styled(run, style(run_color, run_marked)));
     }
 
     if total > room {
         out.push(Span::styled("…", style(theme::pal().subtext0, false)));
-        width_value += 1;
+        width += 1;
     }
 
-    out.push(Span::raw(" ".repeat(room.saturating_sub(width_value))));
+    out.push(Span::raw(" ".repeat(room.saturating_sub(width))));
 
     out
 }
@@ -355,7 +352,7 @@ fn highlight_side(hunk: &Hunk, lang: &str, keep: Kind) -> crate::ui::code::Lines
         .lines
         .iter()
         .filter(|line| line.kind != keep)
-        .map(|line_value| line_value.text.as_str())
+        .map(|line| line.text.as_str())
         .collect();
 
     crate::ui::code::highlight(&text.join("\n"), lang)

@@ -174,12 +174,7 @@ fn operation_key(view: &mut View, key: KeyEvent) -> Act {
 
 fn delete_comment_key(view: &mut View) -> Option<Act> {
     if !view.del_armed(false, view.at) {
-        let what = if view
-            .layout
-            .rows
-            .get(view.at)
-            .is_some_and(|result| result.finding.is_some())
-        {
+        let what = if view.layout.rows.get(view.at).is_some_and(|row| row.finding.is_some()) {
             "dismiss the finding"
         } else {
             "delete the comment"
@@ -188,10 +183,11 @@ fn delete_comment_key(view: &mut View) -> Option<Act> {
         return Some(Act::Toast(format!("d again: {what}")));
     }
 
-    if let Some((ci, Some(row))) = view.row_comment(view.at) {
+    // a reply: that reply goes
+    if let Some((ci, Some(reply))) = view.row_comment(view.at) {
         let id = view.comment_state.comments[ci].id.clone();
 
-        if let Err(error) = view.write_through(|thread| threads::edit(thread, &id, Some(row), "")) {
+        if let Err(error) = view.write_through(|thread_id| threads::edit(thread_id, &id, Some(reply), "")) {
             return Some(Act::Toast(error));
         }
 
@@ -199,7 +195,7 @@ fn delete_comment_key(view: &mut View) -> Option<Act> {
         return Some(Act::Toast(format!("{id}: reply deleted")));
     }
 
-    if let Some(ci) = view.layout.rows.get(view.at).and_then(|result| result.comment) {
+    if let Some(ci) = view.layout.rows.get(view.at).and_then(|row| row.comment) {
         view.comment_state.comments.remove(ci);
         view.save_comments();
         view.rebuild_here();
@@ -209,8 +205,7 @@ fn delete_comment_key(view: &mut View) -> Option<Act> {
         )));
     }
 
-    // a reply: that reply goes
-    if let Some(fi) = view.layout.rows.get(view.at).and_then(|result| result.finding) {
+    if let Some(fi) = view.layout.rows.get(view.at).and_then(|row| row.finding) {
         view.drop_finding(fi);
         view.rebuild_here();
         return Some(Act::Toast("finding dismissed".into()));
@@ -275,7 +270,7 @@ fn stage_selection_key(view: &mut View, key: KeyEvent) -> Act {
     }
 
     view.start_op(Op::StageLines(
-        picks.into_iter().map(|(path, _, pk)| (path, pk)).collect(),
+        picks.into_iter().map(|(path, _, pick)| (path, pick)).collect(),
     ))
 }
 
@@ -288,12 +283,7 @@ fn toggle_side_key(view: &mut View) -> Act {
 }
 
 fn open_row_key(view: &mut View) -> Option<Act> {
-    if view
-        .layout
-        .rows
-        .get(view.at)
-        .is_some_and(|result| result.comment.is_some())
-    {
+    if view.layout.rows.get(view.at).is_some_and(|row| row.comment.is_some()) {
         return Some(view.open_comment_row(view.at, true));
     } else if let Some(file) = view.file_at() {
         let on = !view.folded(file);
@@ -310,7 +300,7 @@ fn send_comments_key(view: &mut View) -> Act {
         .comment_state
         .comments
         .iter()
-        .filter(|character| character.open() && !character.sent)
+        .filter(|comment| comment.open() && !comment.sent)
         .collect();
 
     let Some(text) = batch(&new) else {
@@ -320,12 +310,7 @@ fn send_comments_key(view: &mut View) -> Act {
         ));
     };
 
-    for comment in view
-        .comment_state
-        .comments
-        .iter_mut()
-        .filter(|character| character.open())
-    {
+    for comment in view.comment_state.comments.iter_mut().filter(|comment| comment.open()) {
         comment.sent = true;
     }
 
@@ -381,9 +366,9 @@ fn select_comment_key(view: &mut View, last: usize) {
         .layout
         .rows
         .get(view.at)
-        .and_then(|result| result.comment)
+        .and_then(|row| row.comment)
         .and_then(|ci| view.comment_state.comments.get(ci))
-        .map(|character| character.id.clone())
+        .map(|comment| comment.id.clone())
         && !view.scm.comment_picks.remove(&id)
     {
         view.scm.comment_picks.insert(id);

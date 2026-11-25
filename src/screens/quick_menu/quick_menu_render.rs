@@ -6,40 +6,40 @@ use super::{
 impl Menu {
     /// The menu in AREA (the whole screen), as a command palette: centered on the screen's
     /// width, its top on the row below the header row (row 0).
-    pub(crate) fn render(&mut self, frame_value: &mut Frame, area: Rect) {
-        draw_menu(self, frame_value, area);
+    pub(crate) fn render(&mut self, frame: &mut Frame, area: Rect) {
+        draw_menu(self, frame, area);
     }
 }
 
-fn draw_menu(widget_state: &mut Menu, frame_value: &mut Frame, area: Rect) {
-    widget_state.poll();
-    widget_state.poll_detail();
+fn draw_menu(menu: &mut Menu, frame: &mut Frame, area: Rect) {
+    menu.poll();
+    menu.poll_detail();
 
     // wide screens: up to 100 columns (45% of the width), 76 at least
-    let width_value = area.width.saturating_sub(4).min((area.width * 45 / 100).clamp(76, 100));
+    let width = area.width.saturating_sub(4).min((area.width * 45 / 100).clamp(76, 100));
     let top = area.y + 1.min(area.height.saturating_sub(8));
-    let height_value = area.bottom().saturating_sub(top + 1).min(32).max(8.min(area.height));
-    let area_value = Rect {
-        x: area.x + (area.width - width_value) / 2,
+    let height = area.bottom().saturating_sub(top + 1).min(32).max(8.min(area.height));
+    let bounds = Rect {
+        x: area.x + (area.width - width) / 2,
         y: top,
-        width: width_value,
-        height: height_value,
+        width,
+        height,
     };
 
-    widget_state.layout.frame = area_value;
+    menu.layout.frame = bounds;
 
     // a modal: the screen behind it fades
-    theme::dim(frame_value.buffer_mut(), area);
-    frame_value.render_widget(Clear, area_value);
+    theme::dim(frame.buffer_mut(), area);
+    frame.render_widget(Clear, bounds);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(theme::accent())
         .title(Span::styled(" menu ", theme::accent_bold()))
         .style(theme::text());
-    let inner = block.inner(area_value);
+    let inner = block.inner(bounds);
 
-    frame_value.render_widget(block, area_value);
+    frame.render_widget(block, bounds);
     let inner = Rect {
         x: inner.x + 1,
         width: inner.width.saturating_sub(2),
@@ -50,7 +50,7 @@ fn draw_menu(widget_state: &mut Menu, frame_value: &mut Frame, area: Rect) {
         return;
     }
 
-    draw_tabs(widget_state, frame_value, inner);
+    draw_tabs(menu, frame, inner);
 
     let body = Rect {
         y: inner.y + 2,
@@ -63,53 +63,43 @@ fn draw_menu(widget_state: &mut Menu, frame_value: &mut Frame, area: Rect) {
         ..inner
     };
 
-    widget_state.layout.rows.clear();
+    menu.layout.rows.clear();
 
     // the threads tab: the list's hints (the tab bar: the bar's)
-    let list_hints: Vec<(&str, &str)> = match (widget_state.tab, widget_state.level) {
+    let list_hints: Vec<(&str, &str)> = match (menu.tab, menu.level) {
         (Tab::Threads, Level::Bar) => vec![("←→", "tabs"), ("↓", "repos"), ("type", "filter"), ("esc", "close")],
         (Tab::Threads, _) => {
-            let mut height_2 = widget_state.list.hints();
+            let mut hints = menu.list.hints();
 
-            if !widget_state.list.modal() {
-                height_2.push(("esc", "close"));
+            if !menu.list.modal() {
+                hints.push(("esc", "close"));
             }
 
-            height_2
+            hints
         }
         _ => Vec::new(),
     };
 
-    draw_menu_content(widget_state, frame_value, body, foot, &(list_hints));
+    draw_menu_content(menu, frame, body, foot, &list_hints);
 }
 
-fn draw_menu_content(
-    widget_state: &mut Menu,
-    frame_value: &mut Frame<'_>,
-    body: Rect,
-    foot: Rect,
-    list_hints: &[(&str, &str)],
-) {
-    let hints: &[(&str, &str)] = match widget_state.tab {
+fn draw_menu_content(menu: &mut Menu, frame: &mut Frame<'_>, body: Rect, foot: Rect, list_hints: &[(&str, &str)]) {
+    let hints: &[(&str, &str)] = match menu.tab {
         Tab::Quick => {
-            widget_state.draw_quick(frame_value, body);
+            menu.draw_quick(frame, body);
             &[("↑↓", "move"), ("enter", "run"), ("←→", "tabs"), ("esc", "close")]
         }
         Tab::Threads => {
-            let tick = (widget_state.started.elapsed().as_millis() / thread_card::WAVE_MS) as usize;
+            let tick = (menu.started.elapsed().as_millis() / thread_card::WAVE_MS) as usize;
 
-            widget_state.list.draw(frame_value, body, tick);
+            menu.list.draw(frame, body, tick);
             list_hints
         }
         Tab::Merge => {
-            widget_state.prs.draw_levels(
-                frame_value,
-                body,
-                widget_state.level == Level::Group,
-                widget_state.level == Level::Body,
-            );
+            menu.prs
+                .draw_levels(frame, body, menu.level == Level::Group, menu.level == Level::Body);
 
-            match widget_state.level {
+            match menu.level {
                 Level::Bar => &[("←→", "tabs"), ("↓", "states"), ("esc", "close")],
                 Level::Group => &[("←→", "state"), ("↑", "tabs"), ("↓", "list"), ("esc", "close")],
                 Level::Body => &[
@@ -122,7 +112,7 @@ fn draw_menu_content(
             }
         }
         Tab::Search => {
-            widget_state.draw_search(frame_value, body);
+            menu.draw_search(frame, body);
             &[
                 ("type", "search"),
                 ("↑↓", "move"),
@@ -132,46 +122,46 @@ fn draw_menu_content(
             ]
         }
         Tab::Tokens => {
-            widget_state.draw_tokens(frame_value, body);
+            menu.draw_tokens(frame, body);
             &[("↑↓", "scroll"), ("r", "reload"), ("←→", "tabs"), ("esc", "close")]
         }
     };
 
     let mut spans = Vec::new();
 
-    for (key, line) in hints {
+    for (key, label) in hints {
         spans.push(Span::styled(format!("{key} "), theme::accent()));
-        spans.push(Span::styled(format!("{line}   "), theme::muted()));
+        spans.push(Span::styled(format!("{label}   "), theme::muted()));
     }
 
-    frame_value.render_widget(Paragraph::new(Line::from(spans)), foot);
+    frame.render_widget(Paragraph::new(Line::from(spans)), foot);
 }
 
-fn draw_tabs(widget_state: &mut Menu, frame_value: &mut Frame<'_>, inner: Rect) {
+fn draw_tabs(menu: &mut Menu, frame: &mut Frame<'_>, inner: Rect) {
     // tab bar
     let mut x = inner.x;
 
-    widget_state.layout.tab_rects.clear();
+    menu.layout.tab_rects.clear();
 
-    for (thread, label) in TABS {
+    for (tab, label) in TABS {
         let text = format!(" {label} ");
-        let wd = text.chars().count() as u16;
+        let width = text.chars().count() as u16;
 
-        let st = match (thread == widget_state.tab, widget_state.level) {
+        let style = match (tab == menu.tab, menu.level) {
             (true, Level::Bar) => theme::pill().add_modifier(Modifier::BOLD),
             (true, _) => theme::panel().add_modifier(Modifier::BOLD),
             _ => theme::muted(),
         };
 
-        let rr = Rect {
+        let rect = Rect {
             x,
             y: inner.y,
-            width: wd.min(inner.right().saturating_sub(x)),
+            width: width.min(inner.right().saturating_sub(x)),
             height: 1,
         };
 
-        frame_value.render_widget(Paragraph::new(Span::styled(text, st)), rr);
-        widget_state.layout.tab_rects.push((rr, thread));
-        x += wd + 1;
+        frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
+        menu.layout.tab_rects.push((rect, tab));
+        x += width + 1;
     }
 }

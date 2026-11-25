@@ -38,7 +38,7 @@ impl EventNotes {
         let name = event.agent.clone().unwrap_or_default();
 
         match &event.kind {
-            Ev::Prompt { from, .. } if from == "owner" => clear_messages(self),
+            Ev::Prompt { from, .. } if from == "owner" => clear_errors_and_mentions(self),
             Ev::Prompt { from, to, text } if to.iter().any(|agent| agent == "owner") || mentions_owner(text) => {
                 self.mention(from, event.ts, text);
             }
@@ -248,13 +248,13 @@ pub(crate) fn first_line(text: &str) -> String {
         .collect()
 }
 /// The reply notes of thread T: 1 per comment with unseen agent replies (its latest).
-pub(crate) fn reply_notes(thread_value: &store::Thread) -> Vec<Note> {
-    crate::domain::changes::threads::unseen_replies(&thread_value.id)
+pub(crate) fn reply_notes(thread: &store::Thread) -> Vec<Note> {
+    crate::domain::changes::threads::unseen_replies(&thread.id)
         .into_iter()
         .map(|(comment, ts, by, text)| Note {
-            thread: thread_value.id.clone(),
-            title: thread_value.title.clone(),
-            dir: thread_value.work_dir(),
+            thread: thread.id.clone(),
+            title: thread.title.clone(),
+            dir: thread.work_dir(),
             kind: Kind::Reply,
             agents: vec![by],
             ts,
@@ -264,23 +264,23 @@ pub(crate) fn reply_notes(thread_value: &store::Thread) -> Vec<Note> {
         .collect()
 }
 
-fn clear_messages(model_state: &mut EventNotes) {
-    for agent in model_state.agents.values_mut() {
+fn clear_errors_and_mentions(notes: &mut EventNotes) {
+    for agent in notes.agents.values_mut() {
         agent.error = None;
         agent.mention = None;
     }
 }
 
-fn agent_done(name: &str, model_state: &EventNotes) -> bool {
-    model_state
+fn agent_done(name: &str, notes: &EventNotes) -> bool {
+    notes
         .agents
         .get(name)
         .and_then(|agent| agent.status.as_ref())
         .is_some_and(|status| status.0 == "done")
 }
 
-fn status_note(wanted: &str, fallback: &str, model_state: &AgentNotes) -> Option<(u64, String)> {
-    let (state, note, timestamp) = model_state.status.as_ref()?;
+fn status_note(wanted: &str, fallback: &str, agent: &AgentNotes) -> Option<(u64, String)> {
+    let (state, note, timestamp) = agent.status.as_ref()?;
 
     if state != wanted {
         return None;

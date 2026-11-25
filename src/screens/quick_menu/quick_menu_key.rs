@@ -1,71 +1,69 @@
 use super::{Action, KeyCode, KeyEvent, Level, Menu, Tab};
 
 impl Menu {
-    pub(crate) fn key(&mut self, key_value: KeyEvent) -> Action {
-        dispatch_key(self, key_value)
+    pub(crate) fn key(&mut self, key: KeyEvent) -> Action {
+        dispatch_key(self, key)
     }
 }
 
-fn dispatch_key(widget_state: &mut Menu, key_value: KeyEvent) -> Action {
-    widget_state.poll();
-    let ctrl = key_value
-        .modifiers
-        .contains(ratatui::crossterm::event::KeyModifiers::CONTROL);
+fn dispatch_key(menu: &mut Menu, key: KeyEvent) -> Action {
+    menu.poll();
+    let ctrl = key.modifiers.contains(ratatui::crossterm::event::KeyModifiers::CONTROL);
 
     // the thread list's form / question / dropdown: every key is its own (esc, tab too)
-    if widget_state.tab == Tab::Threads && widget_state.level != Level::Bar && widget_state.list.modal() {
-        let out = widget_state.list.key(key_value);
+    if menu.tab == Tab::Threads && menu.level != Level::Bar && menu.list.modal() {
+        let out = menu.list.key(key);
 
-        return widget_state.list_out(out);
+        return menu.list_out(out);
     }
 
     // tab / shift+tab: the next / previous menu tab, from every level; a tab with a tab group
     // (threads: repos + views, merge: states): ←→ move in the group; the other tabs: ←→
     // switch them too; ctrl+←→: the filter's word jumps
-    let group = widget_state.grouped();
+    let group = menu.grouped();
 
-    match key_value.code {
+    match key.code {
         // esc or the menu key again: closed
         KeyCode::Esc => return Action::Close,
-        _ if crate::infra::config::menu_key().matches(&key_value) => return Action::Close,
+        _ if crate::infra::config::menu_key().matches(&key) => return Action::Close,
         // tab / shift+tab: the next / previous region (the tab bar, a tab group, the list),
         // as on every screen; ←→ on the tab bar: the tabs
         KeyCode::Tab | KeyCode::BackTab if !ctrl => {
-            widget_state.cycle(key_value.code == KeyCode::BackTab);
+            menu.cycle(key.code == KeyCode::BackTab);
             return Action::None;
         }
-        _ if widget_state.tab == Tab::Threads => return widget_state.threads_key(key_value),
-        KeyCode::Right | KeyCode::Left if !ctrl && !group && widget_state.level == Level::Body => {
-            widget_state.switch(if key_value.code == KeyCode::Right { 1 } else { -1 });
+        _ if menu.tab == Tab::Threads => return menu.threads_key(key),
+        KeyCode::Right | KeyCode::Left if !ctrl && !group && menu.level == Level::Body => {
+            menu.switch(if key.code == KeyCode::Right { 1 } else { -1 });
             return Action::None;
         }
-        _ if widget_state.level != Level::Body || key_value.code == KeyCode::Up => {
-            if let Some(agent) = widget_state.level_key(key_value) {
-                return agent;
+        _ if menu.level != Level::Body || key.code == KeyCode::Up => {
+            if let Some(action) = menu.level_key(key) {
+                return action;
             }
         }
         _ => {}
     }
 
-    match widget_state.tab {
-        Tab::Quick => widget_state.quick_key(key_value),
+    match menu.tab {
+        Tab::Quick => menu.quick_key(key),
         Tab::Threads => Action::None,
-        Tab::Search => widget_state.search_key(key_value),
-        Tab::Merge => match widget_state.prs.key(key_value) {
-            crate::screens::merge::pr_list::Pick::Open(error) => Action::Pr(error),
+        Tab::Search => menu.search_key(key),
+        Tab::Merge => match menu.prs.key(key) {
+            crate::screens::merge::pr_list::Pick::Open(entry) => Action::Pr(entry),
             _ => Action::None,
         },
         Tab::Tokens => {
-            match key_value.code {
+            match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    widget_state.tokens.dscroll = widget_state.tokens.dscroll.saturating_sub(1);
+                    menu.tokens.dscroll = menu.tokens.dscroll.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    widget_state.tokens.dscroll = widget_state.tokens.dscroll.saturating_add(1);
+                    menu.tokens.dscroll = menu.tokens.dscroll.saturating_add(1);
                 }
-                KeyCode::PageUp => widget_state.tokens.dscroll = widget_state.tokens.dscroll.saturating_sub(10),
-                KeyCode::PageDown => widget_state.tokens.dscroll = widget_state.tokens.dscroll.saturating_add(10),
-                KeyCode::Char('r') => widget_state.tokens.detail_at = None,
+                KeyCode::PageUp => menu.tokens.dscroll = menu.tokens.dscroll.saturating_sub(10),
+                KeyCode::PageDown => menu.tokens.dscroll = menu.tokens.dscroll.saturating_add(10),
+                KeyCode::Char('r') => menu.tokens.detail_at = None,
                 _ => {}
             }
 

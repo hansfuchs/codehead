@@ -16,13 +16,13 @@ struct OverviewRows<'context> {
 
 impl Merge {
     /// The overview's rows of P in W columns.
-    pub(super) fn rows(&self, path_value: &Pr, width_value: usize, focused: bool) -> Vec<Row> {
+    pub(super) fn rows(&self, pr: &Pr, width: usize, focused: bool) -> Vec<Row> {
         let tab = self.tab_ref();
         let focus = if focused { tab.and_then(|tab| tab.focus) } else { None };
         let edit = tab.and_then(|tab| tab.input.edit.as_ref());
         let mut overview = OverviewRows {
-            pr: path_value,
-            width: width_value,
+            pr,
+            width,
             focus,
             edit,
             tab,
@@ -41,6 +41,7 @@ impl Merge {
         overview.rows
     }
 }
+
 fn highlight(focus: Option<Stop>, stop: Stop, style: Style) -> Style {
     if focus == Some(stop) {
         style
@@ -51,6 +52,7 @@ fn highlight(focus: Option<Stop>, stop: Stop, style: Style) -> Style {
         style
     }
 }
+
 fn input_rows(width: usize, input: &TextArea, single: bool) -> u16 {
     if single {
         3
@@ -58,6 +60,7 @@ fn input_rows(width: usize, input: &TextArea, single: bool) -> u16 {
         (input.rows_for(width.saturating_sub(2) as u16) as u16).clamp(3, 14) + 2
     }
 }
+
 #[path = "merge_overview_checks.rs"]
 mod checks;
 #[path = "merge_overview_conversation.rs"]
@@ -65,15 +68,15 @@ mod conversation;
 
 fn append_title(overview: &mut OverviewRows<'_>) {
     // hero: the title
-    if let Some((Edit::Title, ta)) = overview.edit {
+    if let Some((Edit::Title, textarea)) = overview.edit {
         overview.rows.push(Row {
             line: Line::raw(""),
             stops: Vec::new(),
-            input: input_rows(overview.width, ta, true),
+            input: input_rows(overview.width, textarea, true),
         });
     } else {
         let title = format!("{} #{}", overview.pr.title, overview.pr.pr.number);
-        let st = highlight(
+        let style = highlight(
             overview.focus,
             Stop::Title,
             Style::default()
@@ -82,7 +85,7 @@ fn append_title(overview: &mut OverviewRows<'_>) {
         );
 
         overview.rows.push(Row::stop(
-            Line::from(Span::styled(crate::ui::thread_card::fit(&title, overview.width), st)),
+            Line::from(Span::styled(crate::ui::thread_card::fit(&title, overview.width), style)),
             Stop::Title,
         ));
     }
@@ -90,27 +93,27 @@ fn append_title(overview: &mut OverviewRows<'_>) {
 
 fn append_status(overview: &mut OverviewRows<'_>) {
     // the status (a dropdown), the author, the times
-    let (sc, sl) = match overview.pr.state {
+    let (color, label) = match overview.pr.state {
         State::Open => (theme::pal().success(), "● open"),
         State::Draft => (theme::pal().subtext0, "◌ draft"),
         State::Merged => (theme::pal().merged(), "◆ merged"),
         State::Closed => (theme::pal().error(), "✕ closed"),
     };
 
-    let status = format!(" {sl} ▾ ");
-    let sw = status.width() as u16;
-    let st = chip(sc, overview.focus == Some(Stop::Status));
+    let status = format!(" {label} ▾ ");
+    let status_width = status.width() as u16;
+    let style = chip(color, overview.focus == Some(Stop::Status));
     let mut meta = format!("  {} · opened {}", overview.pr.author, gh::stamp(overview.pr.created));
 
-    if let Some(message) = overview.pr.merged {
-        write!(meta, " · merged {}", gh::stamp(message)).unwrap();
-    } else if let (Some(character), State::Closed) = (overview.pr.closed, overview.pr.state) {
-        write!(meta, " · closed {}", gh::stamp(character)).unwrap();
+    if let Some(merged) = overview.pr.merged {
+        write!(meta, " · merged {}", gh::stamp(merged)).unwrap();
+    } else if let (Some(closed), State::Closed) = (overview.pr.closed, overview.pr.state) {
+        write!(meta, " · closed {}", gh::stamp(closed)).unwrap();
     }
 
     overview.rows.push(Row {
-        line: Line::from(vec![Span::styled(status, st), Span::styled(meta, theme::muted())]),
-        stops: vec![(0, sw, Stop::Status)],
+        line: Line::from(vec![Span::styled(status, style), Span::styled(meta, theme::muted())]),
+        stops: vec![(0, status_width, Stop::Status)],
         input: 0,
     });
 }
@@ -144,22 +147,22 @@ fn append_labels(overview: &mut OverviewRows<'_>) {
     let mut stops = Vec::new();
     let mut x = 0u16;
 
-    for (i, line_value) in overview.pr.labels.iter().enumerate() {
+    for (i, label) in overview.pr.labels.iter().enumerate() {
         let text = if overview.pr.can_edit {
-            format!(" {} × ", line_value.name)
+            format!(" {} × ", label.name)
         } else {
-            format!(" {} ", line_value.name)
+            format!(" {} ", label.name)
         };
 
-        let tw = text.width() as u16;
+        let width = text.width() as u16;
 
         spans.push(Span::styled(
             text,
-            chip(hex(&line_value.color), overview.focus == Some(Stop::Label(i))),
+            chip(hex(&label.color), overview.focus == Some(Stop::Label(i))),
         ));
         spans.push(Span::raw(" "));
-        stops.push((x, tw, Stop::Label(i)));
-        x += tw + 1;
+        stops.push((x, width, Stop::Label(i)));
+        x += width + 1;
     }
 
     if overview.pr.can_edit {

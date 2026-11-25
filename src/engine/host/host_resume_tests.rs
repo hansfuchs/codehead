@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn the_resume_time_comes_from_the_reset_in_the_error() {
-    let _env = crate::engine::ENV_LOCK
+    let env_lock = crate::engine::ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -15,4 +15,6 @@ fn the_resume_time_comes_from_the_reset_in_the_error() {
 
     // 0 reset in the text: 30 min (+ 1)
     assert_eq!(resume_at("usage limit reached", now), now + 31 * 60_000);
+
+    drop(env_lock);
 }

@@ -48,8 +48,8 @@ impl Monitors {
     pub(crate) fn tick(&mut self, thread: &str, kids: &[String]) -> bool {
         tick_monitors(self, thread, kids)
     }
-    pub(crate) fn key(&mut self, key_value: KeyEvent) -> bool {
-        key_monitors(self, key_value)
+    pub(crate) fn key(&mut self, key: KeyEvent) -> bool {
+        key_monitors(self, key)
     }
 
     /// The last `d` result, once.
@@ -57,13 +57,13 @@ impl Monitors {
         self.note.take()
     }
 
-    /// Rows for the monitors area at WIDTH: 0 (0 watches), 1 (the row), or the row + the open
-    /// box (its lines + 2 border rows, at most MAX in all).
     /// Monitors shown: their row animates.
     pub(crate) fn active(&self) -> bool {
         !self.watches.is_empty()
     }
 
+    /// Rows for the monitors area at WIDTH: 0 (0 watches), 1 (the row), or the row + the open
+    /// box (its lines + 2 border rows, at most MAX in all).
     pub(crate) fn rows(&self, width: u16, max: u16) -> u16 {
         if self.watches.is_empty() {
             return 0;
@@ -104,25 +104,25 @@ use std::process::Command;
 
 /// `d`: end the selected watch (its process), then hide it.
 fn end_selected(monitors: &mut Monitors) {
-    let Some(width) = monitors.watches.get(monitors.selected).cloned() else {
+    let Some(watch) = monitors.watches.get(monitors.selected).cloned() else {
         return;
     };
 
-    let killed = kill(&width.command);
+    let killed = kill(&watch.command);
 
     monitors.note = Some(match killed {
         0 => format!(
             "monitor {}: 0 process found (it ended already?) · hidden",
-            width.description
+            watch.description
         ),
         count => format!(
             "monitor ended: {} ({count} process{})",
-            width.description,
+            watch.description,
             if count == 1 { "" } else { "es" }
         ),
     });
-    monitors.ended.insert(width.key());
-    monitors.watches.retain(|x| x.key() != width.key());
+    monitors.ended.insert(watch.key());
+    monitors.watches.retain(|other| other.key() != watch.key());
     monitors.selected = monitors.selected.min(monitors.watches.len().saturating_sub(1));
     monitors.scroll = 0;
 
@@ -155,11 +155,11 @@ fn tick_monitors(monitors: &mut Monitors, thread: &str, kids: &[String]) -> bool
     let topics = monitors.reader.topics.get_or_insert_with(crate::infra::bus::subscribe);
     let mut due = !std::mem::replace(&mut monitors.reader.read_once, true) | std::mem::take(&mut monitors.reader.retry);
 
-    for thread_value in topics.try_iter() {
+    for topic in topics.try_iter() {
         if let crate::infra::bus::Topic::Thread(
             tid,
             crate::infra::bus::Part::Meta | crate::infra::bus::Part::Log | crate::infra::bus::Part::Other,
-        ) = thread_value
+        ) = topic
         {
             due |= tid == id || kids.contains(&tid);
         }
@@ -175,24 +175,22 @@ fn tick_monitors(monitors: &mut Monitors, thread: &str, kids: &[String]) -> bool
 
     for (_, watches) in monitors.reader.reads.poll() {
         match watches {
-            Some(width) => {
-                monitors.watches = width;
+            Some(fresh) => {
+                monitors.watches = fresh;
                 changed = true;
             }
             None => monitors.reader.retry = true,
         }
     }
 
-    monitors
-        .watches
-        .retain(|width_value| !monitors.ended.contains(&width_value.key()));
+    monitors.watches.retain(|watch| !monitors.ended.contains(&watch.key()));
     let now = crate::engine::now_ms();
-    let count = monitors.watches.len();
+    let before = monitors.watches.len();
 
     monitors
         .watches
-        .retain(|width_2| width_2.expires.is_none_or(|end| end > now));
-    changed |= count != monitors.watches.len();
+        .retain(|watch| watch.expires.is_none_or(|end| end > now));
+    changed |= before != monitors.watches.len();
     monitors.selected = monitors.selected.min(monitors.watches.len().saturating_sub(1));
 
     if monitors.watches.is_empty() {
@@ -255,13 +253,13 @@ fn lines_monitors(monitors: &Monitors, width: usize) -> Vec<Line<'static>> {
             .collect();
             let (_, end) = crate::ui::textarea::wrap(&chars, width)[0];
 
-            let st = monitor_style(i, monitors);
+            let style = monitor_style(i, monitors);
 
-            Line::styled(chars[..end].iter().collect::<String>(), st)
+            Line::styled(chars[..end].iter().collect::<String>(), style)
         })
         .collect();
 
-    let mut text = vec![
+    let mut sections = vec![
         String::new(),
         format!("watch: {}", watch.description),
         format!("task: {}", watch.id),
@@ -269,13 +267,13 @@ fn lines_monitors(monitors: &Monitors, width: usize) -> Vec<Line<'static>> {
     ];
 
     if let Some(expires) = watch.expires {
-        text.push(format!(
+        sections.push(format!(
             "expires in: {}s",
             expires.saturating_sub(crate::engine::now_ms()) / 1000
         ));
     }
 
-    for section in text {
+    for section in sections {
         let chars: Vec<_> = section.chars().map(printable_character).collect();
 
         append_wrapped_lines(width, &mut out, &chars);
@@ -285,7 +283,7 @@ fn lines_monitors(monitors: &Monitors, width: usize) -> Vec<Line<'static>> {
 }
 
 fn append_wrapped_lines(width: usize, out: &mut Vec<Line<'static>>, chars: &[char]) {
-    for line in chars.split(|&character_value| character_value == '\n') {
+    for line in chars.split(|&character| character == '\n') {
         for (start, end) in crate::ui::textarea::wrap(line, width) {
             out.push(Line::styled(
                 line[start..end].iter().collect::<String>(),
@@ -351,7 +349,7 @@ fn render_monitors(monitors: &mut Monitors, frame: &mut Frame, area: Rect, tick:
     let descriptions = monitors
         .watches
         .iter()
-        .map(|width_value| format!("{}: {}", width_value.agent, width_value.description))
+        .map(|watch| format!("{}: {}", watch.agent, watch.description))
         .collect::<Vec<_>>()
         .join(" · ");
     let wave = ["◐", "◓", "◑", "◒"][tick % 4];
@@ -381,12 +379,12 @@ fn render_monitors(monitors: &mut Monitors, frame: &mut Frame, area: Rect, tick:
         return;
     }
 
-    let area_value = Rect {
+    let popup_area = Rect {
         height: area.height - 1,
         ..area
     };
 
-    monitors.popup = area_value;
+    monitors.popup = popup_area;
 
     let hint = if monitors.armed {
         " d again: end the watch · another key: no "
@@ -394,7 +392,7 @@ fn render_monitors(monitors: &mut Monitors, frame: &mut Frame, area: Rect, tick:
         " ↑↓ select · d d end · pgup/pgdn scroll · esc close "
     };
 
-    let inner = super::popup::draw_frame(frame, area_value, " monitors ", hint);
+    let inner = super::popup::draw_frame(frame, popup_area, " monitors ", hint);
     let lines = monitors.lines(inner.width.max(1) as usize);
 
     super::popup::draw_lines(frame, inner, lines, &mut monitors.scroll, theme::text());

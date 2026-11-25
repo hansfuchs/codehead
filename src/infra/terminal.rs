@@ -41,14 +41,14 @@ static GUARD_W: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new
 /// Time for the screen loop to end by itself after a signal, before the exit guard ends the process.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 
-extern "C" fn on_signal(text: libc::c_int) {
-    SIGNAL.store(text, std::sync::atomic::Ordering::Relaxed);
+extern "C" fn on_signal(signal: libc::c_int) {
+    SIGNAL.store(signal, std::sync::atomic::Ordering::Relaxed);
     SIGNALED.store(true, std::sync::atomic::Ordering::Relaxed);
-    let width = GUARD_W.load(std::sync::atomic::Ordering::Relaxed);
+    let guard_fd = GUARD_W.load(std::sync::atomic::Ordering::Relaxed);
 
-    if width >= 0 {
+    if guard_fd >= 0 {
         // SAFETY: write is async-signal-safe; 1 byte from a static literal.
-        let _ = unsafe { libc::write(width, b"x".as_ptr().cast(), 1) };
+        let _ = unsafe { libc::write(guard_fd, b"x".as_ptr().cast(), 1) };
     }
 }
 
@@ -63,40 +63,40 @@ pub(crate) fn catch_signals() {
 
     // SAFETY: FDS has room for the 2 fds pipe writes.
     if unsafe { libc::pipe(fds.as_mut_ptr()) } == 0 {
-        catch_signals_result(fds);
+        start_exit_guard(fds);
     }
 
-    for text_value in [libc::SIGTERM, libc::SIGHUP] {
+    for signal in [libc::SIGTERM, libc::SIGHUP] {
         // SAFETY: the handler stores to atomics and writes 1 byte (async-signal-safe).
-        unsafe { libc::signal(text_value, on_signal as *const () as libc::sighandler_t) };
+        unsafe { libc::signal(signal, on_signal as *const () as libc::sighandler_t) };
     }
 }
 
-fn catch_signals_result(fds: [i32; 2]) {
+fn start_exit_guard(fds: [i32; 2]) {
     for fd in fds {
         // SAFETY: FD is open (pipe above); flags change only.
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
 
-    let result = fds[0];
+    let read_fd = fds[0];
 
     let guard = std::thread::Builder::new().name("exit-guard".into()).spawn(move || {
-        let mut bytes = [0u8; 1];
+        let mut byte = [0u8; 1];
 
-        // SAFETY: R is the open read end; B is live. Blocks until the handler writes.
-        while unsafe { libc::read(result, bytes.as_mut_ptr().cast(), 1) } < 0
+        // SAFETY: READ_FD is the open read end; BYTE is live. Blocks until the handler writes.
+        while unsafe { libc::read(read_fd, byte.as_mut_ptr().cast(), 1) } < 0
             && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
         {}
 
         std::thread::sleep(EXIT_GRACE);
-        let text = SIGNAL.load(std::sync::atomic::Ordering::Relaxed);
+        let signal = SIGNAL.load(std::sync::atomic::Ordering::Relaxed);
         let _ = writeln!(
             io::stderr(),
-            "codehead: signal {text}, the screen did not end within {}s: exit",
+            "codehead: signal {signal}, the screen did not end within {}s: exit",
             EXIT_GRACE.as_secs()
         );
 
-        std::process::exit(128 + text)
+        std::process::exit(128 + signal)
     });
 
     if guard.is_ok() {
@@ -128,16 +128,16 @@ fn tty_gone(fd: std::os::fd::RawFd) -> Option<String> {
     }
 
     // the hang-up first: Linux reports a hung-up pty as 0 tty (isatty fails), macOS does not
-    let mut path = libc::pollfd {
+    let mut pollfd = libc::pollfd {
         fd,
         events: libc::POLLIN,
         revents: 0,
     };
 
-    // SAFETY: P is 1 live pollfd; 0 ms: no wait.
-    let count = unsafe { libc::poll(&raw mut path, 1, 0) };
+    // SAFETY: POLLFD is 1 live pollfd; 0 ms: no wait.
+    let ready = unsafe { libc::poll(&raw mut pollfd, 1, 0) };
 
-    if count > 0 && path.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+    if ready > 0 && pollfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
         return Some("terminal closed".into());
     }
 
@@ -184,11 +184,11 @@ pub(crate) fn read_ready(wait: Duration) -> Result<Vec<(Event, Instant)>, String
             return Err(why);
         }
 
-        if !event::poll(wait).map_err(|error_value| error_value.to_string())? {
+        if !event::poll(wait).map_err(|error| error.to_string())? {
             break;
         }
 
-        let ev = event::read().map_err(|error_2| error_2.to_string())?;
+        let ev = event::read().map_err(|error| error.to_string())?;
 
         key_log(&ev);
         out.push((ev, Instant::now()));

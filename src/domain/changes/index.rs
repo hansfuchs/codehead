@@ -3,7 +3,7 @@ use super::{Command, FileDiff, Kind, Path, Stdio, git, parse, patch, stash};
 /// `git ARGS` in DIR with STDIN as its input.
 pub(crate) fn git_in(dir: &Path, args: &[&str], stdin: &str) -> Result<String, String> {
     use std::io::Write;
-    let mut character = Command::new("git")
+    let mut child = Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -13,13 +13,11 @@ pub(crate) fn git_in(dir: &Path, args: &[&str], stdin: &str) -> Result<String, S
         .spawn()
         .map_err(|error| format!("git: {error}"))?;
 
-    if let Some(mut i) = character.stdin.take() {
-        let _ = i.write_all(stdin.as_bytes());
+    if let Some(mut pipe) = child.stdin.take() {
+        let _ = pipe.write_all(stdin.as_bytes());
     }
 
-    let out = character
-        .wait_with_output()
-        .map_err(|error_value| format!("git: {error_value}"))?;
+    let out = child.wait_with_output().map_err(|error| format!("git: {error}"))?;
 
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -35,7 +33,7 @@ pub(crate) fn git_in(dir: &Path, args: &[&str], stdin: &str) -> Result<String, S
 /// index (and outside REV): a new-file diff.
 pub(crate) fn file_diff(dir: &Path, rev: Option<&str>, path: &str) -> Result<String, String> {
     let in_index = git(dir, &["ls-files", "--error-unmatch", "--", path]).is_ok();
-    let in_rev = rev.is_some_and(|result| git(dir, &["cat-file", "-e", &format!("{result}:{path}")]).is_ok());
+    let in_rev = rev.is_some_and(|rev| git(dir, &["cat-file", "-e", &format!("{rev}:{path}")]).is_ok());
 
     if in_index || in_rev {
         let mut args = vec!["diff", "--no-color", "--no-ext-diff", "-U3"];
@@ -80,64 +78,64 @@ pub(crate) fn index_pick(diff: &str, cached: &str, pick: &patch::Pick) -> Option
 
     // each change as (an add, new-side number at it, text), as `pick_of` numbers them
     let changes = |file: &FileDiff| -> Vec<(bool, u32, String)> {
-        let mut value = Vec::new();
+        let mut list = Vec::new();
 
         for hunk in &file.hunks {
-            let count = hunk.new;
+            let new_line = hunk.new;
 
-            append_index_hunk(&mut value, hunk, count);
+            push_hunk_changes(&mut list, hunk, new_line);
         }
 
-        value
+        list
     };
 
     let picked: Vec<(bool, String)> = changes(&wt)
         .into_iter()
-        .filter(|(add, count_value, thread)| {
+        .filter(|(add, line, text)| {
             if *add {
-                pick.adds.contains(count_value)
+                pick.adds.contains(line)
             } else {
-                pick.dels.contains(&(*count_value, thread.clone()))
+                pick.dels.contains(&(*line, text.clone()))
             }
         })
-        .map(|(agent, _, thread_value)| (agent, thread_value))
+        .map(|(add, _, text)| (add, text))
         .collect();
 
     let mut out = patch::Pick::default();
     let mut j = 0;
 
-    for (add, count_2, thread_2) in changes(&ix) {
-        if let Some(key) = picked[j..]
+    for (add, line, text) in changes(&ix) {
+        if let Some(offset) = picked[j..]
             .iter()
-            .position(|(agent_value, x)| *agent_value == add && *x == thread_2)
+            .position(|(picked_add, picked_text)| *picked_add == add && *picked_text == text)
         {
-            j += key + 1;
+            j += offset + 1;
 
-            emit_added_hunk(&mut out, add, count_2, thread_2);
+            insert_pick(&mut out, add, line, text);
         }
     }
 
     (!out.is_empty()).then_some(out)
 }
 
-fn append_index_hunk(value: &mut Vec<(bool, u32, String)>, hunk: &super::Hunk, mut count: u32) {
+fn push_hunk_changes(list: &mut Vec<(bool, u32, String)>, hunk: &super::Hunk, mut new_line: u32) {
     for line in &hunk.lines {
         match line.kind {
             Kind::Add => {
-                value.push((true, count, line.text.clone()));
-                count += 1;
+                list.push((true, new_line, line.text.clone()));
+                new_line += 1;
             }
-            Kind::Ctx => count += 1,
-            Kind::Del => value.push((false, count, line.text.clone())),
+            Kind::Ctx => new_line += 1,
+            Kind::Del => list.push((false, new_line, line.text.clone())),
         }
     }
 }
 
-fn emit_added_hunk(out: &mut patch::Pick, add: bool, count_2: u32, thread_2: String) {
+fn insert_pick(out: &mut patch::Pick, add: bool, line: u32, text: String) {
     if add {
-        out.adds.insert(count_2);
+        out.adds.insert(line);
     } else {
-        out.dels.insert((count_2, thread_2));
+        out.dels.insert((line, text));
     }
 }
 /// Stash ITEMS of DIR (diffs against REV) in THREAD's stash: each picked part out of the worktree
@@ -153,7 +151,7 @@ pub(crate) fn stash_items(
     for (path, lines, pick) in items {
         let diff = file_diff(dir, Some(rev), path)?;
 
-        let Some(path_value) = patch::pick(&diff, pick, patch::Dir::Reverse) else {
+        let Some(reverse_patch) = patch::pick(&diff, pick, patch::Dir::Reverse) else {
             continue;
         };
 
@@ -173,13 +171,14 @@ pub(crate) fn stash_items(
             ],
         )
         .unwrap_or_default();
-        let staged = index_pick(&diff, &cached, pick).and_then(|ip| patch::pick(&cached, &ip, patch::Dir::Reverse));
+        let staged = index_pick(&diff, &cached, pick)
+            .and_then(|staged_pick| patch::pick(&cached, &staged_pick, patch::Dir::Reverse));
 
-        git_in(dir, &["apply", "-R", "-"], &path_value).map_err(|error| format!("{path}: {error}"))?;
+        git_in(dir, &["apply", "-R", "-"], &reverse_patch).map_err(|error| format!("{path}: {error}"))?;
 
-        if let Some(sp) = staged {
-            git_in(dir, &["apply", "-R", "--cached", "-"], &sp)
-                .map_err(|error_value| format!("{path} (index): {error_value}"))?;
+        if let Some(staged_patch) = staged {
+            git_in(dir, &["apply", "-R", "--cached", "-"], &staged_patch)
+                .map_err(|error| format!("{path} (index): {error}"))?;
         }
 
         let agent = crate::engine::edits::writer(thread, dir, path);
@@ -189,7 +188,7 @@ pub(crate) fn stash_items(
             id,
             path: path.clone(),
             lines: lines.clone(),
-            patch: path_value,
+            patch: reverse_patch,
             agent,
             ts: crate::engine::now_ms(),
             ..Default::default()

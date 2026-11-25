@@ -12,29 +12,29 @@ impl App {
             .project_selection
             .proj_cache
             .as_ref()
-            .is_some_and(|character| character.0 == repo);
+            .is_some_and(|cache| cache.0 == repo);
 
         let dir = match &self.project_selection.proj_cache {
-            Some(character_value) if same_repo => character_value.1.clone(),
+            Some(cache) if same_repo => cache.1.clone(),
             _ => crate::domain::projects::dir(&repo),
         };
 
-        let mtime = std::fs::metadata(&dir).and_then(|message| message.modified()).ok();
+        let mtime = std::fs::metadata(&dir).and_then(|meta| meta.modified()).ok();
 
         if !same_repo
             || self
                 .project_selection
                 .proj_cache
                 .as_ref()
-                .is_some_and(|character_2| character_2.2 != mtime)
+                .is_some_and(|cache| cache.2 != mtime)
         {
-            task_projects_all(self, repo, same_repo, dir, mtime);
+            cache_task_projects(self, repo, same_repo, dir, mtime);
         }
 
         self.project_selection
             .proj_cache
             .as_ref()
-            .map(|character_3| character_3.3.clone())
+            .map(|cache| cache.3.clone())
             .unwrap_or_default()
     }
 
@@ -42,23 +42,24 @@ impl App {
     /// slug, goal) by score, the best on top; auto only for 0 filter.
     pub(super) fn proj_rows(&mut self, query: &str) -> Vec<usize> {
         let all = self.task_projects();
-        let query_value = query.trim().to_lowercase();
+        let needle = query.trim().to_lowercase();
 
-        if query_value.is_empty() {
+        if needle.is_empty() {
             return (0..=all.len()).collect();
         }
 
-        let mut message: Vec<(i64, usize)> = all
+        let mut scored: Vec<(i64, usize)> = all
             .iter()
             .enumerate()
-            .filter_map(|(i, path)| {
-                fuzzy(&query_value, &format!("{} {} {}", path.title, path.slug, path.goal)).map(|text| (text, i + 1))
+            .filter_map(|(i, project)| {
+                fuzzy(&needle, &format!("{} {} {}", project.title, project.slug, project.goal))
+                    .map(|score| (score, i + 1))
             })
             .collect();
 
-        message.sort_unstable();
+        scored.sort_unstable();
 
-        message.into_iter().map(|(_, i)| i).collect()
+        scored.into_iter().map(|(_, i)| i).collect()
     }
 
     /// Enter / space / click on the project row: the dropdown, its cursor on auto or the 1st pick.
@@ -68,8 +69,8 @@ impl App {
             .project_selection
             .proj_picks
             .as_ref()
-            .and_then(|value| value.first())
-            .and_then(|text| all.iter().position(|path| path.slug == *text))
+            .and_then(|picks| picks.first())
+            .and_then(|slug| all.iter().position(|project| project.slug == *slug))
             .map_or(0, |i| i + 1);
 
         self.project_selection.proj_menu = Some(WhereMenu {
@@ -86,8 +87,8 @@ impl App {
 
         if i == 0 {
             self.project_selection.proj_picks = None;
-        } else if let Some(path) = all.get(i - 1) {
-            toggle_project_value(self, path);
+        } else if let Some(project) = all.get(i - 1) {
+            toggle_project_pick(self, project);
         }
 
         self.project_selection.proj_menu = if close {
@@ -104,66 +105,61 @@ impl App {
     /// Keys of the open project dropdown: ↑↓ move, type: filter, enter: pick + close, tab: pick,
     /// esc: close.
     pub(super) fn proj_key(&mut self, key: KeyEvent) {
-        let Some(query_value) = self
-            .project_selection
-            .proj_menu
-            .as_ref()
-            .map(|message| message.query.clone())
-        else {
+        let Some(current) = self.project_selection.proj_menu.as_ref().map(|menu| menu.query.clone()) else {
             return;
         };
 
-        let rows = self.proj_rows(&query_value);
+        let rows = self.proj_rows(&current);
         let count = rows.len();
         let typed = !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
         let mut query = None;
 
-        let Some(message_value) = self.project_selection.proj_menu.as_mut() else {
+        let Some(menu) = self.project_selection.proj_menu.as_mut() else {
             return;
         };
 
         match key.code {
             KeyCode::Esc => self.project_selection.proj_menu = None,
-            KeyCode::Up if count > 0 => message_value.cursor = (message_value.cursor + count - 1) % count,
-            KeyCode::Down if count > 0 => message_value.cursor = (message_value.cursor + 1) % count,
-            KeyCode::PageUp => message_value.cursor = message_value.cursor.saturating_sub(dropdown::MAX_ROWS),
+            KeyCode::Up if count > 0 => menu.cursor = (menu.cursor + count - 1) % count,
+            KeyCode::Down if count > 0 => menu.cursor = (menu.cursor + 1) % count,
+            KeyCode::PageUp => menu.cursor = menu.cursor.saturating_sub(dropdown::MAX_ROWS),
             KeyCode::PageDown if count > 0 => {
-                message_value.cursor = (message_value.cursor + dropdown::MAX_ROWS).min(count - 1);
+                menu.cursor = (menu.cursor + dropdown::MAX_ROWS).min(count - 1);
             }
             KeyCode::Enter | KeyCode::Tab => {
-                let cursor = message_value.cursor;
+                let cursor = menu.cursor;
 
                 select_project_row(self, &rows, cursor, key.code == KeyCode::Enter);
             }
-            KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h') if { proj_key_text(key, &query_value, &mut query) } => {
+            KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h') if { delete_from_query(key, &current, &mut query) } => {
             }
-            KeyCode::Char(character) if typed => query = Some(format!("{query_value}{character}")),
+            KeyCode::Char(character) if typed => query = Some(format!("{current}{character}")),
             _ => {}
         }
 
-        if let Some(query_2) = query {
+        if let Some(edited) = query {
             self.project_selection.proj_menu = Some(WhereMenu {
                 cursor: 0,
                 offset: 0,
-                query: query_2,
+                query: edited,
             });
         }
     }
 
     /// The project chip's value: auto, or the picked titles.
-    pub(super) fn proj_value(&mut self) -> String {
+    pub(super) fn proj_chip_text(&mut self) -> String {
         let all = self.task_projects();
 
         match &self.project_selection.proj_picks {
             None => "auto".into(),
-            Some(value) => value
+            Some(picks) => picks
                 .iter()
-                .map(|text| {
+                .map(|slug| {
                     all.iter()
-                        .find(|path| path.slug == *text)
-                        .map_or(text.clone(), |path_value| path_value.title.clone())
+                        .find(|project| project.slug == *slug)
+                        .map_or(slug.clone(), |project| project.title.clone())
                 })
                 .collect::<Vec<_>>()
                 .join(", "),
@@ -177,7 +173,7 @@ impl App {
             .project_selection
             .proj_menu
             .as_ref()
-            .map(|message| (message.query.clone(), message.cursor, message.offset))
+            .map(|menu| (menu.query.clone(), menu.cursor, menu.offset))
         else {
             return;
         };
@@ -191,12 +187,12 @@ impl App {
 
         let width = items
             .iter()
-            .map(|result| result.text.width() + result.detail.width() + 8)
+            .map(|row| row.text.width() + row.detail.width() + 8)
             .max()
             .unwrap_or(0)
             .clamp(40, 72) as u16;
 
-        let Some(result_value) = dropdown::place(self.preview.regions.proj_chip, width, count, bounds, false) else {
+        let Some(area) = dropdown::place(self.preview.regions.proj_chip, width, count, bounds, false) else {
             return;
         };
 
@@ -206,7 +202,7 @@ impl App {
 
         let (off, drawn) = dropdown::list(
             frame,
-            result_value,
+            area,
             dropdown::List {
                 label: &label,
                 note: &note,
@@ -217,31 +213,29 @@ impl App {
             },
         );
 
-        if let Some(message_value) = self.project_selection.proj_menu.as_mut() {
-            message_value.cursor = cur;
-            message_value.offset = off;
+        if let Some(menu) = self.project_selection.proj_menu.as_mut() {
+            menu.cursor = cur;
+            menu.offset = off;
         }
 
         // the 2nd box: the brief of the hovered row, else of the current one
-        let hover = self.preview.hover.and_then(|height| {
-            drawn
-                .iter()
-                .find(|(result_2, _)| result_2.contains(height))
-                .map(|&(_, j)| j)
-        });
+        let hover = self
+            .preview
+            .hover
+            .and_then(|at| drawn.iter().find(|(rect, _)| rect.contains(at)).map(|&(_, j)| j));
 
         let j = hover.unwrap_or(cur);
 
         self.preview.regions.proj_rows = drawn.iter().map(|&(row, j)| (row, rows[j])).collect();
 
-        if let Some(path_value) = rows.get(j).filter(|&&i| i > 0).map(|&i| &all[i - 1]) {
-            draw_proj_menu_text(frame, bounds, result_value, &drawn, j, path_value);
+        if let Some(project) = rows.get(j).filter(|&&i| i > 0).map(|&i| &all[i - 1]) {
+            draw_project_brief(frame, bounds, area, &drawn, j, project);
         }
     }
 }
 
-fn proj_key_text(key: KeyEvent, query_value: &str, query: &mut Option<String>) -> bool {
-    let mut text = query_value.to_owned();
+fn delete_from_query(key: KeyEvent, current: &str, query: &mut Option<String>) -> bool {
+    let mut text = current.to_owned();
 
     crate::ui::textarea::delete_key(&mut text, &key) && {
         *query = Some(text);
@@ -249,15 +243,15 @@ fn proj_key_text(key: KeyEvent, query_value: &str, query: &mut Option<String>) -
     }
 }
 
-fn draw_proj_menu_text(
+fn draw_project_brief(
     frame: &mut Frame<'_>,
     bounds: Rect,
-    result_value: Rect,
+    list_area: Rect,
     drawn: &[(Rect, usize)],
     j: usize,
-    path_value: &crate::domain::projects::Project,
+    project: &crate::domain::projects::Project,
 ) {
-    let text = crate::domain::projects::body_of(&std::fs::read_to_string(&path_value.path).unwrap_or_default());
+    let text = crate::domain::projects::body_of(&std::fs::read_to_string(&project.path).unwrap_or_default());
     let text = text.trim_end();
 
     let text = if text.is_empty() {
@@ -270,10 +264,10 @@ fn draw_proj_menu_text(
     let row_y = drawn
         .iter()
         .find(|(_, i)| *i == j)
-        .map_or(result_value.y + 1, |(rr, _)| rr.y);
+        .map_or(list_area.y + 1, |(rect, _)| rect.y);
 
-    if let Some(bytes) = dropdown::place_beside(result_value, row_y, bw, br, bounds, result_value) {
-        crate::ui::shortcuts::text_box(frame, bytes, &path_value.title, text);
+    if let Some(area) = dropdown::place_beside(list_area, row_y, bw, br, bounds, list_area) {
+        crate::ui::shortcuts::text_box(frame, area, &project.title, text);
     }
 }
 
@@ -308,12 +302,12 @@ fn project_dropdown_items(
                     ..Default::default()
                 }
             } else {
-                let path = &all[i - 1];
-                let on = picks.as_ref().is_some_and(|value| value.contains(&path.slug));
+                let project = &all[i - 1];
+                let on = picks.as_ref().is_some_and(|picks| picks.contains(&project.slug));
 
                 dropdown::Row {
-                    text: format!("{} {}", if on { "◼" } else { "◻" }, path.title),
-                    detail: path.slug.clone(),
+                    text: format!("{} {}", if on { "◼" } else { "◻" }, project.title),
+                    detail: project.slug.clone(),
                     ..Default::default()
                 }
             }
@@ -323,8 +317,8 @@ fn project_dropdown_items(
     items
 }
 
-fn task_projects_all(
-    app_state: &mut App,
+fn cache_task_projects(
+    app: &mut App,
     repo: std::path::PathBuf,
     same_repo: bool,
     dir: std::path::PathBuf,
@@ -332,33 +326,33 @@ fn task_projects_all(
 ) {
     let all: Vec<crate::domain::projects::Project> = crate::domain::projects::list_in(&dir)
         .into_iter()
-        .filter(|path| !path.done)
+        .filter(|project| !project.done)
         .collect();
 
     // another repo: its own projects, auto again
-    if !same_repo && app_state.project_selection.proj_cache.is_some() {
-        app_state.project_selection.proj_picks = None;
-        app_state.project_selection.proj_menu = None;
+    if !same_repo && app.project_selection.proj_cache.is_some() {
+        app.project_selection.proj_picks = None;
+        app.project_selection.proj_menu = None;
     }
 
-    app_state.project_selection.proj_cache = Some((repo, dir, mtime, all));
+    app.project_selection.proj_cache = Some((repo, dir, mtime, all));
 }
 
-fn toggle_project_value(app_state: &mut App, path: &crate::domain::projects::Project) {
-    let mut value = app_state.project_selection.proj_picks.clone().unwrap_or_default();
+fn toggle_project_pick(app: &mut App, project: &crate::domain::projects::Project) {
+    let mut picks = app.project_selection.proj_picks.clone().unwrap_or_default();
 
-    match value.iter().position(|x| *x == path.slug) {
+    match picks.iter().position(|x| *x == project.slug) {
         Some(j) => {
-            value.remove(j);
+            picks.remove(j);
         }
-        None => value.push(path.slug.clone()),
+        None => picks.push(project.slug.clone()),
     }
 
-    app_state.project_selection.proj_picks = (!value.is_empty()).then_some(value);
+    app.project_selection.proj_picks = (!picks.is_empty()).then_some(picks);
 }
 
-fn select_project_row(app_state: &mut App, rows: &[usize], cursor: usize, close: bool) {
+fn select_project_row(app: &mut App, rows: &[usize], cursor: usize, close: bool) {
     if let Some(&index) = rows.get(cursor) {
-        app_state.toggle_project(index, close);
+        app.toggle_project(index, close);
     }
 }

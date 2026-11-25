@@ -1,6 +1,6 @@
 use super::{
-    Action, BRANCH, COMMANDS, Command, ControlFlow, FLOW, HANDOFF, KINDS, Kind, Level, Pos, RELOAD, SKILLS, SUB,
-    TextArea, UnicodeWidthStr,
+    Action, BRANCH, COMMANDS, Command, ControlFlow, FLOW, HANDOFF, KINDS, Kind, Level, Pos, RELOAD, SUB, TextArea,
+    UnicodeWidthStr,
 };
 
 pub(super) fn reset(command: &mut Command) {
@@ -20,11 +20,11 @@ pub(super) fn depth(command: &Command) -> usize {
     command.path.len()
 }
 
-pub(super) fn level(directory: usize, command: &Command) -> Level {
-    if directory == 0 {
+pub(super) fn level(depth: usize, command: &Command) -> Level {
+    if depth == 0 {
         Level::Commands
     } else {
-        command.path[directory - 1]
+        command.path[depth - 1]
     }
 }
 
@@ -36,49 +36,54 @@ pub(super) fn menu(level: Level, query: &str, command: &Command) -> Vec<usize> {
             .iter()
             .enumerate()
             .filter(|(i, _)| !matches!(*i, BRANCH | HANDOFF | RELOAD | FLOW | SUB) || command.can_branch)
-            .map(|(i, character)| (i, character.0))
+            .map(|(i, row)| (i, row.0))
             .collect(),
-        _ => KINDS.iter().enumerate().map(|(i, key)| (i, key.1)).collect(),
+        _ => KINDS.iter().enumerate().map(|(i, row)| (i, row.1)).collect(),
     };
 
-    let query_value = query.to_lowercase();
-    let mut value: Vec<usize> = names
+    let lower = query.to_lowercase();
+    let mut rows: Vec<usize> = names
         .iter()
-        .filter(|(_, count)| count.starts_with(&query_value))
+        .filter(|(_, name)| name.starts_with(&lower))
         .map(|(i, _)| *i)
         .collect();
 
-    value.extend(
+    rows.extend(
         names
             .iter()
-            .filter(|(_, count_value)| {
-                !count_value.starts_with(&query_value)
-                    && crate::domain::notes::fuzzy(&query_value, count_value).is_some()
-            })
+            .filter(|(_, name)| !name.starts_with(&lower) && crate::domain::notes::fuzzy(&lower, name).is_some())
             .map(|(i, _)| *i),
     );
 
-    value
+    rows
 }
 
 pub(super) fn set_items(command: &mut Command) {
     command.items_w = command
         .items
         .iter()
-        .map(|i| i.label.width() + if i.detail.is_empty() { 0 } else { i.detail.width() + 2 })
+        .map(|item| {
+            item.label.width()
+                + if item.detail.is_empty() {
+                    0
+                } else {
+                    item.detail.width() + 2
+                }
+        })
         .max()
         .unwrap_or(0);
+
     command.matched = (String::new(), (0..command.items.len()).collect());
     command.seen = None;
 }
 
 /// 1 level deeper, the command's action, or the item into the text.
 pub(super) fn activate(ta: &mut TextArea, at: Pos, query: &str, command: &mut Command) {
-    let directory = self::depth(command);
+    let depth = self::depth(command);
 
-    match self::level(directory, command) {
+    match self::level(depth, command) {
         Level::Commands => {
-            if let ControlFlow::Break(()) = activate_level_commands(ta, at, query, command) {
+            if let ControlFlow::Break(()) = activate_command(ta, at, query, command) {
                 return;
             }
         }
@@ -95,7 +100,7 @@ pub(super) fn activate(ta: &mut TextArea, at: Pos, query: &str, command: &mut Co
             let Some(item) = command
                 .matched
                 .1
-                .get(command.cursor[directory])
+                .get(command.cursor[depth])
                 .and_then(|&i| command.items.get(i))
             else {
                 return;
@@ -114,12 +119,7 @@ pub(super) fn activate(ta: &mut TextArea, at: Pos, query: &str, command: &mut Co
     }
 }
 
-pub(super) fn activate_level_commands(
-    ta: &mut TextArea,
-    at: Pos,
-    query: &str,
-    command: &mut Command,
-) -> ControlFlow<()> {
+pub(super) fn activate_command(ta: &mut TextArea, at: Pos, query: &str, command: &mut Command) -> ControlFlow<()> {
     let Some(&i) = self::menu(Level::Commands, query, command).get(command.cursor[0]) else {
         return ControlFlow::Break(());
     };
@@ -127,39 +127,39 @@ pub(super) fn activate_level_commands(
     command.cursor[0] = i;
 
     match i {
-        BRANCH => {
+        super::BRANCH => {
             // the `>text` goes, the host branches the thread
             ta.replace_to_cursor(at, "");
             self::reset(command);
             command.action = Some(Action::Branch);
             return ControlFlow::Break(());
         }
-        HANDOFF => {
+        super::HANDOFF => {
             ta.replace_to_cursor(at, "");
             self::reset(command);
             command.action = Some(Action::Handoff);
             return ControlFlow::Break(());
         }
-        RELOAD => {
+        super::RELOAD => {
             ta.replace_to_cursor(at, "");
             self::reset(command);
             command.action = Some(Action::Reload);
             return ControlFlow::Break(());
         }
-        FLOW => {
+        super::FLOW => {
             ta.replace_to_cursor(at, "");
             self::reset(command);
             command.action = Some(Action::Flow);
             return ControlFlow::Break(());
         }
-        SUB => {
+        super::SUB => {
             // `>sub ` stays in the text: the task follows (@agent, #shortcut, any
             // text); the send starts the sub-thread
             ta.replace_to_cursor(at, ">sub ");
             self::reset(command);
             return ControlFlow::Break(());
         }
-        SKILLS => {
+        super::SKILLS => {
             command.path.push(Level::Items(Kind::Skills));
             command.load(Kind::Skills);
         }

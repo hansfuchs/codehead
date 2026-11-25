@@ -19,18 +19,18 @@ impl State {
     /// The buffered thought, then the buffered text, as events (empty ones: 0 events).
     pub(crate) fn flush_text(&mut self) {
         self.flush_thought();
-        let thread = std::mem::take(&mut self.text);
+        let text = std::mem::take(&mut self.text);
 
-        if !thread.trim().is_empty() {
-            self.out(Out::Event(Kind::Text { text: thread }));
+        if !text.trim().is_empty() {
+            self.out(Out::Event(Kind::Text { text }));
         }
     }
     pub(crate) fn flush_thought(&mut self) {
-        let thread = std::mem::take(&mut self.thought);
+        let thought = std::mem::take(&mut self.thought);
 
-        if !thread.trim().is_empty() {
+        if !thought.trim().is_empty() {
             self.out(Out::Event(Kind::Thought {
-                text: thread.trim().to_string(),
+                text: thought.trim().to_string(),
             }));
         }
     }
@@ -45,7 +45,7 @@ impl State {
         };
 
         let text = match self.preamble.take() {
-            Some(path) if !path.is_empty() => format!("{path}\n\n---\n\n{text}"),
+            Some(preamble) if !preamble.is_empty() => format!("{preamble}\n\n---\n\n{text}"),
             _ => text,
         };
 
@@ -71,7 +71,7 @@ impl State {
             }
             // the model the agent's profile names: unknown to the harness → a note in the stream
             Pending::Model => {
-                handle_model(err.as_deref(), self);
+                report_model_error(err.as_deref(), self);
             }
             Pending::Prompt => {
                 reply_prompt(err, result, self)?;
@@ -88,12 +88,12 @@ impl State {
         }
 
         let method = value["method"].as_str().unwrap_or_default();
-        let path = &value["params"];
+        let params = &value["params"];
 
         match method {
-            "session/update" => self.update(&path["update"]),
+            "session/update" => self.update(&params["update"]),
             "session/request_permission" => {
-                handle_session_request_permission(value, path, self);
+                handle_session_request_permission(value, params, self);
             }
             // 0 client capabilities advertised: anything else is an error reply
             _ if value.get("id").is_some() => {
@@ -114,7 +114,7 @@ impl State {
             return;
         }
 
-        let mut err = stderr.lock().map(|thread| thread.join("\n")).unwrap_or_default();
+        let mut err = stderr.lock().map(|lines| lines.join("\n")).unwrap_or_default();
 
         if !why.is_empty() {
             separate_stderr(&mut err);
@@ -132,62 +132,62 @@ fn separate_stderr(err: &mut String) {
     }
 }
 
-fn finish_session_load(why: Pending, model_state: &mut State) {
+fn skip_preamble_on_load(why: Pending, state: &mut State) {
     if why == Pending::Load {
-        model_state.preamble = None;
+        state.preamble = None;
     }
 }
 
-fn handle_model(err: Option<&str>, model_state: &mut State) {
-    if let Some(error_3) = err {
-        let message_2 = model_state.setup.model.clone().unwrap_or_default();
+fn report_model_error(err: Option<&str>, state: &mut State) {
+    if let Some(error) = err {
+        let model = state.setup.model.clone().unwrap_or_default();
 
-        model_state.out(Out::Event(Kind::Error {
-            message: format!("model {message_2}: {error_3}"),
+        state.out(Out::Event(Kind::Error {
+            message: format!("model {model}: {error}"),
         }));
     }
 }
 
-fn handle_session_request_permission(value: &Value, path: &Value, model_state: &mut State) {
-    model_state.flush_text();
+fn handle_session_request_permission(request: &Value, params: &Value, state: &mut State) {
+    state.flush_text();
     let id = crate::engine::new_id();
-    let options = path["options"].as_array().cloned().unwrap_or_default();
-    let tc = &path["toolCall"];
+    let options = params["options"].as_array().cloned().unwrap_or_default();
+    let tc = &params["toolCall"];
     let (name, mut input) = tool_of(tc);
 
-    if let Some(output) = input.as_object_mut() {
-        output.insert(
+    if let Some(fields) = input.as_object_mut() {
+        fields.insert(
             "_options".into(),
             Value::Array(
                 options
                     .iter()
-                    .map(|output_value| json!({"id": output_value["optionId"], "name": output_value["name"], "kind": output_value["kind"]}))
+                    .map(|option| json!({"id": option["optionId"], "name": option["name"], "kind": option["kind"]}))
                     .collect(),
             ),
         );
-        output.insert("_kind".into(), tc["kind"].clone());
+        fields.insert("_kind".into(), tc["kind"].clone());
     }
 
-    model_state.asks.insert(id.clone(), (value["id"].clone(), options));
-    model_state.out(Out::Control(
+    state.asks.insert(id.clone(), (request["id"].clone(), options));
+    state.out(Out::Control(
         id,
         json!({"subtype": "can_use_tool", "tool_name": name, "input": input}),
     ));
 }
 
-fn request_profile_model(sid: &str, options: bool, model_state: &mut State) -> Result<(), String> {
-    if let Some(message_value) = model_state.setup.model.clone() {
+fn request_profile_model(sid: &str, options: bool, state: &mut State) -> Result<(), String> {
+    if let Some(model) = state.setup.model.clone() {
         // ACP config options (codex-acp ≥ 0.16: 0 `session/set_model`), else the older call
         if options {
-            model_state.request(
+            state.request(
                 "session/set_config_option",
-                &json!({"sessionId": sid, "configId": "model", "value": message_value}),
+                &json!({"sessionId": sid, "configId": "model", "value": model}),
                 Pending::Model,
             )?;
         } else {
-            model_state.request(
+            state.request(
                 "session/set_model",
-                &json!({"sessionId": sid, "modelId": message_value}),
+                &json!({"sessionId": sid, "modelId": model}),
                 Pending::Model,
             )?;
         }
@@ -196,18 +196,18 @@ fn request_profile_model(sid: &str, options: bool, model_state: &mut State) -> R
     Ok(())
 }
 
-fn reply_prompt(err: Option<String>, result: &Value, model_state: &mut State) -> Result<(), String> {
-    model_state.flush_text();
-    model_state.busy = false;
-    let user = &result["usage"];
-    let count = |key: &str| user[key].as_u64().unwrap_or(0);
+fn reply_prompt(err: Option<String>, result: &Value, state: &mut State) -> Result<(), String> {
+    state.flush_text();
+    state.busy = false;
+    let usage = &result["usage"];
+    let count = |key: &str| usage[key].as_u64().unwrap_or(0);
     let error = err.or_else(|| match result["stopReason"].as_str() {
         Some("refusal") => Some("the agent refused".into()),
         Some("max_tokens") => Some("hit the token limit".into()),
         _ => None,
     });
 
-    model_state.out(Out::Event(Kind::TurnEnd {
+    state.out(Out::Event(Kind::TurnEnd {
         cost: 0.0,
         input: count("inputTokens"),
         output: count("outputTokens"),
@@ -218,14 +218,14 @@ fn reply_prompt(err: Option<String>, result: &Value, model_state: &mut State) ->
         ms: 0,
         error,
     }));
-    model_state.pump()?;
+    state.pump()?;
 
     Ok(())
 }
 
 fn initialize_session(err: Option<&str>, result: &Value, state: &mut State) -> Result<(), String> {
-    if let Some(error_value) = err {
-        return Err(format!("initialize: {error_value}"));
+    if let Some(error) = err {
+        return Err(format!("initialize: {error}"));
     }
 
     state.capabilities.load_session = result["agentCapabilities"]["loadSession"].as_bool().unwrap_or(false);
@@ -271,8 +271,8 @@ fn establish_session(why: Pending, err: Option<&str>, result: &Value, state: &mu
 
         return state.request("session/new", &json!({"cwd": cwd, "mcpServers": mcp}), Pending::New);
     } else {
-        if let Some(error_2) = err {
-            return Err(format!("session/new: {error_2}"));
+        if let Some(error) = err {
+            return Err(format!("session/new: {error}"));
         }
 
         result["sessionId"].as_str().map(String::from)
@@ -282,7 +282,7 @@ fn establish_session(why: Pending, err: Option<&str>, result: &Value, state: &mu
         return Err("session/new: 0 session id".into());
     };
 
-    finish_session_load(why, state);
+    skip_preamble_on_load(why, state);
 
     let (model, options) = session_model(result);
 

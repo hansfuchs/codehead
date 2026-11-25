@@ -41,9 +41,9 @@ pub(crate) fn remembered(thread: &str) -> Vec<PrRef> {
         .flatten()
         .filter_map(Value::as_str)
         .filter_map(|key| {
-            let (repo, count) = key.rsplit_once('/')?;
+            let (repo, number) = key.rsplit_once('/')?;
 
-            Some(PrRef::new(repo, count.parse().ok()?))
+            Some(PrRef::new(repo, number.parse().ok()?))
         })
         .collect()
 }

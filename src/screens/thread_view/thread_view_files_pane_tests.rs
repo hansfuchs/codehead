@@ -31,7 +31,7 @@ fn merge_is_the_3rd_view_its_keys_its_context() {
         .prompt
         .pending
         .last()
-        .map(|path| path.0.clone())
+        .map(|(text, ..)| text.clone())
         .unwrap_or_default();
 
     assert!(

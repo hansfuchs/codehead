@@ -160,12 +160,12 @@ impl ShellComp {
     /// The project's tasks for DIR (shell mode's dir), read again after FRESH.
     pub(crate) fn tasks(&mut self, dir: &Path) -> Vec<Task> {
         match &self.tasks {
-            Some((directory, at, thread)) if directory == dir && at.elapsed() < FRESH => thread.clone(),
+            Some((cached_dir, read_at, cached)) if cached_dir == dir && read_at.elapsed() < FRESH => cached.clone(),
             _ => {
-                let thread_value = tasks(dir);
+                let fresh = tasks(dir);
 
-                self.tasks = Some((dir.to_path_buf(), Instant::now(), thread_value.clone()));
-                thread_value
+                self.tasks = Some((dir.to_path_buf(), Instant::now(), fresh.clone()));
+                fresh
             }
         }
     }
@@ -177,12 +177,12 @@ impl ShellComp {
 
     /// The open dropdown: the context (the typed word: the filter while a preview is in the
     /// text) and its rows. None: closed.
-    fn open(&mut self, ta: &TextArea, dir: &Path, thread: &[String]) -> Option<(Ctx, Vec<Entry>)> {
-        open_shell_comp(self, ta, dir, thread)
+    fn open(&mut self, ta: &TextArea, dir: &Path, thread_commands: &[String]) -> Option<(Ctx, Vec<Entry>)> {
+        open_shell_comp(self, ta, dir, thread_commands)
     }
 
-    fn pick(&mut self, ta: &mut TextArea, ctx: &Ctx, error: &Entry) {
-        ta.replace_to_cursor(ctx.at, &error.text);
+    fn pick(&mut self, ta: &mut TextArea, ctx: &Ctx, entry: &Entry) {
+        ta.replace_to_cursor(ctx.at, &entry.text);
         self.preview.clear();
         self.forced = None;
     }
@@ -194,14 +194,14 @@ impl ShellComp {
     }
 
     /// The history's suggestion for TA (the cursor at the text's end): the rest of the newest
-    /// command (THREAD first, then the shell's history) that starts with the typed line.
-    pub(crate) fn suggestion(&mut self, ta: &TextArea, thread: &[String]) -> Option<String> {
-        suggestion_shell_comp(self, ta, thread)
+    /// command (the thread's `!commands` first, then the shell's history) that starts with the typed line.
+    pub(crate) fn suggestion(&mut self, ta: &TextArea, thread_commands: &[String]) -> Option<String> {
+        suggestion_shell_comp(self, ta, thread_commands)
     }
 
     /// → / End: the suggestion into TA; alt+→: its next word. True: used.
-    pub(crate) fn accept(&mut self, key: KeyEvent, ta: &mut TextArea, thread: &[String]) -> bool {
-        accept_shell_comp(self, key, ta, thread)
+    pub(crate) fn accept(&mut self, key: KeyEvent, ta: &mut TextArea, thread_commands: &[String]) -> bool {
+        accept_shell_comp(self, key, ta, thread_commands)
     }
 }
 
@@ -220,11 +220,11 @@ mod poll;
 #[path = "shell_completion_render.rs"]
 mod render;
 
-fn own(thread_5: &Task, result: &str) -> bool {
-    if result == "package" {
-        !matches!(thread_5.runner, "just" | "make")
+fn own(task: &Task, runner: &str) -> bool {
+    if runner == "package" {
+        !matches!(task.runner, "just" | "make")
     } else {
-        thread_5.runner == result
+        task.runner == runner
     }
 }
 
@@ -265,10 +265,10 @@ fn run_requests(rx: &Receiver<Req>, out: &crate::infra::bus::Tx<Res>) {
         // fish: only the newest line counts (typed on meanwhile)
         let mut later = Vec::new();
 
-        while let Ok(result) = rx.try_recv() {
-            match (result, &req) {
-                (result_value @ Req::Fish(..), Req::Fish(..)) => req = result_value,
-                (result_2, _) => later.push(result_2),
+        while let Ok(queued) = rx.try_recv() {
+            match (queued, &req) {
+                (newer @ Req::Fish(..), Req::Fish(..)) => req = newer,
+                (other, _) => later.push(other),
             }
         }
 
@@ -287,27 +287,29 @@ fn stale_shell_comp(shell: &ShellComp, ctx: &Ctx) -> Vec<(String, String)> {
     shell
         .fish_rows
         .iter()
-        .filter(|(line_value, _)| {
-            line_value.starts_with(head)
-                && ctx.line.starts_with(line_value.as_str())
-                && !line_value[head.len()..].contains(' ')
+        .filter(|(line, _)| {
+            line.starts_with(head) && ctx.line.starts_with(line.as_str()) && !line[head.len()..].contains(' ')
         })
-        .max_by_key(|(line_2, _)| line_2.len())
-        .map(|(_, result)| {
-            result
-                .iter()
-                .filter(|(thread, _)| thread.starts_with(&ctx.word))
+        .max_by_key(|(line, _)| line.len())
+        .map(|(_, rows)| {
+            rows.iter()
+                .filter(|(text, _)| text.starts_with(&ctx.word))
                 .cloned()
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn open_shell_comp(shell: &mut ShellComp, ta: &TextArea, dir: &Path, thread: &[String]) -> Option<(Ctx, Vec<Entry>)> {
+fn open_shell_comp(
+    shell: &mut ShellComp,
+    ta: &TextArea,
+    dir: &Path,
+    thread_commands: &[String],
+) -> Option<(Ctx, Vec<Entry>)> {
     // a live preview in the text: the word as typed before it (the filter)
     let ctx = match shell.preview.typed(ta) {
-        Some((path, typed)) if path.row == 0 && context(ta).is_some() => {
-            let head: String = ta.text().chars().take(path.col).collect();
+        Some((start, typed)) if start.row == 0 && context(ta).is_some() => {
+            let head: String = ta.text().chars().take(start.col).collect();
             let text = format!("{head}{typed}");
 
             context_of(&text, text.chars().count())
@@ -315,11 +317,11 @@ fn open_shell_comp(shell: &mut ShellComp, ta: &TextArea, dir: &Path, thread: &[S
         _ => context(ta),
     }?;
 
-    if shell.closed.is_some_and(|path_value| path_value != ctx.at) {
+    if shell.closed.is_some_and(|at| at != ctx.at) {
         shell.closed = None;
     }
 
-    if shell.forced.is_some_and(|path_2| path_2 != ctx.at) {
+    if shell.forced.is_some_and(|at| at != ctx.at) {
         shell.forced = None;
     }
 
@@ -334,7 +336,7 @@ fn open_shell_comp(shell: &mut ShellComp, ta: &TextArea, dir: &Path, thread: &[S
         return None;
     }
 
-    let entries = self::entries(&ctx, dir, thread, shell);
+    let entries = self::entries(&ctx, dir, thread_commands, shell);
 
     // 0 rows, or the word is the 1 row already
     if entries.is_empty() || (entries.len() == 1 && entries[0].text.trim_end() == ctx.word) {
@@ -353,7 +355,7 @@ fn open_shell_comp(shell: &mut ShellComp, ta: &TextArea, dir: &Path, thread: &[S
     Some((ctx, entries))
 }
 
-fn suggestion_shell_comp(shell: &mut ShellComp, ta: &TextArea, thread: &[String]) -> Option<String> {
+fn suggestion_shell_comp(shell: &mut ShellComp, ta: &TextArea, thread_commands: &[String]) -> Option<String> {
     let text = ta.text();
     let line = text.strip_prefix('!')?.trim_start();
     let (row, col) = ta.cursor();
@@ -363,28 +365,28 @@ fn suggestion_shell_comp(shell: &mut ShellComp, ta: &TextArea, thread: &[String]
     }
 
     let hist = history(shell);
-    let key = (thread.len(), shell.catalog.history.is_some());
+    let key = (thread_commands.len(), shell.catalog.history.is_some());
 
-    if let Some((key_value, line_value, rest)) = &shell.sugg
-        && *key_value == key
-        && line_value == line
+    if let Some((cached_key, cached_line, rest)) = &shell.sugg
+        && *cached_key == key
+        && cached_line == line
     {
         return rest.clone();
     }
 
-    let rest = thread
+    let rest = thread_commands
         .iter()
         .rev()
         .chain(hist.iter())
-        .find(|character| character.len() > line.len() && character.starts_with(line) && !character.contains('\n'))
-        .map(|character_value| character_value[line.len()..].to_string());
+        .find(|command| command.len() > line.len() && command.starts_with(line) && !command.contains('\n'))
+        .map(|command| command[line.len()..].to_string());
 
     shell.sugg = Some((key, line.to_string(), rest.clone()));
 
     rest
 }
 
-fn accept_shell_comp(shell: &mut ShellComp, key: KeyEvent, ta: &mut TextArea, thread: &[String]) -> bool {
+fn accept_shell_comp(shell: &mut ShellComp, key: KeyEvent, ta: &mut TextArea, thread_commands: &[String]) -> bool {
     let alt = key.modifiers == KeyModifiers::ALT;
     let all = matches!(
         (key.code, key.modifiers),
@@ -395,7 +397,7 @@ fn accept_shell_comp(shell: &mut ShellComp, key: KeyEvent, ta: &mut TextArea, th
         return false;
     }
 
-    let Some(rest) = shell.suggestion(ta, thread) else {
+    let Some(rest) = shell.suggestion(ta, thread_commands) else {
         return false;
     };
 

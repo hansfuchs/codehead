@@ -5,20 +5,20 @@ impl FlowsTab {
         draw_flows_tab(self, frame, area, active);
     }
 
-    fn finish_draw(&mut self, frame: &mut Frame<'_>, area: Rect, active: bool) {
+    fn draw_body(&mut self, frame: &mut Frame<'_>, area: Rect, active: bool) {
         let body = Rect {
             y: area.y + 2,
             height: area.height - 2,
             ..area
         };
-        let lw = (body.width / 3).clamp(24, 40);
-        let list = Rect { width: lw, ..body };
+        let list_w = (body.width / 3).clamp(24, 40);
+        let list = Rect { width: list_w, ..body };
 
         self.hit_regions.list_rect = list;
         self.draw_list(frame, list, active);
         let right = Rect {
             x: list.right() + 2,
-            width: body.width.saturating_sub(lw + 2),
+            width: body.width.saturating_sub(list_w + 2),
             ..body
         };
 
@@ -27,10 +27,10 @@ impl FlowsTab {
             Sub::Steps => self.draw_step(frame, right, active),
         }
 
-        if let Some(error_value) = self.error.clone() {
+        if let Some(error) = self.error.clone() {
             frame.render_widget(
                 Paragraph::new(Line::styled(
-                    crate::ui::thread_card::fit(&error_value, usize::from(area.width)),
+                    crate::ui::thread_card::fit(&error, usize::from(area.width)),
                     Style::default().fg(theme::pal().error()),
                 )),
                 Rect {
@@ -46,19 +46,19 @@ impl FlowsTab {
     }
 }
 
-fn draw_width_value(
+fn draw_sub_tab(
     area: Rect,
     active: bool,
     x: &mut u16,
     spans: &mut Vec<Span<'_>>,
-    text: Sub,
+    sub: Sub,
     label: &str,
-    view_state: &mut FlowsTab,
+    tab: &mut FlowsTab,
 ) {
-    let on = text == view_state.sub;
+    let on = sub == tab.sub;
 
-    let st = if on {
-        if active && view_state.focus == Focus::List {
+    let style = if on {
+        if active && tab.focus == Focus::List {
             theme::pill().add_modifier(Modifier::BOLD)
         } else {
             theme::panel().fg(theme::pal().accent).add_modifier(Modifier::BOLD)
@@ -67,19 +67,19 @@ fn draw_width_value(
         theme::muted()
     };
 
-    let width_value = label.width() as u16 + 2;
+    let tab_width = label.width() as u16 + 2;
 
-    view_state.hit_regions.sub_rects.push((
+    tab.hit_regions.sub_rects.push((
         Rect {
             x: *x,
             y: area.y,
-            width: width_value,
+            width: tab_width,
             height: 1,
         },
-        text,
+        sub,
     ));
-    *x += width_value + 1;
-    spans.push(Span::styled(format!(" {label} "), st));
+    *x += tab_width + 1;
+    spans.push(Span::styled(format!(" {label} "), style));
     spans.push(Span::raw(" "));
 }
 
@@ -97,8 +97,8 @@ fn draw_flows_tab(state: &mut FlowsTab, frame: &mut Frame, area: Rect, active: b
     let mut x = area.x;
     let mut spans = Vec::new();
 
-    for (text, label) in [(Sub::Flows, "flows"), (Sub::Steps, "steps")] {
-        draw_width_value(area, active, &mut x, &mut spans, text, label, state);
+    for (sub, label) in [(Sub::Flows, "flows"), (Sub::Steps, "steps")] {
+        draw_sub_tab(area, active, &mut x, &mut spans, sub, label, state);
     }
 
     if state.filtering || !state.filter.is_empty() {
@@ -109,5 +109,5 @@ fn draw_flows_tab(state: &mut FlowsTab, frame: &mut Frame, area: Rect, active: b
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), Rect { height: 1, ..area });
-    state.finish_draw(frame, area, active);
+    state.draw_body(frame, area, active);
 }

@@ -15,7 +15,7 @@ impl View {
             // ctrl+c: the prompt's selection → copy; text → clear it (ctrl+z brings it back); an
             // empty prompt: quit on a 2nd ctrl+c within 1 s
             KeyCode::Char('c') if ctrl => {
-                return Some(key_copy_thread(self, empty));
+                return Some(copy_clear_or_quit(self, empty));
             }
 
             _ => {}
@@ -25,9 +25,9 @@ impl View {
     }
 }
 
-fn key_copy_thread(view: &mut View, empty: bool) -> bool {
-    if let Some(thread) = view.prompt.input.selected_text() {
-        view.copy(&thread);
+fn copy_clear_or_quit(view: &mut View, empty: bool) -> bool {
+    if let Some(text) = view.prompt.input.selected_text() {
+        view.copy(&text);
         return false;
     }
 
@@ -37,10 +37,7 @@ fn key_copy_thread(view: &mut View, empty: bool) -> bool {
         return false;
     }
 
-    if view
-        .last_ctrl_c
-        .is_some_and(|thread| thread.elapsed() < Duration::from_secs(1))
-    {
+    if view.last_ctrl_c.is_some_and(|at| at.elapsed() < Duration::from_secs(1)) {
         view.exit = Exit::Quit;
         return true;
     }
@@ -52,7 +49,7 @@ fn key_copy_thread(view: &mut View, empty: bool) -> bool {
 }
 
 fn copy_selected_stream(view: &mut View) {
-    if let Some(thread) = view.selected() {
-        view.copy(&thread);
+    if let Some(text) = view.selected() {
+        view.copy(&text);
     }
 }

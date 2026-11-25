@@ -39,31 +39,31 @@ pub(crate) fn front_matter(text: &str) -> (Option<String>, Option<String>) {
 
         open = None;
 
-        let Some((key, value_value)) = line.split_once(':') else {
+        let Some((key, raw)) = line.split_once(':') else {
             continue;
         };
 
-        let value_2 = value_value.trim();
+        let trimmed = raw.trim();
 
-        let value_3 = if matches!(value_2, ">" | "|" | ">-" | "|-" | ">+" | "|+") {
+        let plain = if matches!(trimmed, ">" | "|" | ">-" | "|-" | ">+" | "|+") {
             ""
         } else {
-            value_2
+            trimmed
         };
 
-        let value_4 = value_3
+        let unquoted = plain
             .strip_prefix('"')
-            .and_then(|x| x.strip_suffix('"'))
-            .or_else(|| value_3.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
-            .unwrap_or(value_3);
+            .and_then(|inner| inner.strip_suffix('"'))
+            .or_else(|| plain.strip_prefix('\'').and_then(|inner| inner.strip_suffix('\'')))
+            .unwrap_or(plain);
 
         match key.trim() {
             "name" => {
-                name = Some(value_4.to_string());
+                name = Some(unquoted.to_string());
                 open = Some(&mut name);
             }
             "description" => {
-                desc = Some(value_4.to_string());
+                desc = Some(unquoted.to_string());
                 open = Some(&mut desc);
             }
             _ => {}
@@ -71,18 +71,18 @@ pub(crate) fn front_matter(text: &str) -> (Option<String>, Option<String>) {
     }
 
     (
-        name.filter(|count| !count.is_empty()),
-        desc.filter(|directory| !directory.is_empty()),
+        name.filter(|name| !name.is_empty()),
+        desc.filter(|desc| !desc.is_empty()),
     )
 }
 
 /// Name of the plugin that holds DIR: `name` of the nearest `MARK/plugin.json` above it (below ROOT).
 fn plugin_of(dir: &Path, root: &Path, mark: &str) -> Option<String> {
-    let mut directory = Some(dir);
+    let mut current = Some(dir);
 
-    while let Some(path) = directory {
-        if let Ok(thread) = std::fs::read_to_string(path.join(mark).join("plugin.json")) {
-            return serde_json::from_str::<serde_json::Value>(&thread).ok()?["name"]
+    while let Some(path) = current {
+        if let Ok(manifest) = std::fs::read_to_string(path.join(mark).join("plugin.json")) {
+            return serde_json::from_str::<serde_json::Value>(&manifest).ok()?["name"]
                 .as_str()
                 .map(String::from);
         }
@@ -91,7 +91,7 @@ fn plugin_of(dir: &Path, root: &Path, mark: &str) -> Option<String> {
             break;
         }
 
-        directory = path.parent();
+        current = path.parent();
     }
 
     None
@@ -102,12 +102,12 @@ fn plugin_of(dir: &Path, root: &Path, mark: &str) -> Option<String> {
 fn scan(root: &Path, depth: usize, harness: &str, mark: Option<&str>, out: &mut Vec<Skill>) {
     let mut dirs: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
 
-    while let Some((dir, directory)) = dirs.pop() {
+    while let Some((dir, level)) = dirs.pop() {
         scan_path(
             out,
             &mut dirs,
             &(dir),
-            directory,
+            level,
             ScanSettings {
                 root,
                 depth,
@@ -122,7 +122,7 @@ fn scan_path(
     out: &mut Vec<Skill>,
     dirs: &mut Vec<(PathBuf, usize)>,
     dir: &PathBuf,
-    directory: usize,
+    level: usize,
     settings: ScanSettings<'_>,
 ) {
     let ScanSettings {
@@ -136,12 +136,12 @@ fn scan_path(
         return;
     };
 
-    for error in rd.flatten() {
-        let path = error.path();
-        let name = error.file_name().to_string_lossy().into_owned();
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
 
         if path.is_dir() {
-            queue_directory(path, &name, directory, depth, dirs);
+            queue_directory(path, &name, level, depth, dirs);
 
             continue;
         }
@@ -154,11 +154,11 @@ fn scan_path(
             continue;
         };
 
-        let (count, description) = front_matter(&text);
+        let (declared, description) = front_matter(&text);
 
-        let skill = count.unwrap_or_else(|| {
+        let skill = declared.unwrap_or_else(|| {
             dir.file_name()
-                .map(|x| x.to_string_lossy().into_owned())
+                .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_default()
         });
 
@@ -166,8 +166,8 @@ fn scan_path(
             continue;
         }
 
-        let name = match mark.and_then(|message| plugin_of(dir, root, message)) {
-            Some(path_value) => format!("{path_value}:{skill}"),
+        let name = match mark.and_then(|mark| plugin_of(dir, root, mark)) {
+            Some(plugin) => format!("{plugin}:{skill}"),
             None => skill,
         };
 
@@ -182,37 +182,37 @@ fn scan_path(
 /// Project skill dirs: REL (`.claude/skills`) in CWD and each dir above it, up to the git top / home.
 fn project_dirs(cwd: &Path, rel: &str) -> Vec<PathBuf> {
     let home = crate::infra::config::home();
-    let mut value = Vec::new();
-    let mut directory = Some(cwd);
+    let mut dirs = Vec::new();
+    let mut current = Some(cwd);
 
-    while let Some(path) = directory {
+    while let Some(path) = current {
         if path == home {
             break;
         }
 
         if path.join(rel).is_dir() {
-            value.push(path.join(rel));
+            dirs.push(path.join(rel));
         }
 
         if path.join(".git").exists() {
             break;
         }
 
-        directory = path.parent();
+        current = path.parent();
     }
 
-    value
+    dirs
 }
 
 /// Skills of HARNESSES (`claude`, `codex`; others: 0 known skill dirs) for a thread in CWD, below
 /// HOME. By harness, then name; 1 row per name (plugin versions side by side: 1 of them).
 pub(crate) fn load_in(home: &Path, harnesses: &[String], cwd: &Path) -> Vec<Skill> {
     let mut out = Vec::new();
-    let has = |height: &str| harnesses.iter().any(|x| x == height);
+    let has = |harness: &str| harnesses.iter().any(|name| name == harness);
 
     if has("claude") {
-        for directory in project_dirs(cwd, ".claude/skills") {
-            scan(&directory, 3, "claude", None, &mut out);
+        for dir in project_dirs(cwd, ".claude/skills") {
+            scan(&dir, 3, "claude", None, &mut out);
         }
 
         scan(&home.join(".claude/skills"), 4, "claude", None, &mut out);
@@ -226,11 +226,11 @@ pub(crate) fn load_in(home: &Path, harnesses: &[String], cwd: &Path) -> Vec<Skil
     }
 
     if has("codex") {
-        for directory_value in [".codex/skills", ".agents/skills"]
+        for dir in [".codex/skills", ".agents/skills"]
             .into_iter()
             .flat_map(|rel| project_dirs(cwd, rel))
         {
-            scan(&directory_value, 3, "codex", None, &mut out);
+            scan(&dir, 3, "codex", None, &mut out);
         }
 
         scan(&home.join(".codex/skills"), 4, "codex", None, &mut out);
@@ -244,17 +244,11 @@ pub(crate) fn load_in(home: &Path, harnesses: &[String], cwd: &Path) -> Vec<Skil
         );
     }
 
-    out.sort_by(|agent, bytes| {
-        (&agent.harness, &agent.name, bytes.description.len()).cmp(&(
-            &bytes.harness,
-            &bytes.name,
-            agent.description.len(),
-        ))
+    out.sort_by(|left, right| {
+        (&left.harness, &left.name, right.description.len()).cmp(&(&right.harness, &right.name, left.description.len()))
     });
 
-    out.dedup_by(|agent_value, bytes_value| {
-        agent_value.harness == bytes_value.harness && agent_value.name == bytes_value.name
-    });
+    out.dedup_by(|left, right| left.harness == right.harness && left.name == right.name);
 
     out
 }
@@ -286,8 +280,8 @@ fn continue_field(value: Option<&mut String>, line: &str) {
 
     value.push_str(line.trim());
 }
-fn queue_directory(path: PathBuf, name: &str, directory: usize, depth: usize, dirs: &mut Vec<(PathBuf, usize)>) {
-    if directory < depth && !matches!(name, "node_modules" | ".git" | "marketplaces") {
-        dirs.push((path, directory + 1));
+fn queue_directory(path: PathBuf, name: &str, level: usize, depth: usize, dirs: &mut Vec<(PathBuf, usize)>) {
+    if level < depth && !matches!(name, "node_modules" | ".git" | "marketplaces") {
+        dirs.push((path, level + 1));
     }
 }

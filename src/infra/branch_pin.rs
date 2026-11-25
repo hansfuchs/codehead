@@ -75,16 +75,16 @@ pub(crate) fn pin(wt: &Path, branch: &str) -> Result<(), String> {
 
     let orig = repo_hooks(wt, &common);
     let dir = gitdir.join("codehead-hooks");
-    let io = |error_value: std::io::Error| format!("{}: {error_value}", dir.display());
+    let io = |error: std::io::Error| format!("{}: {error}", dir.display());
     let _ = std::fs::remove_dir_all(&dir);
 
     std::fs::create_dir_all(&dir).map_err(io)?;
 
-    for height in HOOKS {
-        let src = orig.join(height);
+    for hook in HOOKS {
+        let src = orig.join(hook);
 
         if is_exec(&src) {
-            std::os::unix::fs::symlink(&src, dir.join(height)).map_err(io)?;
+            std::os::unix::fs::symlink(&src, dir.join(hook)).map_err(io)?;
         }
     }
 
@@ -129,23 +129,23 @@ fn repo_hooks(wt: &Path, common: &Path) -> PathBuf {
         wt,
         &["config", "--show-scope", "--type=path", "--get-all", "core.hooksPath"],
     );
-    let path_value = output
+    let configured = output
         .lines()
         .filter_map(|line| line.split_once('\t'))
         .filter(|(scope, _)| *scope != "worktree")
         .map(|(_, path)| path.to_string())
         .next_back();
 
-    match path_value {
-        Some(path_2) if Path::new(&path_2).is_absolute() => PathBuf::from(path_2),
-        Some(path_3) => wt.join(path_3),
+    match configured {
+        Some(path) if Path::new(&path).is_absolute() => PathBuf::from(path),
+        Some(path) => wt.join(path),
         None => common.join("hooks"),
     }
 }
 
 fn is_exec(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|message| message.is_file() && message.permissions().mode() & 0o111 != 0)
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(test)]

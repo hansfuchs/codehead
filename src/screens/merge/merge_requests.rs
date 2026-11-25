@@ -3,7 +3,7 @@ use super::{ARM, Act, Duration, Instant, MAX_PER_MIN, MIN_MANUAL, Merge, Op, PrR
 impl Merge {
     /// A gh call may go now (max. `MAX_PER_MIN` per minute).
     pub(super) fn budget(&mut self) -> bool {
-        self.calls.retain(|thread| thread.elapsed() < Duration::from_secs(60));
+        self.calls.retain(|call| call.elapsed() < Duration::from_secs(60));
 
         if self.calls.len() >= MAX_PER_MIN {
             return false;
@@ -12,103 +12,109 @@ impl Merge {
         self.calls.push(Instant::now());
         true
     }
-    pub(super) fn spawn(&self, file: impl FnOnce() -> Res + Send + 'static) {
+
+    pub(super) fn spawn(&self, job: impl FnOnce() -> Res + Send + 'static) {
         let tx = self.tx.clone();
 
         if cfg!(test) {
-            let _ = tx.send(file());
+            let _ = tx.send(job());
 
             return;
         }
 
         std::thread::spawn(move || {
-            let _ = tx.send(file());
+            let _ = tx.send(job());
         });
     }
+
     pub(super) fn read(&mut self, pr: PrRef) {
         read_pull_request(self, pr);
     }
+
     /// A stop waits for its 2nd enter (its button says so): redraws until the arm ends.
     pub(crate) fn armed(&self) -> bool {
         self.tab_ref()
-            .and_then(|thread| thread.input.armed)
+            .and_then(|tab| tab.input.armed)
             .is_some_and(|(_, at)| at.elapsed() < ARM + Duration::from_millis(500))
     }
+
     /// The owner is at work (a key anywhere in the view): 0 sleep.
     pub(crate) fn touch(&mut self) {
         self.active = Instant::now();
     }
+
     /// `r`: read again now (3 s apart).
     pub(super) fn manual(&mut self) -> Act {
         refresh_pull_requests(self)
     }
+
     pub(super) fn run(&mut self, op: &Op) -> Act {
         let Some(pr) = self.current().cloned() else {
             return Act::None;
         };
 
-        let thread = self.tabs.entry(pr.clone()).or_default();
+        let tab = self.tabs.entry(pr.clone()).or_default();
 
-        if thread.input.busy.is_some() {
+        if tab.input.busy.is_some() {
             return Act::Toast("gh: 1 edit at a time".into());
         }
 
-        thread.input.busy = Some(op.clone());
-        let output = op.clone();
+        tab.input.busy = Some(op.clone());
+        let op = op.clone();
 
         self.spawn(move || {
-            let result = gh::run(&pr, &output);
+            let result = gh::run(&pr, &op);
 
-            Res::Op(pr, output, result)
+            Res::Op(pr, op, result)
         });
 
         Act::None
     }
 }
 
-fn read_pull_request(widget_state: &mut Merge, pr: PrRef) {
-    if !widget_state.budget() {
+fn read_pull_request(merge: &mut Merge, pr: PrRef) {
+    if !merge.budget() {
         return;
     }
 
-    let thread = widget_state.tabs.entry(pr.clone()).or_default();
+    let tab = merge.tabs.entry(pr.clone()).or_default();
 
-    thread.reads.reading = true;
-    thread.reads.read_at = Some(Instant::now());
+    tab.reads.reading = true;
+    tab.reads.read_at = Some(Instant::now());
 
-    widget_state.spawn(move || {
+    merge.spawn(move || {
         let result = gh::fetch(&pr);
 
-        if let Ok(path) = &result
+        if let Ok(pull_request) = &result
             && !cfg!(test)
         {
-            cache_write(path);
+            cache_write(pull_request);
         }
 
         Res::Pr(pr, Box::new(result))
     });
 }
 
-fn refresh_pull_requests(widget_state: &mut Merge) -> Act {
-    if widget_state
+fn refresh_pull_requests(merge: &mut Merge) -> Act {
+    if merge
         .manual_at
-        .is_some_and(|thread_value| thread_value.elapsed() < MIN_MANUAL)
+        .is_some_and(|manual_at| manual_at.elapsed() < MIN_MANUAL)
     {
         return Act::Toast("read: wait a moment".into());
     }
 
-    widget_state.manual_at = Some(Instant::now());
+    merge.manual_at = Some(Instant::now());
 
-    if widget_state.thread {
-        widget_state.assoc_at = None;
-        widget_state.read_assoc();
+    if merge.thread {
+        merge.assoc_at = None;
+        merge.read_assoc();
     }
 
-    if let Some(pr) = widget_state.current().cloned() {
-        widget_state.read(pr);
+    if let Some(pr) = merge.current().cloned() {
+        merge.read(pr);
 
-        if let Some(character) = widget_state.tab().and_then(|thread_2| thread_2.changes.as_mut()) {
-            character.refresh(true);
+        if let Some(view) = merge.tab().and_then(|tab| tab.changes.as_mut()) {
+            view.refresh(true);
         }
     }
 

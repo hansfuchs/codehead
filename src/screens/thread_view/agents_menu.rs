@@ -13,7 +13,7 @@ impl View {
 
     /// A key while the agents box has the keys.
     pub(super) fn agents_key(&mut self, key: KeyEvent) {
-        let Some(mut fo) = self.agents.agents_focus.take() else {
+        let Some(mut focus) = self.agents.agents_focus.take() else {
             return;
         };
 
@@ -23,56 +23,56 @@ impl View {
             return;
         }
 
-        fo.at = fo.at.min(count - 1);
-        let agent = self.agents.order[fo.at].clone();
+        focus.at = focus.at.min(count - 1);
+        let agent = self.agents.order[focus.at].clone();
 
         // the replace picker: the agents to take over
-        if let Some((cur, off)) = fo.replace {
-            agents_key_cands(self, key, fo, agent, cur, off);
+        if let Some((cur, off)) = focus.replace {
+            agents_key_cands(self, key, focus, agent, cur, off);
             return;
         }
 
         if key.code != KeyCode::Enter {
-            fo.armed = false;
+            focus.armed = false;
         }
 
         match key.code {
             // esc: back to the prompt
             KeyCode::Esc => return,
             KeyCode::Left | KeyCode::Char('h') => {
-                fo.at = (fo.at + count - 1) % count;
-                fo.cur = 0;
+                focus.at = (focus.at + count - 1) % count;
+                focus.cur = 0;
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                fo.at = (fo.at + 1) % count;
-                fo.cur = 0;
+                focus.at = (focus.at + 1) % count;
+                focus.cur = 0;
             }
-            KeyCode::Up | KeyCode::Char('k') => fo.cur = fo.cur.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => fo.cur = (fo.cur + 1).min(AGENT_MENU.len() - 1),
-            KeyCode::Char(character @ '1'..='3') => {
-                fo.cur = usize::from(character as u8 - b'1');
-                self.agents.agents_focus = Some(fo);
+            KeyCode::Up | KeyCode::Char('k') => focus.cur = focus.cur.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => focus.cur = (focus.cur + 1).min(AGENT_MENU.len() - 1),
+            KeyCode::Char(digit @ '1'..='3') => {
+                focus.cur = usize::from(digit as u8 - b'1');
+                self.agents.agents_focus = Some(focus);
                 return self.agents_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
             }
-            KeyCode::Enter => match fo.cur {
+            KeyCode::Enter => match focus.cur {
                 0 => {
                     self.open_flow(&agent, false);
                     return;
                 }
                 1 if self.agents.members.len() < 2 => self.toast("the thread's last agent: replace it instead"),
-                1 if fo.armed => {
+                1 if focus.armed => {
                     self.host("leave", json!({"op": "leave", "agent": agent}));
                     self.toast(format!("{agent} leaves the thread"));
                     return;
                 }
-                1 => fo.armed = true,
+                1 => focus.armed = true,
                 _ if self.replace_candidates().is_empty() => self.toast("0 other agents · menu → new agent"),
-                _ => fo.replace = Some((0, 0)),
+                _ => focus.replace = Some((0, 0)),
             },
             _ => {}
         }
 
-        self.agents.agents_focus = Some(fo);
+        self.agents.agents_focus = Some(focus);
     }
 
     /// NEW takes over from OLD: OLD leaves, NEW gets the handoff (and OLD's flow). OLD mid-turn:
@@ -86,17 +86,17 @@ impl View {
             ));
             self.prompt.queued = Some((new, old, text));
         } else {
-            self.run_replace(new, old, &(text));
+            self.run_replace(new, old, &text);
         }
     }
 
     /// The agents box's menu above the highlighted agent (or its replace picker).
     pub(super) fn draw_agents_menu(&mut self, frame: &mut Frame, bounds: Rect) {
-        let Some(fo) = self.agents.agents_focus.clone() else {
+        let Some(focus) = self.agents.agents_focus.clone() else {
             return;
         };
 
-        let Some(agent) = self.agents.order.get(fo.at).cloned() else {
+        let Some(agent) = self.agents.order.get(focus.at).cloned() else {
             return;
         };
 
@@ -106,8 +106,8 @@ impl View {
             .slots
             .borrow()
             .iter()
-            .find(|(agent_value, _)| *agent_value == agent)
-            .map(|(_, result)| *result);
+            .find(|(name, _)| *name == agent)
+            .map(|(_, rect)| *rect);
         let anchor = slot.unwrap_or(Rect {
             y: self.layout.input_rect.y.saturating_sub(1),
             height: 1,
@@ -115,18 +115,18 @@ impl View {
             ..self.layout.input_rect
         });
 
-        if let Some(cursor) = fo.replace {
+        if let Some(cursor) = focus.replace {
             draw_agents_menu_rows(self, frame, bounds, &agent, anchor, cursor);
             return;
         }
 
-        let details = agent_menu_details(self, &agent, &fo);
+        let details = agent_menu_details(self, &agent, &focus);
         let rows: Vec<crate::ui::dropdown::Row> = AGENT_MENU
             .iter()
             .zip(details)
-            .map(|(thread, directory)| crate::ui::dropdown::Row {
-                text: (*thread).into(),
-                detail: directory,
+            .map(|(label, detail)| crate::ui::dropdown::Row {
+                text: (*label).into(),
+                detail,
                 now: false,
                 marks: Vec::new(),
             })
@@ -143,7 +143,7 @@ impl View {
                 label: &format!("@{agent}"),
                 note: "←→ agent · ↑↓ · enter · esc",
                 rows: &rows,
-                cursor: fo.cur,
+                cursor: focus.cur,
                 offset: 0,
                 empty: "",
             },
@@ -159,14 +159,21 @@ fn agent_flow_label(state: &crate::engine::flows::run::FlowState) -> String {
     }
 }
 
-fn agents_key_cands(view: &mut View, key: KeyEvent, mut fo: super::AgentsFocus, agent: String, cur: usize, off: usize) {
+fn agents_key_cands(
+    view: &mut View,
+    key: KeyEvent,
+    mut focus: super::AgentsFocus,
+    agent: String,
+    cur: usize,
+    off: usize,
+) {
     let cands = view.replace_candidates();
 
     match key.code {
-        KeyCode::Esc | KeyCode::Left => fo.replace = None,
-        KeyCode::Up | KeyCode::Char('k') => fo.replace = Some((cur.saturating_sub(1), off)),
+        KeyCode::Esc | KeyCode::Left => focus.replace = None,
+        KeyCode::Up | KeyCode::Char('k') => focus.replace = Some((cur.saturating_sub(1), off)),
         KeyCode::Down | KeyCode::Char('j') => {
-            fo.replace = Some(((cur + 1).min(cands.len().saturating_sub(1)), off));
+            focus.replace = Some(((cur + 1).min(cands.len().saturating_sub(1)), off));
         }
         KeyCode::Enter => {
             if let Some(new) = cands.get(cur) {
@@ -177,15 +184,15 @@ fn agents_key_cands(view: &mut View, key: KeyEvent, mut fo: super::AgentsFocus, 
         _ => {}
     }
 
-    view.agents.agents_focus = Some(fo);
+    view.agents.agents_focus = Some(focus);
 }
 
 fn agent_menu_details(view: &View, agent: &str, focus: &super::AgentsFocus) -> [String; 3] {
     let flow = view
         .flowbars
         .iter()
-        .find(|bytes| bytes.agent == agent)
-        .and_then(|bytes| bytes.state.as_ref())
+        .find(|bar| bar.agent == agent)
+        .and_then(|bar| bar.state.as_ref())
         .map(agent_flow_label);
 
     [
@@ -210,9 +217,9 @@ fn draw_agents_menu_rows(
     let rows: Vec<crate::ui::dropdown::Row> = view
         .replace_candidates()
         .iter()
-        .map(|agent_value| crate::ui::dropdown::Row {
-            text: agent_value.name.clone(),
-            detail: crate::ui::cards::tech(agent_value),
+        .map(|candidate| crate::ui::dropdown::Row {
+            text: candidate.name.clone(),
+            detail: crate::ui::cards::tech(candidate),
             now: false,
             marks: Vec::new(),
         })
@@ -235,7 +242,7 @@ fn draw_agents_menu_rows(
         },
     );
 
-    if let Some(fo) = view.agents.agents_focus.as_mut() {
-        fo.replace = Some((cur, off));
+    if let Some(focus) = view.agents.agents_focus.as_mut() {
+        focus.replace = Some((cur, off));
     }
 }

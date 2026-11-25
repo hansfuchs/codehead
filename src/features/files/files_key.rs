@@ -1,49 +1,49 @@
 use super::{Act, KeyCode, KeyEvent, KeyModifiers, PathBuf, View, share, store};
 
 impl View {
-    pub(crate) fn key(&mut self, key_value: KeyEvent) -> Act {
-        key_view(self, key_value)
+    pub(crate) fn key(&mut self, key: KeyEvent) -> Act {
+        key_view(self, key)
     }
 
-    fn key_body_state(&mut self) {
-        key_body(self);
-    }
-}
-
-fn key_keycode_esc(view_state: &mut View) {
-    view_state.filter_input.filtering = false;
-    view_state.filter_input.filter.set_text("");
-    view_state.rebuild();
-}
-
-fn key_match(key_value: KeyEvent, view_state: &mut View) {
-    let before = view_state.filter_input.filter.text();
-
-    view_state.filter_input.filter.key(key_value);
-
-    if view_state.filter_input.filter.text() != before {
-        view_state.rebuild();
-        view_state.at = 0;
-        view_state.text_preview.scroll = 0;
+    fn close_filter(&mut self) {
+        close_filter(self);
     }
 }
 
-fn key_body(view_state: &mut View) {
-    key_keycode_esc(view_state);
+fn clear_filter(view: &mut View) {
+    view.filter_input.filtering = false;
+    view.filter_input.filter.set_text("");
+    view.rebuild();
 }
 
-fn key_view(state: &mut View, key_value: KeyEvent) -> Act {
+fn type_in_filter(key: KeyEvent, view: &mut View) {
+    let before = view.filter_input.filter.text();
+
+    view.filter_input.filter.key(key);
+
+    if view.filter_input.filter.text() != before {
+        view.rebuild();
+        view.at = 0;
+        view.text_preview.scroll = 0;
+    }
+}
+
+fn close_filter(view: &mut View) {
+    clear_filter(view);
+}
+
+fn key_view(view: &mut View, key: KeyEvent) -> Act {
     // the filter input: typing filters; ↑↓ move; enter keeps the matches; esc clears
-    if state.filter_input.filtering {
-        match key_value.code {
+    if view.filter_input.filtering {
+        match key.code {
             KeyCode::Esc => {
-                state.key_body_state();
+                view.close_filter();
             }
-            KeyCode::Enter => state.filter_input.filtering = false,
-            KeyCode::Down => state.step(1),
-            KeyCode::Up => state.step(-1),
+            KeyCode::Enter => view.filter_input.filtering = false,
+            KeyCode::Down => view.step(1),
+            KeyCode::Up => view.step(-1),
             _ => {
-                key_match(key_value, state);
+                type_in_filter(key, view);
             }
         }
 
@@ -51,40 +51,40 @@ fn key_view(state: &mut View, key_value: KeyEvent) -> Act {
     }
 
     // ctrl+f: the filter (the only key to it, in every list)
-    if crate::ui::textarea::is_filter_key(&key_value) {
-        state.filter_input.filtering = true;
+    if crate::ui::textarea::is_filter_key(&key) {
+        view.filter_input.filtering = true;
         return Act::None;
     }
 
     // a letter with ctrl / alt / ⌘: 0 view key (alt+S never shares)
-    if matches!(key_value.code, KeyCode::Char(_))
-        && key_value
+    if matches!(key.code, KeyCode::Char(_))
+        && key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
     {
         return Act::None;
     }
 
-    let armed = state
+    let armed = view
         .share_task
         .share_armed
         .take()
-        .filter(|thread_value| thread_value.elapsed() < std::time::Duration::from_secs(3));
-    let page = usize::from(state.preview.height.saturating_sub(3)).max(1);
+        .filter(|armed_at| armed_at.elapsed() < std::time::Duration::from_secs(3));
+    let page = usize::from(view.preview.height.saturating_sub(3)).max(1);
 
-    finish_key_view(state, key_value, armed, page)
+    list_key(view, key, armed, page)
 }
 
-fn finish_key_view(state: &mut View, key_value: KeyEvent, armed: Option<std::time::Instant>, page: usize) -> Act {
-    match key_value.code {
-        KeyCode::Down | KeyCode::Char('j') => state.step(1),
-        KeyCode::Up | KeyCode::Char('k') => state.step(-1),
-        KeyCode::PageDown | KeyCode::Char(' ') => state.text_preview.scroll += page,
-        KeyCode::PageUp => state.text_preview.scroll = state.text_preview.scroll.saturating_sub(page),
-        KeyCode::Char('g') | KeyCode::Home => state.text_preview.scroll = 0,
+fn list_key(view: &mut View, key: KeyEvent, armed: Option<std::time::Instant>, page: usize) -> Act {
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => view.step(1),
+        KeyCode::Up | KeyCode::Char('k') => view.step(-1),
+        KeyCode::PageDown | KeyCode::Char(' ') => view.text_preview.scroll += page,
+        KeyCode::PageUp => view.text_preview.scroll = view.text_preview.scroll.saturating_sub(page),
+        KeyCode::Char('g') | KeyCode::Home => view.text_preview.scroll = 0,
         // e: the file in the IDE, as on every screen
-        KeyCode::Char('e') => return state.cur().map_or(Act::None, |error| Act::Open(error.path.clone())),
-        KeyCode::Char('r') => state.refresh(true),
+        KeyCode::Char('e') => return view.cur().map_or(Act::None, |entry| Act::Open(entry.path.clone())),
+        KeyCode::Char('r') => view.refresh(true),
         // S S: share the thread's home repo files (commit those paths, push if tracked)
         KeyCode::Char('S') => {
             let Some(home) = crate::infra::config::home_repo() else {
@@ -92,15 +92,13 @@ fn finish_key_view(state: &mut View, key_value: KeyEvent, armed: Option<std::tim
             };
 
             if armed.is_none() {
-                state.share_task.share_armed = Some(std::time::Instant::now());
+                view.share_task.share_armed = Some(std::time::Instant::now());
                 return Act::Toast("S again: share (commit + push the thread's home repo files)".into());
             }
 
-            let paths: Vec<PathBuf> = state.files.iter().map(|error_value| error_value.path.clone()).collect();
-            let title = store::load(&state.id)
-                .map(|thread_2| thread_2.title)
-                .unwrap_or_default();
-            let run = move || share(&home, &paths, &title).unwrap_or_else(|error_2| format!("share: {error_2}"));
+            let paths: Vec<PathBuf> = view.files.iter().map(|entry| entry.path.clone()).collect();
+            let title = store::load(&view.id).map(|thread| thread.title).unwrap_or_default();
+            let run = move || share(&home, &paths, &title).unwrap_or_else(|error| format!("share: {error}"));
 
             // 4 git runs: off the UI thread (tests: at once)
             if cfg!(test) {
@@ -109,7 +107,7 @@ fn finish_key_view(state: &mut View, key_value: KeyEvent, armed: Option<std::tim
 
             let (tx, rx) = crate::infra::bus::channel();
 
-            state.share_task.shared = Some(rx);
+            view.share_task.shared = Some(rx);
 
             std::thread::spawn(move || {
                 let _ = tx.send(run());

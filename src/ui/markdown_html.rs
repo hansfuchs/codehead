@@ -75,8 +75,8 @@ pub(super) fn html_parts(text: &str) -> Vec<HtmlPart<'_>> {
     let mut out = Vec::new();
     let (mut i, mut from) = (0, 0);
 
-    while let Some(lt) = text[i..].find('<').map(|path| i + path) {
-        html_parts_end(text, &mut out, &mut i, &mut from, lt);
+    while let Some(lt) = text[i..].find('<').map(|offset| i + offset) {
+        push_html_part(text, &mut out, &mut i, &mut from, lt);
     }
 
     if from < text.len() {
@@ -86,7 +86,7 @@ pub(super) fn html_parts(text: &str) -> Vec<HtmlPart<'_>> {
     out
 }
 
-fn html_parts_end<'source>(
+fn push_html_part<'source>(
     text: &'source str,
     out: &mut Vec<HtmlPart<'source>>,
     i: &mut usize,
@@ -98,7 +98,7 @@ fn html_parts_end<'source>(
             out.push(HtmlPart::Text(&text[*from..lt]));
         }
 
-        let end = text[lt..].find("-->").map_or(text.len(), |error| lt + error + 3);
+        let end = text[lt..].find("-->").map_or(text.len(), |len| lt + len + 3);
 
         (*i, *from) = (end, end);
         return;
@@ -108,16 +108,16 @@ fn html_parts_end<'source>(
     let n0 = lt + 1 + usize::from(close);
     let n1 = text[n0..]
         .find(|character: char| !(character.is_ascii_alphanumeric() || character == '-'))
-        .map_or(text.len(), |error_value| n0 + error_value);
+        .map_or(text.len(), |offset| n0 + offset);
     let name = &text[n0..n1];
     let lower = name.to_ascii_lowercase();
-    let known = name.starts_with(|character_value: char| character_value.is_ascii_alphabetic())
+    let known = name.starts_with(|ch: char| ch.is_ascii_alphabetic())
         && (name == lower || name == name.to_ascii_uppercase())
         && (HTML_TAGS.contains(&lower.as_str()) || lower.contains('-'));
     let end = text[n1..]
         .find(['>', '<'])
-        .filter(|&error_2| text.as_bytes()[n1 + error_2] == b'>')
-        .map(|error_3| n1 + error_3 + 1);
+        .filter(|&offset| text.as_bytes()[n1 + offset] == b'>')
+        .map(|offset| n1 + offset + 1);
 
     // `<IMG>` too, 0 `<Foo>` (a component in prose)
 
@@ -139,7 +139,7 @@ pub(super) fn html_attr(tag: &str, name: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
     let mut from = 0;
 
-    while let Some(at) = lower[from..].find(name).map(|path| from + path) {
+    while let Some(at) = lower[from..].find(name).map(|offset| from + offset) {
         from = at + name.len();
         let after = lower[from..].trim_start();
 
@@ -151,7 +151,7 @@ pub(super) fn html_attr(tag: &str, name: &str) -> Option<String> {
         let value = tag[tag.len() - after.len() + 1..].trim_start();
 
         let (body, end) = match value.chars().next() {
-            Some(query @ ('"' | '\'')) => (&value[1..], value[1..].find(query)),
+            Some(quote @ ('"' | '\'')) => (&value[1..], value[1..].find(quote)),
             _ => (
                 value,
                 value.find(|character: char| character.is_whitespace() || character == '>'),
@@ -176,26 +176,26 @@ pub(super) fn entities(text: &str) -> String {
             .char_indices()
             .take(12)
             .find(|&(_, character)| character == ';')
-            .map(|(error, _)| error);
-        let character_value = semi.and_then(|error_value| match &rest[1..error_value] {
+            .map(|(index, _)| index);
+        let decoded = semi.and_then(|semi_at| match &rest[1..semi_at] {
             "amp" => Some('&'),
             "lt" => Some('<'),
             "gt" => Some('>'),
             "quot" => Some('"'),
             "apos" => Some('\''),
             "nbsp" => Some(' '),
-            count => count
+            name => name
                 .strip_prefix('#')
-                .and_then(|directory| match directory.strip_prefix(['x', 'X']) {
-                    Some(height) => u32::from_str_radix(height, 16).ok(),
-                    None => directory.parse().ok(),
+                .and_then(|number| match number.strip_prefix(['x', 'X']) {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                    None => number.parse().ok(),
                 })
                 .and_then(char::from_u32),
         });
 
-        if let (Some(character_2), Some(error_2)) = (character_value, semi) {
-            out.push(character_2);
-            rest = &rest[error_2 + 1..];
+        if let (Some(ch), Some(semi_at)) = (decoded, semi) {
+            out.push(ch);
+            rest = &rest[semi_at + 1..];
         } else {
             out.push('&');
             rest = &rest[1..];
@@ -206,11 +206,11 @@ pub(super) fn entities(text: &str) -> String {
     out
 }
 
-/// TEXT of HTML into B: whitespace collapsed (as a browser does), in STYLE, a link on LINK.
-pub(super) fn html_words(bytes: &mut Block, text: &str, style: Style, link: Option<&str>) {
-    let space = |bytes_value: &mut Block| {
-        if bytes_value.pieces.last().is_some_and(|path| path.text != " ") {
-            bytes_value.pieces.push(Piece {
+/// TEXT of HTML into BLOCK: whitespace collapsed (as a browser does), in STYLE, a link on LINK.
+pub(super) fn html_words(block: &mut Block, text: &str, style: Style, link: Option<&str>) {
+    let space = |block: &mut Block| {
+        if block.pieces.last().is_some_and(|piece| piece.text != " ") {
+            block.pieces.push(Piece {
                 text: " ".into(),
                 style,
                 ..Default::default()
@@ -219,16 +219,16 @@ pub(super) fn html_words(bytes: &mut Block, text: &str, style: Style, link: Opti
     };
 
     if text.starts_with(char::is_whitespace) {
-        space(bytes);
+        space(block);
     }
 
-    for (i, width) in text.split_whitespace().enumerate() {
+    for (i, word) in text.split_whitespace().enumerate() {
         if i > 0 {
-            space(bytes);
+            space(block);
         }
 
-        bytes.pieces.push(Piece {
-            text: width.to_string(),
+        block.pieces.push(Piece {
+            text: word.to_string(),
             style,
             link: link.map(str::to_owned),
             ..Default::default()
@@ -236,6 +236,6 @@ pub(super) fn html_words(bytes: &mut Block, text: &str, style: Style, link: Opti
     }
 
     if text.ends_with(char::is_whitespace) && !text.trim().is_empty() {
-        space(bytes);
+        space(block);
     }
 }

@@ -60,16 +60,16 @@ impl<A> Item<A> {
     }
 
     /// The row under the subheading S.
-    pub(crate) fn in_section(mut self, text: impl Into<String>) -> Item<A> {
-        self.section = text.into();
+    pub(crate) fn in_section(mut self, section: impl Into<String>) -> Item<A> {
+        self.section = section.into();
         self
     }
 
-    pub(crate) fn map<B>(self, file: impl FnOnce(A) -> B) -> Item<B> {
+    pub(crate) fn map<B>(self, convert: impl FnOnce(A) -> B) -> Item<B> {
         Item {
             label: self.label,
             hint: self.hint,
-            act: file(self.act),
+            act: convert(self.act),
             section: self.section,
             state: self.state,
             agent: self.agent,
@@ -152,7 +152,7 @@ impl<A: Clone> Menu<A> {
         let label = self.items.get(self.cur).map(|i| (i.section.clone(), i.label.clone()));
 
         self.cur = label
-            .and_then(|(text, line)| items.iter().position(|i| i.section == text && i.label == line))
+            .and_then(|(section, label)| items.iter().position(|i| i.section == section && i.label == label))
             .unwrap_or(self.cur.min(items.len() - 1));
         self.items = items;
     }
@@ -174,17 +174,17 @@ impl<A: Clone> Menu<A> {
         Out::Run(it.act.clone())
     }
 
-    pub(crate) fn key(&mut self, key_value: KeyEvent) -> Out<A> {
+    pub(crate) fn key(&mut self, key: KeyEvent) -> Out<A> {
         let count = self.items.len();
 
-        if is_key(&key_value) {
+        if is_key(&key) {
             return Out::Close;
         }
 
         let armed = std::mem::take(&mut self.armed);
-        let ctrl = key_value.modifiers.contains(KeyModifiers::CONTROL);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        match key_value.code {
+        match key.code {
             KeyCode::Esc => Out::Close,
             KeyCode::Up | KeyCode::Char('k') if !ctrl => {
                 self.cur = (self.cur + count - 1) % count;
@@ -207,7 +207,7 @@ impl<A: Clone> Menu<A> {
                 self.run(self.cur)
             }
             KeyCode::Char(character @ '1'..='9')
-                if key_value.modifiers.is_empty() && usize::from(character as u8 - b'1') < count =>
+                if key.modifiers.is_empty() && usize::from(character as u8 - b'1') < count =>
             {
                 let i = usize::from(character as u8 - b'1');
 
@@ -215,19 +215,19 @@ impl<A: Clone> Menu<A> {
                 self.run(i)
             }
             // the hint key of a row (`e`, `d d` → its 1st key): that row
-            _ => self.key_name(key_value, armed),
+            _ => self.key_name(key, armed),
         }
     }
 
-    fn key_name(&mut self, key_value: KeyEvent, armed: bool) -> Out<A> {
-        let name = crate::ui::keys::key_name(&key_value);
+    fn key_name(&mut self, key: KeyEvent, armed: bool) -> Out<A> {
+        let name = crate::ui::keys::key_name(&key);
 
         match self.items.iter().position(|it| {
             !it.hint.is_empty()
                 && it
                     .hint
                     .split(" · ")
-                    .any(|height| height.split(' ').next() == Some(name.as_str()))
+                    .any(|alt| alt.split(' ').next() == Some(name.as_str()))
         }) {
             Some(i) => {
                 self.armed = armed && self.cur == i;
@@ -244,7 +244,7 @@ impl<A: Clone> Menu<A> {
         };
 
         match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => match self.rows.iter().find(|(result, _)| result.contains(at)) {
+            MouseEventKind::Down(MouseButton::Left) => match self.rows.iter().find(|(rect, _)| rect.contains(at)) {
                 Some(&(_, i)) => {
                     self.armed = self.armed && self.cur == i;
                     self.run(i)
@@ -288,12 +288,12 @@ impl<A: Clone> Menu<A> {
     pub(crate) fn render(&mut self, frame: &mut Frame, place: Place, bounds: Rect) {
         let lines = self.lines();
 
-        let area_value = menu_area(self, place, bounds, lines.len());
+        let area = menu_area(self, place, bounds, lines.len());
         let top = u16::from(self.head.is_some());
 
-        self.area = area_value;
+        self.area = area;
         self.rows.clear();
-        let inner = draw_frame(frame, area_value, &self.title);
+        let inner = draw_frame(frame, area, &self.title);
 
         if inner.height <= top {
             return;
@@ -303,10 +303,7 @@ impl<A: Clone> Menu<A> {
 
         // the cursor's line in view
         let shown = usize::from(inner.height - top);
-        let at = lines
-            .iter()
-            .position(|line_value| *line_value == Some(self.cur))
-            .unwrap_or(0);
+        let at = lines.iter().position(|line| *line == Some(self.cur)).unwrap_or(0);
 
         if at < self.top {
             self.top = at.saturating_sub(usize::from(at > 0 && lines[at - 1].is_none()));
@@ -314,31 +311,16 @@ impl<A: Clone> Menu<A> {
             self.top = at + 1 - shown;
         }
 
-        for (y, (li, line_2)) in (inner.y + top..).zip(lines.iter().enumerate().skip(self.top).take(shown)) {
-            self.render_head(
-                frame,
-                &lines,
-                *line_2,
-                MenuLine {
-                    area_value,
-                    inner,
-                    y,
-                    li,
-                },
-            );
+        for (y, (li, line)) in (inner.y + top..).zip(lines.iter().enumerate().skip(self.top).take(shown)) {
+            self.render_line(frame, &lines, *line, MenuLine { area, inner, y, li });
         }
     }
 
-    fn render_head(&mut self, frame: &mut Frame, lines: &[Option<usize>], line_2: Option<usize>, settings: MenuLine) {
-        let MenuLine {
-            area_value,
-            inner,
-            y,
-            li,
-        } = settings;
+    fn render_line(&mut self, frame: &mut Frame, lines: &[Option<usize>], line: Option<usize>, settings: MenuLine) {
+        let MenuLine { area, inner, y, li } = settings;
 
-        match line_2 {
-            None => draw_separator(self, frame, lines, area_value, inner, y, li),
+        match line {
+            None => draw_separator(self, frame, lines, area, inner, y, li),
             Some(index) => draw_item(self, frame, inner, y, index),
         }
     }
@@ -357,7 +339,7 @@ fn menu_area<A>(menu: &Menu<A>, place: Place, bounds: Rect, line_count: usize) -
         }
     };
 
-    let width_value = menu
+    let width = menu
         .items
         .iter()
         .map(|it| it.label.width() + right(it) + 9)
@@ -365,19 +347,19 @@ fn menu_area<A>(menu: &Menu<A>, place: Place, bounds: Rect, line_count: usize) -
         .unwrap_or(30)
         .max(menu.title.width() + 6)
         .clamp(30, 72) as u16;
-    let width_2 = width_value.min(bounds.width);
+    let width = width.min(bounds.width);
     let top = u16::from(menu.head.is_some());
     let want = (line_count as u16 + top + 2).min(bounds.height.max(3));
 
-    place_menu(place, bounds, width_2, want)
+    place_menu(place, bounds, width, want)
 }
-fn place_menu(place: Place, bounds: Rect, width_2: u16, want: u16) -> Rect {
+fn place_menu(place: Place, bounds: Rect, width: u16, want: u16) -> Rect {
     match place {
         Place::Beside(parent, y) => {
-            let x = if parent.right() + width_2 <= bounds.right() {
+            let x = if parent.right() + width <= bounds.right() {
                 parent.right()
             } else {
-                bounds.right().saturating_sub(width_2)
+                bounds.right().saturating_sub(width)
             };
 
             let y = y.min(bounds.bottom().saturating_sub(want)).max(bounds.y);
@@ -385,52 +367,47 @@ fn place_menu(place: Place, bounds: Rect, width_2: u16, want: u16) -> Rect {
             Rect {
                 x,
                 y,
-                width: width_2,
+                width,
                 height: want,
             }
         }
         Place::At(anchor) => {
             let up = anchor.y.saturating_sub(bounds.y);
             let down = bounds.bottom().saturating_sub(anchor.bottom());
-            let height_value = want.min(up.max(down)).max(3);
+            let height = want.min(up.max(down)).max(3);
 
             let y = if up >= want || up >= down {
-                anchor.y.saturating_sub(height_value)
+                anchor.y.saturating_sub(height)
             } else {
                 anchor.bottom()
             };
 
-            let x = anchor.x.min(bounds.right().saturating_sub(width_2)).max(bounds.x);
+            let x = anchor.x.min(bounds.right().saturating_sub(width)).max(bounds.x);
 
-            Rect {
-                x,
-                y,
-                width: width_2,
-                height: height_value,
-            }
+            Rect { x, y, width, height }
         }
     }
 }
-fn draw_frame(frame: &mut Frame, area_value: Rect, title: &str) -> Rect {
-    frame.render_widget(Clear, area_value);
+fn draw_frame(frame: &mut Frame, area: Rect, title: &str) -> Rect {
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Block::bordered()
             .border_style(theme::accent())
             .title(Span::styled(format!(" {title} "), theme::accent_bold()))
             .style(theme::text()),
-        area_value,
+        area,
     );
     Rect {
-        x: area_value.x + 1,
-        y: area_value.y + 1,
-        width: area_value.width.saturating_sub(2),
-        height: area_value.height.saturating_sub(2),
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
     }
 }
 fn draw_head(frame: &mut Frame, inner: Rect, head: Option<&str>) {
-    if let Some(height_2) = head {
+    if let Some(title) = head {
         let line = Line::from(Span::styled(
-            format!(" {height_2} "),
+            format!(" {title} "),
             theme::pill().add_modifier(Modifier::BOLD),
         ));
 
@@ -449,7 +426,7 @@ fn draw_separator<A>(
     menu: &Menu<A>,
     frame: &mut Frame,
     lines: &[Option<usize>],
-    area_value: Rect,
+    area: Rect,
     inner: Rect,
     y: u16,
     li: usize,
@@ -471,25 +448,23 @@ fn draw_separator<A>(
 
     let buf = frame.buffer_mut();
 
-    buf[(area_value.x, y)].set_symbol("├").set_style(theme::accent());
+    buf[(area.x, y)].set_symbol("├").set_style(theme::accent());
 
     for x in inner.x..inner.right() {
         buf[(x, y)].set_symbol("─").set_style(theme::line());
     }
 
-    buf[(area_value.right() - 1, y)]
-        .set_symbol("┤")
-        .set_style(theme::accent());
+    buf[(area.right() - 1, y)].set_symbol("┤").set_style(theme::accent());
 
     if !sec.is_empty() {
-        let thread = format!(" {sec} ");
+        let label = format!(" {sec} ");
 
         frame.render_widget(
-            Paragraph::new(Span::styled(thread.clone(), theme::accent_bold())),
+            Paragraph::new(Span::styled(label.clone(), theme::accent_bold())),
             Rect {
                 x: inner.x + 1,
                 y,
-                width: (thread.width() as u16).min(inner.width.saturating_sub(1)),
+                width: (label.width() as u16).min(inner.width.saturating_sub(1)),
                 height: 1,
             },
         );
@@ -544,7 +519,7 @@ fn draw_item<A>(menu: &mut Menu<A>, frame: &mut Frame, inner: Rect, y: u16, inde
 
 #[derive(Clone, Copy)]
 struct MenuLine {
-    area_value: Rect,
+    area: Rect,
     inner: Rect,
     y: u16,
     li: usize,

@@ -9,20 +9,20 @@ use super::{
 pub(crate) fn catalog() -> Vec<Regi> {
     let mut out = Vec::new();
 
-    // k: the phase seed, as before the flat frames went out (the kept ones keep their phase)
-    let mut key = 10u64;
+    // the phase seed, as before the flat frames went out (the kept ones keep their phase)
+    let mut phase_seed = 10u64;
 
     // 3d: 1 per solid and pattern of the regis, the dropped ones out (old 032, 039-044, 051-053)
 
     let count = 0;
 
-    append_original_solids(&mut out, &mut key, count);
+    append_original_solids(&mut out, &mut phase_seed, count);
 
     // new: 2 per angular solid, the sprite patterns spread over them; kept: old 066, 076-080
-    append_new_solids(out, key)
+    append_new_solids(out, phase_seed)
 }
 
-fn append_original_solids(out: &mut Vec<Regi>, key: &mut u64, mut count: usize) {
+fn append_original_solids(out: &mut Vec<Regi>, phase_seed: &mut u64, mut count: usize) {
     for index in 0..SOLIDS.len() * 3 {
         let (si, pi) = (index / 3, index % 3);
         let (solid, pattern) = (SOLIDS[si], PATTERNS[pi]);
@@ -39,7 +39,7 @@ fn append_original_solids(out: &mut Vec<Regi>, key: &mut u64, mut count: usize) 
             continue;
         }
 
-        *key += 1;
+        *phase_seed += 1;
 
         if let ControlFlow::Break(()) = skip_flat_solid(solid) {
             continue;
@@ -52,7 +52,7 @@ fn append_original_solids(out: &mut Vec<Regi>, key: &mut u64, mut count: usize) 
             pattern,
             talk: TALKS[(idx * 5 + si) % 8],
             blink: idx % 3,
-            phase: hash(*key - 1) * 10.0,
+            phase: hash(*phase_seed - 1) * 10.0,
             yaw: YAWS[(si + pi) % 4],
             star: false,
         });
@@ -67,7 +67,7 @@ fn skip_flat_solid(solid: Solid) -> ControlFlow<()> {
     ControlFlow::Continue(())
 }
 
-fn append_new_solids(mut out: Vec<Regi>, mut key: u64) -> Vec<Regi> {
+fn append_new_solids(mut out: Vec<Regi>, mut phase_seed: u64) -> Vec<Regi> {
     for index in 0..NEW_SOLIDS.len() * 2 {
         let (si, j) = (index / 2, index % 2);
         let solid = NEW_SOLIDS[si];
@@ -85,11 +85,11 @@ fn append_new_solids(mut out: Vec<Regi>, mut key: u64) -> Vec<Regi> {
             pattern,
             talk: TALKS[(idx * 3 + j) % 8],
             blink: idx % 3,
-            phase: hash(key) * 10.0,
+            phase: hash(phase_seed) * 10.0,
             yaw: YAWS[(si + j) % 4],
             star: false,
         });
-        key += 1;
+        phase_seed += 1;
     }
 
     // 3rd round: a star, an ellipse, a wide trapezoid
@@ -106,11 +106,11 @@ fn append_new_solids(mut out: Vec<Regi>, mut key: u64) -> Vec<Regi> {
             pattern,
             talk,
             blink: si % 3,
-            phase: hash(key) * 10.0,
+            phase: hash(phase_seed) * 10.0,
             yaw,
             star: false,
         });
-        key += 1;
+        phase_seed += 1;
     }
 
     out

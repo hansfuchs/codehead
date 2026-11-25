@@ -33,25 +33,21 @@ impl App {
             ));
         }
 
-        let path_value = agents::parse_profile(agent.prompt.as_deref(), None);
+        let profile = agents::parse_profile(agent.prompt.as_deref(), None);
 
-        for (head, body) in [("voice", &path_value.voice), ("system prompt", &path_value.prompt)] {
-            agent_preview_body(&mut out, head, body);
+        for (head, body) in [("voice", &profile.voice), ("system prompt", &profile.prompt)] {
+            push_profile_text(&mut out, head, body);
         }
 
         out.push(Line::raw(""));
-        out.extend(
-            extra
-                .into_iter()
-                .map(|line_value| Line::styled(line_value, theme::muted())),
-        );
+        out.extend(extra.into_iter().map(|line| Line::styled(line, theme::muted())));
         let uses = self.uses(agent);
 
         out.push(Line::raw(""));
         out.push(Line::styled(format!("threads: {}", uses.len()), theme::bold()));
 
-        for user in uses.iter().take(30) {
-            agent_preview_live(&mut out, user);
+        for thread_use in uses.iter().take(30) {
+            push_thread_use(&mut out, thread_use);
         }
 
         out
@@ -82,7 +78,7 @@ impl App {
     }
 
     pub(super) fn draw_agent_grid(&mut self, frame: &mut Frame, area: Rect, task: bool) {
-        let group = self.agent_grid(area.width);
+        let grid = self.agent_grid(area.width);
 
         let mut cursor = if task {
             self.compose.pick_cursor
@@ -96,8 +92,8 @@ impl App {
             self.agent_list.aoffset
         };
 
-        if !group.places.iter().any(|&(i, _, _)| i == cursor) {
-            cursor = group.places.first().map_or(0, |path| path.0);
+        if !grid.places.iter().any(|&(i, _, _)| i == cursor) {
+            cursor = grid.places.first().map_or(0, |place| place.0);
         }
 
         if task {
@@ -106,11 +102,11 @@ impl App {
             self.agent_list.acursor = cursor;
         }
 
-        if let Some(&(_, _, top)) = group.places.iter().find(|&&(i, _, _)| i == cursor) {
-            offset = crate::ui::cards::scroll(&group, top, CARD_H, offset, area.height as usize);
+        if let Some(&(_, _, top)) = grid.places.iter().find(|&&(i, _, _)| i == cursor) {
+            offset = crate::ui::cards::scroll(&grid, top, CARD_H, offset, area.height as usize);
         }
 
-        offset = offset.min(group.height.saturating_sub(area.height as usize));
+        offset = offset.min(grid.height.saturating_sub(area.height as usize));
 
         if task {
             self.compose.pick_offset = offset;
@@ -125,14 +121,14 @@ impl App {
                 !self.agent_list.afilter_editing
             };
 
-        let cards = crate::ui::cards::draw_grid(frame, area, &group, CARD_H, offset, |file, result, i| {
-            draw_agent_grid_agent(self, task, cursor, focused, file, result, i);
+        let cards = crate::ui::cards::draw_grid(frame, area, &grid, CARD_H, offset, |frame, rect, i| {
+            draw_grid_card(self, task, cursor, focused, frame, rect, i);
         });
 
-        let places = group.places;
+        let places = grid.places;
 
         if places.is_empty() {
-            draw_agent_grid_msg(self, frame, area);
+            draw_agent_grid_empty(self, frame, area);
         }
 
         if task {
@@ -151,9 +147,9 @@ impl App {
             .agent_list
             .usage
             .as_ref()
-            .and_then(|user| user.get(&agent.name))
+            .and_then(|usage| usage.get(&agent.name))
             .map_or(&[], Vec::as_slice);
-        let live = uses.iter().filter(|user_value| !user_value.live.is_empty()).count();
+        let live = uses.iter().filter(|thread_use| !thread_use.live.is_empty()).count();
 
         let threads = if live > 0 {
             format!("{} threads · {live} live", uses.len())
@@ -179,7 +175,7 @@ impl App {
     }
 }
 
-fn agent_preview_body(out: &mut Vec<Line<'static>>, head: &str, body: &str) {
+fn push_profile_text(out: &mut Vec<Line<'static>>, head: &str, body: &str) {
     out.push(Line::raw(""));
     out.push(Line::styled(head.to_string(), theme::bold()));
 
@@ -190,22 +186,22 @@ fn agent_preview_body(out: &mut Vec<Line<'static>>, head: &str, body: &str) {
     out.extend(body.lines().map(|line| Line::raw(format!("  {line}"))));
 }
 
-fn agent_preview_live(out: &mut Vec<Line<'static>>, user: &agents::Use) {
-    let live = if user.live.is_empty() {
+fn push_thread_use(out: &mut Vec<Line<'static>>, thread_use: &agents::Use) {
+    let live = if thread_use.live.is_empty() {
         Span::raw("")
     } else {
         Span::styled(" live", theme::bold().fg(theme::pal().progress()))
     };
 
     out.push(Line::from(vec![
-        Span::raw(format!("  {}", user.title)),
+        Span::raw(format!("  {}", thread_use.title)),
         live,
-        Span::styled(format!(" {}", user.state), theme::muted()),
+        Span::styled(format!(" {}", thread_use.state), theme::muted()),
     ]));
 }
 
 fn draw_agent_profile(
-    app_state: &mut App,
+    app: &mut App,
     agent: &Agent,
     kv: impl Fn(&str, String) -> Line<'static>,
     out: &mut Vec<Line<'static>>,
@@ -214,36 +210,36 @@ fn draw_agent_profile(
         Line::raw(""),
         kv("harness", agent.harness_model()),
         kv("model", agents::model_of(agent)),
-        kv("effort", format!("{} (global)", app_state.agent_list.effort)),
+        kv("effort", format!("{} (global)", app.agent_list.effort)),
         kv("mode", agent.mode.clone()),
         kv("color", agent.color.clone().unwrap_or_else(|| "-".into())),
         kv("style", {
-            let path = agents::parse_profile(agent.prompt.as_deref(), None);
+            let profile = agents::parse_profile(agent.prompt.as_deref(), None);
 
-            match path
+            match profile
                 .style
                 .as_deref()
-                .and_then(|id| app_state.agent_list.styles.iter().find(|text| text.id == id))
+                .and_then(|id| app.agent_list.styles.iter().find(|style| style.id == id))
             {
-                Some(text_value) => text_value.name.clone(),
+                Some(style) => style.name.clone(),
                 None if agent.prompt.as_deref().is_some_and(agents::written_by_us) => "none".into(),
                 None => format!(
                     "{} (global)",
-                    app_state.agent_list.global_style.clone().unwrap_or_else(|| "-".into())
+                    app.agent_list.global_style.clone().unwrap_or_else(|| "-".into())
                 ),
             }
         }),
         kv(
             "seen",
-            agent.last_seen.map_or("never".into(), |thread| {
-                crate::domain::notes::ago(std::time::UNIX_EPOCH + Duration::from_secs(thread.max(0) as u64))
+            agent.last_seen.map_or("never".into(), |seen| {
+                crate::domain::notes::ago(std::time::UNIX_EPOCH + Duration::from_secs(seen.max(0) as u64))
             }),
         ),
     ]);
 }
 
-fn draw_agent_grid_msg(app_state: &mut App, frame: &mut Frame<'_>, area: Rect) {
-    let msg = if app_state.agent_list.agents.is_empty() {
+fn draw_agent_grid_empty(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
+    let msg = if app.agent_list.agents.is_empty() {
         &format!("0 agents. {} → n: new agent", crate::infra::config::menu_key().label)
     } else {
         "0 agents match the filter"
@@ -252,20 +248,20 @@ fn draw_agent_grid_msg(app_state: &mut App, frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Paragraph::new(Line::styled(msg, theme::muted())), area);
 }
 
-fn draw_agent_grid_agent(
-    app_state: &mut App,
+fn draw_grid_card(
+    app: &mut App,
     task: bool,
     cursor: usize,
     focused: bool,
-    file: &mut Frame<'_>,
-    result: Rect,
+    frame: &mut Frame<'_>,
+    area: Rect,
     i: usize,
 ) {
-    let agent = &app_state.agent_list.agents[i];
+    let agent = &app.agent_list.agents[i];
 
     if task {
-        app_state.draw_card(file, result, agent, focused && i == cursor);
+        app.draw_card(frame, area, agent, focused && i == cursor);
     } else {
-        app_state.draw_agent_card(file, result, agent, focused && i == cursor);
+        app.draw_agent_card(frame, area, agent, focused && i == cursor);
     }
 }

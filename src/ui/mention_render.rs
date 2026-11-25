@@ -5,40 +5,40 @@ use super::{
 impl Mention {
     /// Dropdown right above the `@` of TA (TA rendered this frame), inside BOUNDS. Below it when 0
     /// room above. Replace mode: the 2nd dropdown beside it.
-    pub(crate) fn render(&mut self, frame_value: &mut Frame, ta: &TextArea, agents: &[Agent], bounds: Rect) {
+    pub(crate) fn render(&mut self, frame: &mut Frame, ta: &TextArea, agents: &[Agent], bounds: Rect) {
         self.rows.clear();
         self.sync(ta);
 
-        let Some((at, query_value)) = self.query(ta) else {
+        let Some((at, query)) = self.query(ta) else {
             return;
         };
 
-        let groups = visible(agents, &query_value);
-        let message = order(&groups);
+        let groups = visible(agents, &query);
+        let shown = order(&groups);
 
-        if message.is_empty() {
+        if shown.is_empty() {
             return;
         }
 
-        let Some(path) = ta.screen_pos(at) else { return };
+        let Some(cursor_pos) = ta.screen_pos(at) else { return };
 
-        self.cursor = self.cursor.min(message.len() - 1);
-        let cur = message[self.cursor];
+        self.cursor = self.cursor.min(shown.len() - 1);
+        let cur = shown[self.cursor];
 
-        let group = mention_grid(self, &groups, agents);
+        let grid = mention_grid(self, &groups, agents);
         let toggle = !self.replaceable.is_empty();
-        let width_value = (group.card_width + 3).max(if toggle { 22 } else { 16 });
+        let width = (grid.card_width + 3).max(if toggle { 22 } else { 16 });
 
         // as tall as the cards need, cut to the room of the screen
         let Some(area) = dropdown::place_max(
             Rect {
-                x: path.x,
-                y: path.y,
+                x: cursor_pos.x,
+                y: cursor_pos.y,
                 width: 1,
                 height: 1,
             },
-            width_value,
-            group.height,
+            width,
+            grid.height,
             usize::from(bounds.height),
             bounds,
             true,
@@ -46,18 +46,18 @@ impl Mention {
             return;
         };
 
-        let card = draw_cards(self, frame_value, agents, &group, cur, area);
+        let card = draw_cards(self, frame, agents, &grid, cur, area);
 
         // add │ replace in the bottom border
         if toggle {
-            render_can(frame_value, agents, cur, area, self.replace, self);
+            render_can(frame, agents, cur, area, self.replace, self);
         }
 
         // the 2nd dropdown: the agents of the thread the current card can replace
-        if let Some(character) = self.replace {
+        if let Some(target) = self.replace {
             draw_replacements(
                 self,
-                frame_value,
+                frame,
                 &MentionFrame {
                     agents,
                     cur,
@@ -65,24 +65,24 @@ impl Mention {
                     bounds,
                     card,
                 },
-                character,
+                target,
             );
         }
     }
 }
 
 fn render_can(
-    frame_value: &mut Frame<'_>,
+    frame: &mut Frame<'_>,
     agents: &[Agent],
     cur: usize,
     area: Rect,
     replace: Option<usize>,
-    widget_state: &mut Mention,
+    mention: &mut Mention,
 ) {
-    let can = !widget_state.targets(&agents[cur].name).is_empty();
+    let can = !mention.targets(&agents[cur].name).is_empty();
 
-    let on = |bytes: bool| {
-        if bytes {
+    let on = |active: bool| {
+        if active {
             theme::pill().add_modifier(Modifier::BOLD)
         } else {
             theme::muted()
@@ -96,7 +96,7 @@ fn render_can(
         Span::styled(" replace ", if can { on(replace.is_some()) } else { theme::line() }),
         Span::styled(" › ", theme::accent()),
     ];
-    let lw = spans.iter().map(|text_value| text_value.content.width()).sum::<usize>() as u16;
+    let lw = spans.iter().map(|span| span.content.width()).sum::<usize>() as u16;
 
     if area.width > lw + 2 {
         let row = Rect {
@@ -106,7 +106,7 @@ fn render_can(
             height: 1,
         };
 
-        frame_value.render_widget(
+        frame.render_widget(
             Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::pal().on_accent)),
             row,
         );
@@ -148,7 +148,7 @@ fn mention_grid(mention: &Mention, groups: &[(String, Vec<usize>)], agents: &[Ag
 
 fn draw_cards(
     mention: &mut Mention,
-    frame_value: &mut Frame,
+    frame: &mut Frame,
     agents: &[Agent],
     group: &cards::Grid,
     cur: usize,
@@ -159,12 +159,12 @@ fn draw_cards(
 
     mention.offset = cards::scroll(group, top, CARD_ROWS, mention.offset, view);
     let off = mention.offset;
-    let (inner, body) = agent_frame(frame_value, area, off, view, group.height, mention.replace.is_none());
+    let (inner, body) = agent_frame(frame, area, off, view, group.height, mention.replace.is_none());
     let replace = mention.replace;
     let mut cur_rect = None;
 
-    let drawn = cards::draw_grid(frame_value, body, group, CARD_ROWS, off, |style_value, rr, i| {
-        let agent_value = &agents[i];
+    let drawn = cards::draw_grid(frame, body, group, CARD_ROWS, off, |frame, rr, i| {
+        let agent = &agents[i];
         let hl = i == cur;
         let card = Rect {
             height: CARD_ROWS,
@@ -173,10 +173,10 @@ fn draw_cards(
         };
 
         draw_mention_card(
-            style_value,
+            frame,
             card,
-            agent_value,
-            &card_text(mention, agent_value),
+            agent,
+            &card_text(mention, agent),
             inner.x,
             hl,
             replace.is_some(),
@@ -201,17 +201,17 @@ fn draw_cards(
     cur_rect
 }
 
-fn draw_replacements(mention: &mut Mention, frame_value: &mut Frame, context: &MentionFrame, character: usize) {
+fn draw_replacements(mention: &mut Mention, frame: &mut Frame, context: &MentionFrame, target: usize) {
     let targets = mention.targets(&context.agents[context.cur].name);
 
     if targets.is_empty() {
         return;
     }
 
-    let character_value = character.min(targets.len() - 1);
+    let target = target.min(targets.len() - 1);
 
-    mention.replace = Some(character_value);
-    let tw = (targets.iter().map(|thread| thread.width()).max().unwrap_or(0) + 6).max(18) as u16;
+    mention.replace = Some(target);
+    let tw = (targets.iter().map(|name| name.width()).max().unwrap_or(0) + 6).max(18) as u16;
     let row_y = context.card.map_or(context.area.y + 1, |cr| cr.y);
 
     let Some(sr) = dropdown::place_beside(context.area, row_y, tw, targets.len(), context.bounds, context.area) else {
@@ -219,9 +219,9 @@ fn draw_replacements(mention: &mut Mention, frame_value: &mut Frame, context: &M
     };
 
     let shown = (sr.height as usize).saturating_sub(2);
-    let soff = dropdown::fit(0, character_value, targets.len(), shown);
+    let soff = dropdown::fit(0, target, targets.len(), shown);
     let sin = dropdown::frame(
-        frame_value,
+        frame,
         sr,
         &format!("{} replaces", context.agents[context.cur].name),
         "",
@@ -232,20 +232,20 @@ fn draw_replacements(mention: &mut Mention, frame_value: &mut Frame, context: &M
         },
     );
 
-    for (i, thread_value) in targets.iter().enumerate().skip(soff).take(shown) {
+    for (i, name) in targets.iter().enumerate().skip(soff).take(shown) {
         let row = Rect {
             y: sin.y + (i - soff) as u16,
             height: 1,
             ..sin
         };
-        let hl = i == character_value;
+        let hl = i == target;
 
         let color = context
             .agents
             .iter()
-            .find(|agent_2| agent_2.name == *thread_value)
-            .map_or(theme::pal().accent, |agent_3| {
-                crate::domain::agents::color(agent_3.color.as_deref())
+            .find(|agent| agent.name == *name)
+            .map_or(theme::pal().accent, |agent| {
+                crate::domain::agents::color(agent.color.as_deref())
             });
 
         let st = if hl {
@@ -260,22 +260,22 @@ fn draw_replacements(mention: &mut Mention, frame_value: &mut Frame, context: &M
             Style::default().fg(color)
         };
 
-        frame_value.render_widget(
+        frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(" ● ", dot),
-                Span::styled(format!("@{thread_value}"), st),
+                Span::styled(format!("@{name}"), st),
             ]))
             .style(st),
             row,
         );
-        mention.rows.push((row, Hit::Target(thread_value.clone())));
+        mention.rows.push((row, Hit::Target(name.clone())));
     }
 }
 
 fn draw_mention_card(
     frame: &mut Frame,
     card: Rect,
-    agent_value: &Agent,
+    agent: &Agent,
     text: &[String; 3],
     border_x: u16,
     hl: bool,
@@ -286,7 +286,7 @@ fn draw_mention_card(
     cards::draw(
         frame,
         card,
-        agent_value,
+        agent,
         text,
         cards::Look {
             cur: hl,
@@ -309,7 +309,7 @@ fn draw_mention_card(
 }
 
 fn agent_frame(
-    frame_value: &mut Frame,
+    frame: &mut Frame,
     area: Rect,
     off: usize,
     view: usize,
@@ -317,7 +317,7 @@ fn agent_frame(
     active: bool,
 ) -> (Rect, Rect) {
     let inner = dropdown::frame(
-        frame_value,
+        frame,
         area,
         "agents",
         "",

@@ -96,17 +96,14 @@ fn error_text(error: &Value) -> String {
 /// The model of a new session R and whether it sets models as config options: `configOptions`
 /// (id `model`, ACP config options) or the older `models.currentModelId`.
 fn session_model(result: &Value) -> (String, bool) {
-    let opt = result["configOptions"].as_array().and_then(|output| {
-        output
+    let model_option = result["configOptions"].as_array().and_then(|options| {
+        options
             .iter()
-            .find(|character| character["id"] == "model" || character["category"] == "model")
+            .find(|option| option["id"] == "model" || option["category"] == "model")
     });
 
-    match opt {
-        Some(output_value) => (
-            output_value["currentValue"].as_str().unwrap_or_default().to_string(),
-            true,
-        ),
+    match model_option {
+        Some(option) => (option["currentValue"].as_str().unwrap_or_default().to_string(), true),
         None => (
             result["models"]["currentModelId"]
                 .as_str()
@@ -119,10 +116,10 @@ fn session_model(result: &Value) -> (String, bool) {
 
 /// `mcpServers`: codehead's own, then the agent's servers the harness can run (HTTP, SSE: its
 /// `mcpCapabilities`); the rest: (server, why).
-fn mcp_servers(text: &Setup, http: bool, sse: bool) -> (Value, Vec<(String, String)>) {
-    let (cmd, args, env) = &text.mcp;
+fn mcp_servers(setup: &Setup, http: bool, sse: bool) -> (Value, Vec<(String, String)>) {
+    let (cmd, args, env) = &setup.mcp;
     let own = json!({"name": "codehead", "command": cmd, "args": args, "env": env.iter().map(|(key, value)| json!({"name": key, "value": value})).collect::<Vec<_>>()});
-    let (more, errors) = super::servers::acp_config(&text.servers, http, sse);
+    let (more, errors) = super::servers::acp_config(&setup.servers, http, sse);
 
     (Value::Array(std::iter::once(own).chain(more).collect()), errors)
 }
@@ -150,11 +147,11 @@ pub(crate) fn tool_of(tc: &Value) -> (String, Value) {
         input = json!({});
     }
 
-    if let Some(output) = input.as_object_mut()
-        && !output.contains_key("description")
+    if let Some(fields) = input.as_object_mut()
+        && !fields.contains_key("description")
         && !title.is_empty()
     {
-        output.insert("description".into(), Value::String(title.clone()));
+        fields.insert("description".into(), Value::String(title.clone()));
     }
 
     let name = if name.is_empty() {
@@ -179,12 +176,12 @@ pub(crate) fn start(
     let conn = Conn(Arc::new(Mutex::new(state(writer, setup, name, tx))));
 
     {
-        let mut text_value = conn.0.lock().expect("fresh lock");
+        let mut state = conn.0.lock().expect("fresh lock");
         let init = json!({"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false},
             "clientInfo": {"name": "codehead", "version": crate::infra::update::VERSION}});
 
-        if let Err(error) = text_value.request("initialize", &init, Pending::Init) {
-            text_value.out(Out::Event(Kind::Error {
+        if let Err(error) = state.request("initialize", &init, Pending::Init) {
+            state.out(Out::Event(Kind::Error {
                 message: format!("acp: {error}"),
             }));
         }
@@ -201,41 +198,41 @@ const SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 impl Conn {
     pub(crate) fn prompt(&self, text: &str) -> Result<(), String> {
-        let mut text_value = self.0.lock().map_err(|error| error.to_string())?;
+        let mut state = self.0.lock().map_err(|error| error.to_string())?;
 
-        text_value.queue.push_back(text.to_string());
-        text_value.pump()
+        state.queue.push_back(text.to_string());
+        state.pump()
     }
 
     /// Answer ask ID with the option OPTION (an option id), else the 1st option of KINDS.
     pub(crate) fn answer(&self, id: &str, option: Option<&str>, kinds: &[&str]) -> Result<(), String> {
-        let mut text = self.0.lock().map_err(|error| error.to_string())?;
-        let (rpc, options) = text.asks.remove(id).ok_or_else(|| format!("no open ask {id}"))?;
+        let mut state = self.0.lock().map_err(|error| error.to_string())?;
+        let (rpc, options) = state.asks.remove(id).ok_or_else(|| format!("no open ask {id}"))?;
 
         let pick = option.map(String::from).or_else(|| permission_option(&options, kinds));
 
         let outcome = match pick {
-            Some(output_2) => json!({"outcome": "selected", "optionId": output_2}),
+            Some(option_id) => json!({"outcome": "selected", "optionId": option_id}),
             None => json!({"outcome": "cancelled"}),
         };
 
-        text.send(&json!({"jsonrpc": "2.0", "id": rpc, "result": {"outcome": outcome}}))
+        state.send(&json!({"jsonrpc": "2.0", "id": rpc, "result": {"outcome": outcome}}))
     }
 
     pub(crate) fn cancel(&self) -> Result<(), String> {
-        let mut text = self.0.lock().map_err(|error| error.to_string())?;
+        let mut state = self.0.lock().map_err(|error| error.to_string())?;
 
         // open asks first: a cancelled prompt answers them with `cancelled`
-        let asks: Vec<(Value, Vec<Value>)> = text.asks.drain().map(|(_, agent)| agent).collect();
+        let asks: Vec<(Value, Vec<Value>)> = state.asks.drain().map(|(_, ask)| ask).collect();
 
         for (rpc, _) in asks {
-            text.send(&json!({"jsonrpc": "2.0", "id": rpc, "result": {"outcome": {"outcome": "cancelled"}}}))?;
+            state.send(&json!({"jsonrpc": "2.0", "id": rpc, "result": {"outcome": {"outcome": "cancelled"}}}))?;
         }
 
-        text.queue.clear();
-        let sid = text.session.clone().unwrap_or_default();
+        state.queue.clear();
+        let sid = state.session.clone().unwrap_or_default();
 
-        text.send(&json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}}))
+        state.send(&json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}}))
     }
 }
 
@@ -255,11 +252,11 @@ struct Capabilities {
     mcp: Value,
 }
 
-fn state(wtx: Sender<String>, setup: Setup, name: String, tx: Sender<(String, Out)>) -> State {
+fn state(stdin: Sender<String>, setup: Setup, name: String, tx: Sender<(String, Out)>) -> State {
     let preamble = Some(setup.preamble.clone());
 
     State {
-        stdin: wtx,
+        stdin,
         next: 0,
         pending: HashMap::new(),
         session: None,
@@ -282,10 +279,10 @@ fn state(wtx: Sender<String>, setup: Setup, name: String, tx: Sender<(String, Ou
 mod transport;
 
 fn permission_option(options: &[Value], kinds: &[&str]) -> Option<String> {
-    kinds.iter().find_map(|key| {
+    kinds.iter().find_map(|kind| {
         options
             .iter()
-            .find(|output| output["kind"] == *key)
-            .and_then(|output_value| output_value["optionId"].as_str().map(String::from))
+            .find(|option| option["kind"] == *kind)
+            .and_then(|option| option["optionId"].as_str().map(String::from))
     })
 }

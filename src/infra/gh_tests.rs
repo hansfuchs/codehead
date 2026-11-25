@@ -62,79 +62,74 @@ fn fixture() -> Value {
 
 #[test]
 fn a_pr_parses() {
-    let path_value = parse_detail(&PrRef::new("a/b", 7), &fixture()).unwrap();
+    let pr = parse_detail(&PrRef::new("a/b", 7), &fixture()).unwrap();
 
     assert_eq!(
-        (
-            path_value.title.as_str(),
-            path_value.body.as_str(),
-            path_value.state,
-            path_value.method.as_str()
-        ),
+        (pr.title.as_str(), pr.body.as_str(), pr.state, pr.method.as_str()),
         ("Add X", "body\nline", State::Open, "SQUASH")
     );
     assert_eq!(
-        path_value.labels,
+        pr.labels,
         vec![Label {
             name: "bug".into(),
             color: "d73a4a".into()
         }]
     );
-    assert_eq!(path_value.requested, vec!["rev"]);
+    assert_eq!(pr.requested, vec!["rev"]);
 
     // the review without a body: 0 thread; the line thread: its reply inside; latest first
-    assert_eq!(path_value.threads.len(), 2);
-    assert_eq!(path_value.threads[0].root.kind, Kind::Line);
-    assert_eq!(path_value.threads[0].replies.len(), 1);
-    assert!(path_value.threads[0].replies[0].mine);
-    assert_eq!(path_value.threads[0].line, Some(4));
-    assert_eq!(path_value.threads[0].path.as_deref(), Some("src/x.rs"));
+    assert_eq!(pr.threads.len(), 2);
+    assert_eq!(pr.threads[0].root.kind, Kind::Line);
+    assert_eq!(pr.threads[0].replies.len(), 1);
+    assert!(pr.threads[0].replies[0].mine);
+    assert_eq!(pr.threads[0].line, Some(4));
+    assert_eq!(pr.threads[0].path.as_deref(), Some("src/x.rs"));
 
     // failed first, pending, passed, skipped
-    let value: Vec<Verdict> = path_value.checks.iter().map(|character| character.verdict).collect();
+    let verdicts: Vec<Verdict> = pr.checks.iter().map(|check| check.verdict).collect();
 
     assert_eq!(
-        value,
+        verdicts,
         vec![Verdict::Fail, Verdict::Pending, Verdict::Pass, Verdict::Skip]
     );
-    assert_eq!(path_value.checks[2].secs, 27);
-    assert_eq!(path_value.check_counts(), (1, 1, 1, 1));
+    assert_eq!(pr.checks[2].secs, 27);
+    assert_eq!(pr.check_counts(), (1, 1, 1, 1));
 
     // a failed check (not required) on a blocked PR → checks failed
-    assert_eq!(path_value.ready(), Ready::ChecksFailed);
+    assert_eq!(pr.ready(), Ready::ChecksFailed);
 }
 
 #[test]
 fn readiness() {
-    let mut path = parse_detail(&PrRef::new("a/b", 7), &fixture()).unwrap();
+    let mut pr = parse_detail(&PrRef::new("a/b", 7), &fixture()).unwrap();
 
-    path.checks.retain(|character| character.verdict == Verdict::Pass);
+    pr.checks.retain(|check| check.verdict == Verdict::Pass);
 
-    assert_eq!(path.ready(), Ready::NeedsApproval);
+    assert_eq!(pr.ready(), Ready::NeedsApproval);
 
-    path.review = "APPROVED".into();
-    path.merge_state = "BEHIND".into();
+    pr.review = "APPROVED".into();
+    pr.merge_state = "BEHIND".into();
 
-    assert_eq!(path.ready(), Ready::Behind);
-    assert!(path.needs_update() && !path.conflicts());
+    assert_eq!(pr.ready(), Ready::Behind);
+    assert!(pr.needs_update() && !pr.conflicts());
 
-    path.merge_state = "CLEAN".into();
+    pr.merge_state = "CLEAN".into();
 
-    assert_eq!(path.ready(), Ready::Mergeable);
+    assert_eq!(pr.ready(), Ready::Mergeable);
 
-    path.mergeable = "CONFLICTING".into();
+    pr.mergeable = "CONFLICTING".into();
 
-    assert_eq!(path.ready(), Ready::Conflicts);
+    assert_eq!(pr.ready(), Ready::Conflicts);
 
-    path.state = State::Draft;
+    pr.state = State::Draft;
 
-    assert_eq!(path.ready(), Ready::Draft);
+    assert_eq!(pr.ready(), Ready::Draft);
 }
 
 #[test]
 fn list_items_parse() {
-    let value = json!({"nodes": [{"number": 3, "title": "t", "state": "MERGED", "isDraft": false, "createdAt": "2026-01-01T00:00:00Z", "repository": {"nameWithOwner": "a/b"}}, {}]});
-    let items = parse_items(&value);
+    let search = json!({"nodes": [{"number": 3, "title": "t", "state": "MERGED", "isDraft": false, "createdAt": "2026-01-01T00:00:00Z", "repository": {"nameWithOwner": "a/b"}}, {}]});
+    let items = parse_items(&search);
 
     assert_eq!(items.len(), 1);
     assert_eq!(
@@ -147,22 +142,18 @@ fn list_items_parse() {
 #[test]
 #[ignore = "requires GitHub authentication and network access"]
 fn live_queries() {
-    let path = fetch(&PrRef::new("cli/cli", 15100)).unwrap();
+    let pr = fetch(&PrRef::new("cli/cli", 15100)).unwrap();
 
     assert!(
-        !path.title.is_empty() && !path.checks.is_empty() && !path.threads.is_empty(),
-        "{path:?}"
+        !pr.title.is_empty() && !pr.checks.is_empty() && !pr.threads.is_empty(),
+        "{pr:?}"
     );
     assert_ne!(mine(1).unwrap(), [] as [crate::infra::gh::Item; 0]);
-    assert!(diff(&path.pr, None).unwrap().starts_with("diff --git"));
-    assert!(
-        diff(&path.pr, Some(&path.commits[0].oid))
-            .unwrap()
-            .contains("diff --git")
-    );
+    assert!(diff(&pr.pr, None).unwrap().starts_with("diff --git"));
+    assert!(diff(&pr.pr, Some(&pr.commits[0].oid)).unwrap().contains("diff --git"));
     assert_ne!(labels("cli/cli").unwrap(), [] as [crate::infra::gh::Label; 0]);
 
-    let _ = for_branch("cli/cli", &path.head).unwrap();
+    let _ = for_branch("cli/cli", &pr.head).unwrap();
 }
 
 #[test]

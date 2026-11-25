@@ -9,7 +9,7 @@ impl App {
         self.agent_list
             .usage
             .as_ref()
-            .and_then(|user| user.get(&agent.name))
+            .and_then(|usage| usage.get(&agent.name))
             .cloned()
             .unwrap_or_default()
     }
@@ -27,28 +27,28 @@ impl App {
     /// card views: 0 (the thread list has them).
     pub(super) fn tvisible(&self) -> Vec<usize> {
         use crate::features::thread_list::View;
-        let wts = self.thread_list.worktrees.as_deref().unwrap_or(&[]);
-        let nw = wts.len();
+        let worktrees = self.thread_list.worktrees.as_deref().unwrap_or(&[]);
+        let nw = worktrees.len();
 
         let items: Vec<usize> = match self.thread_list.tlist.view {
-            View::Worktrees => (0..nw).filter(|&i| wts[i].thread.is_none()).collect(),
+            View::Worktrees => (0..nw).filter(|&i| worktrees[i].thread.is_none()).collect(),
             View::Claude => (nw..nw + self.thread_list.sessions.len()).collect(),
             View::Active | View::Archived => return Vec::new(),
         };
 
         let query = self.thread_list.tlist.query().trim().to_lowercase();
 
-        let name = |i: usize| -> String { tvisible_character(self, wts, nw, i) };
+        let name = |i: usize| -> String { visible_label(self, worktrees, nw, i) };
 
-        let mut value: Vec<(i64, usize)> = items
+        let mut scored: Vec<(i64, usize)> = items
             .into_iter()
             .filter(|&i| self.thread_list.tlist.keeps(self.trepo_of(i)))
-            .filter_map(|i| tvisible_branch(&query, name, i))
+            .filter_map(|i| match_score(&query, name, i))
             .collect();
 
-        value.sort_unstable();
+        scored.sort_unstable();
 
-        value.into_iter().map(|x| x.1).collect()
+        scored.into_iter().map(|x| x.1).collect()
     }
 
     pub(super) fn n_threads(&self) -> usize {
@@ -57,24 +57,20 @@ impl App {
 
     /// The row of a card: the full read of its thread (preview: changes, agents, task), else
     /// the card's data.
-    pub(super) fn wt_of_card(&self, character: &crate::ui::thread_card::Card) -> Worktree {
+    pub(super) fn wt_of_card(&self, card: &crate::ui::thread_card::Card) -> Worktree {
         self.thread_list
             .worktrees
             .iter()
             .flatten()
-            .find(|width| width.thread.as_ref().is_some_and(|thread| thread.id == character.id))
+            .find(|worktree| worktree.thread.as_ref().is_some_and(|thread| thread.id == card.id))
             .cloned()
-            .unwrap_or_else(|| worktree_of(character))
+            .unwrap_or_else(|| worktree_of(card))
     }
 
     /// The thread / worktree under the cursor (cards: the thread list's).
     pub(super) fn current_wt(&self) -> Option<Worktree> {
         if self.thread_list.tlist.view.cards() {
-            return self
-                .thread_list
-                .tlist
-                .current()
-                .map(|character| self.wt_of_card(character));
+            return self.thread_list.tlist.current().map(|card| self.wt_of_card(card));
         }
 
         let i = *self.tvisible().get(self.thread_list.tcursor)?;
@@ -95,13 +91,8 @@ impl App {
         let inside = self.note_list.notes.inside(&path);
 
         if row.is_dir() {
-            toggle_select_branch(self, inside);
-        } else if let Some(i) = self
-            .note_list
-            .selected
-            .iter()
-            .position(|text_value| *text_value == path)
-        {
+            toggle_dir_selection(self, inside);
+        } else if let Some(i) = self.note_list.selected.iter().position(|note| *note == path) {
             self.note_list.selected.remove(i);
         } else {
             self.note_list.selected.push(path);
@@ -117,9 +108,9 @@ impl App {
             _ => None,
         };
 
-        if let Some(thread) = sel {
-            crate::infra::clip::copy(&thread);
-            return self.toast(format!("copied {} chars", thread.chars().count()), false);
+        if let Some(text) = sel {
+            crate::infra::clip::copy(&text);
+            return self.toast(format!("copied {} chars", text.chars().count()), false);
         }
 
         // as in the thread view: the field's text → cleared (ctrl+z brings it back)
@@ -140,7 +131,7 @@ impl App {
         if self
             .overlays
             .last_ctrl_c
-            .is_some_and(|thread_value| thread_value.elapsed() < Duration::from_secs(1))
+            .is_some_and(|last| last.elapsed() < Duration::from_secs(1))
         {
             self.outcome = Some(Outcome::Quit);
             return;
@@ -167,56 +158,52 @@ impl App {
     }
 }
 
-fn tvisible_branch(query: &str, name: impl Fn(usize) -> String, i: usize) -> Option<(i64, usize)> {
+fn match_score(query: &str, name: impl Fn(usize) -> String, i: usize) -> Option<(i64, usize)> {
     if query.is_empty() {
         Some((0, i))
     } else {
-        fuzzy(query, &name(i)).map(|sc| (-sc, i))
+        fuzzy(query, &name(i)).map(|score| (-score, i))
     }
 }
 
-fn tvisible_character(app_state: &App, wts: &[Worktree], nw: usize, i: usize) -> String {
+fn visible_label(app: &App, worktrees: &[Worktree], nw: usize, i: usize) -> String {
     if i < nw {
-        wts[i].label()
+        worktrees[i].label()
     } else {
-        let character = &app_state.thread_list.sessions[i - nw];
+        let session = &app.thread_list.sessions[i - nw];
 
-        format!("{} {}", character.title, character.place())
+        format!("{} {}", session.title, session.place())
     }
 }
 
-fn toggle_select_branch(app_state: &mut App, inside: Vec<String>) {
-    if inside
-        .iter()
-        .all(|path_value| app_state.note_list.selected.contains(path_value))
-    {
-        app_state.note_list.selected.retain(|text| !inside.contains(text));
+fn toggle_dir_selection(app: &mut App, inside: Vec<String>) {
+    if inside.iter().all(|note| app.note_list.selected.contains(note)) {
+        app.note_list.selected.retain(|note| !inside.contains(note));
     } else {
-        toggle_select_branch_body(app_state, inside);
+        select_missing(app, inside);
     }
 }
 
-fn toggle_select_branch_body(app_state: &mut App, inside: Vec<String>) {
-    for path_2 in inside {
-        if !app_state.note_list.selected.contains(&path_2) {
-            app_state.note_list.selected.push(path_2);
+fn select_missing(app: &mut App, inside: Vec<String>) {
+    for note in inside {
+        if !app.note_list.selected.contains(&note) {
+            app.note_list.selected.push(note);
         }
     }
 }
 
-fn confirm_notes_row(app_state: &mut App) {
-    if app_state.note_list.selected.is_empty()
-        && let Some(row) = app_state.current()
+fn confirm_notes_row(app: &mut App) {
+    if app.note_list.selected.is_empty()
+        && let Some(row) = app.current()
     {
-        app_state.note_list.selected = app_state.note_list.notes.inside(row.path());
+        app.note_list.selected = app.note_list.notes.inside(row.path());
     }
 
-    app_state.outcome = Some(Outcome::Copy(
-        app_state
-            .note_list
+    app.outcome = Some(Outcome::Copy(
+        app.note_list
             .selected
             .iter()
-            .map(|path| app_state.note_list.notes.abs(path))
+            .map(|path| app.note_list.notes.abs(path))
             .collect(),
     ));
 }

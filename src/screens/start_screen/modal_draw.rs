@@ -39,7 +39,7 @@ impl App {
         let mut right = Vec::new();
 
         if let Some((msg, _, err)) = &self.overlays.toast {
-            draw_footer_body(&mut right, msg, *err);
+            push_toast(&mut right, msg, *err);
         }
 
         right.push(Span::styled(crate::infra::config::menu_key().label, theme::accent()));
@@ -133,27 +133,27 @@ impl App {
     }
 
     pub(super) fn frame(frame: &mut Frame, area: Rect, title: &str, width: u16, height: u16) -> Rect {
-        let width_value = width.min(area.width.saturating_sub(2));
-        let height_value = height.min(area.height.saturating_sub(2));
-        let area_value = Rect {
-            x: area.x + (area.width - width_value) / 2,
-            y: area.y + (area.height - height_value) / 2,
-            width: width_value,
-            height: height_value,
+        let box_width = width.min(area.width.saturating_sub(2));
+        let box_height = height.min(area.height.saturating_sub(2));
+        let box_area = Rect {
+            x: area.x + (area.width - box_width) / 2,
+            y: area.y + (area.height - box_height) / 2,
+            width: box_width,
+            height: box_height,
         };
 
         // a modal: the screen behind it fades
         theme::dim(frame.buffer_mut(), area);
-        frame.render_widget(Clear, area_value);
+        frame.render_widget(Clear, box_area);
         let block = Block::new()
             .borders(Borders::ALL)
             .border_type(BorderType::Plain)
             .border_style(theme::accent())
             .title(Span::styled(format!(" {title} "), theme::accent_bold()))
             .style(theme::text());
-        let inner = block.inner(area_value);
+        let inner = block.inner(box_area);
 
-        frame.render_widget(block, area_value);
+        frame.render_widget(block, box_area);
 
         Rect {
             x: inner.x + 1,
@@ -176,9 +176,9 @@ impl App {
                 self.draw_form_pick(frame, area);
             }
             Modal::Info { title, lines, scroll } => {
-                let width_value = lines.iter().map(ratatui::prelude::Line::width).max().unwrap_or(20) as u16 + 6;
+                let width = lines.iter().map(ratatui::prelude::Line::width).max().unwrap_or(20) as u16 + 6;
                 let height = lines.len() as u16 + 4;
-                let inner = Self::frame(frame, area, title, width_value.clamp(40, 120), height);
+                let inner = Self::frame(frame, area, title, width.clamp(40, 120), height);
                 let [body, foot] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
 
                 frame.render_widget(Paragraph::new(lines.clone()).scroll((*scroll, 0)), body);
@@ -188,7 +188,7 @@ impl App {
     }
 }
 
-fn draw_footer_body(right: &mut Vec<Span<'_>>, msg: &String, err: bool) {
+fn push_toast(right: &mut Vec<Span<'_>>, msg: &String, err: bool) {
     right.push(Span::styled(
         format!("{msg}   "),
         Style::default().fg(if err {
@@ -199,12 +199,12 @@ fn draw_footer_body(right: &mut Vec<Span<'_>>, msg: &String, err: bool) {
     ));
 }
 
-fn dropdown_footer_hints(app_state: &App) -> Option<&[(&str, &str)]> {
-    match app_state.compose.screen {
-        Screen::Compose if app_state.repository.where_menu.is_some() => {
+fn dropdown_footer_hints(app: &App) -> Option<&[(&str, &str)]> {
+    match app.compose.screen {
+        Screen::Compose if app.repository.where_menu.is_some() => {
             Some(&[("↑↓", "move"), ("type", "filter"), ("enter", "pick"), ("esc", "close")])
         }
-        Screen::Compose if app_state.project_selection.proj_menu.is_some() => Some(&[
+        Screen::Compose if app.project_selection.proj_menu.is_some() => Some(&[
             ("↑↓", "move"),
             ("type", "filter"),
             ("enter", "pick"),
@@ -212,22 +212,22 @@ fn dropdown_footer_hints(app_state: &App) -> Option<&[(&str, &str)]> {
             ("esc", "close"),
         ]),
         Screen::Compose
-            if app_state
+            if app
                 .flow_selection
                 .flow_menu
                 .as_ref()
-                .is_some_and(|message| message.sub.is_some()) =>
+                .is_some_and(|menu| menu.sub.is_some()) =>
         {
             Some(&[("↑↓", "step"), ("enter", "start here"), ("← esc", "flows")])
         }
-        Screen::Compose if app_state.flow_selection.flow_menu.is_some() => Some(&[
+        Screen::Compose if app.flow_selection.flow_menu.is_some() => Some(&[
             ("↑↓", "flow"),
             ("enter →", "its steps"),
             ("a-z", "jump"),
             ("0", "0 flow"),
             ("esc", "close"),
         ]),
-        Screen::Compose if app_state.repository.repo_pick.is_some() => Some(&[
+        Screen::Compose if app.repository.repo_pick.is_some() => Some(&[
             ("↑↓", "dir"),
             ("←→", "out · in"),
             ("type", "filter"),
@@ -235,29 +235,29 @@ fn dropdown_footer_hints(app_state: &App) -> Option<&[(&str, &str)]> {
             ("enter", "pick"),
             ("esc", "close"),
         ]),
-        Screen::Compose if app_state.draft_selection.drafts_menu.is_some() => {
+        Screen::Compose if app.draft_selection.drafts_menu.is_some() => {
             Some(&[("↑↓", "move"), ("enter", "load"), ("d", "delete"), ("esc", "back")])
         }
         _ => None,
     }
 }
 
-fn pick_footer_hints(app_state: &App) -> &[(&str, &str)] {
-    match app_state.compose.screen {
-        Screen::Pick if app_state.thread_list.tlist.filtering => {
+fn pick_footer_hints(app: &App) -> &[(&str, &str)] {
+    match app.compose.screen {
+        Screen::Pick if app.thread_list.tlist.filtering => {
             &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to list")]
         }
-        Screen::Pick if app_state.note_list.filter_editing => {
+        Screen::Pick if app.note_list.filter_editing => {
             &[("type", "filter"), ("↑↓", "move"), ("enter", "done"), ("esc", "clear")]
         }
-        Screen::Pick if app_state.tab == Tab::Notes && app_state.cfg.copy_mode => &[
+        Screen::Pick if app.tab == Tab::Notes && app.cfg.copy_mode => &[
             ("↑↓", "move"),
             ("←→", "fold"),
             ("space", "select"),
             ("enter", "copy"),
             ("esc", "quit"),
         ],
-        Screen::Pick if app_state.tab == Tab::Notes => &[
+        Screen::Pick if app.tab == Tab::Notes => &[
             ("↑↓", "move"),
             ("←→", "fold"),
             ("space", "select"),
@@ -265,7 +265,7 @@ fn pick_footer_hints(app_state: &App) -> &[(&str, &str)] {
             ("esc", "new"),
             ("tab", "back"),
         ],
-        Screen::Pick if app_state.tab == Tab::Threads => &[
+        Screen::Pick if app.tab == Tab::Threads => &[
             ("↑↓", "move"),
             ("space", "select"),
             ("a", "archive"),
@@ -274,10 +274,10 @@ fn pick_footer_hints(app_state: &App) -> &[(&str, &str)] {
             ("enter", "open"),
             ("ctrl+f", "filter"),
         ],
-        Screen::Pick if app_state.tab == Tab::Settings => app_state.settings.as_ref().map_or(&[], |text| text.help()),
-        Screen::Pick if app_state.tab == Tab::Flows => app_state.flows_tab.help(),
-        Screen::Pick if app_state.tab == Tab::Projects => app_state.project_selection.projects_tab.hints(),
-        Screen::Pick if app_state.agent_list.afilter_editing => {
+        Screen::Pick if app.tab == Tab::Settings => app.settings.as_ref().map_or(&[], |settings| settings.help()),
+        Screen::Pick if app.tab == Tab::Flows => app.flows_tab.help(),
+        Screen::Pick if app.tab == Tab::Projects => app.project_selection.projects_tab.hints(),
+        Screen::Pick if app.agent_list.afilter_editing => {
             &[("type", "filter"), ("↑↓", "move"), ("enter / esc", "back to cards")]
         }
         _ => &[
@@ -292,7 +292,7 @@ fn pick_footer_hints(app_state: &App) -> &[(&str, &str)] {
 fn confirm_buttons(frame: &mut Frame<'_>, area: Rect, title: &str, question: &str, yes: bool) -> Vec<(Rect, bool)> {
     let width = (question.width() as u16 + 8).clamp(44, 90);
     let inner = App::frame(frame, area, title, width, 7);
-    let [_, query, _, bytes] = Layout::vertical([
+    let [_, question_row, _, button_row] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -300,14 +300,17 @@ fn confirm_buttons(frame: &mut Frame<'_>, area: Rect, title: &str, question: &st
     ])
     .areas(inner);
 
-    frame.render_widget(Paragraph::new(Line::styled(question, theme::text()).centered()), query);
+    frame.render_widget(
+        Paragraph::new(Line::styled(question, theme::text()).centered()),
+        question_row,
+    );
     let labels = [(true, "  yes (y)  "), (false, "  no (n/esc)  ")];
-    let total: u16 = labels.iter().map(|(_, line)| line.width() as u16).sum::<u16>() + 2;
-    let mut x = bytes.x + bytes.width.saturating_sub(total) / 2;
+    let total: u16 = labels.iter().map(|(_, label)| label.width() as u16).sum::<u16>() + 2;
+    let mut x = button_row.x + button_row.width.saturating_sub(total) / 2;
     let mut buttons = Vec::new();
 
-    for (value, line_value) in labels {
-        let focused = value == yes;
+    for (is_yes, label) in labels {
+        let focused = is_yes == yes;
 
         let style = if focused {
             theme::pill().add_modifier(Modifier::BOLD)
@@ -315,16 +318,16 @@ fn confirm_buttons(frame: &mut Frame<'_>, area: Rect, title: &str, question: &st
             Style::default().bg(theme::pal().surface0).fg(theme::pal().text)
         };
 
-        let area_value = Rect {
+        let button = Rect {
             x,
-            y: bytes.y,
-            width: line_value.width() as u16,
+            y: button_row.y,
+            width: label.width() as u16,
             height: 1,
         };
 
-        frame.render_widget(Paragraph::new(line_value).style(style), area_value);
-        buttons.push((area_value, value));
-        x += area_value.width + 2;
+        frame.render_widget(Paragraph::new(label).style(style), button);
+        buttons.push((button, is_yes));
+        x += button.width + 2;
     }
 
     buttons

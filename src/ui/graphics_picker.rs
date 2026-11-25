@@ -55,11 +55,11 @@ impl Picker {
 #[path = "graphics_picker_tests.rs"]
 mod tests;
 
-fn encode(image: DynamicImage, size: Size, widget_state: &Picker) -> Result<Protocol, ratatui_image::errors::Errors> {
-    match widget_state.protocol {
+fn encode(image: DynamicImage, size: Size, picker: &Picker) -> Result<Protocol, ratatui_image::errors::Errors> {
+    match picker.protocol {
         ProtocolType::Halfblocks => Halfblocks::new(image, size).map(Protocol::Halfblocks),
-        ProtocolType::Iterm2 => Iterm2::new(image, size, widget_state.tmux).map(Protocol::ITerm2),
-        ProtocolType::Sixel => Sixel::new(image, size, widget_state.tmux).map(Protocol::Sixel),
-        ProtocolType::Kitty => Kitty::new(image, size, super::next_id(), widget_state.tmux, false).map(Protocol::Kitty),
+        ProtocolType::Iterm2 => Iterm2::new(image, size, picker.tmux).map(Protocol::ITerm2),
+        ProtocolType::Sixel => Sixel::new(image, size, picker.tmux).map(Protocol::Sixel),
+        ProtocolType::Kitty => Kitty::new(image, size, super::next_id(), picker.tmux, false).map(Protocol::Kitty),
     }
 }

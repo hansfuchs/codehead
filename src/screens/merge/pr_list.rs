@@ -58,12 +58,12 @@ impl Filter {
     /// The state tabs, in order.
     const ALL: [Filter; 4] = [Filter::Open, Filter::Merged, Filter::Closed, Filter::All];
 
-    fn keeps(self, text: State) -> bool {
+    fn keeps(self, state: State) -> bool {
         match self {
             Filter::All => true,
-            Filter::Open => matches!(text, State::Open | State::Draft),
-            Filter::Merged => text == State::Merged,
-            Filter::Closed => text == State::Closed,
+            Filter::Open => matches!(state, State::Open | State::Draft),
+            Filter::Merged => state == State::Merged,
+            Filter::Closed => state == State::Closed,
         }
     }
 
@@ -131,7 +131,7 @@ impl PrList {
             self.entries = cached();
         }
 
-        if self.read.receiver.is_none() && self.read.at.is_none_or(|thread| thread.elapsed() > STALE) {
+        if self.read.receiver.is_none() && self.read.at.is_none_or(|at| at.elapsed() > STALE) {
             self.start();
         }
     }
@@ -152,12 +152,12 @@ impl PrList {
         self.read.receiver = Some(rx);
     }
 
-    /// A finished read applies. True: a redraw is due.
     /// A read is on its way.
     pub(crate) fn reading(&self) -> bool {
         self.read.receiver.is_some()
     }
 
+    /// A finished read applies. True: a redraw is due.
     pub(crate) fn poll(&mut self) -> bool {
         poll_entries(self)
     }
@@ -177,8 +177,8 @@ impl PrList {
         self.tabs.hit(at)
     }
 
-    pub(crate) fn key(&mut self, key_value: KeyEvent) -> Pick {
-        handle_key(self, key_value)
+    pub(crate) fn key(&mut self, key: KeyEvent) -> Pick {
+        handle_key(self, key)
     }
 
     pub(crate) fn mouse(&mut self, event: MouseEvent) -> Pick {
@@ -207,8 +207,8 @@ impl PrList {
     }
 }
 
-fn state_mark(text: State) -> (&'static str, Color) {
-    match text {
+fn state_mark(state: State) -> (&'static str, Color) {
+    match state {
         State::Open => ("●", theme::pal().success()),
         State::Draft => ("◌", theme::pal().subtext0),
         State::Merged => ("◆", theme::pal().merged()),
@@ -232,15 +232,15 @@ fn poll_entries(list: &mut PrList) -> bool {
     list.read.receiver = None;
 
     match result {
-        Ok(entries_value) => {
-            if entries_value != list.entries {
+        Ok(entries) => {
+            if entries != list.entries {
                 list.version += 1;
             }
 
-            list.entries = entries_value;
+            list.entries = entries;
             list.read.error = None;
         }
-        Err(error_3) => list.read.error = Some(error_3),
+        Err(error) => list.read.error = Some(error),
     }
 
     true
@@ -260,25 +260,20 @@ fn layout_rows(list: &PrList) -> (Vec<RowKind>, Vec<usize>) {
         }
     }
 
-    repos.sort_by(|agent, bytes| bytes.1.cmp(&agent.1).then_with(|| agent.0.cmp(&bytes.0)));
+    repos.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
     let mut rows = Vec::new();
     let mut prs = Vec::new();
 
     for (repo, _) in repos {
-        let mut of: Vec<usize> = (0..list.entries.len())
+        let mut repo_prs: Vec<usize> = (0..list.entries.len())
             .filter(|&i| list.entries[i].item.pr.repo == repo && list.filter.keeps(list.entries[i].item.state))
             .collect();
 
-        of.sort_by(|&agent_value, &bytes_value| {
-            list.entries[bytes_value]
-                .item
-                .created
-                .cmp(&list.entries[agent_value].item.created)
-        });
+        repo_prs.sort_by(|&left, &right| list.entries[right].item.created.cmp(&list.entries[left].item.created));
 
-        rows.push(RowKind::Repo(repo, of.len()));
+        rows.push(RowKind::Repo(repo, repo_prs.len()));
 
-        for i in of {
+        for i in repo_prs {
             rows.push(RowKind::Pr(i));
             prs.push(i);
         }
@@ -303,7 +298,10 @@ fn handle_key(list: &mut PrList, key: KeyEvent) -> Pick {
         KeyCode::Home | KeyCode::Char('g') => list.cursor = 0,
         KeyCode::End | KeyCode::Char('G') => list.cursor = count.saturating_sub(1),
         KeyCode::Left | KeyCode::Right => {
-            list.tabs.i = Filter::ALL.iter().position(|file| *file == list.filter).unwrap_or(0);
+            list.tabs.i = Filter::ALL
+                .iter()
+                .position(|filter| *filter == list.filter)
+                .unwrap_or(0);
             list.tabs
                 .step(if key.code == KeyCode::Right { 1 } else { -1 }, Filter::ALL.len());
             list.filter = Filter::ALL[list.tabs.i];
@@ -311,7 +309,7 @@ fn handle_key(list: &mut PrList, key: KeyEvent) -> Pick {
             list.offset = 0;
         }
         KeyCode::Char('r') => {
-            if list.read.receiver.is_some() || list.read.at.is_some_and(|thread| thread.elapsed() < MIN_MANUAL) {
+            if list.read.receiver.is_some() || list.read.at.is_some_and(|at| at.elapsed() < MIN_MANUAL) {
                 return Pick::Toast("pull requests: a read on its way".into());
             }
 

@@ -24,10 +24,10 @@ fn task_reuses_agent_groups_with_selection_and_scroll() {
     app.agent_list.afilter = Some("paimon".into());
     let mut terminal = Terminal::new(TestBackend::new(200, 48)).unwrap();
 
-    terminal.draw(|file| app.draw(file)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
 
     assert_eq!(
-        app.compose.pick_places.iter().map(|path| path.0).collect::<Vec<_>>(),
+        app.compose.pick_places.iter().map(|place| place.0).collect::<Vec<_>>(),
         [4, 2, 3, 1, 0]
     );
     assert_eq!(app.compose.pick_places, app.agent_grid(198).places);
@@ -39,7 +39,7 @@ fn task_reuses_agent_groups_with_selection_and_scroll() {
         .filter(|(i, _, _)| app.agent_list.agents[*i].harness == "claude")
         .collect();
 
-    assert!(claude.iter().all(|path_value| path_value.2 == claude[0].2));
+    assert!(claude.iter().all(|place| place.2 == claude[0].2));
 
     key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
     key(&mut app, KeyCode::Down, KeyModifiers::NONE);
@@ -64,7 +64,7 @@ fn task_reuses_agent_groups_with_selection_and_scroll_verify_narrow(mut app: App
 
     assert_eq!(app.compose.picks, ["zagan", "lilith", "paimon"]);
 
-    terminal.draw(|file_value| app.draw(file_value)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
 
     assert!(app.compose.pick_offset > 0);
     assert!(
@@ -99,9 +99,9 @@ fn task_reuses_agent_groups_with_selection_and_scroll_verify_narrow(mut app: App
     // A narrow terminal creates vertical card rows and retains the cursor.
     let mut narrow = Terminal::new(TestBackend::new(50, 30)).unwrap();
 
-    narrow.draw(|file_2| app.draw(file_2)).unwrap();
+    narrow.draw(|frame| app.draw(frame)).unwrap();
 
-    assert!(app.compose.pick_places.iter().all(|path_2| path_2.1 == 0));
+    assert!(app.compose.pick_places.iter().all(|place| place.1 == 0));
     assert!(
         app.preview
             .regions
@@ -123,7 +123,7 @@ fn task_reuses_agent_groups_with_selection_and_scroll_verify_narrow(mut app: App
     );
 
     app.agent_list.agents.clear();
-    narrow.draw(|file_3| app.draw(file_3)).unwrap();
+    narrow.draw(|frame| app.draw(frame)).unwrap();
 
     assert!(app.compose.pick_places.is_empty() && app.preview.regions.menu_rows.is_empty());
 }
@@ -133,16 +133,16 @@ fn agents_tab_groups_cards_by_harness_filters_and_moves_in_the_grid() {
     let app = test_app();
 
     // 1 draw, 0 tick: the machine's agents never replace the fixture
-    let once = |app_value: &mut App, width: u16, height: u16| {
-        let mut thread = Terminal::new(TestBackend::new(width, height)).unwrap();
+    let once = |app: &mut App, width: u16, height: u16| {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
-        thread.draw(|file| app_value.draw(file)).unwrap();
-        let bytes = thread.backend().buffer().clone();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
 
         (0..height)
             .map(|y| {
                 (0..width)
-                    .map(|x| bytes[(x, y)].symbol())
+                    .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>()
                     .trim_end()
                     .to_string()
@@ -179,9 +179,9 @@ fn agents_tab_groups_cards_by_harness_filters_and_moves_in_the_grid_verify_order
     let order: Vec<(String, Vec<String>)> = app
         .avisible()
         .into_iter()
-        .map(|(height_value, group)| {
+        .map(|(harness, group)| {
             (
-                height_value,
+                harness,
                 group
                     .into_iter()
                     .map(|i| app.agent_list.agents[i].name.clone())
@@ -223,7 +223,7 @@ fn agents_tab_groups_cards_by_harness_filters_and_moves_in_the_grid_verify_name(
     mut app: App,
     once: impl Fn(&mut App, u16, u16) -> String,
 ) {
-    let name = |app_2: &App| app_2.agent_list.agents[app_2.agent_list.acursor].name.clone();
+    let name = |app: &App| app.agent_list.agents[app.agent_list.acursor].name.clone();
 
     app.agent_list.acursor = 4;
 
@@ -259,7 +259,7 @@ fn agents_tab_groups_cards_by_harness_filters_and_moves_in_the_grid_verify_name(
         .aplace
         .iter()
         .filter(|(i, _, _)| app.agent_list.agents[*i].harness == "claude")
-        .map(|path| path.1)
+        .map(|place| place.1)
         .collect();
 
     assert!(claude.iter().all(|&x| x == 0), "{claude:?}");
@@ -273,13 +273,7 @@ fn agents_tab_groups_cards_by_harness_filters_and_moves_in_the_grid_verify_name(
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
     assert!(!app.agent_list.afilter_editing);
-    assert_eq!(
-        app.avisible()
-            .iter()
-            .map(|(_, group_value)| group_value.len())
-            .sum::<usize>(),
-        1
-    );
+    assert_eq!(app.avisible().iter().map(|(_, group)| group.len()).sum::<usize>(), 1);
     assert_eq!(name(&app), "lilith");
 
     let screen = once(&mut app, 120, 30);
@@ -294,10 +288,10 @@ fn agents_tab_groups_cards_by_harness_filters_and_moves_in_the_grid_verify_name(
 #[test]
 fn hover_paints_clickable_items() {
     let mut app = test_app();
-    let mut thread = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
 
-    thread.draw(|file| app.draw(file)).unwrap();
-    let bg = |thread_value: &Terminal<TestBackend>, x: u16, y: u16| thread_value.backend().buffer()[(x, y)].bg;
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let bg = |terminal: &Terminal<TestBackend>, x: u16, y: u16| terminal.backend().buffer()[(x, y)].bg;
     let moved = |x: u16, y: u16| MouseEvent {
         kind: MouseEventKind::Moved,
         column: x,
@@ -311,44 +305,48 @@ fn hover_paints_clickable_items() {
         .regions
         .tabs
         .iter()
-        .find(|(_, thread_2)| *thread_2 == Tab::Threads)
+        .find(|(_, tab)| *tab == Tab::Threads)
         .unwrap()
         .0;
 
     app.mouse(moved(tab.x + 1, tab.y));
-    thread.draw(|file_value| app.draw(file_value)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
 
-    assert_eq!(bg(&thread, tab.x + 1, tab.y), theme::pal().surface1);
+    assert_eq!(bg(&terminal, tab.x + 1, tab.y), theme::pal().surface1);
 
     // the repo row of the task view
-    let width = app.preview.regions.repo_row;
+    let repo_row = app.preview.regions.repo_row;
 
-    app.mouse(moved(width.x + 2, width.y));
-    thread.draw(|file_2| app.draw(file_2)).unwrap();
+    app.mouse(moved(repo_row.x + 2, repo_row.y));
+    terminal.draw(|frame| app.draw(frame)).unwrap();
 
-    assert_eq!(bg(&thread, width.x + 2, width.y), theme::pal().surface1);
-    assert_ne!(bg(&thread, tab.x + 1, tab.y), theme::pal().surface1, "1 item at a time");
+    assert_eq!(bg(&terminal, repo_row.x + 2, repo_row.y), theme::pal().surface1);
+    assert_ne!(
+        bg(&terminal, tab.x + 1, tab.y),
+        theme::pal().surface1,
+        "1 item at a time"
+    );
 
     // agents tab: a card takes the hover, the free room right of it and its heading do not
     app.switch_tab(Tab::Agents);
     app.agent_list.agents.truncate(1);
-    thread.draw(|file_3| app.draw(file_3)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
     let card = app.agent_list.acards[0].0;
 
     app.mouse(moved(card.right() + 1, card.y + 1));
-    thread.draw(|file_4| app.draw(file_4)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
 
-    assert_ne!(bg(&thread, card.right() + 1, card.y + 1), theme::pal().surface1);
+    assert_ne!(bg(&terminal, card.right() + 1, card.y + 1), theme::pal().surface1);
 
     app.mouse(moved(card.x + 1, card.y - 1));
-    thread.draw(|file_5| app.draw(file_5)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
 
-    assert_ne!(bg(&thread, card.x + 1, card.y - 1), theme::pal().surface1);
+    assert_ne!(bg(&terminal, card.x + 1, card.y - 1), theme::pal().surface1);
 
     app.mouse(moved(card.x + 2, card.y + 1));
-    thread.draw(|file_6| app.draw(file_6)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
 
-    assert_eq!(bg(&thread, card.x + 2, card.y + 1), theme::pal().surface1);
+    assert_eq!(bg(&terminal, card.x + 2, card.y + 1), theme::pal().surface1);
 }
 
 #[test]
@@ -356,27 +354,24 @@ fn undo_redo_in_all_fields() {
     let mut app = test_app();
 
     app.compose.field = Field::Title;
-    undo_redo(&mut app, |agent| agent.compose.title.text());
+    undo_redo(&mut app, |app| app.compose.title.text());
     app.compose.field = Field::Prompt;
-    undo_redo(&mut app, |agent_value| agent_value.compose.prompt.text());
+    undo_redo(&mut app, |app| app.compose.prompt.text());
     app.run(Act::NewAgent);
 
     for field in [F_NAME, F_HARNESS, F_VOICE, F_PROMPT] {
-        if let Some(Modal::Agent(file)) = &mut app.overlays.modal {
-            file.field = field;
+        if let Some(Modal::Agent(form)) = &mut app.overlays.modal {
+            form.field = field;
         }
 
-        undo_redo(&mut app, |agent_2| match &agent_2.overlays.modal {
-            Some(Modal::Agent(file_value)) => [
-                &file_value.name,
-                &file_value.harness,
-                &file_value.voice,
-                &file_value.prompt,
-            ][[F_NAME, F_HARNESS, F_VOICE, F_PROMPT]
-                .iter()
-                .position(|x| *x == file_value.field)
-                .unwrap()]
-            .text(),
+        undo_redo(&mut app, |app| match &app.overlays.modal {
+            Some(Modal::Agent(form)) => {
+                [&form.name, &form.harness, &form.voice, &form.prompt][[F_NAME, F_HARNESS, F_VOICE, F_PROMPT]
+                    .iter()
+                    .position(|x| *x == form.field)
+                    .unwrap()]
+                .text()
+            }
             _ => panic!("agent form closed"),
         });
     }
@@ -385,10 +380,10 @@ fn undo_redo_in_all_fields() {
     app.thread_list.worktrees = Some(Vec::new());
     app.switch_tab(Tab::Threads);
     key(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL);
-    undo_redo(&mut app, |agent_3| agent_3.thread_list.tlist.query());
+    undo_redo(&mut app, |app| app.thread_list.tlist.query());
     app.switch_tab(Tab::Notes);
     key(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL);
-    undo_redo(&mut app, |agent_4| agent_4.note_list.filter.clone().unwrap_or_default());
+    undo_redo(&mut app, |app| app.note_list.filter.clone().unwrap_or_default());
 
     assert_eq!(app.note_list.rows.len(), 0, "filter \"hi\" matches 0 notes");
 
@@ -402,14 +397,14 @@ fn agent_form_enter_opens_the_avatar_picker() {
     let mut app = test_app();
 
     app.run(Act::NewAgent);
-    let form = |app_value: &App| match &app_value.overlays.modal {
-        Some(Modal::Agent(file)) => (file.picker.is_some(), file.sprite.avatar),
+    let form = |app: &App| match &app.overlays.modal {
+        Some(Modal::Agent(agent_form)) => (agent_form.picker.is_some(), agent_form.sprite.avatar),
         _ => panic!("agent form closed"),
     };
 
-    if let Some(Modal::Agent(file_value)) = &mut app.overlays.modal {
-        file_value.field = F_SPRITE;
-        file_value.sprite = sprites::Sprite::of(crate::domain::avatar::Avatar::default());
+    if let Some(Modal::Agent(agent_form)) = &mut app.overlays.modal {
+        agent_form.field = F_SPRITE;
+        agent_form.sprite = sprites::Sprite::of(crate::domain::avatar::Avatar::default());
     }
 
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -451,14 +446,14 @@ fn agent_form_arrows_leave_text_boxes() {
     let mut app = test_app();
 
     app.run(Act::NewAgent);
-    let field = |app_value: &App| match &app_value.overlays.modal {
-        Some(Modal::Agent(file)) => file.field,
+    let field = |app: &App| match &app.overlays.modal {
+        Some(Modal::Agent(agent_form)) => agent_form.field,
         _ => usize::MAX,
     };
 
-    if let Some(Modal::Agent(file_value)) = &mut app.overlays.modal {
-        file_value.field = F_VOICE;
-        file_value.voice.set_text("line one\nline two");
+    if let Some(Modal::Agent(agent_form)) = &mut app.overlays.modal {
+        agent_form.field = F_VOICE;
+        agent_form.voice.set_text("line one\nline two");
     }
 
     dump(&mut app, 120, 42);

@@ -20,7 +20,7 @@ pub(super) fn append_actions(overview: &mut OverviewRows<'_>) {
 
     let busy = overview
         .tab
-        .and_then(|thread_4| thread_4.input.busy.as_ref())
+        .and_then(|tab| tab.input.busy.as_ref())
         .and_then(busy_label);
     let btn = MergeBtn::of(overview.pr);
     let buttons = action_buttons(overview, &btn, busy);
@@ -36,31 +36,31 @@ fn append_action_footer(overview: &mut OverviewRows<'_>, edge: Style, mut detail
         .pr
         .reviewers
         .iter()
-        .map(|(line_2, text_4)| {
+        .map(|(reviewer, state)| {
             format!(
-                "{line_2} {}",
-                if text_4 == "APPROVED" {
+                "{reviewer} {}",
+                if state == "APPROVED" {
                     "✓"
-                } else if text_4 == "CHANGES_REQUESTED" {
+                } else if state == "CHANGES_REQUESTED" {
                     "✕"
                 } else {
                     "·"
                 }
             )
         })
-        .chain(overview.pr.requested.iter().map(|result| format!("{result} ◷")))
+        .chain(overview.pr.requested.iter().map(|requested| format!("{requested} ◷")))
         .collect();
 
     if !reviewers.is_empty() {
         detail = format!("{detail} · reviews: {}", reviewers.join(", "));
     }
 
-    let directory = crate::ui::thread_card::fit(&format!("  {detail}"), overview.width.saturating_sub(4));
-    let pad = overview.width.saturating_sub(directory.width() + 4);
+    let fitted = crate::ui::thread_card::fit(&format!("  {detail}"), overview.width.saturating_sub(4));
+    let pad = overview.width.saturating_sub(fitted.width() + 4);
 
     overview.rows.push(Row::new(Line::from(vec![
         Span::styled("│ ", edge),
-        Span::styled(directory, theme::muted()),
+        Span::styled(fitted, theme::muted()),
         Span::raw(" ".repeat(pad)),
         Span::styled(" │", edge),
     ])));
@@ -83,8 +83,8 @@ fn readiness_style(ready: Ready) -> (&'static str, Color) {
 fn is_armed(overview: &OverviewRows<'_>, stop: Stop) -> bool {
     overview
         .tab
-        .and_then(|thread_3| thread_3.input.armed)
-        .is_some_and(|(agent, at)| agent == stop && at.elapsed() < ARM)
+        .and_then(|tab| tab.input.armed)
+        .is_some_and(|(armed, at)| armed == stop && at.elapsed() < ARM)
 }
 
 fn action_buttons(overview: &OverviewRows<'_>, btn: &MergeBtn, busy: Option<&str>) -> Vec<(String, Stop, Style)> {
@@ -110,15 +110,15 @@ fn action_buttons(overview: &OverviewRows<'_>, btn: &MergeBtn, busy: Option<&str
     }
 
     if matches!(overview.pr.state, State::Open | State::Draft) {
-        let (label, character_value) = btn.label(overview.pr);
+        let (label, color) = btn.label(overview.pr);
 
-        let (label, st) = match busy {
-            Some(bytes) => (bytes.to_string(), chip(theme::pal().progress(), true)),
-            None if is_armed(overview, Stop::Merge) => (format!(" ⏎ again:{label}"), chip(character_value, true)),
-            None => (label, chip(character_value, overview.focus == Some(Stop::Merge))),
+        let (label, style) = match busy {
+            Some(busy) => (busy.to_string(), chip(theme::pal().progress(), true)),
+            None if is_armed(overview, Stop::Merge) => (format!(" ⏎ again:{label}"), chip(color, true)),
+            None => (label, chip(color, overview.focus == Some(Stop::Merge))),
         };
 
-        buttons.push((label, Stop::Merge, st));
+        buttons.push((label, Stop::Merge, style));
     }
 
     buttons
@@ -132,9 +132,9 @@ fn append_action_heading(
     color: Color,
     buttons: Vec<(String, Stop, Style)>,
 ) {
-    let bw: usize = buttons.iter().map(|bytes_value| bytes_value.0.width() + 1).sum();
+    let buttons_width: usize = buttons.iter().map(|button| button.0.width() + 1).sum();
     let head = format!("{icon} {title}");
-    let left_w = overview.width.saturating_sub(bw + 4);
+    let left_w = overview.width.saturating_sub(buttons_width + 4);
     let head = crate::ui::thread_card::fit(&head, left_w);
 
     // auto-merge on: next to the state, in the merge color
@@ -143,7 +143,7 @@ fn append_action_heading(
         .auto_merge
         .as_ref()
         .filter(|_| overview.pr.queued.is_none())
-        .map(|message_value| format!(" · auto-merge on ({})", message_value.to_lowercase()))
+        .map(|method| format!(" · auto-merge on ({})", method.to_lowercase()))
         .unwrap_or_default();
     let auto = crate::ui::thread_card::fit(&auto, left_w.saturating_sub(head.width()));
     let mut spans = vec![
@@ -160,17 +160,19 @@ fn append_action_heading(
 
     let used = 2 + head.width() + auto.width();
 
-    spans.push(Span::raw(" ".repeat(overview.width.saturating_sub(used + bw + 1))));
+    spans.push(Span::raw(
+        " ".repeat(overview.width.saturating_sub(used + buttons_width + 1)),
+    ));
     let mut stops = Vec::new();
-    let mut x = overview.width.saturating_sub(bw + 1) as u16;
+    let mut x = overview.width.saturating_sub(buttons_width + 1) as u16;
 
-    for (label, text_3, st) in buttons {
-        let lw = label.width() as u16;
+    for (label, stop, style) in buttons {
+        let label_width = label.width() as u16;
 
-        stops.push((x, lw, text_3));
-        spans.push(Span::styled(label, st));
+        stops.push((x, label_width, stop));
+        spans.push(Span::styled(label, style));
         spans.push(Span::raw(" "));
-        x += lw + 1;
+        x += label_width + 1;
     }
 
     spans.push(Span::styled("│", edge));
@@ -190,19 +192,19 @@ fn action_detail(
 ) -> String {
     let mut detail = detail.to_string();
 
-    if let Some(query) = &overview.pr.queued {
+    if let Some(queue) = &overview.pr.queued {
         let mut parts = Vec::new();
 
-        if query.position > 0 {
-            parts.push(format!("position {}", query.position));
+        if queue.position > 0 {
+            parts.push(format!("position {}", queue.position));
         }
 
-        if !query.state.is_empty() {
-            parts.push(query.state.to_lowercase().replace('_', " "));
+        if !queue.state.is_empty() {
+            parts.push(queue.state.to_lowercase().replace('_', " "));
         }
 
-        if query.eta > 0 {
-            parts.push(format!("merges in ~{}", secs(query.eta)));
+        if queue.eta > 0 {
+            parts.push(format!("merges in ~{}", secs(queue.eta)));
         }
 
         if !parts.is_empty() {
@@ -225,7 +227,7 @@ fn action_detail(
         .pr
         .checks
         .iter()
-        .filter(|character_2| character_2.verdict == Verdict::Fail)
+        .filter(|check| check.verdict == Verdict::Fail)
         .count();
 
     if ready == Ready::Mergeable && failed > 0 {

@@ -46,8 +46,8 @@ pub(crate) fn kill(command: &str) -> usize {
 
     let pids: Vec<i32> = String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter_map(|line_value| {
-            let (pid, cmd) = line_value.trim_start().split_once(' ')?;
+        .filter_map(|line| {
+            let (pid, cmd) = line.trim_start().split_once(' ')?;
             let pid: u32 = pid.parse().ok()?;
 
             // the shell that runs the command, not a `ps` / `grep` that only names it
@@ -61,18 +61,18 @@ pub(crate) fn kill(command: &str) -> usize {
             .args(["-P", &pid.to_string()])
             .stdin(Stdio::null())
             .output()
-            .map(|output_value| {
-                String::from_utf8_lossy(&output_value.stdout)
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
                     .lines()
-                    .filter_map(|line_2| line_2.trim().parse().ok())
+                    .filter_map(|line| line.trim().parse().ok())
                     .collect()
             })
             .unwrap_or_default();
 
         unsafe { libc::kill(pid, libc::SIGTERM) };
 
-        for character in children {
-            unsafe { libc::kill(character, libc::SIGTERM) };
+        for child in children {
+            unsafe { libc::kill(child, libc::SIGTERM) };
         }
     }
 
@@ -92,7 +92,7 @@ pub(crate) fn task_id(output: &Value) -> Option<String> {
 
     let re = RE.get_or_init(|| regex::Regex::new(r"(?:task |<task_id>|background with ID: )([A-Za-z0-9_-]+)").unwrap());
 
-    re.captures(output.as_str()?).map(|character| character[1].to_string())
+    re.captures(output.as_str()?).map(|captures| captures[1].to_string())
 }
 
 pub(crate) fn parse(rows: &[Value], now: u64) -> Vec<Watch> {
@@ -104,14 +104,14 @@ pub(crate) fn parse(rows: &[Value], now: u64) -> Vec<Watch> {
 
     let mut watches: Vec<_> = watches.into_values().collect();
 
-    watches.sort_by(|agent_value, bytes| (&agent_value.agent, &agent_value.id).cmp(&(&bytes.agent, &bytes.id)));
+    watches.sort_by(|left, right| (&left.agent, &left.id).cmp(&(&right.agent, &right.id)));
     watches
 }
 
 fn parse_watch(now: u64, watches: &mut HashMap<String, Watch>, row: &Value) {
-    let character = &row["content"];
-    let input = &character["raw_input"];
-    let name = character["title"].as_str().unwrap_or_default();
+    let content = &row["content"];
+    let input = &content["raw_input"];
+    let name = content["title"].as_str().unwrap_or_default();
     let session = row["session"].as_str().unwrap_or_default();
 
     if name == "TaskStop" {
@@ -131,13 +131,13 @@ fn parse_watch(now: u64, watches: &mut HashMap<String, Watch>, row: &Value) {
     let Some(id) = (if codex {
         input["processId"].as_str().map(str::to_string)
     } else {
-        task_id(&character["raw_output"])
+        task_id(&content["raw_output"])
     }) else {
         return;
     };
 
     let key = format!("{session}:{id}");
-    let status = character["raw_output"]["status"]
+    let status = content["raw_output"]["status"]
         .as_str()
         .or(row["status"].as_str())
         .or(input["status"].as_str())
@@ -151,9 +151,9 @@ fn parse_watch(now: u64, watches: &mut HashMap<String, Watch>, row: &Value) {
     let timeout = input["timeout_ms"]
         .as_u64()
         .or(if monitor { Some(1_800_000) } else { None });
-    let expires = timeout.map(|thread| row["at"].as_u64().unwrap_or(now).saturating_add(thread));
+    let expires = timeout.map(|timeout| row["at"].as_u64().unwrap_or(now).saturating_add(timeout));
 
-    if expires.is_some_and(|error| error <= now) {
+    if expires.is_some_and(|expires| expires <= now) {
         return;
     }
 
@@ -169,7 +169,7 @@ fn parse_watch(now: u64, watches: &mut HashMap<String, Watch>, row: &Value) {
                 .as_str()
                 .unwrap_or_else(|| command.lines().next().unwrap_or("background task"))
                 .chars()
-                .map(description_character)
+                .map(printable_character)
                 .collect(),
             command,
             expires,
@@ -178,12 +178,8 @@ fn parse_watch(now: u64, watches: &mut HashMap<String, Watch>, row: &Value) {
     );
 }
 
-fn description_character(character_value: char) -> char {
-    if character_value.is_control() {
-        ' '
-    } else {
-        character_value
-    }
+fn printable_character(character: char) -> char {
+    if character.is_control() { ' ' } else { character }
 }
 
 fn remove_stopped_task(watches: &mut HashMap<String, Watch>, input: &Value, session: &str) {
@@ -212,7 +208,7 @@ pub(crate) fn completed(path: &str) -> HashSet<String> {
 
     let entry = cache.entry(path.into()).or_default();
 
-    if file.metadata().is_ok_and(|message| message.len() < entry.offset) {
+    if file.metadata().is_ok_and(|meta| meta.len() < entry.offset) {
         *entry = Transcript::default();
     }
 
@@ -249,7 +245,7 @@ fn read_completed_tasks(entry: &mut Transcript, end: usize) {
             _ => None,
         };
 
-        let Some(text) = text.filter(|thread| thread.contains("<task-notification>")) else {
+        let Some(text) = text.filter(|notice| notice.contains("<task-notification>")) else {
             continue;
         };
 
@@ -263,34 +259,34 @@ fn record_completed_task(ended: &mut HashSet<String>, text: &str) {
         .any(|status| text.contains(&format!("<status>{status}</status>")))
         && let Some(id) = text
             .split_once("<task-id>")
-            .and_then(|(_, thread_value)| thread_value.split_once("</task-id>"))
+            .and_then(|(_, rest)| rest.split_once("</task-id>"))
             .map(|(id, _)| id)
     {
         ended.insert(id.into());
     }
 }
 
-/// Watches of THREAD and of its running sub-threads (their agents marked `(sub)`).
+/// Watches of thread ID and of its running sub-threads (their agents marked `(sub)`).
 /// None: a host did not answer in time (busy): its live agents unknown.
-pub(crate) fn load(thread: &str) -> Option<Vec<Watch>> {
-    let Some(thread_value) = crate::engine::store::load(thread) else {
+pub(crate) fn load(id: &str) -> Option<Vec<Watch>> {
+    let Some(thread) = crate::engine::store::load(id) else {
         return Some(Vec::new());
     };
 
-    let mut out = watches_of(&thread_value, &live(&thread_value.id)?);
+    let mut out = watches_of(&thread, &live(&thread.id)?);
 
-    for kid in &thread_value.kids {
-        let Some(key) = crate::engine::store::load(kid) else {
+    for kid in &thread.kids {
+        let Some(sub) = crate::engine::store::load(kid) else {
             continue;
         };
 
-        let mut width = watches_of(&key, &live(&key.id)?);
+        let mut sub_watches = watches_of(&sub, &live(&sub.id)?);
 
-        for x in &mut width {
-            x.agent = format!("{} (sub)", x.agent);
+        for watch in &mut sub_watches {
+            watch.agent = format!("{} (sub)", watch.agent);
         }
 
-        out.extend(width);
+        out.extend(sub_watches);
     }
 
     Some(out)
@@ -298,7 +294,7 @@ pub(crate) fn load(thread: &str) -> Option<Vec<Watch>> {
 
 /// Live agents of thread ID: 0 host → empty; a host with 0 answer in time → None.
 pub(crate) fn live(id: &str) -> Option<Vec<String>> {
-    crate::engine::client::state_known(id).map(|text| text.live)
+    crate::engine::client::state_known(id).map(|state| state.live)
 }
 
 /// Watches of thread ID alone (0 sub-thread), its live agents from its host.
@@ -329,14 +325,14 @@ pub(crate) fn watches_at(thread: &crate::engine::store::Thread, live: &[String],
     let mut rows: Vec<Value> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
 
-    for error in store::events(&thread.id) {
-        let Some(agent) = error.agent.clone().filter(|agent_value| live.contains(agent_value)) else {
+    for event in store::events(&thread.id) {
+        let Some(agent) = event.agent.clone().filter(|name| live.contains(name)) else {
             continue;
         };
 
-        match error.kind {
+        match event.kind {
             Kind::Tool { id, name, input } => {
-                record_monitor_call(&mut rows, &mut at, error.ts, &agent, id, &name, &input);
+                record_monitor_call(&mut rows, &mut at, event.ts, &agent, id, &name, &input);
             }
             Kind::ToolResult { id, output, .. } => {
                 record_monitor_result(&mut rows, &at, &id, output);
@@ -348,23 +344,18 @@ pub(crate) fn watches_at(thread: &crate::engine::store::Thread, live: &[String],
     let mut watches = parse(&rows, crate::engine::now_ms());
 
     let transcript = |agent: &str| -> Option<String> {
-        crate::infra::claude::session_file(root, thread.sessions.get(agent)?)
-            .map(|path_value| path_value.display().to_string())
+        crate::infra::claude::session_file(root, thread.sessions.get(agent)?).map(|path| path.display().to_string())
     };
 
     let ended: HashMap<String, HashSet<String>> = watches
         .iter()
-        .map(|width| width.session.clone())
+        .map(|watch| watch.session.clone())
         .collect::<HashSet<_>>()
         .into_iter()
-        .filter_map(|agent_2| Some((agent_2.clone(), completed(&transcript(&agent_2)?))))
+        .filter_map(|session| Some((session.clone(), completed(&transcript(&session)?))))
         .collect();
 
-    watches.retain(|width_value| {
-        !ended
-            .get(&width_value.session)
-            .is_some_and(|ids| ids.contains(&width_value.id))
-    });
+    watches.retain(|watch| !ended.get(&watch.session).is_some_and(|ids| ids.contains(&watch.id)));
 
     watches
 }

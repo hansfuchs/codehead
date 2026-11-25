@@ -18,17 +18,17 @@ pub(crate) fn alive(id: &str) -> bool {
 
 /// The threads whose host serves: the sockets in DIR (the run dir) that take a connection.
 fn hosts_in(dir: &Path) -> Vec<String> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
 
-    let mut ids: Vec<String> = rd
+    let mut ids: Vec<String> = entries
         .flatten()
-        .filter_map(|error| {
-            error
+        .filter_map(|entry| {
+            entry
                 .file_name()
                 .to_str()
-                .and_then(|count| count.strip_suffix(".sock"))
+                .and_then(|name| name.strip_suffix(".sock"))
                 .map(String::from)
         })
         .filter(|id| UnixStream::connect(dir.join(format!("{id}.sock"))).is_ok())
@@ -66,13 +66,13 @@ fn stop_all_in(dir: &Path, wait: Duration) -> Vec<(String, Option<String>)> {
 
     let until = Instant::now() + wait;
 
-    while out.iter().any(|(id, error_value)| error_value.is_none() && up(id)) && Instant::now() < until {
+    while out.iter().any(|(id, error)| error.is_none() && up(id)) && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    for (id, error_2) in &mut out {
-        if error_2.is_none() && up(id) {
-            *error_2 = Some(format!("still runs after {} s", wait.as_secs()));
+    for (id, error) in &mut out {
+        if error.is_none() && up(id) {
+            *error = Some(format!("still runs after {} s", wait.as_secs()));
         }
     }
 
@@ -101,8 +101,8 @@ pub(crate) fn ensure_with(id: &str, exe: &Path) -> Result<(), String> {
             return Ok(());
         }
 
-        if let Ok(Some(text)) = child.try_wait() {
-            return Err(format!("codehead host exited ({text}). log: {}", log.display()));
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!("codehead host exited ({status}). log: {}", log.display()));
         }
 
         // a host binds its socket in a few ms: short steps, 0 lost frame budget
@@ -140,60 +140,58 @@ fn spawn_host(id: &str, exe: &Path) -> Result<(std::process::Child, std::path::P
         .create(true)
         .append(true)
         .open(&log)
-        .map_err(|error_value| format!("{}: {error_value}", log.display()))?;
-    let mut character = Command::new(exe);
+        .map_err(|error| format!("{}: {error}", log.display()))?;
+    let mut command = Command::new(exe);
 
-    character
+    command
         .args(["host", id])
         .stdin(Stdio::null())
-        .stdout(file.try_clone().map_err(|error_2| error_2.to_string())?)
+        .stdout(file.try_clone().map_err(|error| error.to_string())?)
         .stderr(file);
 
     // a test's host: the test's data and run dirs (0 env var in prod: an agent's own `cargo
     // test` would inherit them and write into the owner's data dir)
     if cfg!(test) {
-        character
+        command
             .env("CODEHEAD_HOME", super::data_dir())
             .env("CODEHEAD_RUN", super::run_dir());
     }
 
     // SAFETY: setsid is async-signal-safe; runs in the child before exec.
     unsafe {
-        character.pre_exec(|| {
+        command.pre_exec(|| {
             libc::setsid();
             Ok(())
         });
     }
 
-    let child = character
-        .spawn()
-        .map_err(|error_3| format!("codehead host: {error_3}"))?;
+    let child = command.spawn().map_err(|error| format!("codehead host: {error}"))?;
 
     Ok((child, log))
 }
 
-/// Command C to the host of thread ID, which is up. Err: 0 host, or the host's error.
-pub(crate) fn send(id: &str, character: &Value) -> Result<Value, String> {
-    send_within(id, character, Duration::from_secs(30))
+/// Command COMMAND to the host of thread ID, which is up. Err: 0 host, or the host's error.
+pub(crate) fn send(id: &str, command: &Value) -> Result<Value, String> {
+    send_within(id, command, Duration::from_secs(30))
 }
 
 /// `send` with a reply deadline of WAIT: a busy host never blocks a list.
-pub(crate) fn send_within(id: &str, character: &Value, wait: Duration) -> Result<Value, String> {
-    send_at(&socket(id), id, character, wait)
+pub(crate) fn send_within(id: &str, command: &Value, wait: Duration) -> Result<Value, String> {
+    send_at(&socket(id), id, command, wait)
 }
 
 /// `send_within` to the host socket SOCK (of thread ID).
-fn send_at(sock: &Path, id: &str, character: &Value, wait: Duration) -> Result<Value, String> {
-    let mut text = UnixStream::connect(sock).map_err(|error| format!("host of {id}: {error}"))?;
+fn send_at(sock: &Path, id: &str, command: &Value, wait: Duration) -> Result<Value, String> {
+    let mut stream = UnixStream::connect(sock).map_err(|error| format!("host of {id}: {error}"))?;
 
-    text.set_read_timeout(Some(wait)).ok();
-    writeln!(text, "{character}").map_err(|error_value| error_value.to_string())?;
+    stream.set_read_timeout(Some(wait)).ok();
+    writeln!(stream, "{command}").map_err(|error| error.to_string())?;
     let mut line = String::new();
 
-    BufReader::new(&text)
+    BufReader::new(&stream)
         .read_line(&mut line)
-        .map_err(|error_2| error_2.to_string())?;
-    let value: Value = serde_json::from_str(&line).map_err(|error_3| format!("host reply: {error_3}"))?;
+        .map_err(|error| error.to_string())?;
+    let value: Value = serde_json::from_str(&line).map_err(|error| format!("host reply: {error}"))?;
 
     if value["ok"].as_bool() == Some(true) {
         Ok(value)
@@ -202,17 +200,17 @@ fn send_at(sock: &Path, id: &str, character: &Value, wait: Duration) -> Result<V
     }
 }
 
-/// Command C to thread ID's host, started first if down.
-pub(crate) fn call(id: &str, character: &Value) -> Result<Value, String> {
+/// Command COMMAND to thread ID's host, started first if down.
+pub(crate) fn call(id: &str, command: &Value) -> Result<Value, String> {
     ensure(id)?;
-    send(id, character)
+    send(id, command)
 }
 
 /// Live and busy agents of thread ID (empty: 0 host).
 pub(crate) fn state(id: &str) -> (Vec<String>, Vec<String>) {
-    let text = state_full(id);
+    let state = state_full(id);
 
-    (text.live, text.busy)
+    (state.live, state.busy)
 }
 
 /// The host's state of thread ID (empty: 0 host).
@@ -231,7 +229,7 @@ pub(crate) fn state_full(id: &str) -> State {
 
 /// `state_full`, None when a host runs but gives 0 answer in time (busy): its state unknown.
 pub(crate) fn state_known(id: &str) -> Option<State> {
-    let value_value = match send_within(id, &serde_json::json!({"op": "ping"}), Duration::from_millis(500)) {
+    let reply = match send_within(id, &serde_json::json!({"op": "ping"}), Duration::from_millis(500)) {
         Ok(value) => value,
         // 0 host: 0 live agent
         Err(_) if !alive(id) => return Some(State::default()),
@@ -239,7 +237,7 @@ pub(crate) fn state_known(id: &str) -> Option<State> {
     };
 
     let names = |key: &str| {
-        value_value[key]
+        reply[key]
             .as_array()
             .into_iter()
             .flatten()
@@ -251,7 +249,7 @@ pub(crate) fn state_known(id: &str) -> Option<State> {
     Some(State {
         live: names("live"),
         busy: names("busy"),
-        usage: serde_json::from_value(value_value["usage"].clone()).unwrap_or_default(),
+        usage: serde_json::from_value(reply["usage"].clone()).unwrap_or_default(),
     })
 }
 

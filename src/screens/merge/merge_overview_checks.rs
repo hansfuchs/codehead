@@ -6,7 +6,7 @@ use super::{
 pub(super) fn append_checks(overview: &mut OverviewRows<'_>) {
     // checks
     let (fail, pass, skip, pending) = overview.pr.check_counts();
-    let open = overview.tab.is_some_and(|thread_5| thread_5.checks_open);
+    let open = overview.tab.is_some_and(|tab| tab.checks_open);
     let mut parts = Vec::new();
 
     if fail > 0 {
@@ -32,23 +32,23 @@ pub(super) fn append_checks(overview: &mut OverviewRows<'_>) {
         highlight(overview.focus, Stop::Checks, theme::bold()),
     )];
 
-    for (i, text_5) in parts.into_iter().enumerate() {
+    for (i, part) in parts.into_iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" · ", theme::muted()));
         }
 
-        spans.push(text_5);
+        spans.push(part);
     }
 
     spans.push(Span::styled(
         if open { "   ←: hide" } else { "   →: show" },
         theme::muted(),
     ));
-    let cw = Line::from(spans.clone()).width() as u16;
+    let width = Line::from(spans.clone()).width() as u16;
 
     overview.rows.push(Row {
         line: Line::from(spans),
-        stops: vec![(0, cw, Stop::Checks)],
+        stops: vec![(0, width, Stop::Checks)],
         input: 0,
     });
 
@@ -67,12 +67,12 @@ fn append_check_groups(overview: &mut OverviewRows<'_>, open: bool) {
             .pr
             .checks
             .iter()
-            .filter(|character_3| character_3.verdict != Verdict::Skip)
+            .filter(|check| check.verdict != Verdict::Skip)
             .collect();
         let mut last: Option<Verdict> = None;
 
-        for (i, character_4) in shown.iter().enumerate() {
-            append_check_row(overview, &shown, &mut last, i, character_4);
+        for (i, check) in shown.iter().enumerate() {
+            append_check_row(overview, &shown, &mut last, i, check);
         }
 
         if !shown.is_empty() {
@@ -91,55 +91,55 @@ fn append_check_row(
     shown: &[&gh::Check],
     last: &mut Option<Verdict>,
     i: usize,
-    character_4: &gh::Check,
+    check: &gh::Check,
 ) {
-    if *last != Some(character_4.verdict) {
-        let count_value = shown.iter().filter(|x| x.verdict == character_4.verdict).count();
+    if *last != Some(check.verdict) {
+        let count = shown.iter().filter(|x| x.verdict == check.verdict).count();
 
-        let label = match character_4.verdict {
-            Verdict::Fail => format!("  {count_value} failed"),
-            Verdict::Pending => format!("  {count_value} running"),
-            _ => format!("  {count_value} successful"),
+        let label = match check.verdict {
+            Verdict::Fail => format!("  {count} failed"),
+            Verdict::Pending => format!("  {count} running"),
+            _ => format!("  {count} successful"),
         };
 
         overview.rows.push(Row::new(Line::styled(label, theme::muted())));
-        *last = Some(character_4.verdict);
+        *last = Some(check.verdict);
     }
 
-    let (mark, mc) = match character_4.verdict {
+    let (mark, color) = match check.verdict {
         Verdict::Fail => ("✕", theme::pal().error()),
         Verdict::Pending => ("◷", theme::pal().progress()),
         _ => ("✓", theme::pal().success()),
     };
 
-    let text_6 = Stop::Check(i);
+    let stop = Stop::Check(i);
 
-    let detail = match character_4.verdict {
-        Verdict::Fail if character_4.secs > 0 => format!("failed after {}", secs(character_4.secs)),
+    let detail = match check.verdict {
+        Verdict::Fail if check.secs > 0 => format!("failed after {}", secs(check.secs)),
         Verdict::Fail => "failed".into(),
         Verdict::Pending => "running".into(),
-        _ if character_4.secs > 0 => format!("successful in {}", secs(character_4.secs)),
-        _ if !character_4.description.is_empty() => character_4.description.clone(),
+        _ if check.secs > 0 => format!("successful in {}", secs(check.secs)),
+        _ if !check.description.is_empty() => check.description.clone(),
         _ => "successful".into(),
     };
 
-    let req = if character_4.required { "  required" } else { "" };
-    let name = check_name(character_4);
-    let room = overview.width.saturating_sub(detail.width() + req.len() + 8);
+    let required = if check.required { "  required" } else { "" };
+    let name = check_name(check);
+    let room = overview.width.saturating_sub(detail.width() + required.len() + 8);
     let line = Line::from(vec![
-        Span::styled(format!("    {mark} "), Style::default().fg(mc)),
+        Span::styled(format!("    {mark} "), Style::default().fg(color)),
         Span::styled(
             crate::ui::thread_card::fit(&name, room),
-            highlight(overview.focus, text_6, theme::text()),
+            highlight(overview.focus, stop, theme::text()),
         ),
         Span::styled(format!("  {detail}"), theme::muted()),
-        Span::styled(req, theme::text()),
+        Span::styled(required, theme::text()),
     ]);
-    let lw = line.width() as u16;
+    let width = line.width() as u16;
 
     overview.rows.push(Row {
         line,
-        stops: vec![(0, lw, text_6)],
+        stops: vec![(0, width, stop)],
         input: 0,
     });
 }

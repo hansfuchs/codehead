@@ -1,8 +1,8 @@
 use super::*;
 use crate::domain;
 
-fn key_event(character: KeyCode) -> KeyEvent {
-    KeyEvent::from(character)
+fn key_event(code: KeyCode) -> KeyEvent {
+    KeyEvent::from(code)
 }
 
 #[test]
@@ -14,69 +14,66 @@ fn new_edit_done_delete() {
         .join(format!("ch-projtab-{}", std::process::id()))
         .join("demo");
     let _ = std::fs::remove_dir_all(projects::dir(&repo));
-    let mut thread = ProjectsTab::default();
+    let mut tab = ProjectsTab::default();
 
-    thread.enter(vec![repo.clone()]);
+    tab.enter(vec![repo.clone()]);
 
-    assert_eq!(thread.items, [] as [domain::projects::Project; 0]);
+    assert_eq!(tab.items, [] as [domain::projects::Project; 0]);
 
-    thread.key(key_event(KeyCode::Char('n')));
+    tab.key(key_event(KeyCode::Char('n')));
 
     assert!(
-        thread.form.as_ref().is_some_and(|file| file.on_title),
+        tab.form.as_ref().is_some_and(|form| form.on_title),
         "n: the form, on the title"
     );
 
     for character in "Bug fixes".chars() {
-        thread.key(key_event(KeyCode::Char(character)));
+        tab.key(key_event(KeyCode::Char(character)));
     }
 
-    thread.key(key_event(KeyCode::Enter));
+    tab.key(key_event(KeyCode::Enter));
 
-    assert!(
-        thread.form.as_ref().is_some_and(|file_value| !file_value.on_title),
-        "enter: the brief"
-    );
+    assert!(tab.form.as_ref().is_some_and(|form| !form.on_title), "enter: the brief");
 
-    for character_value in "ship it".chars() {
-        thread.key(key_event(KeyCode::Char(character_value)));
+    for character in "ship it".chars() {
+        tab.key(key_event(KeyCode::Char(character)));
     }
 
     assert!(matches!(
-        thread.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+        tab.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
         Out::Toast(_)
     ));
-    assert!(thread.form.is_none());
-    assert_eq!(thread.items.len(), 1);
+    assert!(tab.form.is_none());
+    assert_eq!(tab.items.len(), 1);
 
-    let text = std::fs::read_to_string(&thread.items[0].path).unwrap();
+    let text = std::fs::read_to_string(&tab.items[0].path).unwrap();
 
     assert!(
         text.starts_with("---\ntitle: Bug fixes\n---\n\nGoal: ship it\n"),
         "{text}"
     );
 
-    thread.key(key_event(KeyCode::Enter));
+    tab.key(key_event(KeyCode::Enter));
 
     assert_eq!(
-        thread.form.as_ref().map(|file_2| file_2.title.text()),
+        tab.form.as_ref().map(|form| form.title.text()),
         Some("Bug fixes".into())
     );
 
-    thread.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    tab.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
 
-    assert!(thread.form.is_none());
+    assert!(tab.form.is_none());
 
-    thread.key(key_event(KeyCode::Char('x')));
+    tab.key(key_event(KeyCode::Char('x')));
 
-    assert!(thread.items[0].done);
+    assert!(tab.items[0].done);
 
-    thread.key(key_event(KeyCode::Char('d')));
-    thread.key(key_event(KeyCode::Char('d')));
+    tab.key(key_event(KeyCode::Char('d')));
+    tab.key(key_event(KeyCode::Char('d')));
 
-    assert_eq!(thread.items, [] as [domain::projects::Project; 0]);
-    assert_eq!(thread.key(key_event(KeyCode::Up)), Out::None);
-    assert_eq!(thread.key(key_event(KeyCode::Up)), Out::Up);
+    assert_eq!(tab.items, [] as [domain::projects::Project; 0]);
+    assert_eq!(tab.key(key_event(KeyCode::Up)), Out::None);
+    assert_eq!(tab.key(key_event(KeyCode::Up)), Out::Up);
 
     let _ = std::fs::remove_dir_all(projects::dir(&repo));
 }

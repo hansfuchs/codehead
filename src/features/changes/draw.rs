@@ -19,18 +19,18 @@ fn draw_bars(frame: &mut Frame, view: &mut View) {
 
     if view.filter_state.filtering {
         // pill, the input, the hint at the right
-        let result = view.layout.filter_rect;
+        let bar = view.layout.filter_rect;
         let hint = "  enter: 1st hit · esc: clear";
-        let hw = (hint.chars().count() as u16).min(result.width.saturating_sub(16));
+        let hint_width = (hint.chars().count() as u16).min(bar.width.saturating_sub(16));
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(" f ", theme::pill()), Span::raw(" ")])),
-            result,
+            bar,
         );
         let input = Rect {
-            x: result.x + 4,
-            width: result.width.saturating_sub(4 + hw),
-            ..result
+            x: bar.x + 4,
+            width: bar.width.saturating_sub(4 + hint_width),
+            ..bar
         };
 
         view.filter_state.filter_ta.render(frame, input, true);
@@ -38,8 +38,8 @@ fn draw_bars(frame: &mut Frame, view: &mut View) {
             Paragraph::new(Span::styled(hint, theme::muted())),
             Rect {
                 x: input.right(),
-                width: hw,
-                ..result
+                width: hint_width,
+                ..bar
             },
         );
         return;
@@ -74,20 +74,25 @@ fn pinned(top: usize, view: &View) -> Vec<usize> {
         return Vec::new();
     }
 
-    let Some(hi) = view.layout.rows[..top]
+    let Some(head) = view.layout.rows[..top]
         .iter()
-        .rposition(|x| x.head && x.file == row.file)
+        .rposition(|above| above.head && above.file == row.file)
     else {
         return Vec::new();
     };
 
-    let mut value = vec![hi];
+    let mut rows = vec![head];
 
-    if view.layout.rows.get(hi + 1).is_some_and(|x| x.body == Body::Why) {
-        value.push(hi + 1);
+    if view
+        .layout
+        .rows
+        .get(head + 1)
+        .is_some_and(|next| next.body == Body::Why)
+    {
+        rows.push(head + 1);
     }
 
-    value
+    rows
 }
 
 /// Row I of the rows in RECT: its line, the selection's tint, the code background, the cursor.
@@ -108,9 +113,9 @@ fn draw_row(frame: &mut Frame, rect: Rect, i: usize, x0: u16, width: u16, view: 
     }
 
     // inside a box: the code's dark background
-    if view.layout.rows.get(i).is_some_and(|comment| {
+    if view.layout.rows.get(i).is_some_and(|row| {
         matches!(
-            comment.body,
+            row.body,
             Body::Why
                 | Body::Note(_)
                 | Body::Hunk(_)
@@ -150,10 +155,10 @@ fn draw_row(frame: &mut Frame, rect: Rect, i: usize, x0: u16, width: u16, view: 
 
 fn tint_code_background(rect: Rect, buf: &mut ratatui::prelude::Buffer, bg: ratatui::prelude::Color) {
     for x in rect.x + 1..rect.right().saturating_sub(1) {
-        if let Some(character) = buf.cell_mut((x, rect.y))
-            && character.bg == ratatui::style::Color::Reset
+        if let Some(cell) = buf.cell_mut((x, rect.y))
+            && cell.bg == ratatui::style::Color::Reset
         {
-            character.set_bg(bg);
+            cell.set_bg(bg);
         }
     }
 }
@@ -227,11 +232,11 @@ fn draw_review_rows(frame: &mut Frame<'_>, bars: bool, area: Rect, msg: Option<S
 
         // only the rows in view get made: O(rows on screen) per frame
         for y in view.top..(view.top + height).min(view.layout.rows.len()) {
-            let key = y - view.top;
-            let row = pinned.get(key).copied().unwrap_or(y);
+            let offset = y - view.top;
+            let row = pinned.get(offset).copied().unwrap_or(y);
             let rect = Rect {
                 x: area.x,
-                y: area.y + key as u16,
+                y: area.y + offset as u16,
                 width,
                 height: 1,
             };
@@ -291,19 +296,22 @@ fn draw_now_view(view: &mut View, frame: &mut Frame, area: Rect) {
     let panel = view.scm.shown && area.width >= PANEL_MIN;
 
     let (panel_rect, area) = if panel {
-        let pw = (area.width / 4).clamp(30, 46);
+        let panel_width = (area.width / 4).clamp(30, 46);
 
         for y in area.y..area.bottom() {
-            frame.buffer_mut()[(area.x + pw, y)]
+            frame.buffer_mut()[(area.x + panel_width, y)]
                 .set_symbol("│")
                 .set_style(theme::line());
         }
 
         (
-            Rect { width: pw, ..area },
             Rect {
-                x: area.x + pw + 1,
-                width: area.width - pw - 1,
+                width: panel_width,
+                ..area
+            },
+            Rect {
+                x: area.x + panel_width + 1,
+                width: area.width - panel_width - 1,
                 ..area
             },
         )
@@ -314,8 +322,8 @@ fn draw_now_view(view: &mut View, frame: &mut Frame, area: Rect) {
     };
 
     // the panel's commit in the review's place
-    if let Some(path) = view.peek.as_mut() {
-        path.draw_now(frame, area);
+    if let Some(peek) = view.peek.as_mut() {
+        peek.draw_now(frame, area);
 
         if panel {
             view.draw_panel(frame, panel_rect);

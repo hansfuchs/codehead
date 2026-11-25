@@ -64,9 +64,9 @@ pub(crate) fn subscribe() -> Receiver<Topic> {
 }
 
 /// Send T to every subscriber (gone ones drop out).
-pub(crate) fn publish(thread: &Topic) {
-    if let Ok(mut text) = SUBS.lock() {
-        text.retain(|tx| tx.send(thread.clone()).is_ok());
+pub(crate) fn publish(topic: &Topic) {
+    if let Ok(mut subs) = SUBS.lock() {
+        subs.retain(|tx| tx.send(topic.clone()).is_ok());
     }
 }
 
@@ -141,16 +141,16 @@ pub(crate) fn wake() {
 
 /// The fd the UI loop polls beside the tty.
 pub(crate) fn wake_fd() -> Option<RawFd> {
-    pipe().map(|path| path.0)
+    pipe().map(|fds| fds.0)
 }
 
 /// Empty the pipe after a wake.
 pub(crate) fn drain() {
-    let Some((result, _)) = pipe() else { return };
+    let Some((read_fd, _)) = pipe() else { return };
     let mut buf = [0u8; 256];
 
-    // SAFETY: R is the open, non-blocking read end; BUF is live.
-    while unsafe { libc::read(result, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+    // SAFETY: READ_FD is the open, non-blocking read end; BUF is live.
+    while unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
 }
 
 /// Wait up to WAIT for input on FD or a wake. True: FD is readable. A signal (resize): false.
@@ -161,9 +161,9 @@ pub(crate) fn wait(fd: RawFd, wait: std::time::Duration) -> bool {
         revents: 0,
     }];
 
-    if let Some(width) = wake_fd() {
+    if let Some(wake) = wake_fd() {
         fds.push(libc::pollfd {
-            fd: width,
+            fd: wake,
             events: libc::POLLIN,
             revents: 0,
         });
@@ -172,13 +172,13 @@ pub(crate) fn wait(fd: RawFd, wait: std::time::Duration) -> bool {
     let ms = wait.as_millis().min(i32::MAX as u128) as i32;
 
     // SAFETY: FDS is a live array of FDS.len() pollfd.
-    let count = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
 
-    if count <= 0 {
+    if ready <= 0 {
         return false;
     }
 
-    if fds.get(1).is_some_and(|path| path.revents != 0) {
+    if fds.get(1).is_some_and(|wake| wake.revents != 0) {
         drain();
     }
 

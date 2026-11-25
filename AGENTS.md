@@ -34,6 +34,7 @@ Folders:
 - fn: max. 60 lines (blank and comment lines not counted).
 - nesting: max. 3 blocks (clippy `excessive_nesting`; `impl` + `fn` count). Use early `return`, `let … else`, helper fns.
 - names: 0 single-character identifiers except `i`, `j`, `x`, `y` (clippy `min_ident_chars`). `frame`, not `f`. `key`, not `k`.
+- names say what the value holds or the fn does: `started` for an `Instant`, `modifiers` for key modifiers, `red, green, blue`. Never a fixed word per letter (`b` → `bytes` for a branch). 0 `_value` / `_2` suffixes, 0 words twice in a row, 0 key codes in fn names, 0 trailing `_` (tidy `names`).
 - 0 `#[allow]`. 0 `#[expect]`. Fix the code.
 - comments: explain why, never what. Structure goes into names, types and fns, not into `// section` comments.
 - 1 state struct per concern. A struct field group (`// prompt`, `// stream`) → its own struct with its own `key`, `mouse`, `draw`.

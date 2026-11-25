@@ -18,10 +18,10 @@ pub(super) fn open_url(url: &str) {
 /// alternate screen), yazi, the modes on again, a full redraw. Returns yazi's picked paths.
 pub(super) fn run_outside<B: Backend>(term: &mut Terminal<B>, target: &Path) -> Result<Vec<String>, String> {
     if std::env::var_os("PATH")
-        .and_then(|path| {
-            std::env::split_paths(&path)
-                .map(|directory| directory.join("yazi"))
-                .find(|path| path.is_file())
+        .and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join("yazi"))
+                .find(|bin| bin.is_file())
         })
         .is_none()
     {

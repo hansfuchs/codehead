@@ -1,88 +1,88 @@
 use super::*;
 
 fn ta(text: &str) -> TextArea {
-    let mut thread = TextArea::new(false, "");
+    let mut input = TextArea::new(false, "");
 
-    thread.set_text(text);
-    thread
+    input.set_text(text);
+    input
 }
 
 #[test]
 fn image_marker_backspace_is_atomic_after_paste_and_undo_restores_it() {
-    let mut thread = ta("");
+    let mut input = ta("");
 
-    thread.insert("日本 [Image #1] ");
+    input.insert("日本 [Image #1] ");
 
     // the space after the marker: 1 char, the marker stays
-    thread.backspace(false);
+    input.backspace(false);
 
-    assert_eq!(thread.text(), "日本 [Image #1]");
+    assert_eq!(input.text(), "日本 [Image #1]");
 
-    thread.backspace(false);
+    input.backspace(false);
 
-    assert_eq!(thread.text(), "日本 ");
+    assert_eq!(input.text(), "日本 ");
 
-    thread.restore(true);
+    input.restore(true);
 
-    assert_eq!(thread.text(), "日本 [Image #1]");
+    assert_eq!(input.text(), "日本 [Image #1]");
 
-    thread = ta("日本 [Image #1] ");
-    thread.cur = Pos { row: 0, col: 7 };
-    thread.anchor = None;
-    thread.backspace(false);
+    input = ta("日本 [Image #1] ");
+    input.cur = Pos { row: 0, col: 7 };
+    input.anchor = None;
+    input.backspace(false);
 
-    assert_eq!(thread.text(), "日本  ");
+    assert_eq!(input.text(), "日本  ");
 }
 
 #[test]
 fn arrows_and_shift_arrows_select_complete_image_markers() {
-    let mut thread = ta("a [Image #2] z");
+    let mut input = ta("a [Image #2] z");
 
-    thread.cur = Pos { row: 0, col: 2 };
-    thread.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    input.cur = Pos { row: 0, col: 2 };
+    input.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
 
-    assert_eq!(thread.selected_text().as_deref(), Some("[Image #2]"));
+    assert_eq!(input.selected_text().as_deref(), Some("[Image #2]"));
 
-    thread.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+    input.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
 
-    assert_eq!(thread.text(), "a  z");
+    assert_eq!(input.text(), "a  z");
 
-    thread.restore(true);
-    thread.cur = Pos { row: 0, col: 12 };
-    thread.anchor = None;
-    thread.key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+    input.restore(true);
+    input.cur = Pos { row: 0, col: 12 };
+    input.anchor = None;
+    input.key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
 
-    assert_eq!(thread.selected_text().as_deref(), Some("[Image #2]"));
+    assert_eq!(input.selected_text().as_deref(), Some("[Image #2]"));
 }
 
 #[test]
 fn delete_inside_a_marker_removes_the_whole_marker() {
-    let mut thread = ta("[Image #3]");
+    let mut input = ta("[Image #3]");
 
-    thread.cur = Pos { row: 0, col: 4 };
-    thread.delete(false);
+    input.cur = Pos { row: 0, col: 4 };
+    input.delete(false);
 
-    assert_eq!(thread.text(), "");
+    assert_eq!(input.text(), "");
 
-    thread.restore(true);
+    input.restore(true);
 
-    assert_eq!(thread.text(), "[Image #3]");
+    assert_eq!(input.text(), "[Image #3]");
 }
 
 #[test]
 fn arrows_after_an_edit_without_a_render_read_fresh_rows() {
     // 1 event batch: the text shrinks, then ↑ / ↓ / end before the next render
-    let mut thread = ta("first line\nsecond line that is long\nthird");
+    let mut input = ta("first line\nsecond line that is long\nthird");
 
-    thread.render_for_test(12);
-    thread.set_text("x");
+    input.render_for_test(12);
+    input.set_text("x");
 
     for code in [KeyCode::Up, KeyCode::Down, KeyCode::End, KeyCode::Home] {
-        thread.key(KeyEvent::new(code, KeyModifiers::NONE));
+        input.key(KeyEvent::new(code, KeyModifiers::NONE));
     }
 
-    assert_eq!(thread.text(), "x");
-    assert!(thread.cur.row == 0 && thread.cur.col <= 1);
+    assert_eq!(input.text(), "x");
+    assert!(input.cur.row == 0 && input.cur.col <= 1);
 }
 
 #[test]
@@ -99,196 +99,196 @@ fn wrap_breaks_after_spaces() {
 
 #[test]
 fn backspace_removes_whole_selection() {
-    let mut thread = ta("one\ntwo three");
+    let mut input = ta("one\ntwo three");
 
-    thread.anchor = Some(Pos { row: 0, col: 1 });
-    thread.cur = Pos { row: 1, col: 3 };
+    input.anchor = Some(Pos { row: 0, col: 1 });
+    input.cur = Pos { row: 1, col: 3 };
 
-    assert_eq!(thread.selected_text().unwrap(), "ne\ntwo");
+    assert_eq!(input.selected_text().unwrap(), "ne\ntwo");
 
-    thread.backspace(false);
+    input.backspace(false);
 
-    assert_eq!(thread.text(), "o three");
+    assert_eq!(input.text(), "o three");
 
-    thread.restore(true);
+    input.restore(true);
 
-    assert_eq!(thread.text(), "one\ntwo three");
+    assert_eq!(input.text(), "one\ntwo three");
 }
 
 #[test]
 fn cmd_backspace_deletes_to_row_start() {
-    let mut thread = ta("one two\nthree four");
+    let mut input = ta("one two\nthree four");
 
-    thread.render_for_test(40);
-    thread.cur = Pos { row: 1, col: 5 };
-    thread.kill_to_edge(false);
+    input.render_for_test(40);
+    input.cur = Pos { row: 1, col: 5 };
+    input.kill_to_edge(false);
 
-    assert_eq!(thread.text(), "one two\n four");
+    assert_eq!(input.text(), "one two\n four");
 
     // at the row start: joins with the line above
-    thread.kill_to_edge(false);
+    input.kill_to_edge(false);
 
-    assert_eq!(thread.text(), "one two four");
+    assert_eq!(input.text(), "one two four");
 
-    thread.restore(true);
+    input.restore(true);
 
-    assert_eq!(thread.text(), "one two\n four");
+    assert_eq!(input.text(), "one two\n four");
 
-    thread.cur = Pos { row: 0, col: 3 };
-    thread.kill_to_edge(true);
+    input.cur = Pos { row: 0, col: 3 };
+    input.kill_to_edge(true);
 
-    assert_eq!(thread.text(), "one\n four");
+    assert_eq!(input.text(), "one\n four");
 }
 
 #[test]
 fn double_space_never_adds_a_period() {
-    let key = |character: KeyCode| KeyEvent::new(character, KeyModifiers::NONE);
+    let key = |code: KeyCode| KeyEvent::new(code, KeyModifiers::NONE);
     let t0 = Instant::now();
     let ms = |count: u64| t0 + Duration::from_millis(count);
 
     // macOS: 2nd space → `.` + space in 1 burst
-    let mut thread = ta("word");
+    let mut input = ta("word");
 
-    thread.move_end();
-    thread.key_at(key(KeyCode::Char(' ')), ms(0));
-    thread.key_at(key(KeyCode::Char('.')), ms(150));
-    thread.key_at(key(KeyCode::Char(' ')), ms(151));
+    input.move_end();
+    input.key_at(key(KeyCode::Char(' ')), ms(0));
+    input.key_at(key(KeyCode::Char('.')), ms(150));
+    input.key_at(key(KeyCode::Char(' ')), ms(151));
 
-    assert_eq!(thread.text(), "word  ");
+    assert_eq!(input.text(), "word  ");
 
     // terminal variant: ⌫ `.` space
-    let mut thread_value = ta("word");
+    let mut input = ta("word");
 
-    thread_value.move_end();
-    thread_value.key_at(key(KeyCode::Char(' ')), ms(0));
-    thread_value.key_at(key(KeyCode::Backspace), ms(150));
-    thread_value.key_at(key(KeyCode::Char('.')), ms(150));
-    thread_value.key_at(key(KeyCode::Char(' ')), ms(151));
+    input.move_end();
+    input.key_at(key(KeyCode::Char(' ')), ms(0));
+    input.key_at(key(KeyCode::Backspace), ms(150));
+    input.key_at(key(KeyCode::Char('.')), ms(150));
+    input.key_at(key(KeyCode::Char(' ')), ms(151));
 
-    assert_eq!(thread_value.text(), "word  ");
+    assert_eq!(input.text(), "word  ");
 
     // the 2nd space as a key, then `.` + space (2 writes of 1 key press): 2 spaces, not 3
-    let mut thread_2 = ta("word");
+    let mut input = ta("word");
 
-    thread_2.move_end();
-    thread_2.key_at(key(KeyCode::Char(' ')), ms(0));
-    thread_2.key_at(key(KeyCode::Char(' ')), ms(150));
-    thread_2.key_at(key(KeyCode::Char('.')), ms(170));
-    thread_2.key_at(key(KeyCode::Char(' ')), ms(170));
+    input.move_end();
+    input.key_at(key(KeyCode::Char(' ')), ms(0));
+    input.key_at(key(KeyCode::Char(' ')), ms(150));
+    input.key_at(key(KeyCode::Char('.')), ms(170));
+    input.key_at(key(KeyCode::Char(' ')), ms(170));
 
-    assert_eq!(thread_2.text(), "word  ");
+    assert_eq!(input.text(), "word  ");
 
     // `.` + space, then the 2nd space as a key: 2 spaces, not 3
-    let mut thread_3 = ta("word");
+    let mut input = ta("word");
 
-    thread_3.move_end();
-    thread_3.key_at(key(KeyCode::Char(' ')), ms(0));
-    thread_3.key_at(key(KeyCode::Char('.')), ms(150));
-    thread_3.key_at(key(KeyCode::Char(' ')), ms(150));
-    thread_3.key_at(key(KeyCode::Char(' ')), ms(165));
+    input.move_end();
+    input.key_at(key(KeyCode::Char(' ')), ms(0));
+    input.key_at(key(KeyCode::Char('.')), ms(150));
+    input.key_at(key(KeyCode::Char(' ')), ms(150));
+    input.key_at(key(KeyCode::Char(' ')), ms(165));
 
-    assert_eq!(thread_3.text(), "word  ");
+    assert_eq!(input.text(), "word  ");
 
     // a 3rd space typed by the person: kept
-    thread_3.key_at(key(KeyCode::Char(' ')), ms(400));
+    input.key_at(key(KeyCode::Char(' ')), ms(400));
 
-    assert_eq!(thread_3.text(), "word   ");
+    assert_eq!(input.text(), "word   ");
 
     // a person typing " . ": kept
-    let mut thread_4 = ta("a");
+    let mut input = ta("a");
 
-    thread_4.move_end();
-    thread_4.key_at(key(KeyCode::Char(' ')), ms(0));
-    thread_4.key_at(key(KeyCode::Char('.')), ms(120));
-    thread_4.key_at(key(KeyCode::Char(' ')), ms(240));
+    input.move_end();
+    input.key_at(key(KeyCode::Char(' ')), ms(0));
+    input.key_at(key(KeyCode::Char('.')), ms(120));
+    input.key_at(key(KeyCode::Char(' ')), ms(240));
 
-    assert_eq!(thread_4.text(), "a . ");
+    assert_eq!(input.text(), "a . ");
 
     // end of a sentence: kept
-    let mut thread_5 = ta("end");
+    let mut input = ta("end");
 
-    thread_5.move_end();
-    thread_5.key_at(key(KeyCode::Char('.')), ms(0));
-    thread_5.key_at(key(KeyCode::Char(' ')), ms(1));
+    input.move_end();
+    input.key_at(key(KeyCode::Char('.')), ms(0));
+    input.key_at(key(KeyCode::Char(' ')), ms(1));
 
-    assert_eq!(thread_5.text(), "end. ");
+    assert_eq!(input.text(), "end. ");
 }
 
 #[test]
 fn key_stamps_keep_a_slow_handled_burst_together() {
-    let key_value = |character: KeyCode| KeyEvent::new(character, KeyModifiers::NONE);
+    let key = |code: KeyCode| KeyEvent::new(code, KeyModifiers::NONE);
     let t0 = Instant::now();
-    let mut thread_value = ta("word");
+    let mut input = ta("word");
 
-    thread_value.move_end();
+    input.move_end();
     stamp(Some(t0));
-    thread_value.key(key_value(KeyCode::Char(' ')));
+    input.key(key(KeyCode::Char(' ')));
 
     // the burst read at 150ms; handled later (slow dropdown work): the read time counts
     stamp(Some(t0 + Duration::from_millis(150)));
-    thread_value.key(key_value(KeyCode::Char('.')));
+    input.key(key(KeyCode::Char('.')));
     std::thread::sleep(Duration::from_millis(20));
     stamp(Some(t0 + Duration::from_millis(151)));
-    thread_value.key(key_value(KeyCode::Char(' ')));
+    input.key(key(KeyCode::Char(' ')));
     stamp(None);
 
-    assert_eq!(thread_value.text(), "word  ");
+    assert_eq!(input.text(), "word  ");
 }
 
 #[test]
 fn mentions_get_the_agent_color() {
     let marks = vec![("amon".to_string(), Color::Red), ("lilith".to_string(), Color::Blue)];
     let line: Vec<char> = "ask @amon, (@lilith) mail@amon @amonx".chars().collect();
-    let character = mention_colors(&line, &marks);
+    let colors = mention_colors(&line, &marks);
     let colored: String = line
         .iter()
-        .zip(&character)
-        .filter(|(_, character_value)| character_value.is_some())
+        .zip(&colors)
+        .filter(|(_, color)| color.is_some())
         .map(|(ch, _)| *ch)
         .collect();
 
     assert_eq!(colored, "@amon@lilith");
-    assert_eq!(character[4], Some(Color::Red));
-    assert_eq!(character[12], Some(Color::Blue));
+    assert_eq!(colors[4], Some(Color::Red));
+    assert_eq!(colors[12], Some(Color::Blue));
 
     // a replace note: in the color of the new agent, @lilith in its own color
-    let line_value: Vec<char> = "@amon (replaces @lilith) go".chars().collect();
-    let character_2 = mention_colors(&line_value, &marks);
+    let line: Vec<char> = "@amon (replaces @lilith) go".chars().collect();
+    let colors = mention_colors(&line, &marks);
     let want = |i: usize| if (16..23).contains(&i) { Color::Blue } else { Color::Red };
 
     assert!(
-        character_2[..24]
+        colors[..24]
             .iter()
             .enumerate()
             .all(|(i, x)| i == 5 || *x == Some(want(i))),
-        "{character_2:?}"
+        "{colors:?}"
     );
-    assert_eq!(character_2[5], None);
-    assert_eq!(character_2[24..], [None, None, None]);
+    assert_eq!(colors[5], None);
+    assert_eq!(colors[24..], [None, None, None]);
 }
 
 #[test]
 fn mention_query_before_cursor() {
-    let mut thread = ta("hi @am");
+    let mut input = ta("hi @am");
 
-    thread.move_end();
+    input.move_end();
 
-    assert_eq!(thread.mention(), Some((Pos { row: 0, col: 3 }, "am".into())));
+    assert_eq!(input.mention(), Some((Pos { row: 0, col: 3 }, "am".into())));
 
-    thread.replace_to_cursor(Pos { row: 0, col: 3 }, "@amon ");
+    input.replace_to_cursor(Pos { row: 0, col: 3 }, "@amon ");
 
-    assert_eq!(thread.text(), "hi @amon ");
-    assert_eq!(thread.mention(), None);
+    assert_eq!(input.text(), "hi @amon ");
+    assert_eq!(input.mention(), None);
 
-    let mut thread_value = ta("mail@x");
+    let mut input = ta("mail@x");
 
-    thread_value.move_end();
+    input.move_end();
 
-    assert_eq!(thread_value.mention(), None);
+    assert_eq!(input.mention(), None);
 
-    let mut thread_2 = ta("@");
+    let mut input = ta("@");
 
-    thread_2.move_end();
+    input.move_end();
 
-    assert_eq!(thread_2.mention(), Some((Pos { row: 0, col: 0 }, String::new())));
+    assert_eq!(input.mention(), Some((Pos { row: 0, col: 0 }, String::new())));
 }

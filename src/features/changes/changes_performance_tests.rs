@@ -8,50 +8,48 @@ fn perf_big_diff() {
     let lines: usize = files
         .iter()
         .flat_map(|file| &file.hunks)
-        .map(|height| height.lines.len())
+        .map(|hunk| hunk.lines.len())
         .sum();
-    let mut value = view(files);
-    let mut thread = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 50)).unwrap();
-    let t0 = Instant::now();
+    let mut view = view(files);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 50)).unwrap();
+    let started = Instant::now();
 
-    thread
-        .draw(|file_value| value.draw(file_value, file_value.area()))
-        .unwrap();
-    let first = t0.elapsed();
-    let t0 = Instant::now();
+    terminal.draw(|frame| view.draw(frame, frame.area())).unwrap();
+    let first = started.elapsed();
+    let started = Instant::now();
 
     for _ in 0..200 {
-        value.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        thread.draw(|file_2| value.draw(file_2, file_2.area())).unwrap();
+        view.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        terminal.draw(|frame| view.draw(frame, frame.area())).unwrap();
     }
 
-    let nav = t0.elapsed() / 200;
-    let t0 = Instant::now();
+    let nav = started.elapsed() / 200;
+    let started = Instant::now();
 
     for _ in 0..20 {
-        value.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        thread.draw(|file_3| value.draw(file_3, file_3.area())).unwrap();
+        view.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        terminal.draw(|frame| view.draw(frame, frame.area())).unwrap();
     }
 
-    let fold = t0.elapsed() / 20;
-    let t0 = Instant::now();
+    let fold = started.elapsed() / 20;
+    let started = Instant::now();
 
     for _ in 0..20 {
-        value.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
-        thread.draw(|file_4| value.draw(file_4, file_4.area())).unwrap();
+        view.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        terminal.draw(|frame| view.draw(frame, frame.area())).unwrap();
     }
 
-    let reviewed = t0.elapsed() / 20;
-    let t0 = Instant::now();
+    let reviewed = started.elapsed() / 20;
+    let started = Instant::now();
 
-    value.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    view.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
 
-    for character in "compute".chars() {
-        value.key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
-        thread.draw(|file_5| value.draw(file_5, file_5.area())).unwrap();
+    for typed in "compute".chars() {
+        view.key(KeyEvent::new(KeyCode::Char(typed), KeyModifiers::NONE));
+        terminal.draw(|frame| view.draw(frame, frame.area())).unwrap();
     }
 
-    let filter = t0.elapsed() / 7;
+    let filter = started.elapsed() / 7;
     let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-test-0000"));
 
     println!(
@@ -70,10 +68,10 @@ fn changes_live() {
 
         view.changes = load(&dir).unwrap();
         view.loaded = Some(Instant::now());
-        let mut thread = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 40)).unwrap();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 40)).unwrap();
 
-        thread.draw(|file| view.draw(file, file.area())).unwrap();
-        let bytes = thread.backend().buffer().clone();
+        terminal.draw(|frame| view.draw(frame, frame.area())).unwrap();
+        let buffer = terminal.backend().buffer().clone();
 
         println!("--- {width} columns, base {}", view.changes.base);
 
@@ -81,7 +79,7 @@ fn changes_live() {
             println!(
                 "{}",
                 (0..width)
-                    .map(|x| bytes[(x, y)].symbol().to_string())
+                    .map(|x| buffer[(x, y)].symbol().to_string())
                     .collect::<String>()
             );
         }

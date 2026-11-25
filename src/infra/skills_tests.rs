@@ -2,20 +2,20 @@ use super::*;
 
 #[test]
 fn front_matter_values() {
-    let (count, directory) = front_matter(
+    let (name, desc) = front_matter(
         "---\nname: tmux\ndescription: Use the tmux CLI: tabs, panes.\nmetadata:\n  x: \"2\"\n---\nbody\nname: no",
     );
 
     assert_eq!(
-        (count.as_deref(), directory.as_deref()),
+        (name.as_deref(), desc.as_deref()),
         (Some("tmux"), Some("Use the tmux CLI: tabs, panes."))
     );
 
-    let (count_value, directory_value) =
+    let (folded_name, folded_desc) =
         front_matter("---\nname: \"a-b\"\ndescription: >\n  line 1\n  line 2\nother: x\n---\n");
 
     assert_eq!(
-        (count_value.as_deref(), directory_value.as_deref()),
+        (folded_name.as_deref(), folded_desc.as_deref()),
         (Some("a-b"), Some("line 1 line 2"))
     );
     assert_eq!(front_matter("# no front matter"), (None, None));
@@ -77,14 +77,17 @@ fn check_harness_skills(home: &Path, put: impl Fn(&str, &str)) {
 
     std::fs::create_dir_all(&cwd).unwrap();
 
-    let names = |height: &[&str]| {
+    let names = |harnesses: &[&str]| {
         load_in(
             home,
-            &height.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+            &harnesses
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
             &cwd,
         )
         .into_iter()
-        .map(|text_value| format!("{}/{}", text_value.harness, text_value.name))
+        .map(|skill| format!("{}/{}", skill.harness, skill.name))
         .collect::<Vec<_>>()
     };
 

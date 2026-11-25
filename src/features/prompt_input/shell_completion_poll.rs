@@ -20,13 +20,13 @@ fn cache_fish_results(line: String, rows: Vec<(String, String)>, shell: &mut She
 }
 
 fn apply_completion_results(any: &mut bool, shell: &mut ShellComp) {
-    while let Ok(result) = shell.rx.try_recv() {
-        match result {
+    while let Ok(response) = shell.rx.try_recv() {
+        match response {
             Res::Fish(line, rows) => {
                 cache_fish_results(line, rows, shell);
             }
-            Res::History(height) => shell.catalog.history = Some(height),
-            Res::Commands(character) => shell.catalog.commands = Some(character),
+            Res::History(history) => shell.catalog.history = Some(history),
+            Res::Commands(commands) => shell.catalog.commands = Some(commands),
         }
 
         *any = true;

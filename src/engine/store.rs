@@ -152,13 +152,13 @@ impl Thread {
 
     /// The flow of each agent: FLOWS, + an older version's thread flow as the lead's.
     pub(crate) fn flow_map(&self) -> BTreeMap<String, super::flows::run::FlowState> {
-        let mut message = self.flows.clone();
+        let mut flows = self.flows.clone();
 
-        if let (Some(file), Some(line)) = (&self.flow, self.lead()) {
-            message.entry(line.to_string()).or_insert_with(|| file.clone());
+        if let (Some(flow), Some(lead)) = (&self.flow, self.lead()) {
+            flows.entry(lead.to_string()).or_insert_with(|| flow.clone());
         }
 
-        message
+        flows
     }
 
     /// The flow of AGENT.
@@ -173,12 +173,12 @@ impl Thread {
 
         self.set_flow(old, None);
 
-        for agent_value in self.agents.iter_mut().filter(|agent| *agent == old) {
-            *agent_value = new.to_string();
+        for name in self.agents.iter_mut().filter(|agent| *agent == old) {
+            *name = new.to_string();
         }
 
-        if let Some(text) = self.sessions.remove(old) {
-            self.sessions.insert(new.to_string(), text);
+        if let Some(session) = self.sessions.remove(old) {
+            self.sessions.insert(new.to_string(), session);
         }
 
         if flow.is_some() {
@@ -186,16 +186,16 @@ impl Thread {
         }
     }
 
-    /// AGENT's flow is ST (None: 0 flow). The old thread flow moves into FLOWS first.
-    pub(crate) fn set_flow(&mut self, agent: &str, st: Option<super::flows::run::FlowState>) {
+    /// AGENT's flow is FLOW (None: 0 flow). The old thread flow moves into FLOWS first.
+    pub(crate) fn set_flow(&mut self, agent: &str, flow: Option<super::flows::run::FlowState>) {
         self.flows = self.flow_map();
 
-        match st {
-            Some(text) => self.flows.insert(agent.to_string(), text),
+        match flow {
+            Some(flow) => self.flows.insert(agent.to_string(), flow),
             None => self.flows.remove(agent),
         };
 
-        self.flow = self.lead().and_then(|line| self.flows.get(line)).cloned();
+        self.flow = self.lead().and_then(|lead| self.flows.get(lead)).cloned();
     }
 
     /// Where the agents work: the worktree, else the dir.
@@ -205,25 +205,25 @@ impl Thread {
 
     /// Every checkout of the thread: the work dir first, then the added ones (0 dupes).
     pub(crate) fn all_checkouts(&self) -> Vec<Checkout> {
-        let mut value = vec![Checkout {
+        let mut checkouts = vec![Checkout {
             dir: self.work_dir().display().to_string(),
             branch: self.branch.clone(),
         }];
 
-        for character in &self.checkouts {
-            append_checkout(&mut value, character);
+        for checkout in &self.checkouts {
+            append_checkout(&mut checkouts, checkout);
         }
 
-        value
+        checkouts
     }
 
-    /// Add checkout C (a dir the thread has: 0 change). True: added.
-    pub(crate) fn add_checkout(&mut self, character: Checkout) -> bool {
-        if self.all_checkouts().iter().any(|x| x.dir == character.dir) {
+    /// Add checkout CHECKOUT (a dir the thread has: 0 change). True: added.
+    pub(crate) fn add_checkout(&mut self, checkout: Checkout) -> bool {
+        if self.all_checkouts().iter().any(|known| known.dir == checkout.dir) {
             return false;
         }
 
-        self.checkouts.push(character);
+        self.checkouts.push(checkout);
         true
     }
 
@@ -231,22 +231,22 @@ impl Thread {
         let path = thread_dir(&self.id).join("thread.json");
         let text = serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?;
 
-        write_atomic(&path, &text).map_err(|error_value| format!("{}: {error_value}", path.display()))
+        write_atomic(&path, &text).map_err(|error| format!("{}: {error}", path.display()))
     }
 }
 
-fn append_checkout(value: &mut Vec<Checkout>, character: &Checkout) {
-    if !value.iter().any(|x| x.dir == character.dir) {
-        value.push(character.clone());
+fn append_checkout(checkouts: &mut Vec<Checkout>, checkout: &Checkout) {
+    if !checkouts.iter().any(|known| known.dir == checkout.dir) {
+        checkouts.push(checkout.clone());
     }
 }
 
-/// Thread ID (full id, or a unique prefix).
 /// Thread ID of threads dir DIR (exact id, 0 prefix match).
 pub(crate) fn load_in(dir: &Path, id: &str) -> Option<Thread> {
     serde_json::from_slice(&std::fs::read(dir.join(id).join("thread.json")).ok()?).ok()
 }
 
+/// Thread ID (full id, or a unique prefix).
 pub(crate) fn load(id: &str) -> Option<Thread> {
     let exact = thread_dir(id).join("thread.json");
 
@@ -256,8 +256,8 @@ pub(crate) fn load(id: &str) -> Option<Thread> {
         let mut hits = std::fs::read_dir(threads_dir())
             .ok()?
             .flatten()
-            .filter(|error| error.file_name().to_string_lossy().starts_with(id))
-            .map(|error_value| error_value.path().join("thread.json"));
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(id))
+            .map(|entry| entry.path().join("thread.json"));
         let first = hits.next()?;
 
         if hits.next().is_some() {
@@ -270,16 +270,16 @@ pub(crate) fn load(id: &str) -> Option<Thread> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
-/// Change thread ID: read, F, write, under the thread's `flock` (host, views and the CLI write
+/// Change thread ID: read, CHANGE, write, under the thread's `flock` (host, views and the CLI write
 /// `thread.json`: 0 lost updates).
-pub(crate) fn update(id: &str, file: impl FnOnce(&mut Thread)) -> Result<Thread, String> {
+pub(crate) fn update(id: &str, change: impl FnOnce(&mut Thread)) -> Result<Thread, String> {
     let full = load(id).ok_or_else(|| format!("no thread {id}"))?.id;
     let lock = thread_dir(&full).join("thread.lock");
 
     super::locked(&lock, || {
         let mut thread = load(&full).ok_or_else(|| format!("no thread {id}"))?;
 
-        file(&mut thread);
+        change(&mut thread);
         thread.updated = now_ms();
         thread.save()?;
         Ok(thread)
@@ -287,26 +287,26 @@ pub(crate) fn update(id: &str, file: impl FnOnce(&mut Thread)) -> Result<Thread,
     .map_err(|error| format!("{}: {error}", lock.display()))?
 }
 
-/// Every thread, newest activity first.
 /// The thread updated last, by its thread.json's time (1 parse, not 1 per thread).
 pub(crate) fn latest() -> Option<Thread> {
     let rd = std::fs::read_dir(threads_dir()).ok()?;
     let mut by_time: Vec<(std::time::SystemTime, PathBuf)> = rd
         .flatten()
-        .map(|error| error.path().join("thread.json"))
-        .filter_map(|path_value| Some((std::fs::metadata(&path_value).ok()?.modified().ok()?, path_value)))
+        .map(|entry| entry.path().join("thread.json"))
+        .filter_map(|path| Some((std::fs::metadata(&path).ok()?.modified().ok()?, path)))
         .collect();
 
-    by_time.sort_by_key(|(thread, _)| std::cmp::Reverse(*thread));
+    by_time.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
 
     // the newest that is no sub-thread (a running sub-thread writes its thread.json often), not
     // archived (an archive writes its thread.json last)
     by_time
         .iter()
-        .filter_map(|(_, path_2)| serde_json::from_slice::<Thread>(&std::fs::read(path_2).ok()?).ok())
-        .find(|thread_value| thread_value.of.is_none() && thread_value.state != "archived")
+        .filter_map(|(_, path)| serde_json::from_slice::<Thread>(&std::fs::read(path).ok()?).ok())
+        .find(|thread| thread.of.is_none() && thread.state != "archived")
 }
 
+/// Every thread, newest activity first.
 pub(crate) fn all() -> Vec<Thread> {
     all_in(&threads_dir())
 }
@@ -317,15 +317,15 @@ pub(crate) fn all_in(dir: &Path) -> Vec<Thread> {
         return Vec::new();
     };
 
-    let mut value: Vec<Thread> = rd
+    let mut threads: Vec<Thread> = rd
         .flatten()
-        .filter_map(|error| serde_json::from_slice(&std::fs::read(error.path().join("thread.json")).ok()?).ok())
+        .filter_map(|entry| serde_json::from_slice(&std::fs::read(entry.path().join("thread.json")).ok()?).ok())
         // sub-threads: shown in the thread they run for, 0 row of their own
         .filter(|thread: &Thread| thread.of.is_none())
         .collect();
 
-    value.sort_by_key(|thread_value: &Thread| std::cmp::Reverse(thread_value.updated));
-    value
+    threads.sort_by_key(|thread: &Thread| std::cmp::Reverse(thread.updated));
+    threads
 }
 
 /// A copy of thread ID: same members, dir and events; each agent's next session forks the

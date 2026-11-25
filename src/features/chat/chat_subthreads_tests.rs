@@ -43,17 +43,17 @@ fn a_sub_thread_shows_in_the_chat_only_at_its_end_as_its_agents_message() {
         all_thoughts: false,
     };
 
-    a_sub_thread_shows_in_the_chat_only_at_its_end_as_its_agents_message_verify_color(&thread, fold);
+    assert_ends_as_messages(&thread, fold);
 }
 
-fn a_sub_thread_shows_in_the_chat_only_at_its_end_as_its_agents_message_verify_color(thread: &Thread, fold: Fold<'_>) {
+fn assert_ends_as_messages(thread: &Thread, fold: Fold<'_>) {
     for look in [Look::Bubbles, Look::Lines] {
-        let color = text(&draw(thread, look, 70, &Colors::new(), &[], &fold, &Picker::default()));
-        let rows: Vec<&str> = color.lines().collect();
+        let dump = text(&draw(thread, look, 70, &Colors::new(), &[], &fold, &Picker::default()));
+        let rows: Vec<&str> = dump.lines().collect();
         let head = rows
             .iter()
-            .position(|result| result.contains("ada") && result.contains(" subthread") && !result.contains("failed"))
-            .unwrap_or_else(|| panic!("{look:?}\n{color}"));
+            .position(|row| row.contains("ada") && row.contains(" subthread") && !row.contains("failed"))
+            .unwrap_or_else(|| panic!("{look:?}\n{dump}"));
 
         // the name: bubbles in the box's bottom border (its text above), lines on top
         let body = if look == Look::Bubbles {
@@ -63,28 +63,27 @@ fn a_sub_thread_shows_in_the_chat_only_at_its_end_as_its_agents_message_verify_c
         };
 
         assert!(
-            body.iter()
-                .any(|result_value| result_value.contains("↳ “commit the changes”"))
-                && body.iter().any(|result_2| result_2.contains("3 commits made")),
-            "{look:?}\n{color}"
+            body.iter().any(|row| row.contains("↳ “commit the changes”"))
+                && body.iter().any(|row| row.contains("3 commits made")),
+            "{look:?}\n{dump}"
         );
         assert!(
-            rows.iter().any(|result_3| result_3.contains("subthread")
-                && result_3.contains("· failed")
-                && !result_3.contains("subthread subthread"))
-                && color.contains("host ended"),
-            "{look:?}\n{color}"
+            rows.iter().any(|row| row.contains("subthread")
+                && row.contains("· failed")
+                && !row.contains("subthread subthread"))
+                && dump.contains("host ended"),
+            "{look:?}\n{dump}"
         );
         assert!(
-            !color.contains("started") && !color.contains("messages wait"),
-            "{look:?}\n{color}"
+            !dump.contains("started") && !dump.contains("messages wait"),
+            "{look:?}\n{dump}"
         );
 
         if look == Look::Bubbles {
             assert_eq!(
-                rows.iter().filter(|result_4| result_4.starts_with('┌')).count(),
+                rows.iter().filter(|row| row.starts_with('┌')).count(),
                 3,
-                "own box per end: {color}"
+                "own box per end: {dump}"
             );
         }
     }

@@ -104,42 +104,39 @@ fn the_edits_note_is_1_row_cut_with_an_ellipsis() {
                 summary: "owner: a.rs:4".into(),
             },
         ));
-        let color = text(&draw(&thread, look, 60, &Colors::new(), &[], &fold, &Picker::default()));
-        let rows: Vec<&str> = color
-            .lines()
-            .filter(|result| result.contains("got the edits"))
-            .collect();
+        let dump = text(&draw(&thread, look, 60, &Colors::new(), &[], &fold, &Picker::default()));
+        let rows: Vec<&str> = dump.lines().filter(|row| row.contains("got the edits")).collect();
 
-        assert_eq!(rows.len(), 2, "{color}");
+        assert_eq!(rows.len(), 2, "{dump}");
         assert!(
             rows[0].starts_with("● ada got the edits") && rows[0].ends_with('…') && rows[0].width() <= 60,
-            "{color}"
+            "{dump}"
         );
-        assert!(rows[1].ends_with("owner: a.rs:4"), "{color}");
-        assert!(!color.contains("src/f29.rs"), "{color}");
+        assert!(rows[1].ends_with("owner: a.rs:4"), "{dump}");
+        assert!(!dump.contains("src/f29.rs"), "{dump}");
     }
 
     // other notes wrap as before; chat search reads the whole edits note
-    the_edits_note_is_1_row_cut_with_an_ellipsis_verify_thread_value(fold, &long);
+    assert_other_notes_wrap(fold, &long);
 }
 
-fn the_edits_note_is_1_row_cut_with_an_ellipsis_verify_thread_value(fold: Fold<'_>, long: &str) {
-    let mut thread_value = Thread::default();
+fn assert_other_notes_wrap(fold: Fold<'_>, long: &str) {
+    let mut thread = Thread::default();
 
-    thread_value.push(&ev(
+    thread.push(&ev(
         Some("ada"),
         Kind::Edits {
             summary: format!("owner: {long}"),
         },
     ));
-    thread_value.push(&ev(
+    thread.push(&ev(
         Some("ada"),
         Kind::Error {
             message: format!("boom {long}"),
         },
     ));
-    let color_value = text(&draw(
-        &thread_value,
+    let dump = text(&draw(
+        &thread,
         Look::Lines,
         60,
         &Colors::new(),
@@ -148,11 +145,8 @@ fn the_edits_note_is_1_row_cut_with_an_ellipsis_verify_thread_value(fold: Fold<'
         &Picker::default(),
     ));
 
-    assert!(
-        color_value.contains("src/f29.rs"),
-        "the error wraps in full: {color_value}"
-    );
-    assert!(matches!(&thread_value.items[0], Item::Edits { text, .. } if text.contains("src/f29.rs:29-38")));
+    assert!(dump.contains("src/f29.rs"), "the error wraps in full: {dump}");
+    assert!(matches!(&thread.items[0], Item::Edits { text, .. } if text.contains("src/f29.rs:29-38")));
 }
 
 #[test]

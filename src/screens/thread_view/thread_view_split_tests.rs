@@ -2,17 +2,13 @@ use super::*;
 use ratatui::backend::TestBackend;
 
 fn screen(view: &mut View, width: u16) -> Vec<String> {
-    let mut thread = Terminal::new(TestBackend::new(width, 30)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(width, 30)).unwrap();
 
-    thread.draw(|file| view.draw(file)).unwrap();
-    let bytes = thread.backend().buffer().clone();
+    term.draw(|frame| view.draw(frame)).unwrap();
+    let buf = term.backend().buffer().clone();
 
     (0..30)
-        .map(|y| {
-            (0..width)
-                .map(|x| bytes[(x, y)].symbol().to_string())
-                .collect::<String>()
-        })
+        .map(|y| (0..width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
         .collect()
 }
 

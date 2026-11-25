@@ -6,18 +6,18 @@ fn view() -> View {
     View::new("panetest-0000", Path::new("/tmp"), "thread p", tx)
 }
 
-fn press(view: &mut View, key: KeyCode, message: KeyModifiers) -> bool {
-    view.key(KeyEvent::new(key, message))
+fn press(view: &mut View, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    view.key(KeyEvent::new(code, modifiers))
 }
 
 fn screen(view: &mut View) -> String {
-    let mut thread = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    let mut term = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
 
-    thread.draw(|file| view.draw(file)).unwrap();
-    let bytes = thread.backend().buffer().clone();
+    term.draw(|frame| view.draw(frame)).unwrap();
+    let buf = term.backend().buffer().clone();
 
     (0..30)
-        .map(|y| (0..100).map(|x| bytes[(x, y)].symbol().to_string()).collect::<String>())
+        .map(|y| (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -25,8 +25,8 @@ fn screen(view: &mut View) -> String {
 /// Row 0: `⌂ home` left of the views; a click on it: the start screen (the view ends).
 #[test]
 fn the_home_pill_goes_to_the_start_screen() {
-    let mut value = view();
-    let text = screen(&mut value);
+    let mut view = view();
+    let text = screen(&mut view);
     let row0 = text.lines().next().unwrap_or_default();
 
     assert!(
@@ -34,16 +34,16 @@ fn the_home_pill_goes_to_the_start_screen() {
         "{row0}"
     );
 
-    let result = value.layout.home_rect;
+    let home = view.layout.home_rect;
 
-    value.mouse(MouseEvent {
+    view.mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: result.x + 1,
-        row: result.y,
+        column: home.x + 1,
+        row: home.y,
         modifiers: KeyModifiers::NONE,
     });
 
-    assert!(value.mouse_exit && matches!(value.exit, Exit::Back));
+    assert!(view.mouse_exit && matches!(view.exit, Exit::Back));
 
     // other threads that need the owner: their count on the pill
     let note = |thread: &str, kind| crate::domain::notifications::Note {
@@ -90,7 +90,7 @@ fn archiving_this_thread_from_the_menu_goes_home() {
         }]);
 
     // quick → threads (tab bar), ↓ repos, ↓ projects, ↓ views, ↓ status, ↓ the list
-    for key in [
+    for code in [
         KeyCode::Right,
         KeyCode::Down,
         KeyCode::Down,
@@ -98,7 +98,7 @@ fn archiving_this_thread_from_the_menu_goes_home() {
         KeyCode::Down,
         KeyCode::Down,
     ] {
-        press(&mut view, key, KeyModifiers::NONE);
+        press(&mut view, code, KeyModifiers::NONE);
     }
 
     press(&mut view, KeyCode::Char('.'), KeyModifiers::CONTROL);
@@ -129,17 +129,17 @@ fn archiving_this_thread_from_the_menu_goes_home() {
 fn spawn_never_draws_over_the_command_dropdown() {
     fn buffer(view: &mut View, text: &str) -> ratatui::buffer::Buffer {
         view.prompt.input.set_text(text);
-        let mut thread = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
 
-        thread.draw(|file| view.draw(file)).unwrap();
-        thread.backend().buffer().clone()
+        term.draw(|frame| view.draw(frame)).unwrap();
+        term.backend().buffer().clone()
     }
 
-    let mut value = view();
+    let mut view = view();
 
-    value.agents.members = vec!["ada".into()];
-    value.sync_order();
-    let key = crate::infra::config::command_key().to_string();
+    view.agents.members = vec!["ada".into()];
+    view.sync_order();
+    let command_key = crate::infra::config::command_key().to_string();
 
     // frozen clocks, not the process clock: just before the snap the goo inside the sprite's
     // slot can match the idle sprite of that moment (28 % of clock values), so the goo's
@@ -147,21 +147,20 @@ fn spawn_never_draws_over_the_command_dropdown() {
     // every run
     for now in [3.0, 7.4, 8.14, 9.99, 42.0, 77.7] {
         crate::domain::avatar::freeze(Some(now));
-        value.agents.spawns.clear();
-        let (calm, calm_menu) = (buffer(&mut value, ""), buffer(&mut value, &key));
-        let areas = value.prompt.command.areas().to_vec();
+        view.agents.spawns.clear();
+        let (calm, calm_menu) = (buffer(&mut view, ""), buffer(&mut view, &command_key));
+        let areas = view.prompt.command.areas().to_vec();
 
         assert!(!areas.is_empty(), "the dropdown shows");
 
         // the goo at its densest: just before the snap
         let start = now - crate::domain::avatar::spawn::timing(0).2 * 0.95;
 
-        value
-            .agents
+        view.agents
             .spawns
             .insert("ada".into(), crate::domain::avatar::Spawn { anim: 0, start });
-        let (goo, goo_menu) = (buffer(&mut value, ""), buffer(&mut value, &key));
-        let slot = value.agents.slots.borrow()[0].1;
+        let (goo, goo_menu) = (buffer(&mut view, ""), buffer(&mut view, &command_key));
+        let slot = view.agents.slots.borrow()[0].1;
 
         assert!(slot.intersects(areas[0]), "the dropdown covers the sprite");
 
@@ -172,8 +171,8 @@ fn spawn_never_draws_over_the_command_dropdown() {
 
         assert!(differs, "the spawn draws (clock {now})");
 
-        for result in &areas {
-            assert_dropdown_unchanged(&calm_menu, &goo_menu, *result, now);
+        for area in &areas {
+            assert_dropdown_unchanged(&calm_menu, &goo_menu, *area, now);
         }
     }
 
@@ -182,8 +181,8 @@ fn spawn_never_draws_over_the_command_dropdown() {
 
 #[test]
 fn view_bar_shows_both_views_and_alt_digits_switch() {
-    let mut value = view();
-    let text = screen(&mut value);
+    let mut view = view();
+    let text = screen(&mut view);
 
     // the changes label may carry a count (other tests share the thread id)
     assert!(
@@ -195,89 +194,89 @@ fn view_bar_shows_both_views_and_alt_digits_switch() {
     // the view bar on row 0
     assert!(text.lines().next().unwrap().contains(" chat "), "{text}");
 
-    press(&mut value, KeyCode::Char('2'), KeyModifiers::ALT);
+    press(&mut view, KeyCode::Char('2'), KeyModifiers::ALT);
 
-    assert_eq!(value.panes.pane, Pane::Changes);
+    assert_eq!(view.panes.pane, Pane::Changes);
 
-    let text = screen(&mut value);
+    let text = screen(&mut view);
 
     assert!(
         text.contains("space: select") && text.contains("v: reviewed") && text.contains("tab: next"),
         "{text}"
     );
 
-    press(&mut value, KeyCode::Char('1'), KeyModifiers::ALT);
+    press(&mut view, KeyCode::Char('1'), KeyModifiers::ALT);
 
-    assert_eq!(value.panes.pane, Pane::Chat);
+    assert_eq!(view.panes.pane, Pane::Chat);
 }
 
 /// Ctrl+.: the panel's menu right of the panel with its ship steps; the review's never over
 /// the cursor's row; the prompt's above the prompt; esc closes it.
 #[test]
 fn the_context_menu_opens_beside_the_thing_in_focus() {
-    let mut value = view();
+    let mut view = view();
 
-    press(&mut value, KeyCode::Char('2'), KeyModifiers::ALT);
-    screen(&mut value);
+    press(&mut view, KeyCode::Char('2'), KeyModifiers::ALT);
+    screen(&mut view);
 
     // the panel: right of it, its ship steps under "ship"
-    press(&mut value, KeyCode::Tab, KeyModifiers::NONE);
+    press(&mut view, KeyCode::Tab, KeyModifiers::NONE);
 
-    assert!(value.panes.changes.panel_focus());
+    assert!(view.panes.changes.panel_focus());
 
-    press(&mut value, KeyCode::Char('.'), KeyModifiers::CONTROL);
-    let text = screen(&mut value);
-    let message = value.ctx.as_ref().expect("the panel's menu");
+    press(&mut view, KeyCode::Char('.'), KeyModifiers::CONTROL);
+    let text = screen(&mut view);
+    let menu = view.ctx.as_ref().expect("the panel's menu");
 
-    assert!(message.items.iter().any(|i| i.section.starts_with("ship")), "{text}");
+    assert!(menu.items.iter().any(|item| item.section.starts_with("ship")), "{text}");
     assert!(text.contains("─ ship ─"), "{text}");
 
-    let crate::ui::context_menu::Place::Beside(path, _) = value.panes.changes.ctx_place() else {
+    let crate::ui::context_menu::Place::Beside(panel, _) = view.panes.changes.ctx_place() else {
         panic!("beside the panel")
     };
 
     assert!(
-        path.width > 0
+        panel.width > 0
             && text
                 .lines()
-                .any(|line| line.chars().nth(usize::from(path.right())) == Some('┌')),
+                .any(|line| line.chars().nth(usize::from(panel.right())) == Some('┌')),
         "{text}"
     );
 
-    press(&mut value, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut view, KeyCode::Esc, KeyModifiers::NONE);
 
     assert!(
-        value.ctx.is_none() && value.panes.changes.panel_focus(),
+        view.ctx.is_none() && view.panes.changes.panel_focus(),
         "esc: the menu only"
     );
 
     // S: 0 ship menu of its own
-    press(&mut value, KeyCode::Char('S'), KeyModifiers::SHIFT);
+    press(&mut view, KeyCode::Char('S'), KeyModifiers::SHIFT);
 
-    assert!(!screen(&mut value).contains("─ ship ─"));
+    assert!(!screen(&mut view).contains("─ ship ─"));
 
     // the review: above / below its cursor's row (shift+tab from the panel)
-    press(&mut value, KeyCode::BackTab, KeyModifiers::SHIFT);
+    press(&mut view, KeyCode::BackTab, KeyModifiers::SHIFT);
 
-    assert!(!value.panes.changes.panel_focus() && !value.panes.prompt_focus);
+    assert!(!view.panes.changes.panel_focus() && !view.panes.prompt_focus);
 
-    press(&mut value, KeyCode::Char('.'), KeyModifiers::CONTROL);
-    screen(&mut value);
+    press(&mut view, KeyCode::Char('.'), KeyModifiers::CONTROL);
+    screen(&mut view);
 
-    assert!(value.ctx.is_some());
+    assert!(view.ctx.is_some());
 
-    let crate::ui::context_menu::Place::At(row) = value.panes.changes.ctx_place() else {
+    let crate::ui::context_menu::Place::At(row) = view.panes.changes.ctx_place() else {
         panic!("at the cursor's row")
     };
 
     assert!(!text.is_empty() && row.height == 1);
 
-    press(&mut value, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut view, KeyCode::Esc, KeyModifiers::NONE);
 
     // the prompt: above the prompt
-    press(&mut value, KeyCode::BackTab, KeyModifiers::SHIFT);
-    press(&mut value, KeyCode::Char('.'), KeyModifiers::CONTROL);
-    let text = screen(&mut value);
+    press(&mut view, KeyCode::BackTab, KeyModifiers::SHIFT);
+    press(&mut view, KeyCode::Char('.'), KeyModifiers::CONTROL);
+    let text = screen(&mut view);
 
     assert!(
         text.contains("search the chat") && text.contains("IDE on the worktree"),
@@ -287,125 +286,125 @@ fn the_context_menu_opens_beside_the_thing_in_focus() {
 
 #[test]
 fn tab_moves_between_the_view_and_the_prompt_ctrl_p_is_the_menu() {
-    let mut value = view();
+    let mut view = view();
 
-    press(&mut value, KeyCode::Char('2'), KeyModifiers::ALT);
+    press(&mut view, KeyCode::Char('2'), KeyModifiers::ALT);
 
     // the ring: prompt → review → panel → … → prompt; shift+tab: back
-    press(&mut value, KeyCode::BackTab, KeyModifiers::SHIFT);
+    press(&mut view, KeyCode::BackTab, KeyModifiers::SHIFT);
 
     assert!(
-        value.panes.prompt_focus && value.menu.is_none(),
+        view.panes.prompt_focus && view.menu.is_none(),
         "shift+tab: the prompt, 0 menu"
     );
 
-    press(&mut value, KeyCode::Char('h'), KeyModifiers::NONE);
-    press(&mut value, KeyCode::Tab, KeyModifiers::NONE);
+    press(&mut view, KeyCode::Char('h'), KeyModifiers::NONE);
+    press(&mut view, KeyCode::Tab, KeyModifiers::NONE);
 
     assert!(
-        !value.panes.prompt_focus && !value.panes.changes.panel_focus() && value.prompt.input.text() == "h",
+        !view.panes.prompt_focus && !view.panes.changes.panel_focus() && view.prompt.input.text() == "h",
         "tab: back to the review, the text stays"
     );
 
-    press(&mut value, KeyCode::Tab, KeyModifiers::NONE);
+    press(&mut view, KeyCode::Tab, KeyModifiers::NONE);
 
-    assert!(value.panes.changes.panel_focus(), "tab: the panel");
+    assert!(view.panes.changes.panel_focus(), "tab: the panel");
 
-    press(&mut value, KeyCode::BackTab, KeyModifiers::SHIFT);
+    press(&mut view, KeyCode::BackTab, KeyModifiers::SHIFT);
 
     // the chat: tab never opens the menu; ctrl+p does, from every field
-    press(&mut value, KeyCode::Char('1'), KeyModifiers::ALT);
-    press(&mut value, KeyCode::Tab, KeyModifiers::NONE);
+    press(&mut view, KeyCode::Char('1'), KeyModifiers::ALT);
+    press(&mut view, KeyCode::Tab, KeyModifiers::NONE);
 
-    assert!(value.menu.is_none());
+    assert!(view.menu.is_none());
 
-    press(&mut value, KeyCode::Char('p'), KeyModifiers::CONTROL);
+    press(&mut view, KeyCode::Char('p'), KeyModifiers::CONTROL);
 
-    assert!(value.menu.is_some());
+    assert!(view.menu.is_some());
 
-    press(&mut value, KeyCode::Char('p'), KeyModifiers::CONTROL);
+    press(&mut view, KeyCode::Char('p'), KeyModifiers::CONTROL);
 
-    assert!(value.menu.is_none(), "ctrl+p again: closed");
+    assert!(view.menu.is_none(), "ctrl+p again: closed");
 
     // the changes view with the keys: ctrl+p opens the menu there too
-    press(&mut value, KeyCode::Char('2'), KeyModifiers::ALT);
-    press(&mut value, KeyCode::Char('p'), KeyModifiers::CONTROL);
+    press(&mut view, KeyCode::Char('2'), KeyModifiers::ALT);
+    press(&mut view, KeyCode::Char('p'), KeyModifiers::CONTROL);
 
-    assert!(value.menu.is_some());
+    assert!(view.menu.is_some());
 }
 
 #[test]
 fn changes_view_keeps_letters_from_the_prompt_until_ctrl_m() {
-    let mut value = view();
+    let mut view = view();
 
-    press(&mut value, KeyCode::Char('2'), KeyModifiers::ALT);
-    press(&mut value, KeyCode::Char('j'), KeyModifiers::NONE);
+    press(&mut view, KeyCode::Char('2'), KeyModifiers::ALT);
+    press(&mut view, KeyCode::Char('j'), KeyModifiers::NONE);
 
-    assert_eq!(value.prompt.input.text(), "", "j: a view key");
+    assert_eq!(view.prompt.input.text(), "", "j: a view key");
 
-    press(&mut value, KeyCode::Char('m'), KeyModifiers::CONTROL);
+    press(&mut view, KeyCode::Char('m'), KeyModifiers::CONTROL);
 
-    assert!(value.panes.prompt_focus);
+    assert!(view.panes.prompt_focus);
 
-    press(&mut value, KeyCode::Char('h'), KeyModifiers::NONE);
+    press(&mut view, KeyCode::Char('h'), KeyModifiers::NONE);
 
-    assert_eq!(value.prompt.input.text(), "h");
+    assert_eq!(view.prompt.input.text(), "h");
 
     // esc: the keys back to the view, the text stays
-    press(&mut value, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut view, KeyCode::Esc, KeyModifiers::NONE);
 
-    assert!(!value.panes.prompt_focus && value.prompt.input.text() == "h");
-    assert!(value.last_esc.is_none(), "0 interrupt / back timer");
+    assert!(!view.panes.prompt_focus && view.prompt.input.text() == "h");
+    assert!(view.last_esc.is_none(), "0 interrupt / back timer");
 }
 
 #[test]
 fn changes_view_selects_lines_comments_on_them_and_filters_with_i_and_esc() {
-    let mut value = view();
+    let mut view = view();
 
-    press(&mut value, KeyCode::Char('2'), KeyModifiers::ALT);
-    value.panes.changes.set_files(crate::features::changes::parse(
+    press(&mut view, KeyCode::Char('2'), KeyModifiers::ALT);
+    view.panes.changes.set_files(crate::features::changes::parse(
         "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n x\n-a\n+b\n y\n",
     ));
-    let text = screen(&mut value);
+    let text = screen(&mut view);
 
     assert!(text.contains("▾ medium") && text.contains("┌─ ☐ src/a.rs"), "{text}");
 
     // ↓ ↓ ↓: head → hunk → ` x` → `- a`; space selects 2 lines (the cursor goes down)
     for _ in 0..3 {
-        press(&mut value, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut view, KeyCode::Down, KeyModifiers::NONE);
     }
 
-    press(&mut value, KeyCode::Char(' '), KeyModifiers::NONE);
-    press(&mut value, KeyCode::Char(' '), KeyModifiers::NONE);
+    press(&mut view, KeyCode::Char(' '), KeyModifiers::NONE);
+    press(&mut view, KeyCode::Char(' '), KeyModifiers::NONE);
 
     // c: the modal takes the comment on both lines
-    press(&mut value, KeyCode::Char('c'), KeyModifiers::NONE);
+    press(&mut view, KeyCode::Char('c'), KeyModifiers::NONE);
 
-    assert!(!value.panes.prompt_focus && value.panes.changes.typing());
+    assert!(!view.panes.prompt_focus && view.panes.changes.typing());
 
-    let text = screen(&mut value);
+    let text = screen(&mut view);
 
     assert!(text.contains("comment on src/a.rs:2 · removed 2"), "{text}");
 
-    press(&mut value, KeyCode::Char('n'), KeyModifiers::NONE);
-    press(&mut value, KeyCode::Enter, KeyModifiers::CONTROL);
+    press(&mut view, KeyCode::Char('n'), KeyModifiers::NONE);
+    press(&mut view, KeyCode::Enter, KeyModifiers::CONTROL);
 
-    assert_eq!(value.panes.changes.comment_count(), 1);
+    assert_eq!(view.panes.changes.comment_count(), 1);
 
-    let text = screen(&mut value);
+    let text = screen(&mut view);
 
     assert!(text.contains("2 · removed 2 · you: n"), "{text}");
 
     // ctrl+f: the filter takes letters, i too; esc leaves it (0 interrupt timer)
-    press(&mut value, KeyCode::Char('f'), KeyModifiers::CONTROL);
-    press(&mut value, KeyCode::Char('i'), KeyModifiers::NONE);
+    press(&mut view, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    press(&mut view, KeyCode::Char('i'), KeyModifiers::NONE);
 
-    assert!(!value.panes.prompt_focus && value.prompt.input.text().is_empty());
-    assert!(screen(&mut value).contains(" f  i "));
+    assert!(!view.panes.prompt_focus && view.prompt.input.text().is_empty());
+    assert!(screen(&mut view).contains(" f  i "));
 
-    press(&mut value, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut view, KeyCode::Esc, KeyModifiers::NONE);
 
-    assert!(!value.panes.changes.typing() && value.last_esc.is_none());
+    assert!(!view.panes.changes.typing() && view.last_esc.is_none());
 
     let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("panetest-0000"));
 }
@@ -413,11 +412,11 @@ fn changes_view_selects_lines_comments_on_them_and_filters_with_i_and_esc() {
 fn assert_dropdown_unchanged(
     calm_menu: &ratatui::buffer::Buffer,
     goo_menu: &ratatui::buffer::Buffer,
-    result: Rect,
+    area: Rect,
     now: f32,
 ) {
-    for y in result.top()..result.bottom() {
-        for x in result.left()..result.right() {
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
             assert_eq!(
                 calm_menu[(x, y)].symbol(),
                 goo_menu[(x, y)].symbol(),

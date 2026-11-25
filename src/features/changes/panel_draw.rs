@@ -24,7 +24,7 @@ impl View {
     }
 }
 
-/// The labels stuck to the top and to the bottom of a list of H rows from TOP.
+/// The labels stuck to the top and to the bottom of a list of HEIGHT rows from TOP.
 fn stuck(top: usize, height: usize, view: &View) -> (Vec<usize>, Vec<usize>) {
     let labels: Vec<usize> = (0..view.scm.rows.len())
         .filter(|&i| view.scm.rows[i].label().is_some())
@@ -32,22 +32,22 @@ fn stuck(top: usize, height: usize, view: &View) -> (Vec<usize>, Vec<usize>) {
     let (mut above, mut below): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
 
     for _ in 0..=labels.len() {
-        let agent: Vec<usize> = labels.iter().copied().filter(|&i| i < top + above.len()).collect();
+        let next_above: Vec<usize> = labels.iter().copied().filter(|&i| i < top + above.len()).collect();
         let end = (top + height).saturating_sub(below.len());
 
-        // rows top + A .. END show in place; a label at or after END: the bottom stack
-        let bytes: Vec<usize> = labels
+        // rows top + ABOVE .. END show in place; a label at or after END: the bottom stack
+        let next_below: Vec<usize> = labels
             .iter()
             .copied()
-            .filter(|&i| i >= end && i >= top + agent.len())
+            .filter(|&i| i >= end && i >= top + next_above.len())
             .collect();
 
-        if agent == above && bytes == below {
+        if next_above == above && next_below == below {
             break;
         }
 
-        above = agent;
-        below = bytes;
+        above = next_above;
+        below = next_below;
 
         if above.len() + below.len() >= height {
             break;
@@ -65,24 +65,24 @@ fn panel_scroll(height: usize, view: &mut View) {
     view.scm.top = view.scm.top.min(count.saturating_sub(1));
 
     for _ in 0..4 {
-        let (agent, bytes) = stuck(view.scm.top, height, view);
+        let (above, below) = stuck(view.scm.top, height, view);
         let at = view.scm.at;
 
-        if view.scm.rows.get(at).is_some_and(|result| result.label().is_some())
-            && (agent.contains(&at) || bytes.contains(&at))
+        if view.scm.rows.get(at).is_some_and(|row| row.label().is_some())
+            && (above.contains(&at) || below.contains(&at))
         {
             break;
         }
 
         let (lo, hi) = (
-            view.scm.top + agent.len(),
-            (view.scm.top + height).saturating_sub(bytes.len()),
+            view.scm.top + above.len(),
+            (view.scm.top + height).saturating_sub(below.len()),
         );
 
         if at < lo {
-            view.scm.top = at.saturating_sub(agent.len());
+            view.scm.top = at.saturating_sub(above.len());
         } else if at >= hi {
-            view.scm.top = (at + 1 + bytes.len()).saturating_sub(height);
+            view.scm.top = (at + 1 + below.len()).saturating_sub(height);
         } else {
             break;
         }
@@ -95,32 +95,32 @@ fn panel_scroll(height: usize, view: &mut View) {
 /// The panel's list in LIST.
 fn draw_rows(frame: &mut Frame, list: Rect, view: &mut View) {
     view.sync_rows();
-    let height_value = usize::from(list.height);
+    let height = usize::from(list.height);
 
-    if height_value == 0 {
+    if height == 0 {
         return;
     }
 
-    panel_scroll(height_value, view);
-    let (above, below) = stuck(view.scm.top, height_value, view);
+    panel_scroll(height, view);
+    let (above, below) = stuck(view.scm.top, height, view);
     let mut shown: Vec<(usize, bool)> = above.iter().map(|&i| (i, true)).collect();
-    let body = height_value.saturating_sub(above.len() + below.len());
+    let body = height.saturating_sub(above.len() + below.len());
 
     shown.extend(
         (view.scm.top + above.len()..view.scm.rows.len())
             .take(body)
             .map(|i| (i, false)),
     );
-    shown.truncate(height_value.saturating_sub(below.len()));
+    shown.truncate(height.saturating_sub(below.len()));
     shown.extend(below.iter().map(|&i| (i, true)));
-    let width_value = usize::from(list.width);
+    let width = usize::from(list.width);
 
-    draw_panel_rows(frame, list, view, shown, width_value);
+    draw_panel_rows(frame, list, view, shown, width);
 }
 
-fn draw_panel_rows(frame: &mut Frame<'_>, list: Rect, view: &mut View, shown: Vec<(usize, bool)>, width_value: usize) {
-    for (key, (i, stuck)) in shown.into_iter().enumerate() {
-        draw_panel_row(frame, list, view, width_value, key, i, stuck);
+fn draw_panel_rows(frame: &mut Frame<'_>, list: Rect, view: &mut View, shown: Vec<(usize, bool)>, width: usize) {
+    for (offset, (i, stuck)) in shown.into_iter().enumerate() {
+        draw_panel_row(frame, list, view, width, offset, i, stuck);
     }
 }
 
@@ -128,15 +128,15 @@ fn draw_panel_row(
     frame: &mut Frame<'_>,
     list: Rect,
     view: &mut View,
-    width_value: usize,
-    key: usize,
+    width: usize,
+    offset: usize,
     i: usize,
     stuck: bool,
 ) {
-    let y = list.y + key as u16;
+    let y = list.y + offset as u16;
     let rect = Rect { y, height: 1, ..list };
     let row = view.scm.rows[i].clone();
-    let line = view.panel_line(&row, width_value, rect);
+    let line = view.panel_line(&row, width, rect);
 
     frame.render_widget(Paragraph::new(line), rect);
     let buf = frame.buffer_mut();
@@ -180,33 +180,31 @@ fn picked(view: &mut View, row: &PRow) -> bool {
             .changes
             .files
             .get(*fi)
-            .is_some_and(|x| view.scm.picked.contains(&x.path)),
+            .is_some_and(|file| view.scm.picked.contains(&file.path)),
         PRow::Commit(ci) => view
             .changes
             .commits
             .list
             .get(*ci)
-            .is_some_and(|character| view.scm.commit_picks.contains(&character.oid)),
+            .is_some_and(|commit| view.scm.commit_picks.contains(&commit.oid)),
         PRow::Comment(ci) => view
             .comment_state
             .comments
             .get(*ci)
             .is_some_and(|comment| view.scm.comment_picks.contains(&comment.id)),
         // a group label: every item in it picked
-        row_value if row_value.label().is_some() || matches!(row_value, PRow::CommentFile(..)) => {
-            view.group_picked(row_value)
-        }
+        group if group.label().is_some() || matches!(group, PRow::CommentFile(..)) => view.group_picked(group),
         _ => false,
     }
 }
 
 fn poll_draft(view: &mut View) {
     if let Some(rx) = &view.scm.drafting
-        && let Ok(result) = rx.try_recv()
+        && let Ok(draft) = rx.try_recv()
     {
         view.scm.drafting = None;
 
-        match result {
+        match draft {
             Ok(message) => view.scm.msg.set_text(&message),
             Err(error) => view.operation_state.note = Some(format!("draft: {error}")),
         }

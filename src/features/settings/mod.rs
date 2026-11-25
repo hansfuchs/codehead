@@ -28,22 +28,22 @@ pub(crate) struct Spec {
 
 /// Group heading on ROWS (2 rows): `TITLE ────` (accent), what it sets (muted).
 fn group_head(frame: &mut Frame, row: Option<Rect>, desc_row: Option<Rect>, title: &str, description: &str) {
-    if let Some(row_value) = row {
-        let rule = usize::from(row_value.width).saturating_sub(title.chars().count() + 1);
+    if let Some(head) = row {
+        let rule = usize::from(head.width).saturating_sub(title.chars().count() + 1);
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(title.to_string(), theme::accent_bold()),
                 Span::styled(format!(" {}", "─".repeat(rule)), theme::line()),
             ])),
-            row_value,
+            head,
         );
     }
 
-    if let Some(row_2) = desc_row {
+    if let Some(desc) = desc_row {
         frame.render_widget(
             Paragraph::new(Line::styled(description.to_string(), theme::muted())),
-            row_2,
+            desc,
         );
     }
 }
@@ -162,13 +162,13 @@ impl Form {
 
     /// The default of setting KEY, as the field's placeholder shows it. Colors: the scheme's.
     fn default_of(file: &config::File, key: &str) -> String {
-        if let Some(name) = key.strip_prefix("colors.").filter(|count| *count != "scheme") {
+        if let Some(name) = key.strip_prefix("colors.").filter(|color| *color != "scheme") {
             let scheme = file.scheme.clone().unwrap_or_else(|| theme::PRESETS[0].0.into());
-            let path = theme::Palette::preset(&scheme).unwrap_or(theme::PRESETS[0].1);
+            let palette = theme::Palette::preset(&scheme).unwrap_or(theme::PRESETS[0].1);
 
-            return path
+            return palette
                 .get(name)
-                .map(|character| format!("{} ({scheme})", theme::hex(character)))
+                .map(|color| format!("{} ({scheme})", theme::hex(color)))
                 .unwrap_or_default();
         }
 
@@ -176,8 +176,8 @@ impl Form {
             return "the default agent".into();
         }
 
-        if let Some(directory) = crate::features::settings::harness_tab::default_of(key) {
-            return directory;
+        if let Some(default) = crate::features::settings::harness_tab::default_of(key) {
+            return default;
         }
 
         config::defaults()
@@ -237,8 +237,8 @@ impl Form {
         self.paths.row_at(at).or_else(|| {
             self.rows
                 .iter()
-                .find(|(result, _)| result.contains(at))
-                .map(|(result_value, _)| *result_value)
+                .find(|(rect, _)| rect.contains(at))
+                .map(|(rect, _)| *rect)
         })
     }
 }
@@ -293,8 +293,8 @@ impl Settings {
 
     /// Sub-tab S: the last edit of the form left applies, the form entered reads the file again
     /// (the other form may have written it).
-    pub(crate) fn switch(&mut self, text: Sub) {
-        switch_settings(self, text);
+    pub(crate) fn switch(&mut self, sub: Sub) {
+        switch_settings(self, sub);
     }
 
     pub(crate) fn commit(&mut self) {
@@ -306,10 +306,10 @@ impl Settings {
     }
 
     pub(crate) fn take_applied(&mut self) -> Option<config::File> {
-        let agent = self.form.take_applied();
-        let bytes = self.harness.take_applied();
+        let codehead = self.form.take_applied();
+        let harness = self.harness.take_applied();
 
-        bytes.or(agent)
+        harness.or(codehead)
     }
 
     pub(crate) fn focus_input(&mut self) {
@@ -330,8 +330,8 @@ impl Settings {
     }
 
     pub(crate) fn row_at(&self, at: Position) -> Option<Rect> {
-        if let Some((result_value, _)) = self.bar_hits.iter().find(|(result, _)| result.contains(at)) {
-            return Some(*result_value);
+        if let Some((rect, _)) = self.bar_hits.iter().find(|(rect, _)| rect.contains(at)) {
+            return Some(*rect);
         }
 
         match self.sub {
@@ -378,8 +378,8 @@ use fields::{add_item, alias_of, aliases, delete_alias, dirty, field, reset, rev
 fn reload(form: &mut Form) -> Option<config::File> {
     match config::read_layers(&form.path) {
         Ok(layers) => Some(form.load_layers(layers)),
-        Err(error_value) => {
-            form.status = error_value;
+        Err(error) => {
+            form.status = error;
             form.error = true;
             None
         }
@@ -402,14 +402,13 @@ fn finish_config_commit(layers: config::Layers, file: config::File, form: &mut F
     form.error = false;
     form.applied = Some(file);
 
-    if moved && let Some(file_value) = self::reload(form) {
-        form.applied = Some(file_value);
+    if moved && let Some(reloaded) = self::reload(form) {
+        form.applied = Some(reloaded);
     }
 }
 
 fn load_form_layers(form: &mut Form, layers: config::Layers) -> config::File {
     let file = layers.merged();
-    let text = layers;
 
     form.fields = form
         .specs
@@ -426,7 +425,7 @@ fn load_form_layers(form: &mut Form, layers: config::Layers) -> config::File {
         append_config_aliases(&file, form);
     }
 
-    form.base = Some(text);
+    form.base = Some(layers);
     form.path_focus = None;
     form.editing = None;
     form.paths.reset_input();
@@ -455,22 +454,22 @@ fn commit_form(form: &mut Form) {
         Ok((layers, file)) => {
             finish_config_commit(layers, file, form);
         }
-        Err(error_value) => {
-            form.status = format!("not applied: {error_value}");
+        Err(error) => {
+            form.status = format!("not applied: {error}");
             form.error = true;
         }
     }
 }
 
-fn switch_settings(settings: &mut Settings, text: Sub) {
-    if text == settings.sub {
+fn switch_settings(settings: &mut Settings, sub: Sub) {
+    if sub == settings.sub {
         return;
     }
 
     settings.commit();
-    settings.sub = text;
+    settings.sub = sub;
 
-    match text {
+    match sub {
         Sub::Codehead => {
             self::reload(&mut settings.form);
         }

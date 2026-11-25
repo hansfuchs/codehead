@@ -31,7 +31,13 @@ const RISKY: [&str; 22] = [
 
 fn patterns() -> &'static Vec<regex::Regex> {
     static PATTERNS: std::sync::OnceLock<Vec<regex::Regex>> = std::sync::OnceLock::new();
-    PATTERNS.get_or_init(|| RISKY.iter().filter_map(|path| regex::Regex::new(path).ok()).collect())
+
+    PATTERNS.get_or_init(|| {
+        RISKY
+            .iter()
+            .filter_map(|pattern| regex::Regex::new(pattern).ok())
+            .collect()
+    })
 }
 
 /// A shell command of INPUT that is hard to take back.
@@ -42,11 +48,11 @@ pub(crate) fn risky(input: &Value) -> bool {
         .or_else(|| {
             input["command"]
                 .as_array()
-                .map(|agent| agent.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "))
+                .map(|parts| parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "))
         })
         .unwrap_or_default();
 
-    !cmd.is_empty() && patterns().iter().any(|path| path.is_match(&cmd))
+    !cmd.is_empty() && patterns().iter().any(|pattern| pattern.is_match(&cmd))
 }
 
 /// The host answers this permission request of an ACP agent in MODE itself: TOOL its name,

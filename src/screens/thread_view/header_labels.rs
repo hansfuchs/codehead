@@ -17,13 +17,13 @@ pub(super) fn home_label(notes: &[crate::domain::notifications::Note]) -> (Strin
 
     let mut ids: Vec<&str> = notes
         .iter()
-        .filter(|count| {
+        .filter(|note| {
             matches!(
-                count.kind,
+                note.kind,
                 Kind::Ask | Kind::Blocked | Kind::Gate | Kind::Error | Kind::Step
             )
         })
-        .map(|count| count.thread.as_str())
+        .map(|note| note.thread.as_str())
         .collect();
 
     ids.sort_unstable();
@@ -51,11 +51,11 @@ pub(super) fn input_width(cols: u16) -> u16 {
 
 /// WORD with its 1st letter upper case: `claude` → `Claude`.
 pub(super) fn title_case(word: &str) -> String {
-    let mut character = word.chars();
+    let mut chars = word.chars();
 
-    character
+    chars
         .next()
-        .map_or_else(String::new, |file| file.to_uppercase().chain(character).collect())
+        .map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
 
 /// Effort level as the header shows it: `medium` → `Medium`, `xhigh` → `XHigh`.
@@ -67,7 +67,6 @@ pub(super) fn effort_label(level: &str) -> String {
     }
 }
 
-/// The hint row's left part: its width, short of the keys on the right (0 overlap).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum PromptHint {
     Directory,
@@ -76,6 +75,8 @@ pub(super) enum PromptHint {
     Empty,
     Text,
 }
+
+/// The hint row's left part: its width, short of the keys on the right (0 overlap).
 pub(super) fn to_width(hint: Rect, mode: PromptHint) -> u16 {
     let keys = hint_keys(mode);
 
@@ -96,6 +97,7 @@ pub(super) fn hint_keys(mode: PromptHint) -> &'static str {
     }
 }
 
+/// PATH with the home dir as `~`.
 pub(super) fn tilde(path: &Path) -> String {
     let home = crate::infra::config::home();
 

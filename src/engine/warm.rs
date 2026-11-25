@@ -59,38 +59,38 @@ const ALL: [Warm; 1] = [Warm {
     },
 }];
 
-/// The window of HARNESS in limits file V runs at NOW (unix s).
-fn running(value: &Value, harness: &str, now: u64) -> bool {
-    value[harness][WINDOW]["resets"]
+/// The window of HARNESS in the limits file LIMITS runs at NOW (unix s).
+fn running(limits: &Value, harness: &str, now: u64) -> bool {
+    limits[harness][WINDOW]["resets"]
         .as_u64()
-        .is_some_and(|result| result > now)
+        .is_some_and(|resets| resets > now)
 }
 
 /// A try of HARNESS at NOW is due: its window not running, its last try GAP+ ago.
-fn due(value: &Value, harness: &str, now: u64) -> bool {
-    !running(value, harness, now)
-        && value["_warm"][harness]
+fn due(limits: &Value, harness: &str, now: u64) -> bool {
+    !running(limits, harness, now)
+        && limits["_warm"][harness]
             .as_u64()
-            .is_none_or(|thread| now.saturating_sub(thread) >= GAP)
+            .is_none_or(|last_try| now.saturating_sub(last_try) >= GAP)
 }
 
 /// The watch's trigger of HARNESS at NOW is due: its window reset DELAY+ ago, 0 trigger since
 /// then (a trigger GAP+ ago that brought 0 new report: 1 more, up to `GIVE_UP`).
-fn due_new(value: &Value, harness: &str, now: u64) -> bool {
-    let Some(result) = value[harness][WINDOW]["resets"].as_u64() else {
+fn due_new(limits: &Value, harness: &str, now: u64) -> bool {
+    let Some(resets) = limits[harness][WINDOW]["resets"].as_u64() else {
         return false;
     };
 
-    let at = result + DELAY;
+    let at = resets + DELAY;
 
     if now < at {
         return false;
     }
 
     // tries GAP apart while the last one is within GIVE_UP of the 1st chance
-    value["_warm"][harness]
+    limits["_warm"][harness]
         .as_u64()
-        .is_none_or(|thread| thread < at || (now.saturating_sub(thread) >= GAP && thread < at + GIVE_UP))
+        .is_none_or(|last_try| last_try < at || (now.saturating_sub(last_try) >= GAP && last_try < at + GIVE_UP))
 }
 
 /// The watch: a thread per process (once), every TICK the triggers that are due.
@@ -109,7 +109,7 @@ fn watch_loop() -> ! {
     loop {
         std::thread::sleep(TICK);
 
-        let Some(value) = std::fs::read(super::data_dir().join("limits.json"))
+        let Some(limits) = std::fs::read(super::data_dir().join("limits.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         else {
@@ -118,19 +118,17 @@ fn watch_loop() -> ! {
 
         let now = super::now_ms() / 1000;
 
-        warm_due_windows(&value, now);
+        warm_due_windows(&limits, now);
     }
 }
 
-fn warm_due_windows(value: &Value, now: u64) {
-    for width_value in ALL.iter().filter(|width| due_new(value, width.harness, now)) {
-        if super::harnesses::get(width_value.harness).is_some_and(|height| super::harnesses::on_path(height.bin))
-            && super::limits::claim_warm(width_value.harness, now, |value_value| {
-                due_new(value_value, width_value.harness, now)
-            })
+fn warm_due_windows(limits: &Value, now: u64) {
+    for warm in ALL.iter().filter(|warm| due_new(limits, warm.harness, now)) {
+        if super::harnesses::get(warm.harness).is_some_and(|harness| super::harnesses::on_path(harness.bin))
+            && super::limits::claim_warm(warm.harness, now, |current| due_new(current, warm.harness, now))
         {
-            super::trace(&format!("warm: new {WINDOW} window of {}", width_value.harness));
-            run(width_value);
+            super::trace(&format!("warm: new {WINDOW} window of {}", warm.harness));
+            run(warm);
         }
     }
 }
@@ -144,25 +142,25 @@ pub(crate) fn warm() {
     std::thread::spawn(|| {
         let now = super::now_ms() / 1000;
 
-        for width_value in ALL.iter().filter(|width| {
-            super::harnesses::get(width.harness).is_some_and(|height| super::harnesses::on_path(height.bin))
+        for warm in ALL.iter().filter(|warm| {
+            super::harnesses::get(warm.harness).is_some_and(|harness| super::harnesses::on_path(harness.bin))
         }) {
-            claim_due_window(now, width_value);
+            claim_due_window(now, warm);
         }
     });
 }
 
-fn claim_due_window(now: u64, width_value: &Warm) {
-    if super::limits::claim_warm(width_value.harness, now, |value| due(value, width_value.harness, now)) {
-        run(width_value);
+fn claim_due_window(now: u64, warm: &Warm) {
+    if super::limits::claim_warm(warm.harness, now, |limits| due(limits, warm.harness, now)) {
+        run(warm);
     }
 }
 
-/// 1 message on W: its limit reports into `limits.json`.
-fn run(width: &Warm) {
-    let cmd = (width.cmd)();
+/// 1 message on WARM: its limit reports into `limits.json`.
+fn run(warm: &Warm) {
+    let cmd = (warm.cmd)();
 
-    let Ok(out) = Command::new(&cmd[0])
+    let Ok(output) = Command::new(&cmd[0])
         .args(&cmd[1..])
         .current_dir(super::data_dir())
         .stdin(Stdio::null())
@@ -172,22 +170,22 @@ fn run(width: &Warm) {
         return;
     };
 
-    let mut path = super::harness::Parser::default();
+    let mut parser = super::harness::Parser::default();
 
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
 
-        for output_value in path.line(&value) {
-            record_warm_limits(width, output_value);
+        for out in parser.line(&value) {
+            record_warm_limits(warm, out);
         }
     }
 }
 
-fn record_warm_limits(width: &Warm, output_value: super::harness::Out) {
-    if let super::harness::Out::Limits(line_value) = output_value {
-        super::limits::record(width.harness, &line_value);
+fn record_warm_limits(warm: &Warm, out: super::harness::Out) {
+    if let super::harness::Out::Limits(windows) = out {
+        super::limits::record(warm.harness, &windows);
     }
 }
 

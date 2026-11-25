@@ -42,13 +42,13 @@ fn spans_message(
 ) {
     let SpanStyles { marks, base, hit } = settings;
 
-    let message = marks.binary_search(&i).is_ok();
+    let marked = marks.binary_search(&i).is_ok();
 
-    if message != *on && !cur.is_empty() {
+    if marked != *on && !cur.is_empty() {
         out.push(Span::styled(std::mem::take(cur), if *on { hit } else { base }));
     }
 
-    *on = message;
+    *on = marked;
     cur.push(character);
 }
 

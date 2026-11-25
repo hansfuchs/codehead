@@ -55,15 +55,15 @@ pub(crate) fn load() -> Vec<Msg> {
         load_thread_messages(&mut out, &thread, dir.as_ref(), &title);
     }
 
-    out.sort_by_key(|message_value| message_value.ts);
+    out.sort_by_key(|message| message.ts);
     out
 }
 
 fn load_thread_messages(out: &mut Vec<Msg>, thread: &store::Thread, dir: Option<&PathBuf>, title: &str) {
-    for error in store::events(&thread.id) {
-        let (from, text) = match &error.kind {
+    for event in store::events(&thread.id) {
+        let (from, text) = match &event.kind {
             Kind::Prompt { from, text, .. } => (from.clone(), text.clone()),
-            Kind::Text { text } => (error.agent.clone().unwrap_or_default(), text.clone()),
+            Kind::Text { text } => (event.agent.clone().unwrap_or_default(), text.clone()),
             _ => continue,
         };
 
@@ -71,7 +71,7 @@ fn load_thread_messages(out: &mut Vec<Msg>, thread: &store::Thread, dir: Option<
             continue;
         }
 
-        let mut message = Msg::new(&thread.id, title, &from, error.ts, &text);
+        let mut message = Msg::new(&thread.id, title, &from, event.ts, &text);
 
         message.dir = dir.cloned();
         out.push(message);
@@ -94,29 +94,29 @@ fn word_start(lower: &str, byte: usize) -> bool {
 }
 
 /// Score of query word W (lowercased) in M. None: 0 match.
-fn word_score(width: &str, message: &Msg) -> Option<i64> {
-    let hits: Vec<usize> = message.lower.match_indices(width).map(|(i, _)| i).take(10).collect();
+fn word_score(word: &str, message: &Msg) -> Option<i64> {
+    let hits: Vec<usize> = message.lower.match_indices(word).map(|(i, _)| i).take(10).collect();
 
     if let Some(&first) = hits.first() {
         let start = hits.iter().any(|&i| word_start(&message.lower, i));
 
         return Some(
-            1000 + 10 * width.chars().count() as i64 + 15 * hits.len() as i64 + if start { 300 } else { 0 }
+            1000 + 10 * word.chars().count() as i64 + 15 * hits.len() as i64 + if start { 300 } else { 0 }
                 - (first as i64 / 200).min(50),
         );
     }
 
     // fuzzy in 1 word of the message: 3+ chars, words of max. 32 chars
-    if width.chars().count() < 3 {
+    if word.chars().count() < 3 {
         return None;
     }
 
     message
         .lower
         .split(|character: char| !character.is_alphanumeric() && character != '_' && character != '-')
-        .filter(|thread| !thread.is_empty() && thread.len() <= 32)
-        .filter_map(|thread_value| crate::domain::matcher::word(width, thread_value).map(|(text, _)| text))
-        .filter(|&text_value| text_value >= 60)
+        .filter(|part| !part.is_empty() && part.len() <= 32)
+        .filter_map(|part| crate::domain::matcher::word(word, part).map(|(score, _)| score))
+        .filter(|&score| score >= 60)
         .max()
 }
 
@@ -127,7 +127,7 @@ pub(crate) fn words(query: &str) -> Vec<String> {
 
 /// M matches every word of WORDS (from [`words`]): a substring, else fuzzy inside 1 word.
 pub(crate) fn hit(message: &Msg, words: &[String]) -> bool {
-    !words.is_empty() && words.iter().all(|width| word_score(width, message).is_some())
+    !words.is_empty() && words.iter().all(|word| word_score(word, message).is_some())
 }
 
 /// Indexes of MSGS that match QUERY: best first, then oldest first. Max. MAX.
@@ -138,24 +138,24 @@ pub(crate) fn find(msgs: &[Msg], query: &str) -> Vec<usize> {
         return Vec::new();
     }
 
-    let mut value: Vec<(i64, u64, usize)> = msgs
+    let mut scored: Vec<(i64, u64, usize)> = msgs
         .iter()
         .enumerate()
         .filter_map(|(i, message)| {
             let mut total = 0;
 
-            for width in &words {
-                total += word_score(width, message)?;
+            for word in &words {
+                total += word_score(word, message)?;
             }
 
             Some((total, message.ts, i))
         })
         .collect();
 
-    value.sort_by(|agent, bytes| bytes.0.cmp(&agent.0).then(agent.1.cmp(&bytes.1)));
-    value.truncate(MAX);
+    scored.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    scored.truncate(MAX);
 
-    value.into_iter().map(|(_, _, i)| i).collect()
+    scored.into_iter().map(|(_, _, i)| i).collect()
 }
 
 /// 1 line of M around its 1st match of QUERY, max. WIDTH chars (whitespace runs: 1 space), and
@@ -168,36 +168,36 @@ pub(crate) fn snippet(message: &Msg, query: &str, width: usize) -> (String, Vec<
     // the 1st substring hit of any word: the snippet's focus
     let focus = words
         .iter()
-        .filter_map(|width_value| low.find(width_value.as_str()))
+        .filter_map(|word| low.find(word.as_str()))
         .min()
-        .map_or(0, |bytes| low[..bytes].chars().count());
-    let count_value = flat.chars().count();
+        .map_or(0, |offset| low[..offset].chars().count());
+    let chars = flat.chars().count();
     let width = width.max(8);
 
-    let start = if count_value <= width {
+    let start = if chars <= width {
         0
     } else {
-        focus.saturating_sub(width / 3).min(count_value - width)
+        focus.saturating_sub(width / 3).min(chars - width)
     };
 
     let lead = start > 0;
-    let take = width - usize::from(lead) - usize::from(start + width < count_value);
+    let take = width - usize::from(lead) - usize::from(start + width < chars);
     let body: String = flat.chars().skip(start).take(take).collect();
     let text = format!(
         "{}{body}{}",
         if lead { "…" } else { "" },
-        if start + take < count_value { "…" } else { "" }
+        if start + take < chars { "…" } else { "" }
     );
     let tl = lower(&text);
     let mut marks: Vec<usize> = Vec::new();
 
-    for width_2 in &words {
+    for word in &words {
         let sub: Vec<usize> = tl
-            .match_indices(width_2.as_str())
-            .flat_map(|(bytes_value, _)| {
-                let character = tl[..bytes_value].chars().count();
+            .match_indices(word.as_str())
+            .flat_map(|(offset, _)| {
+                let col = tl[..offset].chars().count();
 
-                character..character + width_2.chars().count()
+                col..col + word.chars().count()
             })
             .collect();
 
@@ -210,13 +210,13 @@ pub(crate) fn snippet(message: &Msg, query: &str, width: usize) -> (String, Vec<
         let mut at = 0;
         let mut best: Option<(i64, Vec<usize>)> = None;
 
-        for thread in tl.split(' ') {
-            mark_snippet_match(width_2, at, &mut best, thread);
+        for token in tl.split(' ') {
+            mark_snippet_match(word, at, &mut best, token);
 
-            at += thread.chars().count() + 1;
+            at += token.chars().count() + 1;
         }
 
-        marks.extend(best.map(|bytes_3| bytes_3.1).unwrap_or_default());
+        marks.extend(best.map(|found| found.1).unwrap_or_default());
     }
 
     marks.sort_unstable();
@@ -225,11 +225,11 @@ pub(crate) fn snippet(message: &Msg, query: &str, width: usize) -> (String, Vec<
     (text, marks)
 }
 
-fn mark_snippet_match(width_2: &str, at: usize, best: &mut Option<(i64, Vec<usize>)>, thread: &str) {
-    if let Some((text_value, path)) = crate::domain::matcher::word(width_2, thread)
-        && best.as_ref().is_none_or(|bytes_2| text_value > bytes_2.0)
+fn mark_snippet_match(word: &str, at: usize, best: &mut Option<(i64, Vec<usize>)>, token: &str) {
+    if let Some((score, positions)) = crate::domain::matcher::word(word, token)
+        && best.as_ref().is_none_or(|current| score > current.0)
     {
-        *best = Some((text_value, path.into_iter().map(|x| x + at).collect()));
+        *best = Some((score, positions.into_iter().map(|position| position + at).collect()));
     }
 }
 
@@ -238,17 +238,17 @@ static JUMP: Mutex<Option<(String, u64)>> = Mutex::new(None);
 
 /// The next view of THREAD scrolls to its message of time TS.
 pub(crate) fn jump_to(thread: &str, ts: u64) {
-    if let Ok(mut j) = JUMP.lock() {
-        *j = Some((thread.into(), ts));
+    if let Ok(mut jump) = JUMP.lock() {
+        *jump = Some((thread.into(), ts));
     }
 }
 
 /// The jump of THREAD, once.
 pub(crate) fn take_jump(thread: &str) -> Option<u64> {
-    let mut j = JUMP.lock().ok()?;
+    let mut jump = JUMP.lock().ok()?;
 
-    if j.as_ref().is_some_and(|(thread_value, _)| thread_value == thread) {
-        j.take().map(|(_, ts)| ts)
+    if jump.as_ref().is_some_and(|(jumped, _)| jumped == thread) {
+        jump.take().map(|(_, ts)| ts)
     } else {
         None
     }

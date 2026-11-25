@@ -28,50 +28,50 @@ fn task_of_reads_the_sub_prefix_only() {
 
 #[test]
 fn the_row_shows_running_ones_and_goes_with_the_last() {
-    let mut text_value = SubThreads::default();
+    let mut subthreads = SubThreads::default();
 
-    assert_eq!(text_value.rows(80, 20), 0);
+    assert_eq!(subthreads.rows(80, 20), 0);
 
-    text_value.started(kid("a"));
-    text_value.started(kid("b"));
+    subthreads.started(kid("a"));
+    subthreads.started(kid("b"));
 
-    assert_eq!(text_value.rows(80, 20), 1);
+    assert_eq!(subthreads.rows(80, 20), 1);
 
     // a click on the row opens the box: title rows + steps, a blank row between
-    text_value.bar = Rect::new(0, 5, 80, 1);
+    subthreads.bar = Rect::new(0, 5, 80, 1);
 
-    assert!(text_value.mouse(MouseEvent {
+    assert!(subthreads.mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 3,
         row: 5,
         modifiers: KeyModifiers::NONE
     }));
 
-    let text: Vec<String> = text_value
+    let lines: Vec<String> = subthreads
         .lines(76)
         .iter()
-        .map(|line| line.spans.iter().map(|x| x.content.to_string()).collect())
+        .map(|line| line.spans.iter().map(|span| span.content.to_string()).collect())
         .collect();
 
     assert!(
-        text[0].starts_with("› job a") && text[0].contains("@ADA") && text[1].contains("↳ ADA: Bash git status"),
-        "{text:?}"
+        lines[0].starts_with("› job a") && lines[0].contains("@ADA") && lines[1].contains("↳ ADA: Bash git status"),
+        "{lines:?}"
     );
-    assert_eq!(text_value.rows(80, 20), 1 + 2 + 5);
+    assert_eq!(subthreads.rows(80, 20), 1 + 2 + 5);
     assert_eq!(
-        text_value.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        subthreads.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
         Some(Act::None)
     );
     assert_eq!(
-        text_value.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
+        subthreads.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
         Some(Act::Stop("b".into()))
     );
 
     // the last one ends: the box closes, the row goes
-    text_value.gone("a");
-    text_value.gone("b");
+    subthreads.gone("a");
+    subthreads.gone("b");
 
-    assert!(!text_value.open && text_value.rows(80, 20) == 0);
+    assert!(!subthreads.open && subthreads.rows(80, 20) == 0);
 }
 
 #[test]
@@ -100,43 +100,43 @@ fn an_open_ask_shows_and_enter_opens_the_sub_thread() {
         })
     ]));
 
-    let mut text_value = SubThreads::default();
+    let mut subthreads = SubThreads::default();
 
-    text_value.started(Kid {
+    subthreads.started(Kid {
         asking: true,
         ..kid("a")
     });
-    text_value.open = true;
-    let text: Vec<String> = text_value
+    subthreads.open = true;
+    let lines: Vec<String> = subthreads
         .lines(90)
         .iter()
-        .map(|line| line.spans.iter().map(|x| x.content.to_string()).collect())
+        .map(|line| line.spans.iter().map(|span| span.content.to_string()).collect())
         .collect();
 
-    assert!(text[0].contains("asks you · enter: open"), "{text:?}");
+    assert!(lines[0].contains("asks you · enter: open"), "{lines:?}");
     assert_eq!(
-        text_value.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        subthreads.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         Some(Act::Open("a".into()))
     );
 }
 
 #[test]
 fn a_sub_thread_that_waits_on_a_monitor_says_so() {
-    let mut text_value = SubThreads::default();
+    let mut subthreads = SubThreads::default();
 
-    text_value.started(Kid {
+    subthreads.started(Kid {
         busy: false,
         watches: 1,
         ..kid("a")
     });
-    text_value.open = true;
-    let text: Vec<String> = text_value
+    subthreads.open = true;
+    let lines: Vec<String> = subthreads
         .lines(90)
         .iter()
-        .map(|line| line.spans.iter().map(|x| x.content.to_string()).collect())
+        .map(|line| line.spans.iter().map(|span| span.content.to_string()).collect())
         .collect();
 
-    assert!(text[0].contains("waits on 1 monitor"), "{text:?}");
+    assert!(lines[0].contains("waits on 1 monitor"), "{lines:?}");
 }
 
 #[test]
@@ -159,8 +159,8 @@ fn steps_keep_the_last_texts_and_tools() {
         .chain([ev("ADA", Kind::TurnStart)])
         .collect();
 
-    let text_value = steps(&events);
+    let kept = steps(&events);
 
-    assert_eq!(text_value.len(), STEPS);
-    assert_eq!(text_value.last().map(String::as_str), Some("ADA: step 5"));
+    assert_eq!(kept.len(), STEPS);
+    assert_eq!(kept.last().map(String::as_str), Some("ADA: step 5"));
 }

@@ -43,17 +43,17 @@ fn the_hosts_worktree_moves_the_view_and_a_missing_host_puts_the_task_in_the_pro
 
     std::fs::create_dir_all(&root).unwrap();
 
-    let sh = |character: &str| {
+    let sh = |script: &str| {
         assert!(
             std::process::Command::new("sh")
                 .arg("-c")
-                .arg(character)
+                .arg(script)
                 .current_dir(&root)
                 .output()
                 .unwrap()
                 .status
                 .success(),
-            "{character}"
+            "{script}"
         );
     };
 
@@ -72,7 +72,7 @@ fn the_hosts_worktree_moves_the_view_and_a_missing_host_puts_the_task_in_the_pro
 
     view.load_checkouts();
 
-    assert_missing_host(&(root), &(repo), &(wt), &(thread), view);
+    assert_missing_host(&root, &repo, &wt, &thread, view);
 }
 
 fn assert_missing_host(root: &Path, repo: &Path, wt: &Path, thread: &store::Thread, mut view: View) {

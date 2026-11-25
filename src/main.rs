@@ -192,17 +192,17 @@ pub(crate) struct Args {
 }
 
 fn parse() -> Args {
-    let mut agent_value = Args::default();
+    let mut args = Args::default();
     let mut it = std::env::args().skip(1);
     let mut rest = Vec::new();
 
-    while let Some(text) = it.next() {
-        parse_option(&mut agent_value, &mut it, &mut rest, text);
+    while let Some(arg) = it.next() {
+        parse_option(&mut args, &mut it, &mut rest, arg);
     }
 
-    agent_value.title = rest.join(" ");
+    args.title = rest.join(" ");
 
-    agent_value
+    args
 }
 
 /// `--kill-hosts`: stop every thread host, 1 line per host. Exit 1: a host did not end.
@@ -219,11 +219,11 @@ fn kill_hosts() -> ! {
 
         match error {
             None => println!("stopped  {id}  {title}"),
-            Some(error_value) => println!("failed   {id}  {title}: {error_value}"),
+            Some(error) => println!("failed   {id}  {title}: {error}"),
         }
     }
 
-    let failed = out.iter().filter(|(_, error_2)| error_2.is_some()).count();
+    let failed = out.iter().filter(|(_, error)| error.is_some()).count();
 
     println!("{} of {} hosts stopped", out.len() - failed, out.len());
 
@@ -248,7 +248,7 @@ fn main() {
     // called as `git` (the shim on the agents' PATH): the push lock, then the real git
     if std::env::args_os()
         .next()
-        .is_some_and(|agent| Path::new(&agent).file_name().is_some_and(|count| count == "git"))
+        .is_some_and(|arg0| Path::new(&arg0).file_name().is_some_and(|name| name == "git"))
     {
         crate::infra::pushlock::shim_main();
     }
@@ -280,17 +280,17 @@ fn sub() {
         Some("host") => engine::host::run(&arg(1)),
         Some("mcp") => engine::mcp::run(),
         Some("home") => crate::infra::home_init::run(argv.get(1).map(String::as_str)),
-        Some("setup") => crate::screens::tutorial::wizard::run(argv.iter().any(|agent_value| agent_value == "--dry")),
+        Some("setup") => crate::screens::tutorial::wizard::run(argv.iter().any(|arg| arg == "--dry")),
         Some("tutorial") => crate::screens::tutorial::run(&argv[1..]),
         Some("tutor-agent") => crate::screens::tutorial::agent(&argv[1..]),
         Some("ctl") => {
             // codehead ctl <thread> '<json command>': 1 command to the thread's host
-            let character: serde_json::Value =
+            let command: serde_json::Value =
                 serde_json::from_str(&arg(2)).unwrap_or_else(|error| fail(&format!("ctl: {error}"), 2));
 
-            match engine::client::call(&arg(1), &character) {
-                Ok(value) => println!("{value}"),
-                Err(error_value) => fail(&error_value, 1),
+            match engine::client::call(&arg(1), &command) {
+                Ok(reply) => println!("{reply}"),
+                Err(error) => fail(&error, 1),
             }
 
             std::process::exit(0)
@@ -299,8 +299,8 @@ fn sub() {
     }
 }
 
-fn parse_option(agent_value: &mut Args, it: &mut impl Iterator<Item = String>, rest: &mut Vec<String>, text: String) {
-    match text.as_str() {
+fn parse_option(args: &mut Args, it: &mut impl Iterator<Item = String>, rest: &mut Vec<String>, arg: String) {
+    match arg.as_str() {
         "-h" | "--help" => {
             println!("{HELP}");
             std::process::exit(0)
@@ -311,18 +311,16 @@ fn parse_option(agent_value: &mut Args, it: &mut impl Iterator<Item = String>, r
         }
         "--update" => crate::infra::update::run(),
         "--kill-hosts" => kill_hosts(),
-        "-a" => agent_value.agent = Some(it.next().unwrap_or_else(|| fail("-a: value required", 2))),
-        "-b" => agent_value.branch = Some(it.next().unwrap_or_else(|| fail("-b: value required", 2))),
-        "-c" => agent_value.copy = true,
+        "-a" => args.agent = Some(it.next().unwrap_or_else(|| fail("-a: value required", 2))),
+        "-b" => args.branch = Some(it.next().unwrap_or_else(|| fail("-b: value required", 2))),
+        "-c" => args.copy = true,
         "--cost" => crate::features::cost::run(&it.next().unwrap_or_else(|| fail("--cost: thread id required", 2))),
-        "--view" => agent_value.view = Some(it.next().unwrap_or_else(|| fail("--view: thread id required", 2))),
-        "-n" => agent_value.dry = true,
+        "--view" => args.view = Some(it.next().unwrap_or_else(|| fail("--view: thread id required", 2))),
+        "-n" => args.dry = true,
         "--" => {
             rest.extend(it.by_ref());
         }
-        text_value if text_value.starts_with('-') && text_value.len() > 1 => {
-            fail(&format!("unknown option {text_value}\n\n{HELP}"), 2)
-        }
-        _ => rest.push(text),
+        other if other.starts_with('-') && other.len() > 1 => fail(&format!("unknown option {other}\n\n{HELP}"), 2),
+        _ => rest.push(arg),
     }
 }

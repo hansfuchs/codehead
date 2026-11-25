@@ -46,12 +46,12 @@ impl Panel {
         }
     }
 
-    pub(crate) fn key(&mut self, key_value: KeyEvent) -> Pick {
+    pub(crate) fn key(&mut self, key: KeyEvent) -> Pick {
         let count = self.notes.len();
 
-        match key_value.code {
+        match key.code {
             KeyCode::Esc => Pick::Close,
-            _ if is_key(&key_value) => Pick::Close,
+            _ if is_key(&key) => Pick::Close,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.cursor = self.cursor.saturating_sub(1);
                 Pick::Stay
@@ -69,7 +69,7 @@ impl Panel {
 
     /// A click at AT: the note's jump.
     pub(crate) fn click(&mut self, at: ratatui::layout::Position) -> Pick {
-        match self.rows.iter().find(|(result, _)| result.contains(at)) {
+        match self.rows.iter().find(|(rect, _)| rect.contains(at)) {
             Some(&(_, i)) => self.notes.get(i).cloned().map_or(Pick::Close, Pick::Jump),
             None => Pick::Close,
         }
@@ -77,16 +77,16 @@ impl Panel {
 
     /// The panel at the top right of AREA, below its 1st row.
     pub(crate) fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        let width_value = area.width.saturating_sub(4).min(76);
+        let width = area.width.saturating_sub(4).min(76);
         let rows = (self.notes.len().max(1) as u16 * 2).min(area.height.saturating_sub(5));
-        let area_value = Rect {
-            x: area.right().saturating_sub(width_value + 1),
+        let panel = Rect {
+            x: area.right().saturating_sub(width + 1),
             y: area.y + 1,
-            width: width_value,
+            width,
             height: rows + 3,
         };
 
-        frame.render_widget(Clear, area_value);
+        frame.render_widget(Clear, panel);
         let block = Block::new()
             .borders(Borders::ALL)
             .border_type(BorderType::Plain)
@@ -100,9 +100,9 @@ impl Panel {
                 theme::muted(),
             ))
             .style(theme::text());
-        let inner = block.inner(area_value);
+        let inner = block.inner(panel);
 
-        frame.render_widget(block, area_value);
+        frame.render_widget(block, panel);
         self.rows.clear();
 
         if self.notes.is_empty() {
@@ -119,7 +119,7 @@ impl Panel {
         let top = self.cursor.saturating_sub(fits - 1);
         let tw = inner.width.saturating_sub(2) as usize;
 
-        for (slot, (i, count_value)) in self.notes.iter().enumerate().skip(top).take(fits).enumerate() {
+        for (slot, (i, note)) in self.notes.iter().enumerate().skip(top).take(fits).enumerate() {
             let y = inner.y + slot as u16 * 2;
             let row = Rect {
                 x: inner.x,
@@ -129,7 +129,7 @@ impl Panel {
             };
             let cur = i == self.cursor;
 
-            draw_note(frame, row, count_value, cur, tw);
+            draw_note(frame, row, note, cur, tw);
             self.rows.push((row, i));
         }
     }
@@ -174,7 +174,7 @@ pub(crate) use crate::ui::notification_badge::{badge, width};
 #[cfg(test)]
 use std::path::PathBuf;
 
-fn draw_note(frame: &mut Frame, row: Rect, count_value: &Note, cur: bool, tw: usize) {
+fn draw_note(frame: &mut Frame, row: Rect, note: &Note, cur: bool, tw: usize) {
     if cur {
         frame.render_widget(
             Paragraph::new("").style(Style::default().bg(theme::pal().surface0)),
@@ -182,27 +182,22 @@ fn draw_note(frame: &mut Frame, row: Rect, count_value: &Note, cur: bool, tw: us
         );
     }
 
-    let when = crate::ui::thread_card::ago(count_value.ts);
-    let head = format!("{} {} ", count_value.kind.icon(), count_value.kind.label());
+    let when = crate::ui::thread_card::ago(note.ts);
+    let head = format!("{} {} ", note.kind.icon(), note.kind.label());
     let room = tw.saturating_sub(head.chars().count() + when.chars().count() + 3);
     let l1 = Line::from(vec![
         Span::styled(
             format!(" {head}"),
-            Style::default()
-                .fg(count_value.kind.color())
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(note.kind.color()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            crate::ui::thread_card::fit(&count_value.title, room),
+            crate::ui::thread_card::fit(&note.title, room),
             if cur { theme::bold() } else { theme::text() },
         ),
         Span::styled(format!(" · {when}"), theme::muted()),
     ]);
     let l2 = Line::from(Span::styled(
-        format!(
-            "   {}",
-            crate::ui::thread_card::fit(&count_value.text, tw.saturating_sub(2))
-        ),
+        format!("   {}", crate::ui::thread_card::fit(&note.text, tw.saturating_sub(2))),
         theme::muted(),
     ));
 

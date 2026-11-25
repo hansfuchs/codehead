@@ -18,14 +18,14 @@ impl View {
         // `#name` of a shortcut: its text
         text = crate::domain::shortcuts::expand(&text);
 
-        text = prompt_context_text(self, text);
+        text = with_view_context(self, text);
 
         let files: Vec<String> = self
             .prompt
             .attachments
             .iter()
-            .filter(|(message, _)| text.contains(message.as_str()))
-            .map(|(message, path)| format!("- {message}: {}", path.display()))
+            .filter(|(marker, _)| text.contains(marker.as_str()))
+            .map(|(marker, path)| format!("- {marker}: {}", path.display()))
             .collect();
 
         if !files.is_empty() {
@@ -53,11 +53,11 @@ impl View {
 
         if let Some((new, old)) = replacing {
             // OLD mid-turn: the replace waits for its turn to end (esc interrupts it)
-            submit_branch(self, text, new, old);
+            submit_replace(self, text, new, old);
             return;
         }
 
-        self.send_prompt(&(text));
+        self.send_prompt(&text);
     }
 
     /// An owner message: TEXT to its @names, else to the agents of the owner's last message.
@@ -167,18 +167,18 @@ impl View {
             .subthreads
             .kids
             .iter()
-            .find(|key| key.id == kid)
-            .map(|key| (key.title.clone(), key.agents.first().cloned().unwrap_or_default()))
+            .find(|sub| sub.id == kid)
+            .map(|sub| (sub.title.clone(), sub.agents.first().cloned().unwrap_or_default()))
             .unwrap_or_default();
 
         self.host("sub_done", json!({"op": "sub_done", "id": kid, "title": title, "agent": agent, "state": "stopped", "text": "stopped by the owner"}));
 
         // its host stops (2 s max), then its records go: off the UI thread
-        let key = kid.to_string();
+        let kid_id = kid.to_string();
 
         let gone = move || {
-            let _ = crate::engine::client::send_within(&key, &json!({"op": "stop"}), Duration::from_secs(2));
-            let _ = store::delete(&key);
+            let _ = crate::engine::client::send_within(&kid_id, &json!({"op": "stop"}), Duration::from_secs(2));
+            let _ = store::delete(&kid_id);
         };
 
         if cfg!(test) {
@@ -263,7 +263,7 @@ impl View {
 
     pub(super) fn paste(&mut self, text: &str) {
         match self.prompt.paster.paste(text) {
-            Pasted::Text(thread) => self.prompt.input.paste(&thread),
+            Pasted::Text(pasted) => self.prompt.input.paste(&pasted),
             Pasted::File { path, marker } => {
                 self.prompt.input.insert(&marker);
                 self.prompt.attachments.push((marker, path));
@@ -341,38 +341,38 @@ impl Replacement {
             return;
         }
 
-        let result = client::call(&id, &json!({"op": "leave", "agent": old, "to": new}))
+        let replaced = client::call(&id, &json!({"op": "leave", "agent": old, "to": new}))
             .and_then(|_| client::call(&id, &json!({"op": "prompt", "to": [new], "text": prompt})));
-        let _ = tx.send(Msg::Done("replace", result));
+        let _ = tx.send(Msg::Done("replace", replaced));
     }
 }
 
-fn submit_branch(view: &mut View, text: String, new: String, old: String) {
+fn submit_replace(view: &mut View, text: String, new: String, old: String) {
     if view.thread.busy.contains(&old) {
         view.toast(format!(
             "{new} replaces {old} after {old}'s turn · esc: interrupt {old}"
         ));
         view.prompt.queued = Some((new, old, text));
     } else {
-        view.run_replace(new, old, &(text));
+        view.run_replace(new, old, &text);
     }
 }
 
-fn prompt_context_text(view: &mut View, mut text: String) -> String {
+fn with_view_context(view: &mut View, mut text: String) -> String {
     // from the changes view: the selected lines and the picked comments go along (once)
     if view.panes.pane == Pane::Changes
-        && let Some(character) = view.panes.changes.context()
+        && let Some(context) = view.panes.changes.context()
     {
-        text = format!("{text}\n\n{character}");
+        text = format!("{text}\n\n{context}");
         view.mini_chat_state.mini_chat = true;
         view.panes.changes.took_context();
     }
 
     // from the merge tab: the pull request in view
     if view.panes.pane == Pane::Merge
-        && let Some(character) = view.merge_state.merge.context()
+        && let Some(context) = view.merge_state.merge.context()
     {
-        text = format!("{text}\n\n{character}");
+        text = format!("{text}\n\n{context}");
     }
 
     text
@@ -383,7 +383,7 @@ fn named_prompt_agents(view: &View, text: &str) -> Vec<String> {
         .agents
         .names
         .iter()
-        .map(|count| count.0.clone())
+        .map(|(name, _)| name.clone())
         .chain(view.agents.members.iter().cloned())
         .collect();
 

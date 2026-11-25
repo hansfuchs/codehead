@@ -7,74 +7,74 @@ impl ThreadList {
     }
 }
 
-fn poll_body(character: Vec<crate::ui::thread_card::Card>, view_state: &mut ThreadList) {
-    view_state.card_reads.loading = None;
+fn take_read(cards: Vec<crate::ui::thread_card::Card>, thread_list: &mut ThreadList) {
+    thread_list.card_reads.loading = None;
 
     // the 1st read after the job's end: the store holds what the job did
-    if std::mem::take(&mut view_state.job_state.settle) {
-        view_state.job_state.moved.clear();
+    if std::mem::take(&mut thread_list.job_state.settle) {
+        thread_list.job_state.moved.clear();
     }
 
-    view_state.set_cards(character);
+    thread_list.set_cards(cards);
 }
 
-fn poll_character_value(lv: u64, view_state: &mut ThreadList) {
-    view_state.card_reads.land_v = lv;
-    let mut character_value = view_state.cards.clone();
+fn refresh_lands(lv: u64, thread_list: &mut ThreadList) {
+    thread_list.card_reads.land_v = lv;
+    let mut cards = thread_list.cards.clone();
 
-    for key in &mut character_value {
-        key.land = crate::domain::landed::of(&key.id).or(key.land.take());
+    for card in &mut cards {
+        card.land = crate::domain::landed::of(&card.id).or(card.land.take());
     }
 
-    view_state.set_cards(character_value);
+    thread_list.set_cards(cards);
 }
 
-fn poll_thread_list(receiver_state: &mut ThreadList, shown: bool) {
-    if let Some(rx) = &receiver_state.card_reads.loading
-        && let Ok(character) = rx.try_recv()
+fn poll_thread_list(thread_list: &mut ThreadList, shown: bool) {
+    if let Some(rx) = &thread_list.card_reads.loading
+        && let Ok(cards) = rx.try_recv()
     {
-        poll_body(character, receiver_state);
+        take_read(cards, thread_list);
     }
 
     // a thread's files changed (state, log, draft): the cards again (0 timer)
-    for thread in receiver_state.card_reads.topics.try_iter() {
-        receiver_state.card_reads.cards_due |= matches!(
-            thread,
+    for topic in thread_list.card_reads.topics.try_iter() {
+        thread_list.card_reads.cards_due |= matches!(
+            topic,
             crate::infra::bus::Topic::Thread(..) | crate::infra::bus::Topic::Rescan(_)
         );
     }
 
-    let due = receiver_state.card_reads.cards_at.is_none() || receiver_state.card_reads.cards_due;
+    let due = thread_list.card_reads.cards_at.is_none() || thread_list.card_reads.cards_due;
 
-    if shown && due && receiver_state.card_reads.loading.is_none() && !cfg!(test) {
-        receiver_state.card_reads.cards_due = false;
-        receiver_state.reload();
+    if shown && due && thread_list.card_reads.loading.is_none() && !cfg!(test) {
+        thread_list.card_reads.cards_due = false;
+        thread_list.reload();
     }
 
     // new landed states: on the cards at once (0 wait for the next card read)
     let lv = crate::domain::landed::version();
 
-    if shown && lv != receiver_state.card_reads.land_v {
-        poll_character_value(lv, receiver_state);
+    if shown && lv != thread_list.card_reads.land_v {
+        refresh_lands(lv, thread_list);
     }
 
     if shown {
         crate::domain::landed::visible();
     }
 
-    if let Some(rx) = &receiver_state.job_state.job
+    if let Some(rx) = &thread_list.job_state.job
         && let Ok((text, err)) = rx.try_recv()
     {
-        receiver_state.job_state.job = None;
-        receiver_state.done(text, err);
+        thread_list.job_state.job = None;
+        thread_list.done(text, err);
     }
 
-    if receiver_state
+    if thread_list
         .job_state
         .status
         .as_ref()
-        .is_some_and(|text_value| text_value.2.elapsed() > STATUS_FOR)
+        .is_some_and(|status| status.2.elapsed() > STATUS_FOR)
     {
-        receiver_state.job_state.status = None;
+        thread_list.job_state.status = None;
     }
 }

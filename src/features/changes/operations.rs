@@ -43,8 +43,8 @@ fn start_op_view(view: &mut View, op: Op) -> Act {
         return Act::Toast("a pull request's diff: read only (the merge tab's prompt tells the agents)".into());
     }
 
-    if let Some(character) = &view.commit_src {
-        return Act::Toast(format!("commit {}: read only", character.short));
+    if let Some(commit) = &view.commit_src {
+        return Act::Toast(format!("commit {}: read only", commit.short));
     }
 
     if view.all {
@@ -60,17 +60,17 @@ fn start_op_view(view: &mut View, op: Op) -> Act {
     }
 
     // a push: its commits leave UNPUSHED for PUSHING until it ends
-    let un = view
+    let unpushed = view
         .changes
         .commits
         .list
         .iter()
-        .filter(|character| !character.pushed)
-        .map(|character| character.oid.clone());
+        .filter(|commit| !commit.pushed)
+        .map(|commit| commit.oid.clone());
 
     view.pushing = match &op {
-        Op::Push | Op::OpenPr => un.collect(),
-        Op::PushTo(oid) => un.skip_while(|output| output != oid).collect(),
+        Op::Push | Op::OpenPr => unpushed.collect(),
+        Op::PushTo(oid) => unpushed.skip_while(|unpushed_oid| unpushed_oid != oid).collect(),
         _ => Vec::new(),
     };
 
@@ -95,23 +95,23 @@ fn start_op_view(view: &mut View, op: Op) -> Act {
 }
 
 fn poll_push_lock_view(view: &mut View) -> bool {
-    let Some(directory) = view.changes.git_dir.as_deref() else {
+    let Some(git_dir) = view.changes.git_dir.as_deref() else {
         return false;
     };
 
-    let other = crate::infra::pushlock::held_in(directory).filter(|height| height.pid != std::process::id());
+    let other = crate::infra::pushlock::held_in(git_dir).filter(|lock| lock.pid != std::process::id());
 
     match (other, view.push_by.is_some()) {
-        (Some(height), false) => {
-            view.push_by = Some(height.by);
+        (Some(lock), false) => {
+            view.push_by = Some(lock.by);
             view.push_hold = false;
             view.pushing = view
                 .changes
                 .commits
                 .list
                 .iter()
-                .filter(|character| !character.pushed)
-                .map(|character| character.oid.clone())
+                .filter(|commit| !commit.pushed)
+                .map(|commit| commit.oid.clone())
                 .collect();
             view.pushing_at = Some(Instant::now());
 
@@ -135,11 +135,11 @@ fn poll_ship_view(view: &mut View) -> bool {
     let mut changed = false;
 
     if let Some(rx) = &view.pull_request.pr_read
-        && let Ok(path) = rx.try_recv()
+        && let Ok(pr) = rx.try_recv()
     {
         view.pull_request.pr_read = None;
-        changed = view.pull_request.pr != path;
-        view.pull_request.pr = path;
+        changed = view.pull_request.pr != pr;
+        view.pull_request.pr = pr;
     }
 
     let on_branch = !cfg!(test)
@@ -153,7 +153,7 @@ fn poll_ship_view(view: &mut View) -> bool {
         && view
             .pull_request
             .pr_at
-            .is_none_or(|thread| thread.elapsed() > Duration::from_secs(30))
+            .is_none_or(|read_at| read_at.elapsed() > Duration::from_secs(30))
     {
         view.pull_request.pr_at = Some(Instant::now());
         let (tx, rx) = crate::infra::bus::channel();
@@ -197,14 +197,14 @@ fn poll_op_view(view: &mut View) -> bool {
     view.pushing_at = None;
 
     if result.is_ok() {
-        for character in view
+        for commit in view
             .changes
             .commits
             .list
             .iter_mut()
-            .filter(|character| gone.contains(&character.oid))
+            .filter(|commit| gone.contains(&commit.oid))
         {
-            character.pushed = true;
+            commit.pushed = true;
         }
     }
 
@@ -218,7 +218,7 @@ fn poll_op_view(view: &mut View) -> bool {
     }
 
     view.operation_state.note = Some(match result {
-        Ok(text) => format!("git: {text}"),
+        Ok(done) => format!("git: {done}"),
         Err(error) => format!("git: {error}"),
     });
 

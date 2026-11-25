@@ -8,7 +8,7 @@ pub(super) fn start_code(state: &mut MarkdownState<'_>, kind: CodeBlockKind<'_>,
     gap(state, at);
 
     let lang = match kind {
-        CodeBlockKind::Fenced(line_value) => line_value
+        CodeBlockKind::Fenced(info) => info
             .split(|character: char| character.is_whitespace() || character == ',')
             .next()
             .unwrap_or_default()
@@ -33,17 +33,17 @@ pub(super) fn end_code(state: &mut MarkdownState<'_>) {
 }
 
 pub(super) fn start_image(state: &mut MarkdownState<'_>, dest_url: &str) {
-    let bytes_4 = state.block.get_or_insert_with(|| {
-        let message_3 = margin(state.prefix, state.quote, state.lists.len());
+    let block = state.block.get_or_insert_with(|| {
+        let margin = margin(state.prefix, state.quote, state.lists.len());
 
         Block {
             pieces: Vec::new(),
-            first: message_3.clone(),
-            rest: message_3,
+            first: margin.clone(),
+            rest: margin,
         }
     });
 
-    bytes_4.pieces.push(Piece {
+    block.pieces.push(Piece {
         text: "[image: ".into(),
         style: theme::muted(),
         link: Some(dest_url.to_string()),
@@ -56,8 +56,8 @@ pub(super) fn start_image(state: &mut MarkdownState<'_>, dest_url: &str) {
 pub(super) fn end_image(state: &mut MarkdownState<'_>) {
     state.styles.pop();
 
-    if let Some(bytes_5) = state.block.as_mut() {
-        bytes_5.pieces.push(Piece {
+    if let Some(block) = state.block.as_mut() {
+        block.pieces.push(Piece {
             text: "]".into(),
             style: theme::muted(),
             link: state.link.clone(),
@@ -75,28 +75,28 @@ pub(super) fn start_link(state: &mut MarkdownState<'_>, dest_url: &str, style: S
         .push(style.fg(theme::pal().info()).add_modifier(Modifier::UNDERLINED));
 }
 
-pub(super) fn text_event(state: &mut MarkdownState<'_>, thread: &str, style: Style) {
-    if let Some((_, text)) = state.code.as_mut() {
-        text.push_str(thread);
+pub(super) fn text_event(state: &mut MarkdownState<'_>, text: &str, style: Style) {
+    if let Some((_, code)) = state.code.as_mut() {
+        code.push_str(text);
         return;
     }
 
-    let bytes_7 = state.block.get_or_insert_with(|| {
-        let message_4 = margin(state.prefix, state.quote, state.lists.len());
+    let block = state.block.get_or_insert_with(|| {
+        let margin = margin(state.prefix, state.quote, state.lists.len());
 
         Block {
             pieces: Vec::new(),
-            first: message_4.clone(),
-            rest: message_4,
+            first: margin.clone(),
+            rest: margin,
         }
     });
 
     let st = if state.heading { theme::bold() } else { style };
 
     // a bare URL in text: clickable too
-    for (i, part) in thread.split(' ').enumerate() {
+    for (i, part) in text.split(' ').enumerate() {
         if i > 0 {
-            bytes_7.pieces.push(Piece {
+            block.pieces.push(Piece {
                 text: " ".into(),
                 style: st,
                 ..Default::default()
@@ -118,7 +118,7 @@ pub(super) fn text_event(state: &mut MarkdownState<'_>, thread: &str, style: Sty
             st
         };
 
-        bytes_7.pieces.push(Piece {
+        block.pieces.push(Piece {
             text: part.to_string(),
             style: st,
             link: url,
@@ -127,20 +127,20 @@ pub(super) fn text_event(state: &mut MarkdownState<'_>, thread: &str, style: Sty
     }
 }
 
-pub(super) fn inline_code(state: &mut MarkdownState<'_>, thread_value: &str) {
-    let bytes_8 = state.block.get_or_insert_with(|| {
-        let message_5 = margin(state.prefix, state.quote, state.lists.len());
+pub(super) fn inline_code(state: &mut MarkdownState<'_>, code: &str) {
+    let block = state.block.get_or_insert_with(|| {
+        let margin = margin(state.prefix, state.quote, state.lists.len());
 
         Block {
             pieces: Vec::new(),
-            first: message_5.clone(),
-            rest: message_5,
+            first: margin.clone(),
+            rest: margin,
         }
     });
 
     // a panel background: inline code never reads as a link (same blue, links underlined);
     // a path of an existing file: a file link (a click opens it in the files view)
-    let file = state.link.is_none().then(|| file_link(thread_value)).flatten();
+    let file = state.link.is_none().then(|| file_link(code)).flatten();
     let style = Style::default().fg(code_fg()).bg(theme::pal().surface0);
 
     let style = if file.is_some() {
@@ -149,10 +149,10 @@ pub(super) fn inline_code(state: &mut MarkdownState<'_>, thread_value: &str) {
         style
     };
 
-    let copy = file.is_none().then(|| thread_value.to_string());
+    let copy = file.is_none().then(|| code.to_string());
 
-    bytes_8.pieces.push(Piece {
-        text: thread_value.to_string(),
+    block.pieces.push(Piece {
+        text: code.to_string(),
         style,
         link: file.or_else(|| state.link.clone()),
         copy,
@@ -160,11 +160,11 @@ pub(super) fn inline_code(state: &mut MarkdownState<'_>, thread_value: &str) {
 }
 
 pub(super) fn line_break(state: &mut MarkdownState<'_>) {
-    if let Some(bytes_9) = state.block.as_mut() {
-        let (first, rest) = (bytes_9.first.clone(), bytes_9.rest.clone());
-        let pieces = std::mem::take(&mut bytes_9.pieces);
+    if let Some(block) = state.block.as_mut() {
+        let (first, rest) = (block.first.clone(), block.rest.clone());
+        let pieces = std::mem::take(&mut block.pieces);
 
         state.out.extend(wrap(&pieces, state.width, &first, &rest));
-        bytes_9.first = rest;
+        block.first = rest;
     }
 }

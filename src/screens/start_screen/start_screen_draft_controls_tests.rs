@@ -32,13 +32,13 @@ fn double_esc_quits() {
     assert!(matches!(app.outcome, Some(Outcome::Quit)));
 
     // another key between the 2 esc: no quit
-    let mut app_value = test_app();
+    let mut fresh = test_app();
 
-    key(&mut app_value, KeyCode::Esc, KeyModifiers::NONE);
-    key(&mut app_value, KeyCode::Down, KeyModifiers::NONE);
-    key(&mut app_value, KeyCode::Esc, KeyModifiers::NONE);
+    key(&mut fresh, KeyCode::Esc, KeyModifiers::NONE);
+    key(&mut fresh, KeyCode::Down, KeyModifiers::NONE);
+    key(&mut fresh, KeyCode::Esc, KeyModifiers::NONE);
 
-    assert!(app_value.outcome.is_none());
+    assert!(fresh.outcome.is_none());
 }
 
 #[test]
@@ -187,7 +187,7 @@ fn ctrl_s_keeps_the_task_as_a_draft_and_starts_over() {
 
     assert_eq!(
         all.iter()
-            .map(|directory| (directory.title.as_str(), directory.kept))
+            .map(|draft| (draft.title.as_str(), draft.kept))
             .collect::<Vec<_>>(),
         [("idea for later", true)]
     );
@@ -200,12 +200,12 @@ fn ctrl_s_keeps_the_task_as_a_draft_and_starts_over() {
     // loaded and edited: it stays kept
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     type_text(&mut app, "!");
-    let directory_2 = drafts::load(&dir, "")
+    let kept = drafts::load(&dir, "")
         .into_iter()
-        .find(|directory_value| directory_value.title.starts_with("idea"))
+        .find(|draft| draft.title.starts_with("idea"))
         .unwrap();
 
-    assert!(directory_2.kept, "{directory_2:?}");
+    assert!(kept.kept, "{kept:?}");
 }
 
 #[test]
@@ -232,7 +232,7 @@ fn save_as_draft_button_and_menu_new_starts_empty() {
     assert_eq!(
         drafts::load(&dir, &app.draft_selection.draft_id)
             .iter()
-            .map(|directory| (directory.prompt.as_str(), directory.kept))
+            .map(|draft| (draft.prompt.as_str(), draft.kept))
             .collect::<Vec<_>>(),
         [("first idea", true)]
     );
@@ -254,7 +254,7 @@ fn save_as_draft_button_and_menu_new_starts_empty() {
         app.draft_selection
             .drafts
             .iter()
-            .map(|directory_value| directory_value.prompt.as_str())
+            .map(|draft| draft.prompt.as_str())
             .collect::<Vec<_>>(),
         ["first idea more"]
     );
@@ -286,7 +286,7 @@ fn drafts_backup_list_load_delete() {
     assert_eq!(
         drafts::load(&dir, "")
             .iter()
-            .map(|directory| directory.title.clone())
+            .map(|draft| draft.title.clone())
             .collect::<Vec<_>>(),
         ["fix the build"]
     );
@@ -307,61 +307,61 @@ fn drafts_backup_list_load_delete() {
     );
 
     // another codehead (the 1st one died): the draft shows, ↑ from the prompt reaches the field
-    let mut app_value = app_with(Some(&dir));
+    let mut restarted = app_with(Some(&dir));
 
-    assert!(dump(&mut app_value, 120, 40).contains("view drafts (1)"));
-    assert!(app_value.compose.field == Field::Prompt);
+    assert!(dump(&mut restarted, 120, 40).contains("view drafts (1)"));
+    assert!(restarted.compose.field == Field::Prompt);
 
-    key(&mut app_value, KeyCode::Up, KeyModifiers::NONE);
+    key(&mut restarted, KeyCode::Up, KeyModifiers::NONE);
 
-    assert!(app_value.compose.field == Field::Drafts);
+    assert!(restarted.compose.field == Field::Drafts);
 
     // enter: the dropdown; esc: back to the task (0 quit)
-    key(&mut app_value, KeyCode::Enter, KeyModifiers::NONE);
-    let text = dump(&mut app_value, 120, 40);
+    key(&mut restarted, KeyCode::Enter, KeyModifiers::NONE);
+    let text = dump(&mut restarted, 120, 40);
 
     assert!(
         text.contains(" drafts ") && text.contains("fix the build") && text.contains("d d: delete"),
         "{text}"
     );
 
-    key(&mut app_value, KeyCode::Esc, KeyModifiers::NONE);
+    key(&mut restarted, KeyCode::Esc, KeyModifiers::NONE);
 
-    assert!(app_value.draft_selection.drafts_menu.is_none() && app_value.outcome.is_none());
+    assert!(restarted.draft_selection.drafts_menu.is_none() && restarted.outcome.is_none());
 
     // enter enter: loaded, the draft is this task's own now
-    key(&mut app_value, KeyCode::Enter, KeyModifiers::NONE);
-    key(&mut app_value, KeyCode::Enter, KeyModifiers::NONE);
+    key(&mut restarted, KeyCode::Enter, KeyModifiers::NONE);
+    key(&mut restarted, KeyCode::Enter, KeyModifiers::NONE);
 
     assert_eq!(
         (
-            app_value.compose.title.text().as_str(),
-            app_value.compose.prompt.text().as_str()
+            restarted.compose.title.text().as_str(),
+            restarted.compose.prompt.text().as_str()
         ),
         ("fix the build", "- a\n- b")
     );
-    assert!(app_value.draft_selection.drafts.is_empty() && app_value.compose.field == Field::Prompt);
+    assert!(restarted.draft_selection.drafts.is_empty() && restarted.compose.field == Field::Prompt);
     assert_eq!(drafts::load(&dir, "").len(), 1);
 
     // a 3rd codehead: d d deletes the draft, the field goes
-    let mut app_2 = app_with(Some(&dir));
+    let mut third = app_with(Some(&dir));
 
-    key(&mut app_2, KeyCode::Up, KeyModifiers::NONE);
-    key(&mut app_2, KeyCode::Enter, KeyModifiers::NONE);
-    key(&mut app_2, KeyCode::Char('d'), KeyModifiers::NONE);
+    key(&mut third, KeyCode::Up, KeyModifiers::NONE);
+    key(&mut third, KeyCode::Enter, KeyModifiers::NONE);
+    key(&mut third, KeyCode::Char('d'), KeyModifiers::NONE);
 
-    assert_eq!(app_2.draft_selection.drafts.len(), 1, "a 1st d only asks");
+    assert_eq!(third.draft_selection.drafts.len(), 1, "a 1st d only asks");
 
-    key(&mut app_2, KeyCode::Char('d'), KeyModifiers::NONE);
+    key(&mut third, KeyCode::Char('d'), KeyModifiers::NONE);
 
-    drafts_backup_list_load_delete_verify_old(&dir, app_2);
+    drafts_backup_list_load_delete_verify_old(&dir, third);
 }
 
-fn drafts_backup_list_load_delete_verify_old(dir: &std::path::Path, mut app_2: App) {
+fn drafts_backup_list_load_delete_verify_old(dir: &std::path::Path, mut third: App) {
     assert!(
-        app_2.draft_selection.drafts.is_empty()
-            && app_2.draft_selection.drafts_menu.is_none()
-            && app_2.compose.field == Field::Prompt
+        third.draft_selection.drafts.is_empty()
+            && third.draft_selection.drafts_menu.is_none()
+            && third.compose.field == Field::Prompt
     );
     assert_eq!(
         drafts::load(dir, ""),
@@ -369,19 +369,19 @@ fn drafts_backup_list_load_delete_verify_old(dir: &std::path::Path, mut app_2: A
     );
 
     // a started thread drops its draft; an emptied task too
-    type_text(&mut app_2, "x");
+    type_text(&mut third, "x");
 
     assert_eq!(drafts::load(dir, "").len(), 1);
 
-    key(&mut app_2, KeyCode::Backspace, KeyModifiers::NONE);
+    key(&mut third, KeyCode::Backspace, KeyModifiers::NONE);
 
     assert_eq!(
         drafts::load(dir, ""),
         [] as [crate::screens::start_screen::drafts::Draft; 0]
     );
 
-    type_text(&mut app_2, "y");
-    app_2.drop_draft();
+    type_text(&mut third, "y");
+    third.drop_draft();
 
     assert_eq!(
         drafts::load(dir, ""),
@@ -389,25 +389,25 @@ fn drafts_backup_list_load_delete_verify_old(dir: &std::path::Path, mut app_2: A
     );
 
     // a started thread clears the form: the next new task starts empty, 0 old draft
-    app_2.compose.field = Field::Prompt;
-    type_text(&mut app_2, "the prompt");
-    let old = app_2.draft_selection.draft_id.clone();
+    third.compose.field = Field::Prompt;
+    type_text(&mut third, "the prompt");
+    let old = third.draft_selection.draft_id.clone();
 
-    app_2.clear_task();
+    third.clear_task();
 
     assert_eq!(
         (
-            app_2.compose.title.text().as_str(),
-            app_2.compose.prompt.text().as_str()
+            third.compose.title.text().as_str(),
+            third.compose.prompt.text().as_str()
         ),
         ("", "")
     );
     assert!(
-        app_2.note_list.selected.is_empty()
-            && app_2.compose.files.is_empty()
-            && app_2.compose.carry.is_empty()
-            && app_2.compose.field == Field::Prompt
-            && app_2.draft_selection.draft_id != old
+        third.note_list.selected.is_empty()
+            && third.compose.files.is_empty()
+            && third.compose.carry.is_empty()
+            && third.compose.field == Field::Prompt
+            && third.draft_selection.draft_id != old
     );
     assert_eq!(
         drafts::load(dir, ""),
@@ -429,19 +429,19 @@ fn prompt_command_dropdown_inserts_a_file() {
 
     // mention → files (of the test dir, 0 git) → the note file, by fuzzy text
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    let text_value = dump(&mut app, 120, 40);
+    let mention = dump(&mut app, 120, 40);
 
     assert!(
-        text_value.contains(" mention ") && text_value.contains("artifacts"),
-        "{text_value}"
+        mention.contains(" mention ") && mention.contains("artifacts"),
+        "{mention}"
     );
 
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    let text_2 = dump(&mut app, 120, 40);
+    let files = dump(&mut app, 120, 40);
 
     assert!(
-        text_2.contains(" mention › files ") && text_2.contains("ideas.md"),
-        "{text_2}"
+        files.contains(" mention › files ") && files.contains("ideas.md"),
+        "{files}"
     );
 
     type_text(&mut app, "dply");
@@ -455,9 +455,9 @@ fn prompt_command_dropdown_inserts_a_file() {
 
     assert!(app.outcome.is_none() && app.compose.screen == Screen::Compose);
 
-    let text_3 = dump(&mut app, 120, 40);
+    let closed = dump(&mut app, 120, 40);
 
-    assert!(!text_3.contains("┌ commands "), "{text_3}");
+    assert!(!closed.contains("┌ commands "), "{closed}");
 }
 
 #[test]

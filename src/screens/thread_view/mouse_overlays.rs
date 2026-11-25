@@ -83,7 +83,7 @@ fn mouse_context(view: &mut View, event: MouseEvent) {
 
     let output = menu.mouse(event);
 
-    if view.ctx_out(&(output)) {
+    if view.ctx_out(&output) {
         view.mouse_exit = true;
     }
 }

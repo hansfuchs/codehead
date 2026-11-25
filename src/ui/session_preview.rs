@@ -1,22 +1,25 @@
 use crate::infra::claude::Session;
 use crate::ui::theme;
 use ratatui::text::{Line, Span};
-pub(crate) fn preview(text: &Session) -> Vec<Line<'static>> {
+pub(crate) fn preview(session: &Session) -> Vec<Line<'static>> {
     let mut out = vec![
-        Line::styled(text.title.clone(), theme::bold()),
-        Line::from(vec![Span::styled("dir ", theme::muted()), Span::raw(text.cwd.clone())]),
+        Line::styled(session.title.clone(), theme::bold()),
+        Line::from(vec![
+            Span::styled("dir ", theme::muted()),
+            Span::raw(session.cwd.clone()),
+        ]),
         Line::from(vec![
             Span::styled("branch ", theme::muted()),
-            Span::raw(if text.branch.is_empty() {
+            Span::raw(if session.branch.is_empty() {
                 "-".to_string()
             } else {
-                text.branch.clone()
+                session.branch.clone()
             }),
         ]),
         Line::from(vec![
             Span::styled("session ", theme::muted()),
-            Span::raw(text.id.clone()),
-            Span::styled(format!(" · {}", text.when), theme::muted()),
+            Span::raw(session.id.clone()),
+            Span::styled(format!(" · {}", session.when), theme::muted()),
         ]),
         Line::raw(""),
         Line::styled(
@@ -27,6 +30,6 @@ pub(crate) fn preview(text: &Session) -> Vec<Line<'static>> {
         Line::styled("last response", theme::bold()),
     ];
 
-    out.extend(text.last.lines().map(|line| Line::raw(line.to_string())));
+    out.extend(session.last.lines().map(|line| Line::raw(line.to_string())));
     out
 }

@@ -40,7 +40,7 @@ fn next_home(outcome: Outcome, application: &mut Application) -> Option<ReturnTa
             copy_paths(&paths, application);
             None
         }
-        value @ Outcome::New { .. } => new_thread(value, application),
+        new @ Outcome::New { .. } => new_thread(new, application),
         Outcome::Resume(worktree) => resume(&worktree, application),
     }
 }
@@ -52,8 +52,8 @@ fn print_plan(
     message: &str,
     picked: &[String],
 ) {
-    if let Some(group) = &plan.prep {
-        let line = group.iter().map(|text_3| quote(text_3)).collect::<Vec<_>>().join(" ");
+    if let Some(argv) = &plan.prep {
+        let line = argv.iter().map(|arg| quote(arg)).collect::<Vec<_>>().join(" ");
 
         if plan.stash {
             println!(
@@ -65,12 +65,12 @@ fn print_plan(
         }
     }
 
-    if let Some(bytes_2) = &plan.worktree {
+    if let Some(branch) = &plan.worktree {
         println!(
             "git -C {} worktree add <codehead data>/worktrees/{} {}",
             quote(&repo.display().to_string()),
-            quote(bytes_2),
-            quote(bytes_2)
+            quote(branch),
+            quote(branch)
         );
     }
 
@@ -128,13 +128,13 @@ fn new_thread(outcome: Outcome, application: &mut Application) -> Option<ReturnT
 
     // a home repo not on disk yet: clone it first
     if let Some((url, path)) = &clone {
-        let _ = application.session.term.draw(|file_2| {
-            crate::screens::start_screen::draw_status(file_2, &format!("cloning {url}…"), 0);
+        let _ = application.session.term.draw(|frame| {
+            crate::screens::start_screen::draw_status(frame, &format!("cloning {url}…"), 0);
         });
 
-        if let Err(error_3) = crate::infra::home::clone(url, path) {
+        if let Err(error) = crate::infra::home::clone(url, path) {
             application.session.tty.leave(&mut application.session.out);
-            fail(&error_3, 1)
+            fail(&error, 1)
         }
     }
 
@@ -151,7 +151,7 @@ fn new_thread(outcome: Outcome, application: &mut Application) -> Option<ReturnT
     // blank frame between the form and the view only flashes
     show_start_status(&picked, &plan, application);
 
-    let text_4 = crate::screens::start_screen::start::Start {
+    let start = crate::screens::start_screen::start::Start {
         repo: &repo,
         target: &target,
         message: &message,
@@ -161,23 +161,23 @@ fn new_thread(outcome: Outcome, application: &mut Application) -> Option<ReturnT
         title_set,
     };
 
-    let (thread_9, note) = match crate::screens::start_screen::start::launch(&text_4, &plan, engine::client::start) {
-        Ok(result_value) => result_value,
-        Err(error_4) => {
+    let (thread, note) = match crate::screens::start_screen::start::launch(&start, &plan, engine::client::start) {
+        Ok(launched) => launched,
+        Err(error) => {
             application.session.tty.leave(&mut application.session.out);
-            fail(&error_4, 1)
+            fail(&error, 1)
         }
     };
 
-    let title = thread_9.title.clone();
+    let title = thread.title.clone();
 
     // the thread has the message (or its draft): the form starts empty again
     application.app.clear_task();
 
     Some(open_view(
         &mut application.session,
-        &thread_9.id,
-        &thread_9.work_dir(),
+        &thread.id,
+        &thread.work_dir(),
         &title,
         &application.cwd,
         note,
@@ -190,9 +190,9 @@ fn show_start_status(
     application: &mut Application,
 ) {
     if plan.prep.is_some() {
-        let _ = application.session.term.draw(|file_3| {
+        let _ = application.session.term.draw(|frame| {
             crate::screens::start_screen::draw_status(
-                file_3,
+                frame,
                 &format!("starting {} · {}…", plan.label, picked.join(", ")),
                 0,
             );
@@ -201,7 +201,7 @@ fn show_start_status(
 }
 
 fn resume(worktree: &crate::domain::threads::Worktree, application: &mut Application) -> Option<ReturnTarget> {
-    let Some(thread_10) = worktree.thread.clone() else {
+    let Some(thread) = worktree.thread.clone() else {
         application.session.tty.leave(&mut application.session.out);
         return None;
     };
@@ -210,16 +210,16 @@ fn resume(worktree: &crate::domain::threads::Worktree, application: &mut Applica
 
     if application.args.dry {
         application.session.tty.leave(&mut application.session.out);
-        println!("codehead --view {}", thread_10.id);
+        println!("codehead --view {}", thread.id);
         return None;
     }
 
-    wake(&thread_10.id);
+    wake(&thread.id);
     Some(open_view(
         &mut application.session,
-        &thread_10.id,
+        &thread.id,
         &dir,
-        &thread_10.title,
+        &thread.title,
         &application.cwd,
         None,
     ))
@@ -271,8 +271,8 @@ fn read_events(mut wait: Duration, application: &mut Application) -> bool {
 
     loop {
         let batch = match read_ready(wait) {
-            Ok(bytes) if bytes.is_empty() => break,
-            Ok(bytes_value) => bytes_value,
+            Ok(ready) if ready.is_empty() => break,
+            Ok(ready) => ready,
             Err(_) => {
                 failed = true;
                 break;
@@ -296,10 +296,10 @@ fn read_events(mut wait: Duration, application: &mut Application) -> bool {
 }
 
 fn draw_if_due(application: &mut Application) {
-    let nv = crate::domain::notifications::version() + crate::infra::bus::version();
+    let version = crate::domain::notifications::version() + crate::infra::bus::version();
 
-    if nv != application.notes_v {
-        application.notes_v = nv;
+    if version != application.notes_v {
+        application.notes_v = version;
         application.dirty = true;
     }
 
@@ -313,7 +313,7 @@ fn draw_if_due(application: &mut Application) {
     }
 
     let _w = engine::watch(|| "start: draw".to_string());
-    let _ = application.session.term.draw(|file| application.app.draw(file));
+    let _ = application.session.term.draw(|frame| application.app.draw(frame));
 
     application.dirty = false;
     application.drawn = Instant::now();
@@ -332,8 +332,8 @@ fn suspend(action: Suspend, application: &mut Application) {
     application.session.tty.leave(&mut application.session.out);
 
     match action {
-        Suspend::Note(path_4) => {
-            editor(&path_4);
+        Suspend::Note(path) => {
+            editor(&path);
             application.app.reload_notes();
         }
         Suspend::Prompt => edit_prompt(application),
@@ -346,34 +346,34 @@ fn suspend(action: Suspend, application: &mut Application) {
 }
 
 fn edit_prompt(application: &mut Application) {
-    let file_value = std::env::temp_dir().join(format!("codehead-prompt-{}.md", std::process::id()));
+    let path = std::env::temp_dir().join(format!("codehead-prompt-{}.md", std::process::id()));
 
-    if std::fs::write(&file_value, application.app.prompt_text()).is_ok() {
-        editor(&file_value);
+    if std::fs::write(&path, application.app.prompt_text()).is_ok() {
+        editor(&path);
 
-        if let Ok(thread_8) = std::fs::read_to_string(&file_value) {
-            application.app.set_prompt(thread_8.trim_end_matches('\n'));
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            application.app.set_prompt(text.trim_end_matches('\n'));
         }
 
-        let _ = std::fs::remove_file(&file_value);
+        let _ = std::fs::remove_file(&path);
     }
 }
 
-fn handle_event(ev: Event, at: Instant, application: &mut Application) -> bool {
+fn handle_event(event: Event, at: Instant, application: &mut Application) -> bool {
     crate::ui::textarea::stamp(Some(at));
 
     let tag = if engine::trace_on() {
-        format!("start: {ev:?}")
+        format!("start: {event:?}")
     } else {
         String::new()
     };
 
     let _w = engine::watch(move || tag);
 
-    match ev {
-        Event::Key(key_value) if key_value.kind != KeyEventKind::Release => application.app.key(key_value),
-        Event::Mouse(message_value) => application.app.mouse(message_value),
-        Event::Paste(text_2) => application.app.paste(&text_2),
+    match event {
+        Event::Key(key) if key.kind != KeyEventKind::Release => application.app.key(key),
+        Event::Mouse(mouse) => application.app.mouse(mouse),
+        Event::Paste(text) => application.app.paste(&text),
         _ => {}
     }
 

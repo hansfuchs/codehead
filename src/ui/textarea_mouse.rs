@@ -11,7 +11,7 @@ impl TextArea {
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) if inside => mouse_press(event, self),
             MouseEventKind::Drag(MouseButton::Left) if self.drag => self.mouse_branch(event),
-            MouseEventKind::Up(MouseButton::Left) if self.drag || inside => self.mouse_thread_value(),
+            MouseEventKind::Up(MouseButton::Left) if self.drag || inside => self.finish_drag(),
             MouseEventKind::ScrollUp if inside => {
                 self.scroll = self.scroll.saturating_sub(3);
                 self.follow = false;
@@ -28,13 +28,13 @@ impl TextArea {
         }
     }
 
-    fn mouse_thread_value(&mut self) -> bool {
+    fn finish_drag(&mut self) -> bool {
         self.drag = false;
 
-        if let Some(thread_value) = self.selected_text()
-            && clip::copy(&thread_value)
+        if let Some(text) = self.selected_text()
+            && clip::copy(&text)
         {
-            self.copied = Some(thread_value.chars().count());
+            self.copied = Some(text.chars().count());
         }
 
         true
@@ -53,51 +53,51 @@ impl TextArea {
     }
 }
 
-fn mouse_position(event: MouseEvent, text: &TextArea) -> Pos {
-    let y = (event.row as isize - text.area.y as isize).clamp(0, text.area.height.saturating_sub(1) as isize) as usize;
-    let x = event.column.saturating_sub(text.area.x) as usize;
+fn mouse_position(event: MouseEvent, ta: &TextArea) -> Pos {
+    let y = (event.row as isize - ta.area.y as isize).clamp(0, ta.area.height.saturating_sub(1) as isize) as usize;
+    let x = event.column.saturating_sub(ta.area.x) as usize;
 
-    text.pos_at(text.scroll + y, x)
+    ta.pos_at(ta.scroll + y, x)
 }
-fn mouse_press(event: MouseEvent, area: &mut TextArea) -> bool {
-    let path = mouse_position(event, area);
+fn mouse_press(event: MouseEvent, ta: &mut TextArea) -> bool {
+    let pos = mouse_position(event, ta);
 
     if event.modifiers.contains(KeyModifiers::SHIFT) {
-        area.move_to(path, true);
+        ta.move_to(pos, true);
         return true;
     }
 
-    let count_2 = match area.clicks {
-        Some((thread, query, count_value)) if query == path && thread.elapsed() < Duration::from_millis(400) => {
-            count_value % 3 + 1
+    let clicks = match ta.clicks {
+        Some((last, last_pos, last_clicks)) if last_pos == pos && last.elapsed() < Duration::from_millis(400) => {
+            last_clicks % 3 + 1
         }
         _ => 1,
     };
 
-    area.clicks = Some((Instant::now(), path, count_2));
-    area.last_op = None;
-    area.want_x = None;
+    ta.clicks = Some((Instant::now(), pos, clicks));
+    ta.last_op = None;
+    ta.want_x = None;
 
-    match count_2 {
-        2 => area.select_word(path),
+    match clicks {
+        2 => ta.select_word(pos),
         3 => {
-            area.anchor = Some(Pos { row: path.row, col: 0 });
-            area.cur = Pos {
-                row: path.row,
-                col: area.lines[path.row].len(),
+            ta.anchor = Some(Pos { row: pos.row, col: 0 });
+            ta.cur = Pos {
+                row: pos.row,
+                col: ta.lines[pos.row].len(),
             };
         }
         _ => {
-            area.move_to(path, false);
+            ta.move_to(pos, false);
 
-            if area.range().is_none() {
-                area.anchor = Some(path);
+            if ta.range().is_none() {
+                ta.anchor = Some(pos);
             }
         }
     }
 
-    area.drag = count_2 == 1;
-    area.follow = true;
+    ta.drag = clicks == 1;
+    ta.follow = true;
 
     true
 }

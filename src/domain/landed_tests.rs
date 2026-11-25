@@ -1,10 +1,10 @@
 use super::*;
 use std::process::{Command, Stdio};
 
-fn sh(dir: &Path, character: &str) {
+fn sh(dir: &Path, script: &str) {
     let ok = Command::new("sh")
         .arg("-c")
-        .arg(character)
+        .arg(script)
         .current_dir(dir)
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
@@ -16,7 +16,7 @@ fn sh(dir: &Path, character: &str) {
         .unwrap()
         .success();
 
-    assert!(ok, "{character}");
+    assert!(ok, "{script}");
 }
 
 /// A remote, its clone (main checkout) and a worktree on branch `feat` with 1 commit.
@@ -144,7 +144,7 @@ fn local_merge_ships_closed_pr_abandons() {
 
 /// Stale: 0 code, agents not done, idle 3+ days; the days left to the auto-archive.
 #[test]
-fn stale_after_3_days_archive_after_30() {
+fn stale_after_three_days_archived_after_thirty() {
     let (now, day) = (100 * DAY_MS, DAY_MS);
 
     assert!(stale(Some(&Land::NoCode), false, now - 3 * day - 1, now));
@@ -168,26 +168,26 @@ fn stale_after_3_days_archive_after_30() {
 #[test]
 fn thread_takes_the_worst_checkout() {
     let (base, repo, wt) = setup("thread");
-    let mut thread_value = store::Thread::new("t", "x", &repo, vec!["ada".into()]);
+    let mut open = store::Thread::new("t", "x", &repo, vec!["ada".into()]);
 
-    assert_eq!(thread(&thread_value, &[], &mut Seen::new()), Land::Main, "on main");
+    assert_eq!(thread(&open, &[], &mut Seen::new()), Land::Main, "on main");
 
-    thread_value.checkouts.push(store::Checkout {
+    open.checkouts.push(store::Checkout {
         dir: wt.display().to_string(),
         branch: Some("feat".into()),
     });
 
-    assert_eq!(thread(&thread_value, &[], &mut Seen::new()), Land::Unpushed(1));
+    assert_eq!(thread(&open, &[], &mut Seen::new()), Land::Unpushed(1));
 
-    let mut agent = store::Thread::new("a", "x", &repo, vec!["ada".into()]);
+    let mut archived = store::Thread::new("a", "x", &repo, vec!["ada".into()]);
 
-    agent.state = "archived".into();
-    agent.repo = Some(repo.display().to_string());
-    agent.worktree_pending = Some("feat".into());
+    archived.state = "archived".into();
+    archived.repo = Some(repo.display().to_string());
+    archived.worktree_pending = Some("feat".into());
     sh(&wt, "echo x > new.txt");
 
     assert_eq!(
-        thread(&agent, &[], &mut Seen::new()),
+        thread(&archived, &[], &mut Seen::new()),
         Land::Unpushed(1),
         "archived: 0 dirty read"
     );
@@ -214,9 +214,9 @@ fn worker_reads_what_a_topic_names() {
     )
     .unwrap();
 
-    let mut width = Worker::new(threads.clone());
+    let mut worker = Worker::new(threads.clone());
 
-    width.init();
+    worker.init();
 
     assert_eq!(of(&thread.id), Some(Land::Unpushed(1)));
 
@@ -224,31 +224,31 @@ fn worker_reads_what_a_topic_names() {
     let (top, common) = (canon(&top), canon(&common));
 
     sh(&wt, "echo x > new.txt");
-    let ids = width.apply(vec![In::Bus(Topic::Work(top.clone()))]);
+    let ids = worker.apply(vec![In::Bus(Topic::Work(top.clone()))]);
 
-    assert!(width.publish(&ids));
+    assert!(worker.publish(&ids));
     assert_eq!(of(&thread.id), Some(Land::Dirty(1)), "edit: status only");
 
     sh(&wt, "git add new.txt && git commit -q -m 2");
-    let ids = width.apply(vec![
+    let ids = worker.apply(vec![
         In::Bus(Topic::Git(common.clone(), bus::Git::All)),
         In::Bus(Topic::Work(top.clone())),
     ]);
 
-    width.publish(&ids);
+    worker.publish(&ids);
 
     assert_eq!(of(&thread.id), Some(Land::Unpushed(2)), "commit");
 
     sh(&wt, "git push -q origin feat");
-    let ids = width.apply(vec![In::Bus(Topic::Git(common.clone(), bus::Git::All))]);
+    let ids = worker.apply(vec![In::Bus(Topic::Git(common.clone(), bus::Git::All))]);
 
-    width.publish(&ids);
+    worker.publish(&ids);
 
     assert_eq!(of(&thread.id), Some(Land::Unmerged), "push");
 
     // another repo's change: 0 read, 0 change
     assert_eq!(
-        width.apply(vec![In::Bus(Topic::Git(
+        worker.apply(vec![In::Bus(Topic::Git(
             PathBuf::from("/elsewhere/.git"),
             bus::Git::All
         ))]),
@@ -260,9 +260,9 @@ fn worker_reads_what_a_topic_names() {
 
     assert_eq!(of(&thread.id), Some(Land::Unpushed(9)));
 
-    let ids = width.apply(vec![In::Refresh(thread.id.clone())]);
+    let ids = worker.apply(vec![In::Refresh(thread.id.clone())]);
 
-    width.publish(&ids);
+    worker.publish(&ids);
 
     assert_eq!(of(&thread.id), Some(Land::Unmerged));
 

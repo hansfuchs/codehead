@@ -1,5 +1,4 @@
 use super::{Duration, Frame, Line, Paragraph, Rect, Row, Sec, Source, Span, Style, SystemTime, View, theme};
-use std::ops::ControlFlow;
 use std::path::Path;
 
 impl View {
@@ -7,21 +6,21 @@ impl View {
         draw_view(self, frame, area);
     }
 
-    fn finish_draw(&mut self, frame: &mut Frame<'_>, preview: Rect, path_value: &Path) -> ControlFlow<()> {
-        let Some(lines) = self.preview_lines(path_value, preview.width.saturating_sub(1)) else {
+    fn draw_text_preview(&mut self, frame: &mut Frame<'_>, preview: Rect, path: &Path) {
+        let Some(lines) = self.preview_lines(path, preview.width.saturating_sub(1)) else {
             frame.render_widget(
                 Paragraph::new(Line::styled(
-                    format!(" {} · reading…", self.shown(path_value)),
+                    format!(" {} · reading…", self.shown(path)),
                     theme::muted(),
                 )),
                 Rect { height: 1, ..preview },
             );
-            return ControlFlow::Break(());
+            return;
         };
 
         self.text_preview.scroll = self.text_preview.scroll.min(lines.len().saturating_sub(1));
         let head = Line::from(vec![
-            Span::styled(format!(" {} ", self.shown(path_value)), theme::bold()),
+            Span::styled(format!(" {} ", self.shown(path)), theme::bold()),
             Span::styled(
                 format!(
                     "{} lines · e: IDE · ctrl+.: yazi, copy path · ctrl+f: filter",
@@ -50,60 +49,50 @@ impl View {
         self.text_preview
             .preview_fx
             .apply(frame, preview, self.text_preview.preview_version);
-
-        ControlFlow::Continue(())
     }
 }
 
-fn draw_row_head_text_value(frame: &mut Frame<'_>, area_value: Rect, text_value: Sec) {
+fn draw_section_heading(frame: &mut Frame<'_>, area: Rect, section: Sec) {
     frame.render_widget(
         Paragraph::new(Span::styled(
-            format!(" {}", text_value.label()),
+            format!(" {}", section.label()),
             theme::muted().add_modifier(ratatui::style::Modifier::BOLD),
         )),
-        area_value,
+        area,
     );
 }
 
-fn draw_row_file_key(
-    frame: &mut Frame<'_>,
-    lw: u16,
-    now: u64,
-    hit: Style,
-    area_value: Rect,
-    key: usize,
-    view_state: &mut View,
-) {
-    let (i, marks) = &view_state.visible[key];
-    let error = &view_state.files[*i];
+fn draw_file_row(frame: &mut Frame<'_>, lw: u16, now: u64, hit: Style, area: Rect, position: usize, view: &mut View) {
+    let (i, marks) = &view.visible[position];
+    let entry = &view.files[*i];
 
-    let tag = match error.source {
+    let tag = match entry.source {
         Source::Agent => Span::styled("✎ ", theme::fg(theme::pal().info())),
         Source::Note => Span::styled("◆ ", theme::muted()),
         Source::Named => Span::styled("↗ ", theme::muted()),
         Source::Attached(_) => Span::styled("⧉ ", theme::muted()),
     };
 
-    let age = crate::domain::notes::ago(SystemTime::UNIX_EPOCH + Duration::from_secs(error.at.min(now)));
-    let name = view_state.label(error);
+    let age = crate::domain::notes::ago(SystemTime::UNIX_EPOCH + Duration::from_secs(entry.at.min(now)));
+    let name = view.label(entry);
     let room = usize::from(lw).saturating_sub(age.chars().count() + 5);
-    let sel = key == view_state.at;
+    let sel = position == view.at;
     let st = if sel { theme::pill() } else { Style::default() };
 
     // a long path: its end shown (`…` + the tail), the marks moved along
-    let count_2 = name.chars().count();
+    let length = name.chars().count();
 
-    let (fitted, marks): (String, Vec<usize>) = if count_2 <= room || room < 2 {
+    let (fitted, marks): (String, Vec<usize>) = if length <= room || room < 2 {
         (name.clone(), marks.clone())
     } else {
-        let cut = count_2 - (room - 1);
+        let cut = length - (room - 1);
 
         (
             format!("…{}", name.chars().skip(cut).collect::<String>()),
             marks
                 .iter()
-                .filter(|&&message| message >= cut)
-                .map(|message_value| message_value - cut + 1)
+                .filter(|&&mark| mark >= cut)
+                .map(|mark| mark - cut + 1)
                 .collect(),
         )
     };
@@ -122,46 +111,46 @@ fn draw_row_file_key(
         },
     ));
     spans.push(Span::styled(format!(" {age}"), theme::muted()));
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(st), area_value);
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(st), area);
 }
 
-fn draw_area_value(
+fn draw_list_row(
     frame: &mut Frame<'_>,
     context: FileListLayout,
     now: u64,
     hit: Style,
-    count_value: usize,
+    index: usize,
     row: &Row,
-    view_state: &mut View,
+    view: &mut View,
 ) {
     let FileListLayout { lw, list, top } = context;
 
-    let y = list.y + (count_value - top) as u16;
-    let area_value = Rect { y, height: 1, ..list };
+    let y = list.y + (index - top) as u16;
+    let area = Rect { y, height: 1, ..list };
 
-    view_state.drawn.push((y, *row));
+    view.drawn.push((y, *row));
 
     match *row {
         Row::Gap => {}
-        Row::Head(text_value) => {
-            draw_row_head_text_value(frame, area_value, text_value);
+        Row::Head(section) => {
+            draw_section_heading(frame, area, section);
         }
-        Row::File(key) => {
-            draw_row_file_key(frame, lw, now, hit, area_value, key, view_state);
+        Row::File(position) => {
+            draw_file_row(frame, lw, now, hit, area, position, view);
         }
     }
 }
 
-fn draw_body(hit: &mut bool, thread: &crate::infra::bus::Topic, view_state: &View) {
-    *hit |= match &thread {
+fn note_list_topic(hit: &mut bool, topic: &crate::infra::bus::Topic, view: &View) {
+    *hit |= match &topic {
         crate::infra::bus::Topic::Thread(id, crate::infra::bus::Part::Log | crate::infra::bus::Part::Other) => {
-            *id == view_state.id
+            *id == view.id
         }
-        crate::infra::bus::Topic::Work(width_value) | crate::infra::bus::Topic::Rescan(width_value) => view_state
+        crate::infra::bus::Topic::Work(dir) | crate::infra::bus::Topic::Rescan(dir) => view
             .source_reads
             .roots
             .iter()
-            .any(|result| result.starts_with(width_value) || width_value.starts_with(result)),
+            .any(|root| root.starts_with(dir) || dir.starts_with(root)),
         _ => false,
     };
 }
@@ -173,17 +162,17 @@ struct FileListLayout {
     top: usize,
 }
 
-fn draw_view(state: &mut View, frame: &mut Frame, area: Rect) {
-    state.poll();
+fn draw_view(view: &mut View, frame: &mut Frame, area: Rect) {
+    view.poll();
     let mut hit = false;
 
-    for thread in state.source_reads.topics.try_iter() {
-        draw_body(&mut hit, &thread, state);
+    for topic in view.source_reads.topics.try_iter() {
+        note_list_topic(&mut hit, &topic, view);
     }
 
-    state.refresh(hit);
+    view.refresh(hit);
 
-    if state.files.is_empty() {
+    if view.files.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::styled(
                 "  0 files yet: the files the agents write, and the home repo's notes of this thread · menu: yazi",
@@ -196,10 +185,10 @@ fn draw_view(state: &mut View, frame: &mut Frame, area: Rect) {
 
     let (lw, fr, list, preview) = file_layout(area);
 
-    draw_filter_header(state, frame, fr);
+    draw_filter_header(view, frame, fr);
 
-    state.list = list;
-    state.preview = preview;
+    view.list = list;
+    view.preview = preview;
 
     // the divider
     for y in area.y..area.bottom() {
@@ -208,9 +197,9 @@ fn draw_view(state: &mut View, frame: &mut Frame, area: Rect) {
             .set_style(theme::line());
     }
 
-    state.drawn.clear();
+    view.drawn.clear();
 
-    if state.visible.is_empty() {
+    if view.visible.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled("  0 matches", theme::muted())),
             Rect { height: 1, ..list },
@@ -218,18 +207,18 @@ fn draw_view(state: &mut View, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    state.at = state.at.min(state.visible.len() - 1);
-    let rows = state.rows();
-    let height_value = usize::from(list.height);
+    view.at = view.at.min(view.visible.len() - 1);
+    let rows = view.rows();
+    let height = usize::from(list.height);
 
-    let top = first_visible_row(&rows, state.at, height_value);
+    let top = first_visible_row(&rows, view.at, height);
 
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |directory| directory.as_secs());
+        .map_or(0, |elapsed| elapsed.as_secs());
 
-    if let ControlFlow::Break(()) = finish_draw_view(
-        state,
+    draw_rows_and_preview(
+        view,
         frame,
         FileRowsLayout {
             lw,
@@ -239,16 +228,11 @@ fn draw_view(state: &mut View, frame: &mut Frame, area: Rect) {
             top,
             now,
         },
-        height_value,
-    ) {}
+        height,
+    );
 }
 
-fn finish_draw_view(
-    state: &mut View,
-    frame: &mut Frame<'_>,
-    file_rows_layout: FileRowsLayout<'_>,
-    height_value: usize,
-) -> ControlFlow<()> {
+fn draw_rows_and_preview(view: &mut View, frame: &mut Frame<'_>, file_rows_layout: FileRowsLayout<'_>, height: usize) {
     let FileRowsLayout {
         lw,
         list,
@@ -262,25 +246,16 @@ fn finish_draw_view(
         .fg(theme::pal().accent)
         .add_modifier(ratatui::style::Modifier::BOLD | ratatui::style::Modifier::UNDERLINED);
 
-    for (count_value, row) in rows.iter().enumerate().skip(top).take(height_value) {
-        draw_area_value(
-            frame,
-            FileListLayout { lw, list, top },
-            now,
-            hit,
-            count_value,
-            row,
-            state,
-        );
+    for (index, row) in rows.iter().enumerate().skip(top).take(height) {
+        draw_list_row(frame, FileListLayout { lw, list, top }, now, hit, index, row, view);
     }
 
-    state
-        .source_reads
+    view.source_reads
         .list_fx
-        .apply(frame, list, state.source_reads.list_version);
+        .apply(frame, list, view.source_reads.list_version);
 
-    let Some(path_value) = state.cur().map(|error_value| error_value.path.clone()) else {
-        return ControlFlow::Break(());
+    let Some(path) = view.cur().map(|entry| entry.path.clone()) else {
+        return;
     };
 
     let body = Rect {
@@ -290,15 +265,12 @@ fn finish_draw_view(
         width: preview.width.saturating_sub(1),
     };
 
-    if state.draw_image(frame, &path_value, Rect { height: 1, ..preview }, body) {
-        return ControlFlow::Break(());
+    // images + pdfs: drawn by the terminal (0 dissolve over graphics)
+    if view.draw_image(frame, &path, Rect { height: 1, ..preview }, body) {
+        return;
     }
 
-    // images + pdfs: drawn by the terminal (0 dissolve over graphics)
-
-    if let ControlFlow::Break(()) = state.finish_draw(frame, preview, &path_value) {}
-
-    ControlFlow::Continue(())
+    view.draw_text_preview(frame, preview, &path);
 }
 
 fn file_layout(area: Rect) -> (u16, Rect, Rect, Rect) {
@@ -325,11 +297,11 @@ fn file_layout(area: Rect) -> (u16, Rect, Rect, Rect) {
     (lw, fr, list, preview)
 }
 
-fn draw_filter_header(state: &mut View, frame: &mut Frame, fr: Rect) {
+fn draw_filter_header(view: &mut View, frame: &mut Frame, fr: Rect) {
     frame.render_widget(
         Paragraph::new(Span::styled(
             " › ",
-            if state.filter_input.filtering {
+            if view.filter_input.filtering {
                 theme::accent_bold()
             } else {
                 theme::muted()
@@ -337,24 +309,24 @@ fn draw_filter_header(state: &mut View, frame: &mut Frame, fr: Rect) {
         )),
         Rect { width: 3, ..fr },
     );
-    let query = state.filter_input.filter.text();
+    let query = view.filter_input.filter.text();
 
     let count = if query.trim().is_empty() {
         String::new()
     } else {
-        format!(" {} of {}", state.visible.len(), state.files.len())
+        format!(" {} of {}", view.visible.len(), view.files.len())
     };
 
     let cw = count.chars().count() as u16;
 
-    state.filter_input.filter.render(
+    view.filter_input.filter.render(
         frame,
         Rect {
             x: fr.x + 3,
             width: fr.width.saturating_sub(3 + cw),
             ..fr
         },
-        state.filter_input.filtering,
+        view.filter_input.filtering,
     );
 
     if cw > 0 {
@@ -370,24 +342,21 @@ fn draw_filter_header(state: &mut View, frame: &mut Frame, fr: Rect) {
 }
 
 #[derive(Clone, Copy)]
-struct FileRowsLayout<'reference_0> {
+struct FileRowsLayout<'rows> {
     lw: u16,
     list: Rect,
     preview: Rect,
-    rows: &'reference_0 [Row],
+    rows: &'rows [Row],
     top: usize,
     now: u64,
 }
 
-fn first_visible_row(rows: &[Row], cursor: usize, height_value: usize) -> usize {
+fn first_visible_row(rows: &[Row], cursor: usize, height: usize) -> usize {
     // the cursor row in view; the heading above the 1st file in view where it fits
-    let cur_row = rows
-        .iter()
-        .position(|result_value| *result_value == Row::File(cursor))
-        .unwrap_or(0);
-    let top = cur_row.saturating_sub(height_value.saturating_sub(1));
+    let cur_row = rows.iter().position(|row| *row == Row::File(cursor)).unwrap_or(0);
+    let top = cur_row.saturating_sub(height.saturating_sub(1));
 
-    if top > 0 && matches!(rows.get(top.saturating_sub(1)), Some(Row::Head(_))) && cur_row - (top - 1) < height_value {
+    if top > 0 && matches!(rows.get(top.saturating_sub(1)), Some(Row::Head(_))) && cur_row - (top - 1) < height {
         top - 1
     } else {
         top

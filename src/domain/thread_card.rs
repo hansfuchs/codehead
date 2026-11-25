@@ -65,12 +65,12 @@ impl Card {
 impl Card {
     /// 1st line of the title, "untitled" for none.
     pub(crate) fn name(&self) -> String {
-        let thread = self.title.lines().next().unwrap_or_default().trim();
+        let title = self.title.lines().next().unwrap_or_default().trim();
 
-        if thread.is_empty() {
+        if title.is_empty() {
             "untitled".into()
         } else {
-            thread.to_string()
+            title.to_string()
         }
     }
 }
@@ -82,21 +82,21 @@ fn seen_path() -> PathBuf {
 fn read_seen() -> HashMap<String, u64> {
     std::fs::read_to_string(seen_path())
         .ok()
-        .and_then(|thread| serde_json::from_str(&thread).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
 }
 
 fn write_seen(seen: &HashMap<String, u64>) {
     let path = seen_path();
 
-    if let Some(directory) = path.parent() {
-        let _ = std::fs::create_dir_all(directory);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
 
-    if let Ok(thread) = serde_json::to_string(seen) {
+    if let Ok(json) = serde_json::to_string(seen) {
         let tmp = path.with_extension("tmp");
 
-        if std::fs::write(&tmp, thread).is_ok() {
+        if std::fs::write(&tmp, json).is_ok() {
             let _ = std::fs::rename(tmp, path);
         }
     }
@@ -105,7 +105,7 @@ fn write_seen(seen: &HashMap<String, u64>) {
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |directory| directory.as_millis() as u64)
+        .map_or(0, |since| since.as_millis() as u64)
 }
 
 /// Thread ID shown now: its agent items so far are read.
@@ -127,7 +127,7 @@ fn mark_seen_at(id: &str, force: bool) {
     let now = now_ms();
 
     // the thread view marks every 3s: 1 write per 15s is enough (its last mark comes at its end)
-    if !force && seen.get(id).is_some_and(|thread| now.saturating_sub(*thread) < 15_000) {
+    if !force && seen.get(id).is_some_and(|at| now.saturating_sub(*at) < 15_000) {
         return;
     }
 
@@ -146,8 +146,8 @@ pub(crate) fn has_draft(id: &str) -> bool {
         return false;
     };
 
-    let text = value["text"].as_str().is_some_and(|thread| !thread.trim().is_empty());
-    let unsent = value["unsent"].as_array().is_some_and(|user| !user.is_empty());
+    let text = value["text"].as_str().is_some_and(|text| !text.trim().is_empty());
+    let unsent = value["unsent"].as_array().is_some_and(|unsent| !unsent.is_empty());
 
     text || unsent
 }
@@ -167,9 +167,9 @@ pub(crate) fn last_item(id: &str) -> Option<u64> {
     buf.lines()
         .rev()
         .filter_map(|line| serde_json::from_str::<crate::engine::store::Event>(line).ok())
-        .find_map(|error| {
+        .find_map(|event| {
             use crate::engine::store::Kind;
-            matches!(error.kind, Kind::Text { .. } | Kind::Error { .. } | Kind::Ask { .. }).then_some(error.ts)
+            matches!(event.kind, Kind::Text { .. } | Kind::Error { .. } | Kind::Ask { .. }).then_some(event.ts)
         })
 }
 
@@ -182,54 +182,54 @@ pub(crate) fn load() -> Vec<Card> {
     let mut cards: Vec<Card> = threads
         .into_iter()
         .filter(|thread| thread.state != "deleted")
-        .map(|path_value| {
-            let last = last_item(&path_value.id);
+        .map(|thread| {
+            let last = last_item(&thread.id);
 
-            let unread = match (last, seen.get(&path_value.id)) {
-                (Some(at), Some(text)) => at > *text,
+            let unread = match (last, seen.get(&thread.id)) {
+                (Some(at), Some(seen_at)) => at > *seen_at,
                 // a thread codehead never showed: its items so far count as read
                 (Some(at), None) => {
-                    seen.insert(path_value.id.clone(), at);
+                    seen.insert(thread.id.clone(), at);
                     new_seen = true;
                     false
                 }
                 (None, _) => false,
             };
 
-            let dir = [path_value.worktree.clone(), path_value.dir.clone()]
+            let dir = [thread.worktree.clone(), thread.dir.clone()]
                 .into_iter()
                 .flatten()
                 .map(PathBuf::from)
-                .find(|path_2| path_2.is_dir());
+                .find(|dir| dir.is_dir());
 
             Card {
-                repo: crate::domain::threads::repo_of_thread(&path_value),
+                repo: crate::domain::threads::repo_of_thread(&thread),
                 agents: crate::domain::thread_card::AgentActivity {
-                    busy: path_value.busy,
-                    monitoring: path_value.watching,
-                    blocked: path_value.needs.as_deref() == Some("question"),
-                    live: path_value.live,
+                    busy: thread.busy,
+                    monitoring: thread.watching,
+                    blocked: thread.needs.as_deref() == Some("question"),
+                    live: thread.live,
                 },
 
                 unread,
-                activity: last.unwrap_or(0).max(path_value.updated * 1000),
+                activity: last.unwrap_or(0).max(thread.updated * 1000),
                 dir,
-                branch: path_value.branch.clone().unwrap_or_default(),
-                draft: has_draft(&path_value.id),
-                land: crate::domain::landed::of(&path_value.id),
+                branch: thread.branch.clone().unwrap_or_default(),
+                draft: has_draft(&thread.id),
+                land: crate::domain::landed::of(&thread.id),
                 completion: crate::domain::thread_card::Completion {
-                    done: crate::domain::notifications::reported_done(&path_value.id),
-                    review: crate::domain::notifications::reported_review(&path_value.id),
+                    done: crate::domain::notifications::reported_done(&thread.id),
+                    review: crate::domain::notifications::reported_review(&thread.id),
                 },
 
-                worktree: path_value
+                worktree: thread
                     .worktree
                     .as_deref()
-                    .is_some_and(|path_3| std::path::Path::new(path_3).is_dir()),
-                projects: path_value.projects,
-                id: path_value.id,
-                title: path_value.title,
-                state: path_value.state,
+                    .is_some_and(|worktree| std::path::Path::new(worktree).is_dir()),
+                projects: thread.projects,
+                id: thread.id,
+                title: thread.title,
+                state: thread.state,
             }
         })
         .collect();
@@ -238,7 +238,7 @@ pub(crate) fn load() -> Vec<Card> {
         write_seen(&seen);
     }
 
-    cards.sort_by_key(|character| std::cmp::Reverse(character.activity));
+    cards.sort_by_key(|card| std::cmp::Reverse(card.activity));
 
     cards
 }
@@ -257,24 +257,24 @@ pub(crate) fn filter(cards: &[Card], query: &str) -> Vec<usize> {
         }
     }
 
-    let query_value = words.join(" ");
-    let passes = |character_3: &Card| keep.iter().all(|filter| filter.matches(character_3));
+    let fuzzy_query = words.join(" ");
+    let passes = |card: &Card| keep.iter().all(|filter| filter.matches(card));
 
-    if query_value.is_empty() {
+    if fuzzy_query.is_empty() {
         return (0..cards.len()).filter(|&i| passes(&cards[i])).collect();
     }
 
     let mut hits: Vec<(i64, usize)> = cards
         .iter()
         .enumerate()
-        .filter(|(_, character_4)| passes(character_4))
-        .filter_map(|(i, character_5)| {
-            crate::domain::fuzzy::fuzzy(&query_value, &format!("{} {}", character_5.name(), character_5.branch))
-                .map(|text| (text, i))
+        .filter(|(_, card)| passes(card))
+        .filter_map(|(i, card)| {
+            crate::domain::fuzzy::fuzzy(&fuzzy_query, &format!("{} {}", card.name(), card.branch))
+                .map(|score| (score, i))
         })
         .collect();
 
-    hits.sort_by_key(|(text_value, i)| (std::cmp::Reverse(*text_value), *i));
+    hits.sort_by_key(|(score, i)| (std::cmp::Reverse(*score), *i));
 
     hits.into_iter().map(|(_, i)| i).collect()
 }

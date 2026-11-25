@@ -45,15 +45,15 @@ pub(super) fn test_view() -> View {
     view
 }
 
-/// The view drawn at W x H: its rows of text.
+/// The view drawn at WIDTH x HEIGHT: its rows of text.
 pub(super) fn draw(view: &mut View, width: u16, height: u16) -> Vec<String> {
-    let mut thread = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
 
-    thread.draw(|file| view.draw(file, file.area())).unwrap();
-    let bytes = thread.backend().buffer().clone();
+    terminal.draw(|frame| view.draw(frame, frame.area())).unwrap();
+    let buffer = terminal.backend().buffer().clone();
 
     (0..height)
-        .map(|y| (0..width).map(|x| bytes[(x, y)].symbol().to_string()).collect())
+        .map(|y| (0..width).map(|x| buffer[(x, y)].symbol().to_string()).collect())
         .collect()
 }
 
@@ -63,24 +63,24 @@ pub(super) fn draw_ctx(view: &mut View, width: u16, height: u16) -> Vec<String> 
     view.focus_panel(true);
     draw(view, width, height);
     let (title, items) = view.ctx_items();
-    let mut message = crate::ui::context_menu::Menu::new(title, items).expect("items");
+    let mut menu = crate::ui::context_menu::Menu::new(title, items).expect("items");
 
-    message.head = view.ctx_head();
-    let mut thread = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    menu.head = view.ctx_head();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
 
-    thread
-        .draw(|file| {
-            view.draw(file, file.area());
-            let path = view.ctx_place();
+    terminal
+        .draw(|frame| {
+            view.draw(frame, frame.area());
+            let place = view.ctx_place();
 
-            message.render(file, path, file.area());
+            menu.render(frame, place, frame.area());
         })
         .unwrap();
 
-    let bytes = thread.backend().buffer().clone();
+    let buffer = terminal.backend().buffer().clone();
 
     (0..height)
-        .map(|y| (0..width).map(|x| bytes[(x, y)].symbol().to_string()).collect())
+        .map(|y| (0..width).map(|x| buffer[(x, y)].symbol().to_string()).collect())
         .collect()
 }
 
@@ -89,7 +89,7 @@ pub(super) fn ship(view: &mut View, label: &str) -> Act {
     let i = view
         .ship_rows()
         .iter()
-        .position(|result| result.label == label)
+        .position(|row| row.label == label)
         .unwrap_or_else(|| panic!("{label}"));
 
     view.ctx_step(i)

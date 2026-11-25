@@ -12,7 +12,7 @@ impl View {
         let y = self
             .drawn
             .iter()
-            .find(|(_, result)| matches!(result, Row::File(file) if Some(*file) == i))
+            .find(|(_, row)| matches!(row, Row::File(file) if Some(*file) == i))
             .map_or(self.list.y, |(y, _)| *y);
 
         crate::ui::context_menu::Place::At(Rect {
@@ -22,11 +22,11 @@ impl View {
         })
     }
     /// A context menu command with 0 key of its own.
-    pub(crate) fn ctx_cmd(&mut self, character: &str) -> Act {
-        match character {
-            "yazi" => Act::Yazi(self.cur().map_or_else(|| self.dir.clone(), |error| error.path.clone())),
+    pub(crate) fn ctx_cmd(&mut self, cmd: &str) -> Act {
+        match cmd {
+            "yazi" => Act::Yazi(self.cur().map_or_else(|| self.dir.clone(), |entry| entry.path.clone())),
             "copy path" => match self.cur() {
-                Some(error_value) => ctx_cmd_some_error_value(error_value),
+                Some(entry) => copy_path(entry),
                 None => Act::None,
             },
             _ => Act::None,
@@ -34,44 +34,44 @@ impl View {
     }
 }
 
-fn ctx_cmd_some_error_value(error_value: &Entry) -> Act {
-    let path_value = error_value.path.display().to_string();
-    let ok = crate::infra::clip::copy(&path_value);
+fn copy_path(entry: &Entry) -> Act {
+    let path = entry.path.display().to_string();
+    let ok = crate::infra::clip::copy(&path);
 
     Act::Toast(if ok {
-        format!("copied {path_value}")
+        format!("copied {path}")
     } else {
         "0 clipboard tool".into()
     })
 }
 
-fn ctx_items_view(state: &mut View) -> (String, Vec<crate::ui::context_menu::Item<crate::ui::context_menu::Act>>) {
+fn ctx_items_view(view: &mut View) -> (String, Vec<crate::ui::context_menu::Item<crate::ui::context_menu::Act>>) {
     use crate::ui::context_menu::{Act as ContextAction, Item, key};
 
-    let title = state.cur().map_or_else(
+    let title = view.cur().map_or_else(
         || "files".to_string(),
-        |error| {
-            error
+        |entry| {
+            entry
                 .path
                 .file_name()
-                .map_or_else(String::new, |count| count.to_string_lossy().into_owned())
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
         },
     );
 
-    let mut value = Vec::new();
+    let mut items = Vec::new();
 
-    if state.cur().is_some() {
-        value.push(Item::new("open in the IDE", "e", key('e')));
-        value.push(Item::new("copy the path", "", ContextAction::Cmd("copy path")));
+    if view.cur().is_some() {
+        items.push(Item::new("open in the IDE", "e", key('e')));
+        items.push(Item::new("copy the path", "", ContextAction::Cmd("copy path")));
     }
 
-    value.push(Item::new(
+    items.push(Item::new(
         "yazi on the file (its pick: into the prompt)",
         "",
         ContextAction::Cmd("yazi"),
     ));
-    value.push(Item::new("share: commit + push the home repo files", "S S", key('S')));
-    value.push(Item::new("read the list again", "r", key('r')));
+    items.push(Item::new("share: commit + push the home repo files", "S S", key('S')));
+    items.push(Item::new("read the list again", "r", key('r')));
 
-    (title, value)
+    (title, items)
 }

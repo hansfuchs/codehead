@@ -7,7 +7,7 @@ fn agent_form_harness_and_model_dropdowns() {
 
     app.run(Act::NewAgent);
 
-    let message = |id: &str, name: &str| Model {
+    let model = |id: &str, name: &str| Model {
         id: id.into(),
         name: name.into(),
     };
@@ -18,7 +18,7 @@ fn agent_form_harness_and_model_dropdowns() {
         ("codex", "Codex", "codex"),
         ("opencode", "OpenCode", "opencode"),
     ]
-    .map(|(count, line, bytes)| (count.to_string(), line.to_string(), bytes.to_string()))
+    .map(|(name, label, bin)| (name.to_string(), label.to_string(), bin.to_string()))
     .to_vec();
     let at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -30,14 +30,14 @@ fn agent_form_harness_and_model_dropdowns() {
         Entry {
             at,
             models: vec![
-                message("gpt-6.1-sol", "GPT-6.1-Sol"),
-                message("gpt-6.1-terra", "GPT-6.1 Terra"),
+                model("gpt-6.1-sol", "GPT-6.1-Sol"),
+                model("gpt-6.1-terra", "GPT-6.1 Terra"),
             ],
         },
     )]));
 
-    app.model_catalog.probe = |height| {
-        if height == "opencode" {
+    app.model_catalog.probe = |harness| {
+        if harness == "opencode" {
             Ok(vec![Model {
                 id: "opencode/big-pickle".into(),
                 name: String::new(),
@@ -78,17 +78,17 @@ fn agent_form_harness_and_model_dropdowns_verify_out(mut app: App) {
     );
 
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    let file_value = form(&mut app);
+    let agent_form = form(&mut app);
 
     assert_eq!(
-        (file_value.harness.text(), file_value.field),
+        (agent_form.harness.text(), agent_form.field),
         ("codex".to_string(), F_MODEL)
     );
     assert!(
-        file_value
+        agent_form
             .pick
             .as_ref()
-            .is_some_and(|path| path.model && path.harness == "codex")
+            .is_some_and(|pick| pick.model && pick.harness == "codex")
     );
     assert_eq!(app.model_catalog.model_reads.pending(), 0, "fresh cache: 0 read");
 
@@ -107,16 +107,20 @@ fn agent_form_harness_and_model_dropdowns_verify_out(mut app: App) {
     // ↓↓ + enter: gpt-6.1-terra → harness/model
     key(&mut app, KeyCode::Down, KeyModifiers::NONE);
     key(&mut app, KeyCode::Down, KeyModifiers::NONE);
-    agent_form_harness_and_model_dropdowns_verify_file_(app);
+    agent_form_harness_and_model_dropdowns_verify_saved(app);
 }
 
-fn agent_form_harness_and_model_dropdowns_verify_file_(mut app: App) {
+fn agent_form_harness_and_model_dropdowns_verify_saved(mut app: App) {
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    let file_2 = form(&mut app);
+    let agent_form = form(&mut app);
 
-    assert!(file_2.pick.is_none());
-    assert_eq!(file_2.harness.text(), "codex/gpt-6.1-terra");
-    assert_eq!(file_2.spec(&[], None).harness, "codex/gpt-6.1-terra", "the saved value");
+    assert!(agent_form.pick.is_none());
+    assert_eq!(agent_form.harness.text(), "codex/gpt-6.1-terra");
+    assert_eq!(
+        agent_form.spec(&[], None).harness,
+        "codex/gpt-6.1-terra",
+        "the saved value"
+    );
 
     let out = dump(&mut app, 120, 44);
 
@@ -127,10 +131,7 @@ fn agent_form_harness_and_model_dropdowns_verify_file_(mut app: App) {
     let out = dump(&mut app, 120, 44);
 
     assert!(out.contains("● gpt-6.1-terra"), "{out}");
-    assert_eq!(
-        form(&mut app).pick.as_ref().map(|path_value| path_value.cursor),
-        Some(2)
-    );
+    assert_eq!(form(&mut app).pick.as_ref().map(|pick| pick.cursor), Some(2));
 
     // r: read again (the fake fails: the note says so, the cached list stays)
     key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
@@ -178,19 +179,19 @@ fn agent_form_harness_and_model_dropdowns_verify_file_(mut app: App) {
 
     assert_eq!(form(&mut app).harness.text(), "opencode");
 
-    agent_form_harness_and_model_dropdowns_verify_thread(app);
+    agent_form_harness_and_model_dropdowns_verify_buffer(app);
 }
 
-fn agent_form_harness_and_model_dropdowns_verify_thread(mut app: App) {
-    let mut thread = Terminal::new(TestBackend::new(120, 44)).unwrap();
+fn agent_form_harness_and_model_dropdowns_verify_buffer(mut app: App) {
+    let mut terminal = Terminal::new(TestBackend::new(120, 44)).unwrap();
 
-    thread.draw(|file_3| app.draw(file_3)).unwrap();
-    let bytes_value = thread.backend().buffer().clone();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
 
     let first = (0..44)
         .map(|y| {
             (0..120)
-                .map(|x| bytes_value[(x, y)].symbol().to_string())
+                .map(|x| buffer[(x, y)].symbol().to_string())
                 .collect::<String>()
         })
         .collect::<Vec<_>>()
@@ -235,10 +236,10 @@ fn agent_form_harness_and_model_dropdowns_verify_thread(mut app: App) {
 
     type_text(&mut app, "sonnet");
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    let file_4 = form(&mut app);
+    let agent_form = form(&mut app);
 
     assert_eq!(
-        (file_4.harness.text(), file_4.harness_model()),
+        (agent_form.harness.text(), agent_form.harness_model()),
         ("claude".to_string(), "claude/sonnet".to_string())
     );
 }
@@ -398,7 +399,7 @@ fn settings_sub_tabs_reach_the_mcp_servers_and_its_add_form() {
     let _env = crate::engine::ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let text = crate::engine::servers::Server {
+    let server = crate::engine::servers::Server {
         name: "docs-x".into(),
         kind: "stdio".into(),
         command: Some("npx".into()),
@@ -407,7 +408,7 @@ fn settings_sub_tabs_reach_the_mcp_servers_and_its_add_form() {
         ..Default::default()
     };
 
-    crate::engine::servers::save(&[text]).unwrap();
+    crate::engine::servers::save(&[server]).unwrap();
     let mut app = test_app();
 
     key(&mut app, KeyCode::Char('7'), KeyModifiers::ALT);

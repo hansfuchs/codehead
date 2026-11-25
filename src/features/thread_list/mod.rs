@@ -144,7 +144,7 @@ impl ProjTab {
     pub(crate) fn keeps(&self, projects: &[String]) -> bool {
         match self {
             ProjTab::All => true,
-            ProjTab::Project(path) => projects.contains(path),
+            ProjTab::Project(slug) => projects.contains(slug),
             ProjTab::None => projects.is_empty(),
         }
     }
@@ -152,7 +152,7 @@ impl ProjTab {
     fn label(&self) -> String {
         match self {
             ProjTab::All => "all".into(),
-            ProjTab::Project(path) => path.clone(),
+            ProjTab::Project(slug) => slug.clone(),
             ProjTab::None => "0 projects".into(),
         }
     }
@@ -171,8 +171,8 @@ impl StatusTab {
     const ALL: [StatusTab; 4] = [StatusTab::Open, StatusTab::Stale, StatusTab::Shipped, StatusTab::All];
 
     /// The tab of section S (`ThreadList::section`).
-    fn of(text: u8) -> StatusTab {
-        match text {
+    fn of(section: u8) -> StatusTab {
+        match section {
             0 => StatusTab::Open,
             1 => StatusTab::Stale,
             _ => StatusTab::Shipped,
@@ -205,7 +205,7 @@ impl StatusTab {
 fn repo_name(path: &Path) -> String {
     path.file_name().map_or_else(
         || path.display().to_string(),
-        |count| count.to_string_lossy().into_owned(),
+        |name| name.to_string_lossy().into_owned(),
     )
 }
 
@@ -268,9 +268,9 @@ pub(crate) struct ThreadList {
     /// Agent names (the edit form's agents).
     pub roster: Vec<String>,
     pub list: Rect,
-    card_reads: CardReadsState,
-    job_state: JobStateState,
-    hit_regions: HitRegionsState,
+    card_reads: CardReads,
+    job_state: JobState,
+    hit_regions: HitRegions,
 }
 
 impl ThreadList {
@@ -319,7 +319,7 @@ impl ThreadList {
             roster: Vec::new(),
             list: Rect::default(),
             card_reads: new_card_reads(loading),
-            job_state: JobStateState {
+            job_state: JobState {
                 actions: None,
                 pending: None,
                 job: None,
@@ -328,7 +328,7 @@ impl ThreadList {
                 status: None,
                 changed: false,
             },
-            hit_regions: HitRegionsState {
+            hit_regions: HitRegions {
                 rows: Vec::new(),
                 act_rows: Vec::new(),
             },
@@ -370,37 +370,24 @@ impl ThreadList {
 
     /// New cards (a read): the cursor stays on its thread. Moved cards (a job on its way) as
     /// the job leaves them.
-    pub(crate) fn set_cards(&mut self, character: Vec<Card>) {
-        set_cards_thread_list(self, character);
+    pub(crate) fn set_cards(&mut self, cards: Vec<Card>) {
+        set_cards_thread_list(self, cards);
     }
 
     pub(crate) fn query(&self) -> String {
         self.filter.text()
     }
-
-    // ---------- tabs ----------
-
-    // ---------- rows ----------
-
-    // ---------- actions ----------
-
-    // ---------- keys ----------
-
-    // ---------- mouse ----------
-
-    // ---------- draw ----------
 }
 
 // ---------- edit form ----------
 
-fn open_branch(auto: Option<&PathBuf>, repos: &mut Vec<Option<String>>, result: String) {
-    if !repos.contains(&Some(result.clone())) && Some(result.as_str()) != auto.as_ref().and_then(|agent| agent.to_str())
-    {
-        repos.push(Some(result));
+fn push_repo(auto: Option<&PathBuf>, repos: &mut Vec<Option<String>>, repo: String) {
+    if !repos.contains(&Some(repo.clone())) && Some(repo.as_str()) != auto.as_ref().and_then(|auto| auto.to_str()) {
+        repos.push(Some(repo));
     }
 }
 
-fn finish_open(
+fn build_form(
     thread: &crate::engine::store::Thread,
     auto: Option<PathBuf>,
     repos: Vec<Option<String>>,
@@ -409,24 +396,24 @@ fn finish_open(
     agents: Vec<(String, bool)>,
 ) -> Form {
     let all = crate::domain::threads::repo_of_thread_store(thread)
-        .map(|result_3| crate::domain::projects::list(&result_3))
+        .map(|repo| crate::domain::projects::list(&repo))
         .unwrap_or_default();
     let mut projs: Vec<(String, bool)> = vec![("auto".into(), !thread.owner_choices.projects_set)];
 
-    for path_4 in all
+    for project in all
         .iter()
-        .filter(|path_3| !path_3.done || thread.projects.contains(&path_3.slug))
+        .filter(|project| !project.done || thread.projects.contains(&project.slug))
     {
-        projs.push((path_4.slug.clone(), thread.projects.contains(&path_4.slug)));
+        projs.push((project.slug.clone(), thread.projects.contains(&project.slug)));
     }
 
     // gone briefs: kept until dropped here
-    for path_6 in thread
+    for slug in thread
         .projects
         .iter()
-        .filter(|path_5| !all.iter().any(|x| &x.slug == *path_5))
+        .filter(|slug| !all.iter().any(|project| &project.slug == *slug))
     {
-        projs.push((path_6.clone(), true));
+        projs.push((slug.clone(), true));
     }
 
     Form {
@@ -434,12 +421,12 @@ fn finish_open(
         title,
         projs,
         repos,
-        auto: auto.map_or_else(|| "outside git".into(), |path_7| repo_name(&path_7)),
+        auto: auto.map_or_else(|| "outside git".into(), |repo| repo_name(&repo)),
         repo_i,
         links: thread
             .checkouts
             .iter()
-            .map(|character_value| (character_value.dir.clone(), true))
+            .map(|checkout| (checkout.dir.clone(), true))
             .collect(),
         agents,
         row: 0,
@@ -496,17 +483,17 @@ pub(super) enum FormOut {
     Save(String, crate::domain::threads::Edit),
 }
 
-fn set_cards_body(character: &mut Vec<Card>, view_state: &mut ThreadList) {
-    character.retain(|key| !matches!(view_state.job_state.moved.get(&key.id), Some(None)));
+fn apply_moved(cards: &mut Vec<Card>, thread_list: &mut ThreadList) {
+    cards.retain(|card| !matches!(thread_list.job_state.moved.get(&card.id), Some(None)));
 
-    for key_value in character {
-        if let Some(Some(text)) = view_state.job_state.moved.get(&key_value.id) {
-            key_value.state = text.clone();
+    for card in cards {
+        if let Some(Some(state)) = thread_list.job_state.moved.get(&card.id) {
+            card.state = state.clone();
         }
     }
 }
 
-struct CardReadsState {
+struct CardReads {
     loading: Option<Receiver<Vec<Card>>>,
     cards_at: Option<Instant>,
     /// `landed::version` of the cards' lands.
@@ -518,7 +505,7 @@ struct CardReadsState {
     version: u64,
     fx: crate::ui::dissolve::Dissolve,
 }
-struct JobStateState {
+struct JobState {
     /// The actions dropdown: its cursor.
     actions: Option<usize>,
     pending: Option<Pending>,
@@ -532,38 +519,38 @@ struct JobStateState {
     /// A job ended: the host reads its own rows again (`take_changed`).
     changed: bool,
 }
-struct HitRegionsState {
+struct HitRegions {
     /// Last draw: card rows, dropdown rows, the list.
     rows: Vec<(Rect, usize)>,
     act_rows: Vec<(Rect, Act)>,
 }
 
-fn set_cards_thread_list(state: &mut ThreadList, mut character: Vec<Card>) {
+fn set_cards_thread_list(state: &mut ThreadList, mut cards: Vec<Card>) {
     if !state.job_state.moved.is_empty() {
-        set_cards_body(&mut character, state);
+        apply_moved(&mut cards, state);
     }
 
-    if character == state.cards {
+    if cards == state.cards {
         return;
     }
 
-    let picked = state.current().map(|character_value| character_value.id.clone());
+    let picked = state.current().map(|card| card.id.clone());
 
-    state.cards = character;
+    state.cards = cards;
     state.card_reads.version += 1;
-    let ids: HashSet<&str> = state.cards.iter().map(|character_2| character_2.id.as_str()).collect();
+    let ids: HashSet<&str> = state.cards.iter().map(|card| card.id.as_str()).collect();
 
-    state.sel.retain(|text_value| ids.contains(text_value.as_str()));
+    state.sel.retain(|id| ids.contains(id.as_str()));
 
     if let Some(id) = picked
-        && let Some(path) = state.visible().iter().position(|&i| state.cards[i].id == id)
+        && let Some(row) = state.visible().iter().position(|&i| state.cards[i].id == id)
     {
-        state.cursor = path;
+        state.cursor = row;
     }
 }
 
-fn new_card_reads(loading: Option<Receiver<Vec<Card>>>) -> CardReadsState {
-    CardReadsState {
+fn new_card_reads(loading: Option<Receiver<Vec<Card>>>) -> CardReads {
+    CardReads {
         cards_at: loading.is_some().then(Instant::now),
         land_v: crate::domain::landed::version(),
         topics: crate::infra::bus::subscribe(),

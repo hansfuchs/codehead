@@ -21,7 +21,7 @@ impl View {
         self.layout.built = None;
         self.jump_file(i);
 
-        if let Some(row) = self.layout.rows.iter().position(|result| result.comment == Some(ci)) {
+        if let Some(row) = self.layout.rows.iter().position(|row| row.comment == Some(ci)) {
             self.at = row;
             self.top = row.saturating_sub(3);
         }
@@ -29,9 +29,9 @@ impl View {
 
     /// s: the staged section's rows unstage, the others stage.
     pub(super) fn panel_stage(&mut self) -> Act {
-        let ps = targets(self);
+        let paths = targets(self);
 
-        if ps.is_empty() {
+        if paths.is_empty() {
             return Act::Toast("0 files · space: pick files".into());
         }
 
@@ -39,9 +39,9 @@ impl View {
 
         self.scm.picked.clear();
         self.start_op(if unstage {
-            Op::UnstageFiles(ps)
+            Op::UnstageFiles(paths)
         } else {
-            Op::StageFiles(ps)
+            Op::StageFiles(paths)
         })
     }
 
@@ -54,13 +54,13 @@ impl View {
     pub(in crate::features::changes) fn restore(&mut self, id: &str) -> Act {
         self.stash_state.stash = crate::features::changes::stash::read(&self.id);
 
-        let Some(error_value) = self.stash_state.stash.iter_mut().find(|error| error.id == id) else {
+        let Some(entry) = self.stash_state.stash.iter_mut().find(|entry| entry.id == id) else {
             return Act::None;
         };
 
-        error_value.restoring = true;
-        let msg = crate::features::changes::stash::restore_ask(error_value);
-        let who = error_value.agent.clone().unwrap_or_else(|| "the lead".into());
+        entry.restoring = true;
+        let msg = crate::features::changes::stash::restore_ask(entry);
+        let who = entry.agent.clone().unwrap_or_else(|| "the lead".into());
 
         crate::features::changes::stash::write(&self.id, &self.stash_state.stash);
         self.stash_state.stash_at = crate::features::changes::stash::stamp(&self.id);
@@ -77,8 +77,8 @@ impl View {
     }
 
     /// A key for the commit message.
-    pub(super) fn msg_key(&mut self, key_value: KeyEvent) -> Act {
-        msg_key_view(self, key_value)
+    pub(super) fn msg_key(&mut self, key: KeyEvent) -> Act {
+        msg_key_view(self, key)
     }
 }
 
@@ -89,7 +89,7 @@ fn targets(view: &View) -> Vec<String> {
         .files
         .iter()
         .map(|file| file.path.clone())
-        .filter(|path_value| view.scm.picked.contains(path_value))
+        .filter(|path| view.scm.picked.contains(path))
         .collect();
 
     if !known.is_empty() {
@@ -101,7 +101,7 @@ fn targets(view: &View) -> Vec<String> {
             .changes
             .files
             .get(*i)
-            .map(|file_value| vec![file_value.path.clone()])
+            .map(|file| vec![file.path.clone()])
             .unwrap_or_default(),
         _ => Vec::new(),
     }
@@ -161,34 +161,29 @@ fn jump_file_view(view: &mut View, i: usize) {
     // a commit in the review's place: the changes come back
     view.peek = None;
 
-    if !view.layout.rows.iter().any(|result| result.head && result.file == i) && !view.filter_state.filter.is_empty() {
+    if !view.layout.rows.iter().any(|row| row.head && row.file == i) && !view.filter_state.filter.is_empty() {
         view.filter_state.filter.clear();
         view.layout.built = None;
     }
 
     view.rebuild_here();
 
-    if let Some(height) = view
-        .layout
-        .rows
-        .iter()
-        .position(|result_value| result_value.head && result_value.file == i)
-    {
-        view.at = height;
-        view.top = height.saturating_sub(1);
+    if let Some(head) = view.layout.rows.iter().position(|row| row.head && row.file == i) {
+        view.at = head;
+        view.top = head.saturating_sub(1);
     }
 }
 
 fn panel_stash_view(view: &mut View) -> Act {
-    let ps = targets(view);
+    let paths = targets(view);
 
-    if ps.is_empty() {
+    if paths.is_empty() {
         return Act::Toast("0 files · space: pick files".into());
     }
 
     view.scm.picked.clear();
 
-    let items = ps
+    let items = paths
         .into_iter()
         .map(|path| {
             (
@@ -205,20 +200,20 @@ fn panel_stash_view(view: &mut View) -> Act {
     view.stash_op(items)
 }
 
-fn msg_key_view(view: &mut View, key_value: KeyEvent) -> Act {
-    let send = key_value
+fn msg_key_view(view: &mut View, key: KeyEvent) -> Act {
+    let send = key
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
 
-    match key_value.code {
+    match key.code {
         KeyCode::Esc => view.scm.msg_focus = false,
         KeyCode::Enter if send => return commit(view),
         // ↓ on the last row: the list's 1st row; page down: its last row
         KeyCode::Down if !send && view.scm.msg.on_last_row() => leave_message(0, view),
         KeyCode::PageDown => leave_message(usize::MAX, view),
-        KeyCode::Char('g') if key_value.modifiers.contains(KeyModifiers::CONTROL) => return draft(view),
+        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => return draft(view),
         _ => {
-            if !matches!(view.scm.msg.key(key_value), Outcome::Handled) && key_value.code == KeyCode::Enter {
+            if !matches!(view.scm.msg.key(key), Outcome::Handled) && key.code == KeyCode::Enter {
                 view.scm.msg.newline();
             }
         }

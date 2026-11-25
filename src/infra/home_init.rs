@@ -36,13 +36,13 @@ pub(crate) fn run(arg: Option<&str>) -> ! {
     let local = config::path();
     let file = config::read_file(&local).map_or_else(
         |error| crate::infra::terminal::fail(&format!("{}: {error}", local.display()), 2),
-        |(_, file_value)| file_value,
+        |(_, file)| file,
     );
 
     let Some(home) = file
         .home
         .as_deref()
-        .filter(|height| !height.trim().is_empty())
+        .filter(|home| !home.trim().is_empty())
         .map(config::expand)
     else {
         crate::infra::terminal::fail(
@@ -59,11 +59,11 @@ pub(crate) fn run(arg: Option<&str>) -> ! {
         }
         Some("init") => match init(&home, &local, &crate::engine::config_dir()) {
             Ok(lines) => {
-                for line_value in lines {
-                    println!("{line_value}");
+                for line in lines {
+                    println!("{line}");
                 }
             }
-            Err(error_value) => crate::infra::terminal::fail(&error_value, 1),
+            Err(error) => crate::infra::terminal::fail(&error, 1),
         },
         Some(other) => crate::infra::terminal::fail(
             &format!("codehead home: unknown command {other}. commands: status, init"),
@@ -91,16 +91,16 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
 
 /// Entries of DIR (files or dirs), by name.
 fn entries(dir: &Path) -> Vec<String> {
-    let mut value: Vec<String> = std::fs::read_dir(dir)
+    let mut names: Vec<String> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
-        .map(|error| error.file_name().to_string_lossy().into_owned())
-        .filter(|count| !count.starts_with('.'))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
         .collect();
 
-    value.sort();
-    value
+    names.sort();
+    names
 }
 
 /// Lines of `codehead home`.
@@ -130,7 +130,7 @@ pub(crate) fn status(home: &Path, device: &str) -> Vec<String> {
     let names = |sub: &str| {
         entries(&dir.join(sub))
             .into_iter()
-            .map(|count_value| count_value.trim_end_matches(".toml").to_string())
+            .map(|name| name.trim_end_matches(".toml").to_string())
             .collect::<Vec<_>>()
     };
 
@@ -143,8 +143,8 @@ pub(crate) fn status(home: &Path, device: &str) -> Vec<String> {
     ));
     let servers = std::fs::read_to_string(dir.join("mcp.toml"))
         .ok()
-        .and_then(|thread| thread.parse::<toml::Table>().ok())
-        .map_or(0, |thread_value| thread_value.len());
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .map_or(0, |table| table.len());
 
     out.push(format!("mcp servers: {servers}"));
     out.push(format!("devices: {}", names("devices").join(", ")));
@@ -164,7 +164,7 @@ fn move_path(src: &Path, dst: &Path) -> Result<(), String> {
         .arg(src)
         .arg(dst)
         .status()
-        .is_ok_and(|text| text.success());
+        .is_ok_and(|status| status.success());
 
     if !ok {
         return Err(format!("cp {} {}: failed", src.display(), dst.display()));
@@ -197,23 +197,23 @@ fn move_one(config: &Path, dir: &Path, name: &str) -> Result<Vec<String>, String
         out.push(format!("moved: {} → {}", src.display(), dst.display()));
     } else if src.is_dir() {
         // both: each entry the codehead dir lacks moves; the others stay
-        for error in entries(&src) {
-            out.push(move_entry(&src, &dst, &error)?);
+        for name in entries(&src) {
+            out.push(move_entry(&src, &dst, &name)?);
         }
 
         if std::fs::read_dir(&src)
-            .map_err(|error_value| error_value.to_string())?
+            .map_err(|error| error.to_string())?
             .next()
             .is_none()
         {
-            std::fs::remove_dir(&src).map_err(|error_2| format!("{}: {error_2}", src.display()))?;
+            std::fs::remove_dir(&src).map_err(|error| format!("{}: {error}", src.display()))?;
         }
     } else {
         out.push(format!("kept: {} ({} exists)", src.display(), dst.display()));
     }
 
     if !src.exists() {
-        std::os::unix::fs::symlink(&dst, &src).map_err(|error_3| format!("symlink {}: {error_3}", src.display()))?;
+        std::os::unix::fs::symlink(&dst, &src).map_err(|error| format!("symlink {}: {error}", src.display()))?;
     }
 
     Ok(out)
@@ -234,7 +234,7 @@ pub(crate) fn init(home: &Path, local: &Path, config: &Path) -> Result<Vec<Strin
 
     if !readme.exists() {
         crate::engine::write_atomic(&readme, README.as_bytes())
-            .map_err(|error_value| format!("{}: {error_value}", readme.display()))?;
+            .map_err(|error| format!("{}: {error}", readme.display()))?;
         out.push(format!("written: {}", readme.display()));
     }
 
@@ -249,7 +249,7 @@ pub(crate) fn init(home: &Path, local: &Path, config: &Path) -> Result<Vec<Strin
         };
 
         crate::engine::write_atomic(&attrs, format!("{text}{sep}{UNION}\n").as_bytes())
-            .map_err(|error_2| format!("{}: {error_2}", attrs.display()))?;
+            .map_err(|error| format!("{}: {error}", attrs.display()))?;
         out.push(format!("written: {} ({UNION})", attrs.display()));
     }
 
@@ -266,22 +266,21 @@ pub(crate) fn init(home: &Path, local: &Path, config: &Path) -> Result<Vec<Strin
 /// file. A `notes` setting that names home's notes/ goes (the default).
 fn split_settings(home: &Path, local: &Path) -> Result<Vec<String>, String> {
     let layers = config::read_layers(local)?;
-    let mut file_value = layers.merged();
-    let device = config::device_of(&file_value);
+    let mut file = layers.merged();
+    let device = config::device_of(&file);
 
     // 1st the pointer: then the layers include home's files
-    let same_home = file_value
+    let same_home = file
         .home
         .as_deref()
         .map(config::expand)
-        .is_some_and(|height| height == home);
+        .is_some_and(|configured| configured == home);
 
-    if !same_home || file_value.device.as_deref() != Some(device.as_str()) {
+    if !same_home || file.device.as_deref() != Some(device.as_str()) {
         let mut pointer = layers.local.file.clone();
 
         pointer.home = Some(
-            file_value
-                .home
+            file.home
                 .clone()
                 .filter(|_| same_home)
                 .unwrap_or_else(|| home.display().to_string()),
@@ -296,26 +295,27 @@ fn split_settings(home: &Path, local: &Path) -> Result<Vec<String>, String> {
         return Err(format!("{}: home is not {}", local.display(), home.display()));
     }
 
-    file_value.home.clone_from(&layers.local.file.home);
-    file_value.device.clone_from(&layers.local.file.device);
+    file.home.clone_from(&layers.local.file.home);
+    file.device.clone_from(&layers.local.file.device);
 
-    if file_value
+    if file
         .notes
         .as_deref()
         .map(config::expand)
-        .is_some_and(|count| count == home.join("notes"))
+        .is_some_and(|notes| notes == home.join("notes"))
     {
-        file_value.notes = None;
+        file.notes = None;
     }
 
     let before = layers.merged();
-    let after = config::save_layers(&layers, &file_value)?;
+    let after = config::save_layers(&layers, &file)?;
     let mut out = vec![format!("device: {device}")];
 
     if after.merged() != before || layers.local.text != after.local.text {
-        let path = |line: &Option<config::Layer>| {
-            line.as_ref()
-                .map(|line_value| line_value.path.display().to_string())
+        let path = |layer: &Option<config::Layer>| {
+            layer
+                .as_ref()
+                .map(|layer| layer.path.display().to_string())
                 .unwrap_or_default()
         };
 
@@ -335,13 +335,13 @@ fn split_settings(home: &Path, local: &Path) -> Result<Vec<String>, String> {
 mod tests;
 
 fn move_entry(src: &Path, dst: &Path, name: &str) -> Result<String, String> {
-    let text = src.join(name);
-    let directory = dst.join(name);
+    let from = src.join(name);
+    let to = dst.join(name);
 
-    if directory.exists() {
-        return Ok(format!("kept: {} ({} exists)", text.display(), directory.display()));
+    if to.exists() {
+        return Ok(format!("kept: {} ({} exists)", from.display(), to.display()));
     }
 
-    move_path(&text, &directory)?;
-    Ok(format!("moved: {} → {}", text.display(), directory.display()))
+    move_path(&from, &to)?;
+    Ok(format!("moved: {} → {}", from.display(), to.display()))
 }

@@ -5,17 +5,17 @@ pub(super) fn draw_dropdown(merge: &mut Merge, frame: &mut Frame, focused: bool)
         return;
     };
 
-    let Some(menu_value) = &tab.input.menu else {
+    let Some(menu) = &tab.input.menu else {
         return;
     };
 
-    let anchor = menu_anchor(merge, menu_value);
+    let anchor = menu_anchor(merge, menu);
 
-    let (label, rows, cursor_value, note): MenuContent = menu_content(merge, tab, menu_value);
+    let (label, rows, cursor, note): MenuContent = menu_content(merge, tab, menu);
 
     let menu_width = rows
         .iter()
-        .map(|result_value| result_value.text.width() + 6)
+        .map(|row| row.text.width() + 6)
         .max()
         .unwrap_or(20)
         .clamp(28, 60) as u16;
@@ -41,9 +41,9 @@ pub(super) fn draw_dropdown(merge: &mut Merge, frame: &mut Frame, focused: bool)
             label: &label,
             note: &note,
             rows: &rows,
-            cursor: cursor_value,
+            cursor,
             offset: 0,
-            empty: if matches!(menu_value, Menu::Labels { .. }) {
+            empty: if matches!(menu, Menu::Labels { .. }) {
                 "0 labels"
             } else {
                 "0 options"
@@ -58,9 +58,7 @@ pub(super) fn draw_dropdown(merge: &mut Merge, frame: &mut Frame, focused: bool)
 pub(super) fn menu_anchor(merge: &Merge, menu: &Menu) -> Rect {
     let anchor_stop = match menu {
         Menu::Status(..) => Stop::Status,
-        Menu::Mine {
-            thread, comment: key, ..
-        } => Stop::Comment(*thread, *key),
+        Menu::Mine { thread, comment, .. } => Stop::Comment(*thread, *comment),
         Menu::Labels { .. } => Stop::AddLabel,
     };
 
@@ -81,8 +79,8 @@ pub(super) fn menu_content(merge: &Merge, tab: &super::super::Tab, menu: &Menu) 
             "status".into(),
             options
                 .iter()
-                .map(|(line, _)| crate::ui::dropdown::Row {
-                    text: line.to_string(),
+                .map(|(option, _)| crate::ui::dropdown::Row {
+                    text: option.to_string(),
                     ..Default::default()
                 })
                 .collect(),
@@ -105,14 +103,14 @@ pub(super) fn label_menu_content(
     let loading = tab
         .pr
         .as_ref()
-        .is_some_and(|path| !merge.labels.contains_key(&path.pr.repo));
+        .is_some_and(|pr| !merge.labels.contains_key(&pr.pr.repo));
 
     let rows = options
         .iter()
         .map(|label| {
             let marks = query
                 .split_whitespace()
-                .filter_map(|word_value| crate::domain::matcher::word(word_value, &label.name))
+                .filter_map(|word| crate::domain::matcher::word(word, &label.name))
                 .flat_map(|(_, positions)| positions)
                 .collect();
 

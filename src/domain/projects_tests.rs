@@ -2,19 +2,16 @@ use super::*;
 
 #[test]
 fn briefs_parse_title_done_goal() {
-    let (thread, directory, group) = parse("---\ntitle: UX improvements\ndone: true\n---\n\n# Goal\n\nless noise\n");
+    let (title, done, goal) = parse("---\ntitle: UX improvements\ndone: true\n---\n\n# Goal\n\nless noise\n");
 
     assert_eq!(
-        (thread.as_deref(), directory, group.as_str()),
+        (title.as_deref(), done, goal.as_str()),
         (Some("UX improvements"), true, "Goal")
     );
 
-    let (thread_value, directory_value, group_value) = parse("plain text\nmore");
+    let (title, done, goal) = parse("plain text\nmore");
 
-    assert_eq!(
-        (thread_value, directory_value, group_value.as_str()),
-        (None, false, "plain text")
-    );
+    assert_eq!((title, done, goal.as_str()), (None, false, "plain text"));
 
     let text = set_front("---\ntitle: X\n---\nbody\n", "done", Some("true"));
 
@@ -64,22 +61,22 @@ fn projects_live_in_the_home_repo_under_the_repos_dir() {
         base.join("data/projects/codehead")
     );
 
-    let directory = home.join("codehead/projects");
-    let path = create_in(&directory, "Website refinement").unwrap();
+    let dir = home.join("codehead/projects");
+    let project = create_in(&dir, "Website refinement").unwrap();
 
     assert_eq!(
-        (path.slug.as_str(), path.title.as_str(), path.done),
+        (project.slug.as_str(), project.title.as_str(), project.done),
         ("website-refinement", "Website refinement", false)
     );
-    assert!(create_in(&directory, "website refinement").is_err(), "same slug");
+    assert!(create_in(&dir, "website refinement").is_err(), "same slug");
 
-    create_in(&directory, "Bug fixes").unwrap();
-    set_done(&path, true).unwrap();
-    let all = list_in(&directory);
+    create_in(&dir, "Bug fixes").unwrap();
+    set_done(&project, true).unwrap();
+    let all = list_in(&dir);
 
     assert_eq!(
         all.iter()
-            .map(|path_value| (path_value.slug.as_str(), path_value.done))
+            .map(|project| (project.slug.as_str(), project.done))
             .collect::<Vec<_>>(),
         [("bug-fixes", false), ("website-refinement", true)]
     );
@@ -129,18 +126,18 @@ fn rename_branch_moves_the_branch_and_its_upstream() {
 
     std::fs::create_dir_all(&base).unwrap();
 
-    let sh = |character: &str| {
+    let sh = |script: &str| {
         assert!(
             Command::new("sh")
                 .arg("-c")
-                .arg(character)
+                .arg(script)
                 .current_dir(&base)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()
                 .unwrap()
                 .success(),
-            "{character}"
+            "{script}"
         );
     };
 

@@ -17,18 +17,18 @@ fn msgs() -> Vec<Msg> {
 
 #[test]
 fn every_word_must_match_best_first_then_oldest() {
-    let message = msgs();
+    let msgs = msgs();
 
     // "deploy" at a word start in 3 messages; the 2nd has 2 hits
-    assert_eq!(find(&message, "deploy"), vec![1, 0, 2]);
-    assert_eq!(find(&message, "deploy docs"), vec![2]);
+    assert_eq!(find(&msgs, "deploy"), vec![1, 0, 2]);
+    assert_eq!(find(&msgs, "deploy docs"), vec![2]);
 
     // fuzzy inside 1 word
-    assert_eq!(find(&message, "scrpt"), vec![0, 1]);
-    assert!(find(&message, "zebra").is_empty() && find(&message, "  ").is_empty());
+    assert_eq!(find(&msgs, "scrpt"), vec![0, 1]);
+    assert!(find(&msgs, "zebra").is_empty() && find(&msgs, "  ").is_empty());
 
     // case: any
-    assert_eq!(find(&message, "DEPLOY SCRIPT"), vec![1, 0]);
+    assert_eq!(find(&msgs, "DEPLOY SCRIPT"), vec![1, 0]);
 }
 
 #[test]
@@ -48,8 +48,8 @@ fn the_snippet_centers_the_match_and_marks_it() {
     assert_eq!(marks.iter().map(|&i| at[i]).collect::<String>(), "needle");
 
     // fuzzy marks
-    let (text_value, marks) = snippet(&Msg::new("t", "x", "owner", 1, "run the script"), "scrpt", 40);
-    let at = text_value.chars().collect::<Vec<_>>();
+    let (fuzzy_text, marks) = snippet(&Msg::new("t", "x", "owner", 1, "run the script"), "scrpt", 40);
+    let at = fuzzy_text.chars().collect::<Vec<_>>();
 
     assert_eq!(marks.iter().map(|&i| at[i]).collect::<String>(), "scrpt");
 }

@@ -56,10 +56,10 @@ pub(crate) struct Subagents {
 /// The running subagents of SUBS in box order: by master (first start first), each master's
 /// tree depth first. (subagent, depth).
 pub(crate) fn order(subs: &[Sub]) -> Vec<(&Sub, usize)> {
-    let running_value: Vec<&Sub> = subs.iter().filter(|sub| sub.running()).collect();
+    let running: Vec<&Sub> = subs.iter().filter(|sub| sub.running()).collect();
     let mut masters: Vec<&str> = Vec::new();
 
-    for subagent in &running_value {
+    for subagent in &running {
         if !masters.contains(&subagent.master.as_str()) {
             masters.push(&subagent.master);
         }
@@ -68,10 +68,10 @@ pub(crate) fn order(subs: &[Sub]) -> Vec<(&Sub, usize)> {
     let mut out = Vec::new();
 
     for master_name in masters {
-        append_subtree(&running_value, None, master_name, 0, &mut out);
+        append_subtree(&running, None, master_name, 0, &mut out);
 
         // a subagent whose parent ended (or is unknown): at the top level of its master
-        append_orphans(&running_value, &mut out, master_name);
+        append_orphans(&running, &mut out, master_name);
     }
 
     out
@@ -83,9 +83,9 @@ fn append_orphans<'subs>(running: &[&'subs Sub], out: &mut Vec<(&'subs Sub, usiz
             && candidate
                 .parent
                 .as_deref()
-                .is_some_and(|parent_id| !running.iter().any(|x| x.id == parent_id))
+                .is_some_and(|parent_id| !running.iter().any(|other| other.id == parent_id))
     }) {
-        if !out.iter().any(|(x, _)| x.id == subagent.id) {
+        if !out.iter().any(|(placed, _)| placed.id == subagent.id) {
             out.push((subagent, 0));
             append_subtree(running, Some(&subagent.id), master_name, 1, out);
         }
@@ -122,13 +122,13 @@ impl Subagents {
     /// The selected subagent: the chosen one while it runs, else the 1st.
     fn current<'a>(&self, list: &[(&'a Sub, usize)]) -> Option<&'a Sub> {
         list.iter()
-            .find(|(text, _)| Some(&text.id) == self.selected.as_ref())
+            .find(|(sub, _)| Some(&sub.id) == self.selected.as_ref())
             .or(list.first())
-            .map(|(text_value, _)| *text_value)
+            .map(|(sub, _)| *sub)
     }
 
-    pub(crate) fn key(&mut self, key_value: KeyEvent, subs: &[Sub]) -> Option<Act> {
-        key_subagents(self, key_value, subs)
+    pub(crate) fn key(&mut self, key: KeyEvent, subs: &[Sub]) -> Option<Act> {
+        key_subagents(self, key, subs)
     }
 
     pub(crate) fn mouse(&mut self, event: MouseEvent) -> bool {
@@ -178,62 +178,52 @@ mod key_tests;
 fn select_clicked_subagent(event: MouseEvent, subagents: &mut Subagents) {
     let row = usize::from(event.row.saturating_sub(subagents.popup.y + 1)) + subagents.scroll;
 
-    if let Some((_, id)) = subagents.rows.iter().rev().find(|(row_value, _)| *row_value <= row) {
+    if let Some((_, id)) = subagents.rows.iter().rev().find(|(start, _)| *start <= row) {
         subagents.selected = Some(id.clone());
     }
 }
 
-fn tick_subagents(subagents_value: &mut Subagents, subs: &[Sub]) -> bool {
+fn tick_subagents(subagents: &mut Subagents, subs: &[Sub]) -> bool {
     let TranscriptFiles {
         files,
         directories: dirs,
-    } = watch_transcripts(&mut subagents_value.reader, subs);
-    let topics = subagents_value
-        .reader
-        .topics
-        .get_or_insert_with(crate::infra::bus::subscribe);
+    } = watch_transcripts(&mut subagents.reader, subs);
+    let topics = subagents.reader.topics.get_or_insert_with(crate::infra::bus::subscribe);
 
-    for thread_value in topics.try_iter() {
-        if let crate::infra::bus::Topic::Work(width_value) | crate::infra::bus::Topic::Rescan(width_value) =
-            thread_value
-        {
-            subagents_value.reader.due |= dirs.iter().any(|directory_2| directory_2.starts_with(&width_value));
+    for topic in topics.try_iter() {
+        if let crate::infra::bus::Topic::Work(path) | crate::infra::bus::Topic::Rescan(path) = topic {
+            subagents.reader.due |= dirs.iter().any(|dir| dir.starts_with(&path));
         }
     }
 
-    if !files.is_empty() && subagents_value.reader.due && subagents_value.reader.read.is_none() && !cfg!(test) {
-        subagents_value.reader.due = false;
+    if !files.is_empty() && subagents.reader.due && subagents.reader.read.is_none() && !cfg!(test) {
+        subagents.reader.due = false;
         let (tx, rx) = crate::infra::bus::channel();
 
         std::thread::spawn(move || {
             let _ = tx.send(
                 files
                     .into_iter()
-                    .filter_map(|(id, path_2)| Some((id, crate::engine::subagents::activity_of(&path_2)?)))
+                    .filter_map(|(id, transcript)| Some((id, crate::engine::subagents::activity_of(&transcript)?)))
                     .collect(),
             );
 
             crate::infra::bus::wake();
         });
 
-        subagents_value.reader.read = Some(rx);
+        subagents.reader.read = Some(rx);
     }
 
     let mut changed = false;
 
-    if let Some(now) = subagents_value
-        .reader
-        .read
-        .as_ref()
-        .and_then(|result| result.try_recv().ok())
-    {
-        subagents_value.reader.read = None;
-        changed = now != subagents_value.reader.now;
-        subagents_value.reader.now = now;
+    if let Some(now) = subagents.reader.read.as_ref().and_then(|read| read.try_recv().ok()) {
+        subagents.reader.read = None;
+        changed = now != subagents.reader.now;
+        subagents.reader.now = now;
     }
 
-    if !Subagents::active(subs) && subagents_value.open {
-        subagents_value.open = false;
+    if !Subagents::active(subs) && subagents.open {
+        subagents.open = false;
         changed = true;
     }
 
@@ -248,21 +238,15 @@ fn watch_transcripts(reader: &mut TranscriptReads, subs: &[Sub]) -> TranscriptFi
         .collect();
     let dirs: Vec<PathBuf> = files
         .iter()
-        .filter_map(|(_, transcript_value)| transcript_value.parent().map(crate::infra::watch::canon))
+        .filter_map(|(_, transcript)| transcript.parent().map(crate::infra::watch::canon))
         .collect();
     let before = reader.watched.len();
 
-    reader.watched.retain(|(directory, _)| dirs.contains(directory));
+    reader.watched.retain(|(dir, _)| dirs.contains(dir));
 
-    for directory_2 in &dirs {
-        if !reader
-            .watched
-            .iter()
-            .any(|(watched_value, _)| watched_value == directory_2)
-        {
-            reader
-                .watched
-                .push((directory_2.clone(), crate::infra::watch::show(directory_2)));
+    for dir in &dirs {
+        if !reader.watched.iter().any(|(watched, _)| watched == dir) {
+            reader.watched.push((dir.clone(), crate::infra::watch::show(dir)));
             reader.due = true;
         }
     }
@@ -283,21 +267,19 @@ fn key_subagents(subagents: &mut Subagents, key: KeyEvent, subs: &[Sub]) -> Opti
     let list = order(subs);
     let at = subagents
         .current(&list)
-        .and_then(|character| list.iter().position(|(text, _)| text.id == character.id))
+        .and_then(|current| list.iter().position(|(sub, _)| sub.id == current.id))
         .unwrap_or(0);
     let armed = std::mem::take(&mut subagents.armed);
 
     match key.code {
         KeyCode::Esc => subagents.open = false,
         KeyCode::Up => {
-            subagents.selected = list
-                .get(at.saturating_sub(1))
-                .map(|(text_value, _)| text_value.id.clone());
+            subagents.selected = list.get(at.saturating_sub(1)).map(|(sub, _)| sub.id.clone());
         }
         KeyCode::Down => {
             subagents.selected = list
                 .get((at + 1).min(list.len().saturating_sub(1)))
-                .map(|(text_2, _)| text_2.id.clone());
+                .map(|(sub, _)| sub.id.clone());
         }
         KeyCode::PageDown => subagents.scroll += 5,
         KeyCode::PageUp => subagents.scroll = subagents.scroll.saturating_sub(5),
@@ -306,7 +288,7 @@ fn key_subagents(subagents: &mut Subagents, key: KeyEvent, subs: &[Sub]) -> Opti
             return Some(
                 subagents
                     .current(&list)
-                    .map_or(Act::None, |text_3| Act::Stop(text_3.id.clone())),
+                    .map_or(Act::None, |sub| Act::Stop(sub.id.clone())),
             );
         }
         KeyCode::Char('d') if key.modifiers.is_empty() => subagents.armed = true,
@@ -364,7 +346,7 @@ fn lines_subagents(subagents: &mut Subagents, subs: &[Sub], width: usize) -> Vec
             append_group_gap(&mut out, master_name);
 
             master_name = Some(&subagent.master);
-            let group_count = list.iter().filter(|(x, _)| x.master == subagent.master).count();
+            let group_count = list.iter().filter(|(sub, _)| sub.master == subagent.master).count();
 
             out.push(Line::from(vec![
                 Span::styled(subagent.master.clone(), theme::bold()),
@@ -378,7 +360,7 @@ fn lines_subagents(subagents: &mut Subagents, subs: &[Sub], width: usize) -> Vec
         let selected_row = selected.as_deref() == Some(subagent.id.as_str());
         let indentation = "  ".repeat(*depth);
         let mark = if selected_row { "› " } else { "  " };
-        let mut description_value = format!("{mark}{indentation}{}", subagent.description);
+        let mut description = format!("{mark}{indentation}{}", subagent.description);
         let mut tags: Vec<String> = Vec::new();
 
         append_agent_type_tag(subagent, &mut tags);
@@ -390,7 +372,7 @@ fn lines_subagents(subagents: &mut Subagents, subs: &[Sub], width: usize) -> Vec
         tags.push(took(subagent.start));
         let tail = format!(" · {}", tags.join(" · "));
 
-        description_value = super::popup::truncate(description_value, width.saturating_sub(tail.chars().count()));
+        description = super::popup::truncate(description, width.saturating_sub(tail.chars().count()));
         subagents.rows.push((out.len(), subagent.id.clone()));
 
         let style = if selected_row {
@@ -400,7 +382,7 @@ fn lines_subagents(subagents: &mut Subagents, subs: &[Sub], width: usize) -> Vec
         };
 
         out.push(Line::from(vec![
-            Span::styled(description_value, style),
+            Span::styled(description, style),
             Span::styled(tail, theme::muted()),
         ]));
 
@@ -448,8 +430,8 @@ fn render_subagents(subagents: &mut Subagents, frame: &mut Frame, area: Rect, ti
 
     let what = list
         .iter()
-        .filter(|(_, directory)| *directory == 0)
-        .map(|(text_value, _)| format!("{}: {}", text_value.master, text_value.description))
+        .filter(|(_, depth)| *depth == 0)
+        .map(|(sub, _)| format!("{}: {}", sub.master, sub.description))
         .collect::<Vec<_>>()
         .join(" · ");
 
@@ -468,12 +450,12 @@ fn render_subagents(subagents: &mut Subagents, frame: &mut Frame, area: Rect, ti
         return;
     }
 
-    let area_value = Rect {
+    let popup_area = Rect {
         height: area.height - 1,
         ..area
     };
 
-    subagents.popup = area_value;
+    subagents.popup = popup_area;
 
     let hint = if subagents.armed {
         " d again: stop the subagent · another key: no "
@@ -481,7 +463,7 @@ fn render_subagents(subagents: &mut Subagents, frame: &mut Frame, area: Rect, ti
         " ↑↓ select · d d stop · pgup/pgdn scroll · esc close "
     };
 
-    let inner = super::popup::draw_frame(frame, area_value, " subagents ", hint);
+    let inner = super::popup::draw_frame(frame, popup_area, " subagents ", hint);
     let lines = subagents.lines(subs, inner.width.max(1) as usize);
 
     super::popup::draw_lines(
@@ -502,7 +484,7 @@ fn append_subtree<'a>(
 ) {
     for subagent in running
         .iter()
-        .filter(|text| text.master == master && text.parent.as_deref() == parent)
+        .filter(|sub| sub.master == master && sub.parent.as_deref() == parent)
     {
         out.push((subagent, depth));
         append_subtree(running, Some(&subagent.id), master, depth + 1, out);

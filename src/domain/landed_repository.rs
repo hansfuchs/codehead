@@ -4,13 +4,13 @@ use super::{FETCH_MAX, Land, Path, PrSeen, Refs, Seen, State, git, store};
 pub(crate) fn default_branch(dir: &Path) -> Option<String> {
     let (ok, out, _) = git(dir, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
 
-    if let Some(bytes) = out.trim().strip_prefix("origin/").filter(|_| ok) {
-        return Some(bytes.to_string());
+    if let Some(branch) = out.trim().strip_prefix("origin/").filter(|_| ok) {
+        return Some(branch.to_string());
     }
 
     ["main", "master"]
         .into_iter()
-        .find(|bytes_value| oid(dir, &format!("origin/{bytes_value}")).is_some() || oid(dir, bytes_value).is_some())
+        .find(|branch| oid(dir, &format!("origin/{branch}")).is_some() || oid(dir, branch).is_some())
         .map(String::from)
 }
 pub(crate) fn oid(dir: &Path, rev: &str) -> Option<String> {
@@ -24,8 +24,8 @@ pub(crate) fn oid(dir: &Path, rev: &str) -> Option<String> {
 pub(crate) fn contained(dir: &Path, rev: &str, base: &str, seen: &mut Seen) -> bool {
     let key = (rev.to_string(), base.to_string());
 
-    if let Some(&bytes) = seen.get(&key) {
-        return bytes;
+    if let Some(&landed) = seen.get(&key) {
+        return landed;
     }
 
     let ancestor = || git(dir, &["merge-base", "--is-ancestor", rev, base]).0;
@@ -43,18 +43,18 @@ pub(crate) fn contained(dir: &Path, rev: &str, base: &str, seen: &mut Seen) -> b
         ok && out.lines().next().map(str::trim) == Some(tree.trim())
     };
 
-    let bytes_value = ancestor() || cherry() || merge();
+    let landed = ancestor() || cherry() || merge();
 
-    seen.insert(key, bytes_value);
+    seen.insert(key, landed);
 
-    bytes_value
+    landed
 }
 /// The state of checkout DIR. BRANCH: the branch to read (an archived thread's kept branch in
 /// its repo; None: DIR's current one). DIRTY: count uncommitted files.
 pub(crate) fn checkout(dir: &Path, branch: Option<&str>, dirty: bool, prs: &[PrSeen], seen: &mut Seen) -> Land {
-    let (bytes, def) = match task_branch(dir, branch) {
-        Ok(x) => x,
-        Err(line) => return line,
+    let (branch, def) = match task_branch(dir, branch) {
+        Ok(found) => found,
+        Err(land) => return land,
     };
 
     if dirty {
@@ -65,7 +65,7 @@ pub(crate) fn checkout(dir: &Path, branch: Option<&str>, dirty: bool, prs: &[PrS
         }
     }
 
-    with_prs(&refs(dir, &bytes, def.as_deref(), seen), &bytes, prs)
+    with_prs(&refs(dir, &branch, def.as_deref(), seen), &branch, prs)
 }
 /// The task branch of checkout DIR (BRANCH: that one, None: DIR's current one) and the repo's
 /// default branch. Err: the state of a checkout with 0 task branch (0 git, 0 branch: 0 code;
@@ -75,18 +75,18 @@ pub(crate) fn task_branch(dir: &Path, branch: Option<&str>) -> Result<(String, O
         return Err(Land::NoCode);
     }
 
-    let bytes = branch.map_or_else(|| crate::domain::threads::current_branch(dir), String::from);
+    let current = branch.map_or_else(|| crate::domain::threads::current_branch(dir), String::from);
     let def = default_branch(dir);
 
-    if bytes.is_empty() {
+    if current.is_empty() {
         return Err(Land::NoCode);
     }
 
-    if Some(&bytes) == def.as_ref() || bytes == "main" || bytes == "master" {
+    if Some(&current) == def.as_ref() || current == "main" || current == "master" {
         return Err(Land::Main);
     }
 
-    Ok((bytes, def))
+    Ok((current, def))
 }
 /// Uncommitted + untracked files of checkout DIR.
 pub(crate) fn dirty_count(dir: &Path) -> usize {
@@ -97,19 +97,19 @@ pub(crate) fn dirty_count(dir: &Path) -> usize {
         .count()
 }
 /// The refs state of branch B in checkout DIR (DEF: the repo's default branch).
-pub(super) fn refs(dir: &Path, bytes: &str, def: Option<&str>, seen: &mut Seen) -> Refs {
-    let Some(rev) = oid(dir, &format!("refs/heads/{bytes}")) else {
+pub(super) fn refs(dir: &Path, branch: &str, def: Option<&str>, seen: &mut Seen) -> Refs {
+    let Some(rev) = oid(dir, &format!("refs/heads/{branch}")) else {
         return Refs::NoCode;
     };
 
     let bases: Vec<String> = def
         .iter()
-        .flat_map(|directory| [format!("origin/{directory}"), directory.to_string()])
-        .filter_map(|result| oid(dir, &result))
+        .flat_map(|name| [format!("origin/{name}"), name.to_string()])
+        .filter_map(|rev| oid(dir, &rev))
         .collect();
 
     // a new branch (0 move since its creation, its tip in the base): 0 work yet, not shipped
-    let fresh = git(dir, &["reflog", "show", "--format=%H", &format!("refs/heads/{bytes}")])
+    let fresh = git(dir, &["reflog", "show", "--format=%H", &format!("refs/heads/{branch}")])
         .1
         .lines()
         .count()
@@ -136,19 +136,16 @@ pub(super) fn refs(dir: &Path, bytes: &str, def: Option<&str>, seen: &mut Seen) 
     Refs::Ahead { rev, unpushed }
 }
 /// The state of branch B with refs state R and the thread's PRS.
-pub(super) fn with_prs(result: &Refs, bytes: &str, prs: &[PrSeen]) -> Land {
-    let (rev, unpushed) = match result {
+pub(super) fn with_prs(refs: &Refs, branch: &str, prs: &[PrSeen]) -> Land {
+    let (rev, unpushed) = match refs {
         Refs::NoCode => return Land::NoCode,
         Refs::Landed => return Land::Landed,
         Refs::Ahead { rev, unpushed } => (rev, *unpushed),
     };
 
-    let mine: Vec<&PrSeen> = prs.iter().filter(|path| path.head == bytes).collect();
+    let mine: Vec<&PrSeen> = prs.iter().filter(|pr| pr.head == branch).collect();
 
-    if mine
-        .iter()
-        .any(|path_value| path_value.state == State::Merged && &path_value.head_oid == rev)
-    {
+    if mine.iter().any(|pr| pr.state == State::Merged && &pr.head_oid == rev) {
         return Land::Landed;
     }
 
@@ -156,37 +153,32 @@ pub(super) fn with_prs(result: &Refs, bytes: &str, prs: &[PrSeen]) -> Land {
         return Land::Unpushed(unpushed);
     }
 
-    if let Some(path_3) = mine
-        .iter()
-        .find(|path_2| matches!(path_2.state, State::Open | State::Draft))
-    {
-        return Land::PrOpen(path_3.label.clone());
+    if let Some(pr) = mine.iter().find(|pr| matches!(pr.state, State::Open | State::Draft)) {
+        return Land::PrOpen(pr.label.clone());
     }
 
-    let closed = mine
-        .iter()
-        .find(|path_4| path_4.state == State::Closed && &path_4.head_oid == rev);
+    let closed = mine.iter().find(|pr| pr.state == State::Closed && &pr.head_oid == rev);
 
-    if let Some(path_6) = closed.filter(|_| !mine.iter().any(|path_5| path_5.state == State::Merged)) {
-        return Land::Abandoned(path_6.label.clone());
+    if let Some(pr) = closed.filter(|_| !mine.iter().any(|pr| pr.state == State::Merged)) {
+        return Land::Abandoned(pr.label.clone());
     }
 
     Land::Unmerged
 }
 /// The state of thread T: the worst of its checkouts. Archived: its kept branch in its repo.
-pub(crate) fn thread(thread_value: &store::Thread, prs: &[PrSeen], seen: &mut Seen) -> Land {
-    let lands: Vec<Land> = if thread_value.state == "archived" {
-        let repo = crate::domain::threads::repo_of_thread_store(thread_value);
+pub(crate) fn thread(thread: &store::Thread, prs: &[PrSeen], seen: &mut Seen) -> Land {
+    let lands: Vec<Land> = if thread.state == "archived" {
+        let repo = crate::domain::threads::repo_of_thread_store(thread);
 
-        match (repo, thread_value.worktree_pending.as_deref()) {
-            (Some(result), Some(bytes)) => vec![checkout(&result, Some(bytes), false, prs, seen)],
+        match (repo, thread.worktree_pending.as_deref()) {
+            (Some(repo), Some(branch)) => vec![checkout(&repo, Some(branch), false, prs, seen)],
             _ => Vec::new(),
         }
     } else {
-        thread_value
+        thread
             .all_checkouts()
             .iter()
-            .map(|character| checkout(Path::new(&character.dir), None, true, prs, seen))
+            .map(|co| checkout(Path::new(&co.dir), None, true, prs, seen))
             .collect()
     };
 

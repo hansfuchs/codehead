@@ -136,14 +136,14 @@ fn task_rectangles(area: Rect, heights: TaskHeights) -> [Rect; 19] {
     .areas(area)
 }
 
-fn task_location_heights(app_state: &App, area: Rect, title_rows: u16, note_rows: u16) -> (u16, u16, u16, u16, u16) {
-    let opts_h = if app_state.repository.wheres.is_empty() { 0 } else { 2 };
+fn task_location_heights(app: &App, area: Rect, title_rows: u16, note_rows: u16) -> (u16, u16, u16, u16, u16) {
+    let opts_h = if app.repository.wheres.is_empty() { 0 } else { 2 };
 
     // "where": a label, the repo row, the branch row (a git repo only)
-    let branch_h = u16::from(!app_state.repository.wheres.is_empty());
+    let branch_h = u16::from(!app.repository.wheres.is_empty());
 
     // the projects row: a git repo only
-    let proj_h = u16::from(app_state.cfg.repo.is_some());
+    let proj_h = u16::from(app.cfg.repo.is_some());
 
     // the drafts row: "view drafts (n)" (1+ drafts), "save as draft"; a blank row below
     let drafts_h = 2;
@@ -154,27 +154,27 @@ fn task_location_heights(app_state: &App, area: Rect, title_rows: u16, note_rows
     (opts_h, branch_h, proj_h, drafts_h, available)
 }
 
-fn task_agent_height(app_state: &App, area: Rect, available: u16) -> u16 {
-    if app_state.agent_list.agents.is_empty() {
+fn task_agent_height(app: &App, area: Rect, available: u16) -> u16 {
+    if app.agent_list.agents.is_empty() {
         1
     } else {
-        let group = app_state.agent_grid(area.width);
-        let view = group
+        let grid = app.agent_grid(area.width);
+        let view = grid
             .height
             .min(2 * (CARD_H as usize + 1))
             .min(available.max(CARD_H + 1) as usize);
 
         // only the rows the cards fill: the rest goes to the prompt
-        match group
+        match grid
             .places
             .iter()
-            .find(|&&(i, _, _)| i == app_state.compose.pick_cursor)
-            .or(group.places.first())
+            .find(|&&(i, _, _)| i == app.compose.pick_cursor)
+            .or(grid.places.first())
         {
             Some(&(_, _, top)) => {
-                let off = crate::ui::cards::scroll(&group, top, CARD_H, app_state.compose.pick_offset, view);
+                let off = crate::ui::cards::scroll(&grid, top, CARD_H, app.compose.pick_offset, view);
 
-                crate::ui::cards::used(&group, CARD_H, off, view).max(1) as u16
+                crate::ui::cards::used(&grid, CARD_H, off, view).max(1) as u16
             }
             None => view as u16,
         }

@@ -44,17 +44,17 @@ pub(crate) fn git_dir(dir: &Path, globals: &[OsString]) -> Option<PathBuf> {
         .output()
         .ok()?;
     let text = String::from_utf8(out.stdout).ok()?;
-    let text_value = text.trim();
+    let trimmed = text.trim();
 
-    (out.status.success() && !text_value.is_empty()).then(|| PathBuf::from(text_value))
+    (out.status.success() && !trimmed.is_empty()).then(|| PathBuf::from(trimmed))
 }
 
 /// PID runs.
 fn alive(pid: u32) -> bool {
     // signal 0: 0 signal sent, only the check (EPERM: it runs, as another user)
-    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    let sent = unsafe { libc::kill(pid as libc::pid_t, 0) };
 
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    sent == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// The holder of the lock in `GIT_DIR`. A lock of a process that ended: gone, None.
@@ -63,7 +63,7 @@ pub(crate) fn held_in(git_dir: &Path) -> Option<Holder> {
     let text = std::fs::read_to_string(&path).ok()?;
 
     match serde_json::from_str::<Holder>(&text) {
-        Ok(height) if alive(height.pid) => Some(height),
+        Ok(holder) if alive(holder.pid) => Some(holder),
         // a crashed holder, or a lock being written (0 text yet): only a dead one goes
         Err(_) if text.is_empty() => Some(Holder {
             pid: 0,
@@ -86,12 +86,12 @@ pub(crate) fn acquire_in(git_dir: &Path, by: &str, pid: u32) -> Result<Guard, Ho
     for _ in 0..2 {
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
-                let height = Holder {
+                let holder = Holder {
                     pid,
                     by: by.to_string(),
                     at: crate::engine::now_ms(),
                 };
-                let _ = file.write_all(serde_json::to_string(&height).unwrap_or_default().as_bytes());
+                let _ = file.write_all(serde_json::to_string(&holder).unwrap_or_default().as_bytes());
 
                 return Ok(Guard(Some(path)));
             }
@@ -111,8 +111,8 @@ pub(crate) fn acquire_in(git_dir: &Path, by: &str, pid: u32) -> Result<Guard, Ho
 }
 
 /// The toast / message when HOLDER holds the lock.
-pub(crate) fn busy_text(height: &Holder) -> String {
-    format!("a push of this thread runs ({}): wait for it to end", height.by)
+pub(crate) fn busy_text(holder: &Holder) -> String {
+    format!("a push of this thread runs ({}): wait for it to end", holder.by)
 }
 
 /// The shim's dir: put first on PATH, its `git` is codehead.
@@ -124,15 +124,15 @@ pub(crate) fn shim_dir() -> PathBuf {
 /// follows).
 pub(crate) fn install() {
     let Ok(exe) = std::env::current_exe() else { return };
-    let directory = shim_dir();
-    let link = directory.join("git");
+    let dir = shim_dir();
+    let link = dir.join("git");
 
-    if std::fs::read_link(&link).is_ok_and(|thread| thread == exe) {
+    if std::fs::read_link(&link).is_ok_and(|target| target == exe) {
         return;
     }
 
-    let _ = std::fs::create_dir_all(&directory);
-    let tmp = directory.join(format!(".git-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let tmp = dir.join(format!(".git-{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
 
     if std::os::unix::fs::symlink(&exe, &tmp).is_ok() {
@@ -142,33 +142,31 @@ pub(crate) fn install() {
 
 /// PATH with the shim's dir first (once).
 pub(crate) fn path_with_shim() -> OsString {
-    let directory = shim_dir();
+    let dir = shim_dir();
     let rest: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).filter(|x| *x != directory).collect())
+        .map(|paths| std::env::split_paths(&paths).filter(|entry| *entry != dir).collect())
         .unwrap_or_default();
 
-    std::env::join_paths(std::iter::once(directory).chain(rest)).unwrap_or_default()
+    std::env::join_paths(std::iter::once(dir).chain(rest)).unwrap_or_default()
 }
 
 /// The real git: the 1st `git` on PATH that is no codehead shim.
 pub(crate) fn real_git() -> Option<PathBuf> {
-    let me = std::env::current_exe()
-        .ok()
-        .and_then(|path_value| path_value.canonicalize().ok());
+    let me = std::env::current_exe().ok().and_then(|exe| exe.canonicalize().ok());
     let shim = shim_dir();
     let path = std::env::var_os("PATH")?;
 
     std::env::split_paths(&path)
-        .filter(|directory| *directory != shim)
-        .map(|directory_value| directory_value.join("git"))
-        .find(|group| {
-            let character = group.canonicalize().ok();
+        .filter(|dir| *dir != shim)
+        .map(|dir| dir.join("git"))
+        .find(|candidate| {
+            let resolved = candidate.canonicalize().ok();
 
-            character.is_some()
-                && character != me
-                && std::fs::metadata(group).is_ok_and(|message| {
+            resolved.is_some()
+                && resolved != me
+                && std::fs::metadata(candidate).is_ok_and(|meta| {
                     use std::os::unix::fs::PermissionsExt;
-                    message.is_file() && message.permissions().mode() & 0o111 != 0
+                    meta.is_file() && meta.permissions().mode() & 0o111 != 0
                 })
         })
 }
@@ -178,14 +176,14 @@ pub(crate) fn split_args(args: &[OsString]) -> (Vec<OsString>, Option<String>) {
     let mut globals = Vec::new();
     let mut it = args.iter();
 
-    while let Some(agent) = it.next() {
-        let text = agent.to_string_lossy();
+    while let Some(arg) = it.next() {
+        let text = arg.to_string_lossy();
 
         if !text.starts_with('-') {
             return (globals, Some(text.into_owned()));
         }
 
-        globals.push(agent.clone());
+        globals.push(arg.clone());
 
         // an option with its value in the next arg
         if matches!(
@@ -227,10 +225,10 @@ pub(crate) fn shim_main() -> ! {
         .unwrap_or_else(|| "shell".into());
 
     let guard = match git_dir(&cwd, &globals) {
-        Some(directory) => match acquire_in(&directory, &by, std::process::id()) {
-            Ok(group) => Some(group),
-            Err(height) => {
-                eprintln!("codehead: {}. The push did not run.", busy_text(&height));
+        Some(dir) => match acquire_in(&dir, &by, std::process::id()) {
+            Ok(guard) => Some(guard),
+            Err(holder) => {
+                eprintln!("codehead: {}. The push did not run.", busy_text(&holder));
                 std::process::exit(1);
             }
         },
@@ -241,7 +239,7 @@ pub(crate) fn shim_main() -> ! {
     let code = Command::new(&git)
         .args(&args)
         .status()
-        .map_or(127, |text_value| text_value.code().unwrap_or(1));
+        .map_or(127, |status| status.code().unwrap_or(1));
 
     drop(guard);
     std::process::exit(code);

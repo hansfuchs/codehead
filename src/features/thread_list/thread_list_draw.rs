@@ -15,7 +15,7 @@ impl Form {
         draw_form(self, frame, area);
     }
 
-    fn draw_text_value(
+    fn draw_project_row(
         &self,
         project_row_frame: ProjectRowFrame<'_, '_, '_>,
         line: impl Fn(&mut Frame<'_>, u16, Line<'_>),
@@ -26,22 +26,22 @@ impl Form {
     ) {
         let ProjectRowFrame { frame, y } = project_row_frame;
 
-        let mut text_value = vec![Span::raw("  ")];
+        let mut spans = vec![Span::raw("  ")];
 
-        text_value.extend(check(on, self.row == 2 + i, slug.to_owned()));
+        spans.extend(check(on, self.row == 2 + i, slug.to_owned()));
 
         if i == 0 && self.projs.len() == 1 {
-            text_value.push(Span::styled(
+            spans.push(Span::styled(
                 "  0 projects in this repo: projects tab (F3)",
                 theme::muted(),
             ));
         }
 
-        line(frame, *y, Line::from(text_value));
+        line(frame, *y, Line::from(spans));
         *y += 1;
     }
 
-    fn finish_draw(
+    fn draw_agent_rows(
         &mut self,
         frame: &mut Frame<'_>,
         mut y: u16,
@@ -52,15 +52,11 @@ impl Form {
         let lead = self.agents.iter().position(|agent| agent.1);
 
         for (i, (name, on)) in self.agents.iter().enumerate() {
-            self.finish_draw_text_(AgentRowLayout { frame, y: &mut y, lead }, &line, &check, i, name, *on);
+            self.draw_agent_row(AgentRowLayout { frame, y: &mut y, lead }, &line, &check, i, name, *on);
         }
 
-        if let Some(error_value) = &self.error {
-            line(
-                frame,
-                y,
-                Line::styled(error_value.clone(), theme::fg(theme::pal().error())),
-            );
+        if let Some(error) = &self.error {
+            line(frame, y, Line::styled(error.clone(), theme::fg(theme::pal().error())));
             y += 1;
         }
 
@@ -75,7 +71,7 @@ impl Form {
         );
     }
 
-    fn finish_draw_text_(
+    fn draw_agent_row(
         &self,
         context: AgentRowLayout<'_, '_, '_>,
         line: &impl Fn(&mut Frame<'_>, u16, Line<'_>),
@@ -86,72 +82,72 @@ impl Form {
     ) {
         let AgentRowLayout { frame, y, lead } = context;
 
-        let mut text_3 = vec![Span::raw("  ")];
+        let mut spans = vec![Span::raw("  ")];
 
-        text_3.extend(check(
+        spans.extend(check(
             on,
             self.row == 2 + self.projs.len() + self.links.len() + i,
             name.to_owned(),
         ));
 
         if Some(i) == lead {
-            text_3.push(Span::styled("  lead", theme::muted()));
+            spans.push(Span::styled("  lead", theme::muted()));
         }
 
-        line(frame, *y, Line::from(text_3));
+        line(frame, *y, Line::from(spans));
         *y += 1;
     }
 }
 
-fn draw_branch(inner: Rect, frame_value: &mut Frame<'_>, y: u16, line_value: Line<'_>) {
+fn draw_form_line(inner: Rect, frame: &mut Frame<'_>, y: u16, line: Line<'_>) {
     if y < inner.bottom() {
-        frame_value.render_widget(Paragraph::new(line_value), Rect { y, height: 1, ..inner });
+        frame.render_widget(Paragraph::new(line), Rect { y, height: 1, ..inner });
     }
 }
 
-fn draw_body_state(on: bool, thread: &str) -> Span<'static> {
+fn field_label(on: bool, name: &str) -> Span<'static> {
     Span::styled(
-        format!("{thread:<8}"),
+        format!("{name:<8}"),
         if on { theme::accent_bold() } else { theme::muted() },
     )
 }
 
-fn draw_body(on: bool, hl: bool, text: String) -> Vec<Span<'static>> {
-    let st = if hl { theme::pill() } else { theme::text() };
+fn check_spans(on: bool, hl: bool, text: String) -> Vec<Span<'static>> {
+    let style = if hl { theme::pill() } else { theme::text() };
 
     vec![
         Span::styled(
             if on { "◼ " } else { "◻ " },
             if on { theme::accent() } else { theme::line() },
         ),
-        Span::styled(text, st),
+        Span::styled(text, style),
     ]
 }
 
-fn draw_mode_switch(frame: &mut Frame<'_>, fr: Rect, input: Rect, view_state: &mut ThreadList) {
+fn draw_mode_switch(frame: &mut Frame<'_>, filter_row: Rect, input: Rect, thread_list: &mut ThreadList) {
     frame.render_widget(
         Paragraph::new(Span::styled("› ", theme::accent())),
-        Rect { width: 2, ..fr },
+        Rect { width: 2, ..filter_row },
     );
-    view_state.filter.render(frame, input, true);
+    thread_list.filter.render(frame, input, true);
 }
 
-fn draw_mode_manage(frame: &mut Frame<'_>, fr: Rect, cw: u16, view_state: &mut ThreadList) {
-    let label = Style::default().fg(if view_state.filtering {
+fn draw_mode_manage(frame: &mut Frame<'_>, filter_row: Rect, count_width: u16, thread_list: &mut ThreadList) {
+    let label = Style::default().fg(if thread_list.filtering {
         theme::pal().accent
     } else {
         theme::pal().subtext0
     });
 
-    frame.render_widget(Paragraph::new(Span::styled("filter › ", label)), fr);
+    frame.render_widget(Paragraph::new(Span::styled("filter › ", label)), filter_row);
     let input = Rect {
-        x: fr.x + 9,
-        width: fr.width.saturating_sub(9 + cw),
-        ..fr
+        x: filter_row.x + 9,
+        width: filter_row.width.saturating_sub(9 + count_width),
+        ..filter_row
     };
 
-    if view_state.filtering || !view_state.filter.text().is_empty() {
-        view_state.filter.render(frame, input, view_state.filtering);
+    if thread_list.filtering || !thread_list.filter.text().is_empty() {
+        thread_list.filter.render(frame, input, thread_list.filtering);
     } else {
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -163,29 +159,33 @@ fn draw_mode_manage(frame: &mut Frame<'_>, fr: Rect, cw: u16, view_state: &mut T
     }
 }
 
-fn draw_count_value(frame: &mut Frame<'_>, sr: Rect, view_state: &mut ThreadList) {
-    let st = view_state.stat_tab();
+fn draw_status_tabs(frame: &mut Frame<'_>, status_row: Rect, thread_list: &mut ThreadList) {
+    let tab = thread_list.stat_tab();
 
-    view_state.stats.i = StatusTab::ALL.iter().position(|thread_2| *thread_2 == st).unwrap_or(0);
-    let count_value = view_state.stat_counts();
+    thread_list.stats.i = StatusTab::ALL.iter().position(|status| *status == tab).unwrap_or(0);
+    let counts = thread_list.stat_counts();
     let labels: Vec<String> = StatusTab::ALL
         .iter()
-        .zip(count_value)
-        .map(|(thread_3, count_2)| format!("{} {count_2}", thread_3.label()))
+        .zip(counts)
+        .map(|(status, count)| format!("{} {count}", status.label()))
         .collect();
 
-    view_state
-        .stats
-        .draw(frame, sr, "status ", &labels, view_state.focus == Focus::Status);
+    thread_list.stats.draw(
+        frame,
+        status_row,
+        "status ",
+        &labels,
+        thread_list.focus == Focus::Status,
+    );
 
-    if let Some(x) = view_state.stats.end().filter(|_| !st.hint().is_empty()) {
-        let area_value = Rect {
+    if let Some(x) = thread_list.stats.end().filter(|_| !tab.hint().is_empty()) {
+        let hint_area = Rect {
             x: x + 1,
-            width: sr.right().saturating_sub(x + 1),
-            ..sr
+            width: status_row.right().saturating_sub(x + 1),
+            ..status_row
         };
 
-        frame.render_widget(Paragraph::new(Span::styled(st.hint(), theme::muted())), area_value);
+        frame.render_widget(Paragraph::new(Span::styled(tab.hint(), theme::muted())), hint_area);
     }
 }
 
@@ -209,19 +209,19 @@ fn draw_thread_list(state: &mut ThreadList, frame: &mut Frame, area: Rect, tick:
     draw_tab_rows(state, frame, row);
 
     // status tabs (active) / the archived note: a fixed row, out of the list's scroll
-    let sr = row(4);
+    let status_row = row(4);
 
     if state.has_stats() {
-        draw_count_value(frame, sr, state);
+        draw_status_tabs(frame, status_row, state);
     } else if state.view == View::Archived {
-        let count_3 = state.visible().len();
+        let count = state.visible().len();
 
         frame.render_widget(
             Paragraph::new(Span::styled(
-                format!("archived · {count_3} · branches kept, worktrees gone"),
+                format!("archived · {count} · branches kept, worktrees gone"),
                 theme::muted().add_modifier(Modifier::BOLD),
             )),
-            sr,
+            status_row,
         );
     }
 
@@ -250,9 +250,9 @@ fn draw_thread_list(state: &mut ThreadList, frame: &mut Frame, area: Rect, tick:
         state.draw_cards(frame, list, tick);
     }
 
-    if let Some(line_value) = foot_line {
+    if let Some(line) = foot_line {
         frame.render_widget(Clear, foot);
-        frame.render_widget(Paragraph::new(line_value), foot);
+        frame.render_widget(Paragraph::new(line), foot);
     }
 
     state.draw_actions(frame, list);
@@ -262,10 +262,10 @@ fn draw_thread_list(state: &mut ThreadList, frame: &mut Frame, area: Rect, tick:
     }
 }
 
-fn draw_thread_list_body(state: &ThreadList) -> Option<Line<'static>> {
-    state.job_state.status.as_ref().map(|(thread_4, err, _)| {
+fn status_line(state: &ThreadList) -> Option<Line<'static>> {
+    state.job_state.status.as_ref().map(|(text, err, _)| {
         Line::styled(
-            format!(" {thread_4}"),
+            format!(" {text}"),
             if *err {
                 theme::fg(theme::pal().error())
             } else {
@@ -275,23 +275,23 @@ fn draw_thread_list_body(state: &ThreadList) -> Option<Line<'static>> {
     })
 }
 
-struct AgentRowLayout<'reference_0, 'reference_1, 'reference_2> {
-    frame: &'reference_0 mut Frame<'reference_1>,
-    y: &'reference_2 mut u16,
+struct AgentRowLayout<'frame, 'buffer, 'row> {
+    frame: &'frame mut Frame<'buffer>,
+    y: &'row mut u16,
     lead: Option<usize>,
 }
 
 fn draw_form(state: &mut Form, frame: &mut Frame, area: Rect) {
-    let area_value = form_bounds(state, area);
+    let bounds = form_bounds(state, area);
 
-    let inner = draw_form_frame(frame, area_value);
+    let inner = draw_form_frame(frame, bounds);
     let mut y = inner.y;
 
-    let line = |frame_value: &mut Frame, y: u16, line_value: Line| {
-        draw_branch(inner, frame_value, y, line_value);
+    let line = |frame: &mut Frame, y: u16, text: Line| {
+        draw_form_line(inner, frame, y, text);
     };
 
-    let label = |on: bool, thread: &str| draw_body_state(on, thread);
+    let label = |on: bool, name: &str| field_label(on, name);
 
     line(frame, y, Line::from(label(state.row == 0, "title")));
 
@@ -315,20 +315,20 @@ fn draw_form(state: &mut Form, frame: &mut Frame, area: Rect) {
         None => format!("auto: {} (the repo of its dir)", state.auto),
     };
 
-    let st = if state.row == 1 { theme::pill() } else { theme::text() };
+    let style = if state.row == 1 { theme::pill() } else { theme::text() };
 
     line(
         frame,
         y,
         Line::from(vec![
             label(state.row == 1, "repo"),
-            Span::styled(format!("‹ {repo} ›"), st),
+            Span::styled(format!("‹ {repo} ›"), style),
             Span::styled("  ←→", theme::muted()),
         ]),
     );
     y += 1;
 
-    let check = |on: bool, hl: bool, text: String| draw_body(on, hl, text);
+    let check = |on: bool, hl: bool, text: String| check_spans(on, hl, text);
 
     line(
         frame,
@@ -338,10 +338,10 @@ fn draw_form(state: &mut Form, frame: &mut Frame, area: Rect) {
             theme::muted().add_modifier(Modifier::BOLD),
         ),
     );
-    finish_draw_form(state, frame, y, line, check);
+    draw_form_rows(state, frame, y, line, check);
 }
 
-fn finish_draw_form(
+fn draw_form_rows(
     state: &mut Form,
     frame: &mut Frame<'_>,
     mut y: u16,
@@ -351,7 +351,7 @@ fn finish_draw_form(
     y += 1;
 
     for (i, (slug, on)) in state.projs.iter().enumerate() {
-        state.draw_text_value(ProjectRowFrame { frame, y: &mut y }, &line, &check, i, slug, *on);
+        state.draw_project_row(ProjectRowFrame { frame, y: &mut y }, &line, &check, i, slug, *on);
     }
 
     line(
@@ -370,10 +370,10 @@ fn finish_draw_form(
     }
 
     for (i, (dir, on)) in state.links.iter().enumerate() {
-        let mut text_2 = vec![Span::raw("  ")];
+        let mut spans = vec![Span::raw("  ")];
 
-        text_2.extend(check(*on, state.row == 2 + state.projs.len() + i, dir.clone()));
-        line(frame, y, Line::from(text_2));
+        spans.extend(check(*on, state.row == 2 + state.projs.len() + i, dir.clone()));
+        line(frame, y, Line::from(spans));
         y += 1;
     }
 
@@ -385,44 +385,44 @@ fn finish_draw_form(
             theme::muted().add_modifier(Modifier::BOLD),
         ),
     );
-    state.finish_draw(frame, y, line, check);
+    state.draw_agent_rows(frame, y, line, check);
 }
 
-fn draw_filter_header(state: &mut ThreadList, frame: &mut Frame, fr: Rect) {
+fn draw_filter_header(state: &mut ThreadList, frame: &mut Frame, filter_row: Rect) {
     // the filter
     let total = state
         .cards
         .iter()
-        .filter(|character| character.archived() == (state.view == View::Archived))
+        .filter(|card| card.archived() == (state.view == View::Archived))
         .count();
     let shown = state.visible().len();
 
-    let count = if state.view.cards() && shown != total {
+    let count_label = if state.view.cards() && shown != total {
         format!("{shown} of {total} ")
     } else {
         String::new()
     };
 
-    let cw = unicode_width::UnicodeWidthStr::width(count.as_str()) as u16;
+    let count_width = unicode_width::UnicodeWidthStr::width(count_label.as_str()) as u16;
     let input = Rect {
-        x: fr.x + 2,
-        width: fr.width.saturating_sub(2 + cw),
-        ..fr
+        x: filter_row.x + 2,
+        width: filter_row.width.saturating_sub(2 + count_width),
+        ..filter_row
     };
 
     match state.mode {
         Mode::Switch => {
-            draw_mode_switch(frame, fr, input, state);
+            draw_mode_switch(frame, filter_row, input, state);
         }
         Mode::Manage => {
-            draw_mode_manage(frame, fr, cw, state);
+            draw_mode_manage(frame, filter_row, count_width, state);
         }
     }
 
-    if cw > 0 {
+    if count_width > 0 {
         frame.render_widget(
-            Paragraph::new(Line::styled(count, theme::fg(theme::pal().subtext0)).right_aligned()),
-            fr,
+            Paragraph::new(Line::styled(count_label, theme::fg(theme::pal().subtext0)).right_aligned()),
+            filter_row,
         );
     }
 }
@@ -432,7 +432,7 @@ fn draw_tab_rows(state: &mut ThreadList, frame: &mut Frame, row: impl Fn(u16) ->
     let tabs = state.repo_tabs();
     let cur = state.repo_tab();
 
-    state.repos.i = tabs.iter().position(|thread| *thread == cur).unwrap_or(0);
+    state.repos.i = tabs.iter().position(|tab| *tab == cur).unwrap_or(0);
     let labels: Vec<String> = tabs.iter().map(RepoTab::label).collect();
 
     state
@@ -441,7 +441,7 @@ fn draw_tab_rows(state: &mut ThreadList, frame: &mut Frame, row: impl Fn(u16) ->
     let ptabs = state.proj_tabs();
     let pcur = state.proj_tab();
 
-    state.projs.i = ptabs.iter().position(|thread_value| *thread_value == pcur).unwrap_or(0);
+    state.projs.i = ptabs.iter().position(|tab| *tab == pcur).unwrap_or(0);
     let labels: Vec<String> = ptabs.iter().map(ProjTab::label).collect();
 
     state
@@ -449,8 +449,8 @@ fn draw_tab_rows(state: &mut ThreadList, frame: &mut Frame, row: impl Fn(u16) ->
         .draw(frame, row(2), "project", &labels, state.focus == Focus::Projects);
     let all = state.views_all();
 
-    state.views.i = all.iter().position(|value| *value == state.view).unwrap_or(0);
-    let labels: Vec<String> = all.iter().map(|value_value| state.view_label(*value_value)).collect();
+    state.views.i = all.iter().position(|view| *view == state.view).unwrap_or(0);
+    let labels: Vec<String> = all.iter().map(|view| state.view_label(*view)).collect();
 
     state
         .views
@@ -458,38 +458,38 @@ fn draw_tab_rows(state: &mut ThreadList, frame: &mut Frame, row: impl Fn(u16) ->
 }
 
 fn footer_line(state: &ThreadList) -> Option<Line<'static>> {
-    if let Some(path) = &state.job_state.pending {
-        let count_4 = path.ids.len();
+    if let Some(pending) = &state.job_state.pending {
+        let count = pending.ids.len();
 
         // threads with work not in the base: the question names it
-        let open: Vec<String> = path
+        let open: Vec<String> = pending
             .ids
             .iter()
             .filter_map(|id| {
                 state
                     .cards
                     .iter()
-                    .find(|character_value| &character_value.id == id)?
+                    .find(|card| &card.id == id)?
                     .land
                     .clone()
                     .filter(crate::domain::landed::Land::open)
             })
-            .map(|line| line.badge())
+            .map(|land| land.badge())
             .collect();
 
         let ask_archive = match open.as_slice() {
-            [] => format!(" archive {count_4} thread(s)? "),
-            [one] if count_4 == 1 => format!(" {one}: archive anyway? "),
-            _ => format!(" archive {count_4} thread(s), {} open (work not landed)? ", open.len()),
+            [] => format!(" archive {count} thread(s)? "),
+            [one] if count == 1 => format!(" {one}: archive anyway? "),
+            _ => format!(" archive {count} thread(s), {} open (work not landed)? ", open.len()),
         };
 
-        let (ask, why) = match path.act {
+        let (ask, why) = match pending.act {
             Act::Archive => (
                 ask_archive,
                 "hosts stop, worktrees go (uncommitted files → git stash), branches stay",
             ),
             _ => (
-                format!(" delete {count_4} thread(s) + worktree(s)? "),
+                format!(" delete {count} thread(s) + worktree(s)? "),
                 "uncommitted files → git stash, pushed branches go",
             ),
         };
@@ -500,12 +500,12 @@ fn footer_line(state: &ThreadList) -> Option<Line<'static>> {
             Span::styled(why, theme::muted()),
         ]))
     } else {
-        draw_thread_list_body(state)
+        status_line(state)
     }
 }
 
 fn form_bounds(state: &Form, area: Rect) -> Rect {
-    let width_value = area.width.saturating_sub(4).min(76);
+    let width = area.width.saturating_sub(4).min(76);
     let body = 2
         + 1
         + state.projs.len()
@@ -515,27 +515,27 @@ fn form_bounds(state: &Form, area: Rect) -> Rect {
         + state.agents.len()
         + 2
         + usize::from(state.error.is_some());
-    let height_value = (body as u16 + 2).min(area.height);
+    let height = (body as u16 + 2).min(area.height);
 
     Rect {
-        x: area.x + (area.width - width_value) / 2,
-        y: area.y + 1.min(area.height.saturating_sub(height_value)),
-        width: width_value,
-        height: height_value,
+        x: area.x + (area.width - width) / 2,
+        y: area.y + 1.min(area.height.saturating_sub(height)),
+        width,
+        height,
     }
 }
 
-fn draw_form_frame(frame: &mut Frame, area_value: Rect) -> Rect {
-    frame.render_widget(Clear, area_value);
+fn draw_form_frame(frame: &mut Frame, area: Rect) -> Rect {
+    frame.render_widget(Clear, area);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(theme::accent())
         .title(Span::styled(" edit thread ", theme::accent_bold()))
         .style(theme::text());
-    let inner = block.inner(area_value);
+    let inner = block.inner(area);
 
-    frame.render_widget(block, area_value);
+    frame.render_widget(block, area);
 
     Rect {
         x: inner.x + 1,
@@ -544,7 +544,7 @@ fn draw_form_frame(frame: &mut Frame, area_value: Rect) -> Rect {
     }
 }
 
-struct ProjectRowFrame<'reference_0, 'reference_1, 'reference_2> {
-    frame: &'reference_0 mut Frame<'reference_1>,
-    y: &'reference_2 mut u16,
+struct ProjectRowFrame<'frame, 'buffer, 'row> {
+    frame: &'frame mut Frame<'buffer>,
+    y: &'row mut u16,
 }

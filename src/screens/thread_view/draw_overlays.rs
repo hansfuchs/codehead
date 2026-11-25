@@ -19,24 +19,24 @@ impl View {
 
         let place = self.ctx_place();
 
-        if let Some(message) = self.ctx.as_mut() {
-            message.render(frame, place, area);
+        if let Some(ctx) = self.ctx.as_mut() {
+            ctx.render(frame, place, area);
         }
 
         if self.menu.is_some() {
             // live: an agent came or left, a flow moved on
-            draw_overlays_items(self);
+            refresh_menu_items(self);
         }
 
-        if let Some(message) = self.menu.as_mut() {
+        if let Some(menu) = self.menu.as_mut() {
             frame.render_widget(Clear, Rect::default());
 
             // a command palette: below the view bar, centered on the screen's width
-            message.render(frame, frame.area());
+            menu.render(frame, frame.area());
         }
 
-        if let Some(path) = self.notes_panel.as_mut() {
-            path.draw(frame, frame.area());
+        if let Some(panel) = self.notes_panel.as_mut() {
+            panel.draw(frame, frame.area());
         }
     }
 
@@ -82,7 +82,7 @@ impl View {
         crate::ui::shortcuts::render_popup(frame, &self.prompt.input, self.selection.hover, keys, area, open);
 
         match self.shell_state.cwd_edit.as_ref() {
-            Some(ta) if shell => self.shell_state.cwd_paths.render(frame, ta, area, cwd_rect),
+            Some(input) if shell => self.shell_state.cwd_paths.render(frame, input, area, cwd_rect),
             _ => self.shell_state.cwd_paths.hide(),
         }
     }
@@ -94,21 +94,24 @@ impl View {
     }
 }
 
-fn draw_overlays_items(view: &mut View) {
+fn refresh_menu_items(view: &mut View) {
     let items = view.menu_items();
 
-    if let Some(message) = view.menu.as_mut() {
-        message.set_items(items);
+    if let Some(menu) = view.menu.as_mut() {
+        menu.set_items(items);
     }
 }
 
 fn refresh_context_menu_items(view: &mut View) {
     let (_, items) = view.panes.changes.ctx_items();
-    let items = items.into_iter().map(|it| it.map(|action| ctx_of(&action))).collect();
+    let items = items
+        .into_iter()
+        .map(|item| item.map(|action| ctx_of(&action)))
+        .collect();
     let head = view.panes.changes.ctx_head();
 
-    if let Some(message) = view.ctx.as_mut() {
-        message.set_items(items);
-        message.head = head;
+    if let Some(ctx) = view.ctx.as_mut() {
+        ctx.set_items(items);
+        ctx.head = head;
     }
 }

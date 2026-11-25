@@ -27,10 +27,10 @@ pub(crate) fn tool_line(name: &str, input: &serde_json::Value) -> String {
 pub(crate) fn transcript(id: &str) -> String {
     let mut out = String::new();
 
-    for error in store::events(id) {
-        let who = error.agent.clone().unwrap_or_else(|| "owner".into());
+    for event in store::events(id) {
+        let who = event.agent.clone().unwrap_or_else(|| "owner".into());
 
-        let line = match &error.kind {
+        let line = match &event.kind {
             Kind::Prompt { from, to, text } => format!("\n### {from} → {}\n{text}\n", to.join(", ")),
             Kind::Text { text } => format!("\n### {who}\n{text}\n"),
             Kind::Tool { name, input, .. } => format!("- {who} ran: {}\n", tool_line(name, input)),
@@ -72,15 +72,15 @@ pub(crate) fn facts(thread: &Thread) -> String {
     );
     let _ = writeln!(text, "- directory: {}", dir.display());
 
-    if let Some(bytes) = &thread.branch {
-        let _ = writeln!(text, "- branch: {bytes}");
+    if let Some(branch) = &thread.branch {
+        let _ = writeln!(text, "- branch: {branch}");
     }
 
-    if let Some(path) = thread.port {
+    if let Some(port) = thread.port {
         let _ = writeln!(
             text,
-            "- ports: {path}-{}",
-            path + crate::infra::worktree_setup::PORTS - 1
+            "- ports: {port}-{}",
+            port + crate::infra::worktree_setup::PORTS - 1
         );
     }
 
@@ -99,8 +99,8 @@ pub(crate) fn facts(thread: &Thread) -> String {
     if !log.trim().is_empty() {
         text.push_str("- last commits:\n");
 
-        for line_value in log.lines() {
-            let _ = writeln!(text, "  - {line_value}");
+        for commit in log.lines() {
+            let _ = writeln!(text, "  - {commit}");
         }
     }
 
@@ -152,8 +152,7 @@ pub(crate) fn write(id: &str, model: &str) -> Result<String, String> {
         .stderr(Stdio::null())
         .output()
         .map_err(|error| format!("claude: {error}"))?;
-    let value: serde_json::Value =
-        serde_json::from_slice(&out.stdout).map_err(|error_value| format!("claude: {error_value}"))?;
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|error| format!("claude: {error}"))?;
     let text = value["result"].as_str().unwrap_or_default();
 
     if value["is_error"] == true || text.trim().is_empty() {
@@ -164,7 +163,7 @@ pub(crate) fn write(id: &str, model: &str) -> Result<String, String> {
     let doc: Vec<&str> = text
         .trim()
         .split("\n\n")
-        .take_while(|path| !path.trim_start().starts_with("Note:"))
+        .take_while(|paragraph| !paragraph.trim_start().starts_with("Note:"))
         .collect();
 
     Ok(format!(
@@ -207,8 +206,7 @@ pub(crate) fn start(old: &Thread, doc: &str) -> Result<Thread, String> {
 
     std::fs::create_dir_all(store::thread_dir(&thread.id)).map_err(|error| error.to_string())?;
     thread.save()?;
-    std::fs::write(draft_path(&thread.id), format!("{doc}\n\n## Next\n\n"))
-        .map_err(|error_value| error_value.to_string())?;
+    std::fs::write(draft_path(&thread.id), format!("{doc}\n\n## Next\n\n")).map_err(|error| error.to_string())?;
 
     Ok(thread)
 }
@@ -216,10 +214,10 @@ pub(crate) fn start(old: &Thread, doc: &str) -> Result<Thread, String> {
 /// A prompt draft of thread ID waiting for its view (read once).
 pub(crate) fn take_draft(id: &str) -> Option<String> {
     let path = draft_path(id);
-    let directory = std::fs::read_to_string(&path).ok()?;
+    let draft = std::fs::read_to_string(&path).ok()?;
     let _ = std::fs::remove_file(&path);
 
-    Some(directory)
+    Some(draft)
 }
 
 #[cfg(test)]

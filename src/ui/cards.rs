@@ -36,20 +36,20 @@ pub(crate) fn groups(agents: &[Agent], keep: impl Fn(&Agent) -> bool) -> Vec<(St
 
     groups
         .into_iter()
-        .map(|(height, mut group)| {
+        .map(|(harness, mut group)| {
             group.sort_by_key(|&i| agents[i].name.to_lowercase());
-            (height, group)
+            (harness, group)
         })
         .collect()
 }
 
 /// Q matches agent A: fuzzy over name, harness, model. Empty Q: every agent.
 pub(crate) fn matches(agent: &Agent, query: &str) -> bool {
-    let query_value = query.trim().to_lowercase();
+    let query = query.trim().to_lowercase();
 
-    query_value.is_empty()
+    query.is_empty()
         || crate::domain::fuzzy::fuzzy(
-            &query_value,
+            &query,
             &format!("{} {} {}", agent.name, agent.harness, agents::model_of(agent)),
         )
         .is_some()
@@ -102,10 +102,10 @@ fn grid_gap(groups: &[(String, Vec<usize>)], card_w: u16, card_h: u16, width: u1
 
 /// 1st virtual row to show so that the card at TOP (`CARD_H` rows) is in a VIEW of rows, its group
 /// heading too when it sits right above it. OFFSET: the last value.
-pub(crate) fn scroll(group: &Grid, top: usize, card_h: u16, offset: usize, view: usize) -> usize {
+pub(crate) fn scroll(layout: &Grid, top: usize, card_h: u16, offset: usize, view: usize) -> usize {
     let bottom = top + card_h as usize;
 
-    let top = if group.heads.iter().any(|&(height_value, _)| height_value + 1 == top) {
+    let top = if layout.heads.iter().any(|&(row, _)| row + 1 == top) {
         top - 1
     } else {
         top
@@ -119,46 +119,46 @@ pub(crate) fn scroll(group: &Grid, top: usize, card_h: u16, offset: usize, view:
         offset = bottom.saturating_sub(view);
     }
 
-    let offset = offset.min(group.height.saturating_sub(view));
+    let offset = offset.min(layout.height.saturating_sub(view));
 
     // never start inside a card or a heading: `draw_grid` skips a cut card, its rows stay blank
-    starts(group)
+    starts(layout)
         .into_iter()
-        .find(|&text| text >= offset && text <= top)
+        .find(|&start| start >= offset && start <= top)
         .unwrap_or(offset)
 }
 
 /// The virtual rows where a heading or a row of cards starts, ascending.
-fn starts(group: &Grid) -> Vec<usize> {
-    let mut value: Vec<usize> = group
+fn starts(layout: &Grid) -> Vec<usize> {
+    let mut rows: Vec<usize> = layout
         .heads
         .iter()
         .map(|&(y, _)| y)
-        .chain(group.places.iter().map(|&(_, _, y)| y))
+        .chain(layout.places.iter().map(|&(_, _, y)| y))
         .collect();
 
-    value.sort_unstable();
-    value.dedup();
-    value
+    rows.sort_unstable();
+    rows.dedup();
+    rows
 }
 
 /// Rows of a VIEW that `draw_grid` fills from OFFSET: the bottom of the last whole heading or card.
-pub(crate) fn used(group: &Grid, card_h: u16, offset: usize, view: usize) -> usize {
+pub(crate) fn used(layout: &Grid, card_h: u16, offset: usize, view: usize) -> usize {
     let fits = |vy: usize, height: usize| vy >= offset && vy + height <= offset + view;
 
     // a heading counts with its 1st card row only: 0 dangling headings at the bottom
-    let heads = group
+    let heads = layout
         .heads
         .iter()
         .filter(|&&(y, _)| fits(y, 1 + card_h as usize))
         .map(|&(y, _)| y + 1);
-    let cards = group
+    let cards = layout
         .places
         .iter()
         .filter(|&&(_, _, y)| fits(y, card_h as usize))
         .map(|&(_, _, y)| y + card_h as usize);
 
-    heads.chain(cards).max().map_or(0, |bytes| bytes - offset)
+    heads.chain(cards).max().map_or(0, |bottom| bottom - offset)
 }
 
 /// Grid G in AREA from virtual row OFFSET: the headings (bold), each card in full view through
@@ -166,42 +166,42 @@ pub(crate) fn used(group: &Grid, card_h: u16, offset: usize, view: usize) -> usi
 pub(crate) fn draw_grid(
     frame: &mut Frame,
     area: Rect,
-    group: &Grid,
+    layout: &Grid,
     card_h: u16,
     offset: usize,
     mut card: impl FnMut(&mut Frame, Rect, usize),
 ) -> Vec<(Rect, usize)> {
     let view = area.height as usize;
-    let shown = |vy: usize, height_value: usize| vy >= offset && vy + height_value <= offset + view;
+    let shown = |vy: usize, height: usize| vy >= offset && vy + height <= offset + view;
 
-    for (vy, text) in &group.heads {
+    for (vy, heading) in &layout.heads {
         if shown(*vy, 1) {
-            let area_value = Rect {
+            let head_area = Rect {
                 y: area.y + (vy - offset) as u16,
                 height: 1,
                 ..area
             };
 
-            frame.render_widget(Paragraph::new(Line::styled(text.clone(), theme::bold())), area_value);
+            frame.render_widget(Paragraph::new(Line::styled(heading.clone(), theme::bold())), head_area);
         }
     }
 
     let mut out = Vec::new();
 
-    for &(i, x, vy) in &group.places {
+    for &(i, x, vy) in &layout.places {
         if !shown(vy, card_h as usize) || x >= area.width {
             continue;
         }
 
-        let area_2 = Rect {
+        let card_area = Rect {
             x: area.x + x,
             y: area.y + (vy - offset) as u16,
-            width: group.card_width.min(area.width - x),
+            width: layout.card_width.min(area.width - x),
             height: card_h,
         };
 
-        card(frame, area_2, i);
-        out.push((area_2, i));
+        card(frame, card_area, i);
+        out.push((card_area, i));
     }
 
     out
@@ -246,9 +246,7 @@ pub(crate) struct Look<'a> {
 pub(crate) fn draw(frame: &mut Frame, area: Rect, agent: &Agent, rows: &[String], look: Look) {
     let color = agents::color(agent.color.as_deref());
     let lit = look.cur || look.lit;
-    let base = look
-        .bg
-        .map_or(Style::default(), |style_value| Style::default().bg(style_value));
+    let base = look.bg.map_or(Style::default(), |bg| Style::default().bg(bg));
 
     let inner = if let Some(border) = look.border {
         let mut block = Block::new()
@@ -257,8 +255,8 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, agent: &Agent, rows: &[String]
             .border_style(border)
             .style(base);
 
-        if let Some(thread) = look.title {
-            block = block.title(thread);
+        if let Some(title) = look.title {
+            block = block.title(title);
         }
 
         let inner = block.inner(area);
@@ -285,9 +283,9 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, agent: &Agent, rows: &[String]
     let side: Vec<Vec<Span<'static>>> = rows
         .iter()
         .enumerate()
-        .map(|(i, thread_value)| {
+        .map(|(i, row)| {
             vec![Span::styled(
-                format!("  {}", crate::ui::thread_card::fit(thread_value, room)),
+                format!("  {}", crate::ui::thread_card::fit(row, room)),
                 if i == 0 { name_st } else { theme::muted() },
             )]
         })
@@ -314,7 +312,7 @@ pub(crate) fn border(cur: bool, picked: bool, color: Color) -> Style {
 
 /// Widest text row of ROWS, clamped to 10..=24 columns.
 pub(crate) fn text_width<'a>(rows: impl Iterator<Item = &'a String>) -> usize {
-    rows.map(|thread| thread.width()).max().unwrap_or(0).clamp(10, 24)
+    rows.map(|row| row.width()).max().unwrap_or(0).clamp(10, 24)
 }
 
 #[cfg(test)]

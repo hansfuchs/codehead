@@ -55,13 +55,13 @@ const MAIN_TABS: [Tab; 7] = [
 /// worktree, default branch (main, else master), the other branches (newest commit first).
 fn where_choices(repo: &Path, cwd: &Path) -> Choices {
     // 2 git runs at once (~15 ms each): off the UI thread (`quick_choices` until then)
-    let (bs, checkouts) = std::thread::scope(|text| {
-        let checkouts = text.spawn(|| threads::checkouts(repo));
+    let (branches, checkouts) = std::thread::scope(|scope| {
+        let checkouts = scope.spawn(|| threads::checkouts(repo));
 
         (threads::branches(repo), checkouts.join().unwrap_or_default())
     });
 
-    choices_of(repo, cwd, bs, checkouts)
+    choices_of(repo, cwd, branches, checkouts)
 }
 
 /// The where choices by the file system only (0 git runs): current branch, new branch, new
@@ -70,7 +70,7 @@ fn quick_choices(repo: &Path, cwd: &Path) -> Choices {
     choices_of(repo, cwd, Vec::new(), HashMap::new())
 }
 
-fn choices_of(repo: &Path, cwd: &Path, bs: Vec<String>, checkouts: HashMap<String, String>) -> Choices {
+fn choices_of(repo: &Path, cwd: &Path, branches: Vec<String>, checkouts: HashMap<String, String>) -> Choices {
     let here_branch = threads::current_branch(cwd);
     let repo_branch = threads::current_branch(repo);
     let here_dir = threads::toplevel(cwd)
@@ -79,20 +79,18 @@ fn choices_of(repo: &Path, cwd: &Path, bs: Vec<String>, checkouts: HashMap<Strin
         .to_string();
     let default = ["main", "master"]
         .into_iter()
-        .find(|directory| bs.iter().any(|bytes| bytes == directory))
+        .find(|name| branches.iter().any(|branch| branch == name))
         .map(String::from);
     let mut wheres = vec![Where::Current, Where::NewBranch, Where::NewWorktree];
 
-    if let Some(directory_2) = default
-        .as_ref()
-        .filter(|directory_value| **directory_value != here_branch)
-    {
-        wheres.push(Where::Branch(directory_2.clone()));
+    if let Some(main) = default.as_ref().filter(|main| **main != here_branch) {
+        wheres.push(Where::Branch(main.clone()));
     }
 
     wheres.extend(
-        bs.into_iter()
-            .filter(|bytes_value| *bytes_value != here_branch && Some(bytes_value) != default.as_ref())
+        branches
+            .into_iter()
+            .filter(|branch| *branch != here_branch && Some(branch) != default.as_ref())
             .map(Where::Branch),
     );
 
@@ -159,11 +157,9 @@ fn restart_note(result: &agents::Restart) -> String {
     })
 }
 
-/// Area of the (area, index) row at AT.
-fn find_rows(area: &[(Rect, usize)], at: Position) -> Option<Rect> {
-    area.iter()
-        .map(|(result, _)| *result)
-        .find(|result_value| result_value.contains(at))
+/// Area of the (rows, index) row at AT.
+fn find_rows(rows: &[(Rect, usize)], at: Position) -> Option<Rect> {
+    rows.iter().map(|(rect, _)| *rect).find(|rect| rect.contains(at))
 }
 
 /// Filter row ROW: the input cells after the `filter › ` label, before the count (COUNT cells).
@@ -182,38 +178,38 @@ fn filter_input(row: Rect, count: usize) -> Rect {
 const KEYS_ITEM: usize = 1000;
 
 /// Threads tab row of a thread card (the menu opens it like the threads tab does).
-fn worktree_of(character: &crate::ui::thread_card::Card) -> Worktree {
-    let path = character
+fn worktree_of(card: &crate::ui::thread_card::Card) -> Worktree {
+    let path = card
         .dir
         .as_ref()
-        .map(|directory| directory.display().to_string())
+        .map(|dir| dir.display().to_string())
         .unwrap_or_default();
     let thread = crate::domain::threads::Thread {
-        id: character.id.clone(),
-        title: character.title.clone(),
-        state: character.state.clone(),
-        live: character.agents.live,
-        updated: character.activity / 1000,
+        id: card.id.clone(),
+        title: card.title.clone(),
+        state: card.state.clone(),
+        live: card.agents.live,
+        updated: card.activity / 1000,
         worktree: None,
-        branch: (!character.branch.is_empty()).then(|| character.branch.clone()),
+        branch: (!card.branch.is_empty()).then(|| card.branch.clone()),
         dir: Some(path.clone()),
-        busy: character.agents.busy,
-        needs: character.agents.blocked.then(|| "question".to_string()),
+        busy: card.agents.busy,
+        needs: card.agents.blocked.then(|| "question".to_string()),
         ..Default::default()
     };
 
     Worktree {
         path,
-        branch: if character.branch.is_empty() {
+        branch: if card.branch.is_empty() {
             "in place".into()
         } else {
-            character.branch.clone()
+            card.branch.clone()
         },
         thread: Some(thread),
         unpushed: 0,
         when: String::new(),
-        linked: character.worktree,
-        repo: character.repo.clone(),
+        linked: card.worktree,
+        repo: card.repo.clone(),
     }
 }
 
@@ -225,12 +221,12 @@ fn hint(key: &str, label: &str) -> Vec<Span<'static>> {
 }
 
 fn trash(path: &std::path::Path) -> Result<&'static str, String> {
-    let ok = |character: &mut std::process::Command| {
-        character
+    let ok = |command: &mut std::process::Command| {
+        command
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .is_ok_and(|text| text.success())
+            .is_ok_and(|status| status.success())
     };
 
     if ok(std::process::Command::new("gio").arg("trash").arg(path)) {

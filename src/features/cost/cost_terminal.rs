@@ -15,7 +15,7 @@ pub(super) fn run_loop(term: &mut DefaultTerminal, id: &str) -> std::io::Result<
     let mut morph = Instant::now();
 
     loop {
-        term.draw(|file| draw(file, &snap, morph.elapsed(), now()))?;
+        term.draw(|frame| draw(frame, &snap, morph.elapsed(), now()))?;
 
         // the morph animation: frames until it ends; else sleep until a key, a change, the clock
         let wait = if morph.elapsed() < MORPH_TIME {
@@ -33,7 +33,7 @@ pub(super) fn run_loop(term: &mut DefaultTerminal, id: &str) -> std::io::Result<
         read |= requested;
 
         read |= topics.try_iter().any(
-            |thread| matches!(thread, crate::infra::bus::Topic::Thread(tid, crate::infra::bus::Part::Log) if tid == id),
+            |topic| matches!(topic, crate::infra::bus::Topic::Thread(tid, crate::infra::bus::Part::Log) if tid == id),
         );
 
         if read {

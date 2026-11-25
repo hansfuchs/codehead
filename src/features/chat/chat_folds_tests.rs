@@ -56,7 +56,7 @@ fn folds_runs_and_asks_verify_ask(mut thread: Thread) {
 
     ask.sync(thread.asks.first());
     ask.at = 1;
-    let color = draw(
+    let drawn = draw(
         &thread,
         Look::Lines,
         60,
@@ -71,25 +71,22 @@ fn folds_runs_and_asks_verify_ask(mut thread: Thread) {
         },
         &ask,
     );
-    let text_value = text(&color);
+    let dump = text(&drawn);
 
-    assert!(text_value.contains("  fix it"), "{text_value}");
-    assert!(text_value.contains("📎 /tmp/a.png"), "{text_value}");
-    assert!(text_value.contains("Bash: list · Read: x.rs · 2 calls"), "{text_value}");
-    assert!(text_value.contains("│ done now"), "{text_value}");
-    folds_runs_and_asks_verify_open(thread, &color, &text_value);
+    assert!(dump.contains("  fix it"), "{dump}");
+    assert!(dump.contains("📎 /tmp/a.png"), "{dump}");
+    assert!(dump.contains("Bash: list · Read: x.rs · 2 calls"), "{dump}");
+    assert!(dump.contains("│ done now"), "{dump}");
+    folds_runs_and_asks_verify_open(thread, &drawn, &dump);
 }
 
-fn folds_runs_and_asks_verify_open(mut thread: Thread, color: &Drawn, text_value: &str) {
-    assert!(
-        text_value.contains("┃ › 2. blue") && text_value.contains("┃   1. red"),
-        "{text_value}"
-    );
-    assert!(color.hits.values().any(|height| *height == Hit::Run(1)));
-    assert!(widest(color) <= 60);
+fn folds_runs_and_asks_verify_open(mut thread: Thread, drawn: &Drawn, dump: &str) {
+    assert!(dump.contains("┃ › 2. blue") && dump.contains("┃   1. red"), "{dump}");
+    assert!(drawn.hits.values().any(|hit| *hit == Hit::Run(1)));
+    assert!(widest(drawn) <= 60);
 
     let open: HashSet<usize> = [1].into();
-    let color_value = text(&draw(
+    let open_dump = text(&draw(
         &thread,
         Look::Lines,
         60,
@@ -106,8 +103,8 @@ fn folds_runs_and_asks_verify_open(mut thread: Thread, color: &Drawn, text_value
     ));
 
     assert!(
-        color_value.contains("│      sh") && color_value.contains("│      ls") && color_value.contains("│      b"),
-        "{color_value}"
+        open_dump.contains("│      sh") && open_dump.contains("│      ls") && open_dump.contains("│      b"),
+        "{open_dump}"
     );
 
     thread.push(&ev(
@@ -201,12 +198,12 @@ fn open_runs_show_code_blocks() {
     ));
     let open: HashSet<usize> = [1].into();
 
-    open_runs_show_code_blocks_verify_color(&thread, cmd, &open);
+    assert_code_blocks(&thread, cmd, &open);
 }
 
-fn open_runs_show_code_blocks_verify_color(thread: &Thread, cmd: &str, open: &HashSet<usize>) {
+fn assert_code_blocks(thread: &Thread, cmd: &str, open: &HashSet<usize>) {
     for look in [Look::Bubbles, Look::Lines] {
-        let color = draw(
+        let drawn = draw(
             thread,
             look,
             60,
@@ -221,36 +218,28 @@ fn open_runs_show_code_blocks_verify_color(thread: &Thread, cmd: &str, open: &Ha
             },
             &Picker::default(),
         );
-        let text_value = text(&color);
+        let dump = text(&drawn);
 
         if std::env::var_os("SHOW").is_some() {
-            eprintln!("{text_value}");
+            eprintln!("{dump}");
         }
 
         // the command: a sh block, wrapped (0 chars cut), with a copy button
         assert!(
-            text_value.contains(" sh ")
-                && text_value.contains("copy")
-                && text_value.contains("Bun.file")
-                && text_value.contains("data/file.json"),
-            "{text_value}"
+            dump.contains(" sh ")
+                && dump.contains("copy")
+                && dump.contains("Bun.file")
+                && dump.contains("data/file.json"),
+            "{dump}"
         );
         assert!(
-            text_value.contains("-let a = 1;") && text_value.contains("+let a = 2;") && text_value.contains(" diff "),
-            "{text_value}"
+            dump.contains("-let a = 1;") && dump.contains("+let a = 2;") && dump.contains(" diff "),
+            "{dump}"
         );
-        assert!(
-            text_value.contains(" json ") && text_value.contains("no match"),
-            "{text_value}"
-        );
-        assert!(widest(&color) <= 60, "{text_value}");
+        assert!(dump.contains(" json ") && dump.contains("no match"), "{dump}");
+        assert!(widest(&drawn) <= 60, "{dump}");
 
         // the copy button holds the whole command
-        assert!(
-            color
-                .rows
-                .iter()
-                .any(|result| result.copies.iter().any(|character| character.2 == cmd))
-        );
+        assert!(drawn.rows.iter().any(|row| row.copies.iter().any(|copy| copy.2 == cmd)));
     }
 }

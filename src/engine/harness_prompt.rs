@@ -6,13 +6,11 @@ pub(crate) fn system_prompt(agent: &Agent, thread: &crate::engine::store::Thread
     let others: Vec<String> = thread
         .agents
         .iter()
-        .filter(|count| **count != agent.name)
-        .map(
-            |count_value| match roster.iter().find(|agent_value| &agent_value.name == count_value) {
-                Some(agent_2) => format!("{count_value} ({})", harness_label(agent_2)),
-                None => count_value.clone(),
-            },
-        )
+        .filter(|name| **name != agent.name)
+        .map(|name| match roster.iter().find(|member| &member.name == name) {
+            Some(member) => format!("{name} ({})", harness_label(member)),
+            None => name.clone(),
+        })
         .collect();
     let text = format!(
         "You are {name}, an agent in codehead. codehead runs named agents on threads: 1 thread = 1 task, \
@@ -47,8 +45,8 @@ Thread: {title}\nAgents on the thread: {list}",
 }
 
 fn append_project_context(agent: &Agent, thread: &crate::engine::store::Thread, mut text: String) -> String {
-    if let Some(height) = crate::infra::config::home_repo() {
-        text.push_str(&home_block(&height));
+    if let Some(home) = crate::infra::config::home_repo() {
+        text.push_str(&home_block(&home));
     }
 
     // a sub-thread runs for another thread: 0 own name, 0 own projects
@@ -62,7 +60,7 @@ fn append_project_context(agent: &Agent, thread: &crate::engine::store::Thread, 
         ));
     }
 
-    if let Some(path) = thread.port {
+    if let Some(port) = thread.port {
         let what = if crate::infra::portless::active() {
             "databases, queues and other non-HTTP listeners"
         } else {
@@ -71,8 +69,8 @@ fn append_project_context(agent: &Agent, thread: &crate::engine::store::Thread, 
 
         let _ = write!(
             text,
-            "\nPorts of this thread: {path}-{} ($CODEHEAD_PORT = {path}). Start {what} on these, never on the defaults: other threads run next to you.",
-            path + crate::infra::worktree_setup::PORTS - 1
+            "\nPorts of this thread: {port}-{} ($CODEHEAD_PORT = {port}). Start {what} on these, never on the defaults: other threads run next to you.",
+            port + crate::infra::worktree_setup::PORTS - 1
         );
     }
 
@@ -87,11 +85,11 @@ fn append_project_context(agent: &Agent, thread: &crate::engine::store::Thread, 
 }
 /// The home repo block of the system prompt: every harness gets the same steering.
 pub(crate) fn home_block(home: &std::path::Path) -> String {
-    let height = home.display();
+    let home = home.display();
 
     format!(
         "\n\n# Home repo\n\
-Home repo: `{height}` ($CODEHEAD_HOME_REPO). Read `{height}/AGENTS.md` before work: its rules apply to you \
+Home repo: `{home}` ($CODEHEAD_HOME_REPO). Read `{home}/AGENTS.md` before work: its rules apply to you \
 wherever you work (notes, plans, reports, other repos)."
     )
 }
@@ -100,9 +98,9 @@ pub(crate) fn harness_label(agent: &Agent) -> String {
     match agent
         .model
         .as_deref()
-        .filter(|message| !message.is_empty() && *message != "default")
+        .filter(|model| !model.is_empty() && *model != "default")
     {
-        Some(message_value) => format!("{}/{message_value}", agent.harness),
+        Some(model) => format!("{}/{model}", agent.harness),
         None => agent.harness.clone(),
     }
 }

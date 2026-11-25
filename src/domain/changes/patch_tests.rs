@@ -15,9 +15,9 @@ const DIFF: &str = "diff --git a/x b/x
  f
 ";
 
-fn adds(value: &[u32]) -> Pick {
+fn adds(lines: &[u32]) -> Pick {
     Pick {
-        adds: value.iter().copied().collect(),
+        adds: lines.iter().copied().collect(),
         ..Default::default()
     }
 }
@@ -25,12 +25,12 @@ fn adds(value: &[u32]) -> Pick {
 #[test]
 fn forward_keeps_the_picked_add_drops_the_rest() {
     // B alone: `-b` stays (context), `-d`, `+D`: d stays
-    let path = Pick {
+    let selected = Pick {
         adds: [2].into(),
         dels: [(2, "b".into())].into(),
         all: false,
     };
-    let out = pick(DIFF, &path, Dir::Forward).unwrap();
+    let out = pick(DIFF, &selected, Dir::Forward).unwrap();
 
     assert_eq!(
         out,
@@ -47,36 +47,36 @@ fn forward_keeps_the_picked_add_drops_the_rest() {
 #[test]
 fn reverse_keeps_the_worktree_side() {
     // take B out (back to b): the rest (D) stays as context
-    let path = Pick {
+    let selected = Pick {
         adds: [2].into(),
         dels: [(2, "b".into())].into(),
         all: false,
     };
-    let out = pick(DIFF, &path, Dir::Reverse).unwrap();
+    let out = pick(DIFF, &selected, Dir::Reverse).unwrap();
 
     assert!(out.ends_with("@@ -1,6 +1,6 @@\n a\n-b\n+B\n c\n D\n e\n f\n"), "{out}");
 }
 
 #[test]
 fn a_new_file_part_and_whole() {
-    let directory = "diff --git a/n b/n\nnew file mode 100755\n--- /dev/null\n+++ b/n\n@@ -0,0 +1,3 @@\n+1\n+2\n+3\n";
-    let file = pick(directory, &adds(&[2]), Dir::Forward).unwrap();
+    let diff = "diff --git a/n b/n\nnew file mode 100755\n--- /dev/null\n+++ b/n\n@@ -0,0 +1,3 @@\n+1\n+2\n+3\n";
+    let forward = pick(diff, &adds(&[2]), Dir::Forward).unwrap();
 
     assert_eq!(
-        file,
+        forward,
         "diff --git a/n b/n\nnew file mode 100755\n--- /dev/null\n+++ b/n\n@@ -0,0 +1,1 @@\n+2\n"
     );
 
     // reverse, line 2: the file stays, 1 and 3 are its context
-    let result = pick(directory, &adds(&[2]), Dir::Reverse).unwrap();
+    let reverse = pick(diff, &adds(&[2]), Dir::Reverse).unwrap();
 
     assert!(
-        result.ends_with("--- a/n\n+++ b/n\n@@ -1,2 +1,3 @@\n 1\n+2\n 3\n"),
-        "{result}"
+        reverse.ends_with("--- a/n\n+++ b/n\n@@ -1,2 +1,3 @@\n 1\n+2\n 3\n"),
+        "{reverse}"
     );
 
     let all = pick(
-        directory,
+        diff,
         &Pick {
             all: true,
             ..Default::default()
@@ -91,21 +91,21 @@ fn a_new_file_part_and_whole() {
     );
 }
 
-fn sh(directory: &std::path::Path, character: &str) -> String {
-    let output_value = Command::new("sh")
+fn sh(directory: &std::path::Path, script: &str) -> String {
+    let output = Command::new("sh")
         .arg("-c")
-        .arg(character)
+        .arg(script)
         .current_dir(directory)
         .stderr(Stdio::piped())
         .output()
         .unwrap();
 
     assert!(
-        output_value.status.success(),
-        "{character}: {}",
-        String::from_utf8_lossy(&output_value.stderr)
+        output.status.success(),
+        "{script}: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8_lossy(&output_value.stdout).into_owned()
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 fn apply(directory: &std::path::Path, patch: &str, args: &str) {
@@ -134,13 +134,13 @@ fn real_git_takes_the_patches() {
     let diff = sh(&directory, "git diff -- x");
 
     // stage `four` (its removed `4` too) and the removal of 25 (it sits before new line 25)
-    let path = Pick {
+    let stage = Pick {
         adds: [4].into(),
         dels: [(3, "4".into()), (25, "25".into())].into(),
         all: false,
     };
 
-    apply(&directory, &pick(&diff, &path, Dir::Forward).unwrap(), "--cached");
+    apply(&directory, &pick(&diff, &stage, Dir::Forward).unwrap(), "--cached");
     let cached = sh(&directory, "git diff --cached -U0 -- x");
 
     assert!(
@@ -153,12 +153,12 @@ fn real_git_takes_the_patches() {
 
     // stash `three` (back to 3) in the worktree; the patch puts it back
     let diff = sh(&directory, "git diff HEAD -- x");
-    let path_value = Pick {
+    let unstash = Pick {
         adds: [3].into(),
         dels: [(3, "3".into())].into(),
         all: false,
     };
-    let stash = pick(&diff, &path_value, Dir::Reverse).unwrap();
+    let stash = pick(&diff, &unstash, Dir::Reverse).unwrap();
 
     apply(&directory, &stash, "-R");
     let now = std::fs::read_to_string(directory.join("x")).unwrap();
@@ -178,12 +178,12 @@ fn real_git_takes_the_patches() {
 
     // an untracked file: a part of it staged
     sh(&directory, "printf 'a\\nb\\nc\\n' > n");
-    let output_value = Command::new("git")
+    let output = Command::new("git")
         .args(["diff", "--no-index", "--", "/dev/null", "n"])
         .current_dir(&directory)
         .output()
         .unwrap();
-    let diff = String::from_utf8_lossy(&output_value.stdout);
+    let diff = String::from_utf8_lossy(&output.stdout);
 
     apply(&directory, &pick(&diff, &adds(&[2]), Dir::Forward).unwrap(), "--cached");
 

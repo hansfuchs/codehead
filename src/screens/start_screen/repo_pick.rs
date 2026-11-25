@@ -57,49 +57,50 @@ pub(crate) struct Picker {
 /// Dirs of DIR, hidden ones out, sorted by name (case off); HOME repos not on disk with DIR as
 /// their parent too.
 fn list(dir: &Path, home: &[crate::infra::home::Repo]) -> Vec<Entry> {
-    let mut value: Vec<Entry> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter(|error| !error.file_name().to_string_lossy().starts_with('.'))
-                .map(|error_value| error_value.path())
+    let mut entries: Vec<Entry> = std::fs::read_dir(dir)
+        .map(|listing| {
+            listing
+                .flatten()
+                .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                .map(|entry| entry.path())
                 .filter(|path| path.is_dir())
-                .map(|path_value| Entry {
-                    name: path_value
+                .map(|path| Entry {
+                    name: path
                         .file_name()
-                        .map(|count| count.to_string_lossy().into_owned())
+                        .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_default(),
-                    git: path_value.join(".git").exists(),
-                    path: path_value,
+                    git: path.join(".git").exists(),
+                    path,
                     clone: None,
                 })
                 .collect()
         })
         .unwrap_or_default();
 
-    for result_value in home
+    for repo in home
         .iter()
-        .filter(|result| result.path.parent() == Some(dir) && !result.path.exists())
+        .filter(|repo| repo.path.parent() == Some(dir) && !repo.path.exists())
     {
-        value.push(Entry {
-            name: result_value
+        entries.push(Entry {
+            name: repo
                 .path
                 .file_name()
-                .map(|count_value| count_value.to_string_lossy().into_owned())
+                .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            path: result_value.path.clone(),
+            path: repo.path.clone(),
             git: false,
-            clone: result_value.url.clone(),
+            clone: repo.url.clone(),
         });
     }
 
-    value.sort_by_key(|error_2| error_2.name.to_lowercase());
-    value
+    entries.sort_by_key(|entry| entry.name.to_lowercase());
+    entries
 }
 
 impl Picker {
     /// The picker on DIR (the form's repo, else the dir codehead started in).
     pub(crate) fn new(dir: &Path, home: Vec<crate::infra::home::Repo>) -> Self {
-        let mut path = Picker {
+        let mut picker = Picker {
             parent: Vec::new(),
             cursor: 0,
             offset: 0,
@@ -111,8 +112,8 @@ impl Picker {
             right_rows: Vec::new(),
         };
 
-        path.go(dir);
-        path
+        picker.go(dir);
+        picker
     }
 
     /// DIR becomes the current dir: its parent's dirs left (the cursor on DIR), its dirs right.
@@ -121,7 +122,7 @@ impl Picker {
         self.offset = 0;
 
         if let Some(up) = dir.parent() {
-            self.go_body(dir, up);
+            self.list_parent(dir, up);
         } else {
             self.parent = vec![Entry {
                 name: "/".into(),
@@ -135,15 +136,15 @@ impl Picker {
         self.load_kids();
     }
 
-    fn go_body(&mut self, dir: &Path, up: &Path) {
+    fn list_parent(&mut self, dir: &Path, up: &Path) {
         self.parent = list(up, &self.home);
 
         // a dir the listing leaves out (hidden): in it all the same
-        if !self.parent.iter().any(|error| error.path == dir) {
+        if !self.parent.iter().any(|entry| entry.path == dir) {
             self.parent.push(Entry {
                 name: dir
                     .file_name()
-                    .map(|count| count.to_string_lossy().into_owned())
+                    .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default(),
                 git: dir.join(".git").exists(),
                 path: dir.to_path_buf(),
@@ -151,11 +152,7 @@ impl Picker {
             });
         }
 
-        self.cursor = self
-            .parent
-            .iter()
-            .position(|error_value| error_value.path == dir)
-            .unwrap_or(0);
+        self.cursor = self.parent.iter().position(|entry| entry.path == dir).unwrap_or(0);
     }
 
     /// The left pane's rows (indexes of the parent's dirs): the filter's matches, in order.
@@ -176,7 +173,7 @@ impl Picker {
         self.kids_offset = 0;
 
         self.kids = match self.current() {
-            Some(error) if error.clone.is_none() => list(&error.path.clone(), &self.home),
+            Some(entry) if entry.clone.is_none() => list(&entry.path.clone(), &self.home),
             _ => Vec::new(),
         };
     }
@@ -185,7 +182,7 @@ impl Picker {
     fn parent_dir(&self) -> Option<PathBuf> {
         self.parent
             .first()
-            .and_then(|error| error.path.parent())
+            .and_then(|entry| entry.path.parent())
             .map(Path::to_path_buf)
     }
 
@@ -206,7 +203,7 @@ impl Picker {
             KeyCode::Home => self.step(0),
             KeyCode::End if count > 0 => self.step(count - 1),
             KeyCode::Right | KeyCode::Tab => {
-                self.key_first();
+                self.enter_first_kid();
             }
             KeyCode::Left | KeyCode::BackTab => self.up(),
             KeyCode::Backspace if typed && self.query.is_empty() => self.up(),
@@ -218,9 +215,9 @@ impl Picker {
             // ~ (0 filter): the home dir
             KeyCode::Char('~') if typed && self.query.is_empty() => self.go(&crate::infra::config::home()),
             KeyCode::Char(character) if typed => {
-                let query_value = format!("{}{character}", self.query);
+                let query = format!("{}{character}", self.query);
 
-                self.set_query(query_value);
+                self.set_query(query);
             }
             _ => {}
         }
@@ -228,8 +225,8 @@ impl Picker {
         Act::None
     }
 
-    fn key_first(&mut self) {
-        if let Some(first) = self.kids.first().map(|error_value| error_value.path.clone()) {
+    fn enter_first_kid(&mut self) {
+        if let Some(first) = self.kids.first().map(|kid| kid.path.clone()) {
             self.go(&first);
         }
     }
@@ -248,7 +245,7 @@ impl Picker {
 
     /// A new filter: the cursor on the 1st match.
     fn set_query(&mut self, query: String) {
-        let at = self.current().map(|error| error.path.clone());
+        let at = self.current().map(|entry| entry.path.clone());
 
         self.query = query;
         let shown = self.shown();
@@ -268,16 +265,12 @@ impl Picker {
     pub(crate) fn click(&mut self, x: u16, y: u16) -> bool {
         let at = ratatui::layout::Position { x, y };
 
-        if let Some(&(_, i)) = self.left_rows.iter().find(|(result, _)| result.contains(at)) {
+        if let Some(&(_, i)) = self.left_rows.iter().find(|(rect, _)| rect.contains(at)) {
             self.step(i);
             return true;
         }
 
-        if let Some(&(_, i)) = self
-            .right_rows
-            .iter()
-            .find(|(result_value, _)| result_value.contains(at))
-        {
+        if let Some(&(_, i)) = self.right_rows.iter().find(|(rect, _)| rect.contains(at)) {
             let path = self.kids[i].path.clone();
 
             self.go(&path);
@@ -371,7 +364,7 @@ impl Picker {
         let cur = self.current().cloned();
 
         let empty = match &cur {
-            Some(error) if error.clone.is_some() => " 0 clone yet · enter: clone",
+            Some(entry) if entry.clone.is_some() => " 0 clone yet · enter: clone",
             _ => " 0 dirs",
         };
 
@@ -385,23 +378,23 @@ impl Picker {
             );
         }
 
-        for (j, error_value) in self.kids.iter().enumerate().skip(self.kids_offset).take(rows) {
+        for (j, kid) in self.kids.iter().enumerate().skip(self.kids_offset).take(rows) {
             let row = Rect {
                 y: right.y + (j - self.kids_offset) as u16,
                 height: 1,
                 ..right
             };
 
-            Self::row(frame, row, error_value, false);
+            Self::row(frame, row, kid, false);
             self.right_rows.push((row, j));
         }
     }
 
     /// A dir row: its name, `git` / `clone` at the right; CUR: the cursor row.
-    fn row(frame: &mut Frame, row: Rect, error: &Entry, cur: bool) {
+    fn row(frame: &mut Frame, row: Rect, entry: &Entry, cur: bool) {
         let st = if cur {
             theme::pill().add_modifier(Modifier::BOLD)
-        } else if error.git {
+        } else if entry.git {
             Style::default().fg(theme::pal().text)
         } else {
             theme::muted()
@@ -409,16 +402,16 @@ impl Picker {
 
         let dim = if cur { theme::pill() } else { theme::muted() };
 
-        let detail = if error.clone.is_some() {
+        let detail = if entry.clone.is_some() {
             "clone"
-        } else if error.git {
+        } else if entry.git {
             "git"
         } else {
             ""
         };
 
         let room = (row.width as usize).saturating_sub(detail.width() + 3);
-        let name = format!("{}/", error.name);
+        let name = format!("{}/", entry.name);
 
         let name: String = if name.width() > room {
             name.chars().take(room.saturating_sub(1)).chain(['…']).collect()

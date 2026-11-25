@@ -81,11 +81,11 @@ fn prepare_runtime(args: &Args) {
 
 fn resume_hosts() -> std::thread::JoinHandle<()> {
     std::thread::spawn(|| {
-        for thread_2 in engine::store::all()
+        for thread in engine::store::all()
             .into_iter()
-            .filter(|thread_value| !thread_value.resume.is_empty())
+            .filter(|thread| !thread.resume.is_empty())
         {
-            let _ = engine::client::ensure(&thread_2.id);
+            let _ = engine::client::ensure(&thread.id);
         }
     })
 }
@@ -94,16 +94,16 @@ fn start_terminal() -> Session {
     let mut out = io::stdout();
     let mut tty = Tty { enhanced: false };
 
-    if let Err(error_value) = tty.enter(&mut out) {
+    if let Err(error) = tty.enter(&mut out) {
         tty.leave(&mut out);
-        fail(&format!("terminal: {error_value}"), 1);
+        fail(&format!("terminal: {error}"), 1);
     }
 
     let term = match Terminal::new(crate::ui::frames::backend()) {
-        Ok(thread_3) => thread_3,
-        Err(error_2) => {
+        Ok(terminal) => terminal,
+        Err(error) => {
             tty.leave(&mut out);
-            fail(&format!("terminal: {error_2}"), 1)
+            fail(&format!("terminal: {error}"), 1)
         }
     };
 
@@ -117,7 +117,7 @@ fn open_initial(args: &Args, cwd: &Path, session: &mut Session) -> Option<Return
         && args.branch.is_none()
         && !args.copy
         && !args.dry;
-    let latest = plain.then(engine::store::latest).flatten().map(|thread_4| thread_4.id);
+    let latest = plain.then(engine::store::latest).flatten().map(|thread| thread.id);
 
     // the thread view first: the start screen (App) is built when it ends
     crate::domain::notifications::start();
@@ -127,30 +127,30 @@ fn open_initial(args: &Args, cwd: &Path, session: &mut Session) -> Option<Return
 
     if let Some(id) = args.view.as_ref().or(latest.as_ref()) {
         // 1 thread.json (an id prefix: the newest match), 0 scan of every thread's host and log
-        let thread_6 = engine::store::load(id).or_else(|| {
+        let found = engine::store::load(id).or_else(|| {
             engine::store::all()
                 .into_iter()
-                .find(|thread_5| thread_5.id.starts_with(id.as_str()))
+                .find(|thread| thread.id.starts_with(id.as_str()))
         });
 
-        let Some(thread_7) = thread_6 else {
+        let Some(thread) = found else {
             session.tty.leave(&mut session.out);
             fail(&format!("no thread {id}"), 2)
         };
 
-        let dir = [thread_7.worktree.clone(), Some(thread_7.dir.clone())]
+        let dir = [thread.worktree.clone(), Some(thread.dir.clone())]
             .into_iter()
             .flatten()
             .map(PathBuf::from)
-            .find(|path_3| path_3.is_dir())
+            .find(|path| path.is_dir())
             .unwrap_or_else(|| cwd.to_path_buf());
 
         // --view opens a done thread again; the auto-open leaves its state as it is
         if args.view.is_some() {
-            wake(&thread_7.id);
+            wake(&thread.id);
         }
 
-        back = Some(open_view(session, &thread_7.id, &dir, &thread_7.title, cwd, None));
+        back = Some(open_view(session, &thread.id, &dir, &thread.title, cwd, None));
     }
 
     back
@@ -162,17 +162,17 @@ fn create_start_screen(args: &Args, cfg: Config, back: Option<ReturnTarget>) -> 
 
     // -b names a branch of the start dir's repo: the setting `repo` stays off then
     if args.branch.is_none()
-        && let Some(result) = crate::infra::config::default_repo()
+        && let Some(repo) = crate::infra::config::default_repo()
     {
-        app.use_default_repo(&result);
+        app.use_default_repo(&repo);
     }
 
     engine::trace("app new");
 
-    if let Some(tab) = back {
+    if let Some(target) = back {
         app.return_from_thread();
 
-        if let ReturnTarget::Tab(tab) = tab {
+        if let ReturnTarget::Tab(tab) = target {
             app.go_home(&tab);
         }
     }
@@ -191,7 +191,7 @@ fn configuration(args: &Args) -> (PathBuf, Config) {
     if engine::harnesses::installed().is_empty() {
         let list: Vec<String> = engine::harnesses::ALL
             .iter()
-            .map(|height| format!("  {} ({}): {}", height.label, height.bin, height.install))
+            .map(|harness| format!("  {} ({}): {}", harness.label, harness.bin, harness.install))
             .collect();
 
         fail(
@@ -233,29 +233,23 @@ fn requested_agents(args: &Args) -> (Vec<String>, String) {
     let picks: Vec<String> = args
         .agent
         .iter()
-        .flat_map(|agent_value| agent_value.split(','))
-        .map(|agent_2| agent_2.trim().to_string())
-        .filter(|agent_3| !agent_3.is_empty())
+        .flat_map(|list| list.split(','))
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
         .collect();
 
-    if picks
-        .iter()
-        .any(|path_value| !all.iter().any(|agent_4| &agent_4.name == path_value))
-    {
+    if picks.iter().any(|pick| !all.iter().any(|agent| &agent.name == pick)) {
         all = crate::domain::agents::roster_only();
     }
 
     let agent = crate::domain::agents::default_agent(&all).unwrap_or_default();
 
-    if let Some(bad) = picks
-        .iter()
-        .find(|path_2| !all.iter().any(|agent_5| &agent_5.name == *path_2))
-    {
+    if let Some(bad) = picks.iter().find(|pick| !all.iter().any(|agent| &agent.name == *pick)) {
         fail(
             &format!(
                 "no agent named {bad}. agents: {}",
                 all.iter()
-                    .map(|agent_6| agent_6.name.as_str())
+                    .map(|agent| agent.name.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             ),

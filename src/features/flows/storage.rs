@@ -1,24 +1,24 @@
 use super::{Flow, FlowsTab, Library, Step, flows};
 
 impl FlowsTab {
-    pub(super) fn fail(&mut self, error_value: impl Into<String>) {
-        self.error = Some(error_value.into());
+    pub(super) fn fail(&mut self, error: impl Into<String>) {
+        self.error = Some(error.into());
     }
     /// The open flow to disk (a built-in: a user file over it), the library read again.
     pub(super) fn save_flow(&mut self) {
-        let Some(file) = self.flow.clone() else { return };
+        let Some(flow) = self.flow.clone() else { return };
 
-        match self.lib.save_flow(&file) {
+        match self.lib.save_flow(&flow) {
             Ok(_) => {
-                save_flow_ok(&file, self);
+                reload_after_flow_save(&flow, self);
             }
-            Err(error_value) => self.fail(format!("save: {error_value}")),
+            Err(error) => self.fail(format!("save: {error}")),
         }
     }
 
-    pub(super) fn save_step(&mut self, text: &Step) -> bool {
-        match self.lib.save_step(text) {
-            Ok(_) => save_step_ok(self),
+    pub(super) fn save_step(&mut self, step: &Step) -> bool {
+        match self.lib.save_step(step) {
+            Ok(_) => reload_after_step_save(self),
             Err(error) => {
                 self.fail(format!("save: {error}"));
                 false
@@ -28,52 +28,57 @@ impl FlowsTab {
 
     /// The shared step of node I as a one-off of this flow (its text copied in).
     pub(super) fn fork(&mut self, i: usize) {
-        let Some(count) = self.flow.as_ref().and_then(|file| file.steps.get(i)).cloned() else {
+        let Some(node) = self.flow.as_ref().and_then(|flow| flow.steps.get(i)).cloned() else {
             return;
         };
 
-        let Some(text) = count.uses.as_deref().and_then(|user| self.lib.step(user)).cloned() else {
+        let Some(step) = node
+            .uses
+            .as_deref()
+            .and_then(|step_name| self.lib.step(step_name))
+            .cloned()
+        else {
             return;
         };
 
-        if let Some(file_value) = self.flow.as_mut() {
-            file_value.steps[i] = flows::inline(&count, &text);
+        if let Some(flow) = self.flow.as_mut() {
+            flow.steps[i] = flows::inline(&node, &step);
         }
 
         self.save_flow();
-        self.note = Some(format!("{}: a one-off of this flow now", text.name));
+        self.note = Some(format!("{}: a one-off of this flow now", step.name));
         self.open_node_editor(i);
     }
     pub(crate) fn paste(&mut self, text: &str) {
-        if let Some((_, ta)) = self.ask.as_mut() {
-            ta.insert(text);
-        } else if let Some((ta, _)) = self.picker.as_mut() {
-            ta.insert(text);
-        } else if let Some(ed) = self.editor.as_mut() {
-            ed.fields[ed.field].1.insert(text);
+        if let Some((_, answer)) = self.ask.as_mut() {
+            answer.insert(text);
+        } else if let Some((query, _)) = self.picker.as_mut() {
+            query.insert(text);
+        } else if let Some(editor) = self.editor.as_mut() {
+            editor.fields[editor.field].1.insert(text);
         }
     }
 }
 
-fn save_flow_ok(file: &Flow, view_state: &mut FlowsTab) {
-    view_state.error = None;
-    view_state.lib = Library::load(view_state.dir.as_deref());
+fn reload_after_flow_save(flow: &Flow, tab: &mut FlowsTab) {
+    tab.error = None;
+    tab.lib = Library::load(tab.dir.as_deref());
 
-    if let Some(nf) = view_state.lib.flows.iter().find(|x| x.slug == file.slug).cloned() {
-        view_state.flow = Some(nf);
+    if let Some(saved) = tab.lib.flows.iter().find(|x| x.slug == flow.slug).cloned() {
+        tab.flow = Some(saved);
     }
 }
 
-fn save_step_ok(view_state: &mut FlowsTab) -> bool {
-    view_state.lib = Library::load(view_state.dir.as_deref());
+fn reload_after_step_save(tab: &mut FlowsTab) -> bool {
+    tab.lib = Library::load(tab.dir.as_deref());
 
-    if let Some(file_value) = view_state
+    if let Some(reloaded) = tab
         .flow
         .as_ref()
-        .and_then(|file| view_state.lib.flows.iter().find(|x| x.slug == file.slug))
+        .and_then(|flow| tab.lib.flows.iter().find(|x| x.slug == flow.slug))
         .cloned()
     {
-        view_state.flow = Some(file_value);
+        tab.flow = Some(reloaded);
     }
 
     true

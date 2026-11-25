@@ -32,7 +32,7 @@ fn styles() -> Vec<Style> {
 #[test]
 fn compose_parse_round_trip() {
     let sprite = crate::domain::sprites::from_id("regi:7 eyes=3 speed=0.5");
-    let path = Profile {
+    let profile = Profile {
         style: Some("mecha".into()),
         voice: "dry.\ncalls the owner boss.".into(),
         prompt: "you review rust.".into(),
@@ -44,20 +44,20 @@ fn compose_parse_round_trip() {
         ("claude", None, true),
         ("codex", Some("MECHA"), true),
     ] {
-        let raw = compose(&path, &styles(), harness, global);
+        let raw = compose(&profile, &styles(), harness, global);
 
         assert_eq!(raw.contains("BODY"), embedded, "{harness} {global:?}");
         assert!(raw.contains("<!-- codehead:handoff -->") && raw.contains("needs harness: <harness> (<tool>)"));
-        assert_eq!(parse_profile(Some(&raw), None), path);
+        assert_eq!(parse_profile(Some(&raw), None), profile);
     }
 }
 
 #[test]
 fn foreign_prompt_is_system_prompt() {
-    let path = parse_profile(Some("be brief"), Some("mecha"));
+    let profile = parse_profile(Some("be brief"), Some("mecha"));
 
     assert_eq!(
-        path,
+        profile,
         Profile {
             style: Some("mecha".into()),
             prompt: "be brief".into(),
@@ -73,12 +73,12 @@ fn effort_keeps_other_keys() {
 
     std::fs::write(&path, "{\n  \"zeta\": 1,\n  \"alpha\": \"x\"\n}\n").unwrap();
     set_effort_in(&path, Some("high")).unwrap();
-    let thread = std::fs::read_to_string(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
 
     assert!(
-        thread.find("zeta").unwrap() < thread.find("alpha").unwrap()
-            && thread.find("alpha").unwrap() < thread.find("effortLevel").unwrap(),
-        "{thread}"
+        text.find("zeta").unwrap() < text.find("alpha").unwrap()
+            && text.find("alpha").unwrap() < text.find("effortLevel").unwrap(),
+        "{text}"
     );
 
     set_effort_in(&path, None).unwrap();

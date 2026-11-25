@@ -13,44 +13,44 @@ impl View {
             return;
         };
 
-        let st = window.area;
+        let area = window.area;
         let buf = frame.buffer_mut();
 
-        let col = at.x - st.x;
+        let col = at.x - area.x;
         let row = &self.stream.drawn.rows[row_index];
         let hit = self.stream.drawn.hits.contains_key(&row_index);
         let span = row
             .links
             .iter()
             .chain(row.copies.iter())
-            .find(|(agent, bytes, _)| col >= *agent && col < *bytes)
-            .map(|(agent, bytes, _)| (*agent, *bytes));
+            .find(|(start, end, _)| col >= *start && col < *end)
+            .map(|(start, end, _)| (*start, *end));
 
-        if let Some((agent, bytes)) = span {
+        if let Some((start, end)) = span {
             theme::hover(
                 buf,
                 Rect {
-                    x: st.x + agent,
+                    x: area.x + start,
                     y: at.y,
-                    width: bytes - agent,
+                    width: end - start,
                     height: 1,
                 },
             );
         } else if hit {
-            hover_message(self, buf, st, at);
+            hover_message(self, buf, area, at);
         }
     }
 
-    pub(super) fn draw_stream_fold(&self, frame: &mut Frame, st: Rect) {
+    pub(super) fn draw_stream_fold(&self, frame: &mut Frame, area: Rect) {
         let buf = frame.buffer_mut();
 
-        if self.stream.back == 0 || st.height <= 1 {
+        if self.stream.back == 0 || area.height <= 1 {
             return;
         }
 
-        let y = st.bottom() - 1;
+        let y = area.bottom() - 1;
 
-        for x in st.x..st.right() {
+        for x in area.x..area.right() {
             buf[(x, y)].reset();
             buf[(x, y)].set_symbol("┄").set_style(theme::line());
         }
@@ -60,7 +60,7 @@ impl View {
             return;
         }
 
-        let st = window.area;
+        let area = window.area;
 
         let note = if self.agents.members.is_empty() {
             "0 agents on this thread · @name brings one in"
@@ -71,20 +71,20 @@ impl View {
         frame.render_widget(
             Paragraph::new(Line::styled(format!("  {note}"), theme::muted())),
             Rect {
-                y: st.bottom().saturating_sub(1),
+                y: area.bottom().saturating_sub(1),
                 height: 1,
-                ..st
+                ..area
             },
         );
     }
 }
 
-fn hover_message(view: &View, buf: &mut ratatui::buffer::Buffer, st: Rect, at: Position) {
+fn hover_message(view: &View, buf: &mut ratatui::buffer::Buffer, area: Rect, at: Position) {
     // bubbles: the hover stays inside the box's borders
     let (x0, x1) = if view.stream.look == chat::Look::Bubbles {
-        (st.x + 2, st.right().saturating_sub(2))
+        (area.x + 2, area.right().saturating_sub(2))
     } else {
-        (st.x, st.right())
+        (area.x, area.right())
     };
 
     theme::hover(
@@ -101,7 +101,7 @@ fn hover_message(view: &View, buf: &mut ratatui::buffer::Buffer, st: Rect, at: P
 fn draw_waves(view: &View, frame: &mut Frame, window: &StreamFrame) {
     let tick = view.tick();
     let StreamFrame {
-        area: st,
+        area,
         shown,
         start,
         end,
@@ -116,11 +116,11 @@ fn draw_waves(view: &View, frame: &mut Frame, window: &StreamFrame) {
 
         let y = shown.y + (row - start - cut) as u16;
 
-        if y < shown.bottom() && st.x + col + 3 <= st.right() {
+        if y < shown.bottom() && area.x + col + 3 <= area.right() {
             frame.render_widget(
                 Paragraph::new(Span::styled(WAVE[tick % WAVE.len()], Style::default().fg(*color))),
                 Rect {
-                    x: st.x + col,
+                    x: area.x + col,
                     y,
                     width: 3,
                     height: 1,

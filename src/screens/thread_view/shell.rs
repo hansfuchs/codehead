@@ -14,9 +14,9 @@ impl View {
             Some(("search", false))
         } else if self.panes.pane == Pane::Changes
             && view_keys
-            && let Some(message) = self.panes.changes.mode()
+            && let Some(mode) = self.panes.changes.mode()
         {
-            Some((message, false))
+            Some((mode, false))
         } else if self.panes.pane == Pane::Files && view_keys && self.panes.files.typing() {
             Some(("filter", false))
         } else if self.shell_mode() && (self.panes.pane == Pane::Chat || self.panes.prompt_focus) {
@@ -33,7 +33,7 @@ impl View {
 
     /// The thread's `!commands`, oldest first.
     pub(super) fn shell_cmds(&self) -> Vec<String> {
-        self.thread.items.iter().filter_map(shell_cmds_chat).collect()
+        self.thread.items.iter().filter_map(shell_command_of).collect()
     }
 
     /// Shell mode, not in the `!commands` (↑↓): the completions and the suggestion are on.
@@ -46,17 +46,17 @@ impl View {
     pub(super) fn run_shell(&mut self, command: String) {
         // `cd DIR` alone: shell mode's dir (every command runs in a new shell)
         if let Some(dir) = cd_target(&command) {
-            self.set_shell_cwd(shell_directory(dir));
+            self.set_shell_cwd(cd_dir(dir));
             return;
         }
 
         // a push of the checkout runs (the panel, an agent): 0 2nd push from shell mode (the
         // shim on its PATH holds the line too; this says so at once)
         if git_push(&command)
-            && let Some(height) = crate::infra::pushlock::git_dir(&self.shell_state.shell_cwd, &[])
-                .and_then(|directory| crate::infra::pushlock::held_in(&directory))
+            && let Some(holder) = crate::infra::pushlock::git_dir(&self.shell_state.shell_cwd, &[])
+                .and_then(|git_dir| crate::infra::pushlock::held_in(&git_dir))
         {
-            self.toast(crate::infra::pushlock::busy_text(&height));
+            self.toast(crate::infra::pushlock::busy_text(&holder));
             return;
         }
 
@@ -98,18 +98,18 @@ impl View {
     /// TYPED (`~/x`, `/x`, `x` from the dir now): shell mode's dir, kept for the thread. False: 0
     /// such dir.
     pub(super) fn set_shell_cwd(&mut self, typed: &str) -> bool {
-        let thread = typed.trim().trim_matches('"');
+        let wanted = typed.trim().trim_matches('"');
 
-        let path = if thread == "~" {
+        let path = if wanted == "~" {
             crate::infra::config::home()
-        } else if let Some(rest) = thread.strip_prefix("~/") {
+        } else if let Some(rest) = wanted.strip_prefix("~/") {
             crate::infra::config::home().join(rest)
         } else {
-            self.shell_state.shell_cwd.join(thread)
+            self.shell_state.shell_cwd.join(wanted)
         };
 
         let Some(path) = std::fs::canonicalize(&path).ok().filter(|path| path.is_dir()) else {
-            self.toast(format!("cd: 0 dir {thread}"));
+            self.toast(format!("cd: 0 dir {wanted}"));
             return false;
         };
 
@@ -126,38 +126,34 @@ impl View {
 
     /// ↓ at the bottom of shell mode: the dir input, the dir with a `/` (its entries show).
     pub(super) fn edit_cwd(&mut self) {
-        let mut ta = TextArea::new(true, "a dir");
+        let mut input = TextArea::new(true, "a dir");
 
-        ta.style = Some(theme::text());
-        let thread = tilde(&self.shell_state.shell_cwd);
+        input.style = Some(theme::text());
+        let dir = tilde(&self.shell_state.shell_cwd);
 
-        let thread = if thread.ends_with('/') {
-            thread
-        } else {
-            format!("{thread}/")
-        };
+        let dir = if dir.ends_with('/') { dir } else { format!("{dir}/") };
 
         // a space in the path: quoted (the dropdown goes on inside the quote)
-        ta.set_text(&if thread.contains(char::is_whitespace) {
-            format!("\"{thread}")
+        input.set_text(&if dir.contains(char::is_whitespace) {
+            format!("\"{dir}")
         } else {
-            thread
+            dir
         });
         self.shell_state.cwd_paths = crate::ui::paths::Paths::directory(&self.shell_state.shell_cwd);
         self.shell_state.cwd_paths.dirs_only = true;
-        self.shell_state.cwd_edit = Some(ta);
+        self.shell_state.cwd_edit = Some(input);
         self.stream.dirty = true;
     }
 
-    /// Key K for the dir input (open). Enter: the dir (0 such dir: the input stays), esc / ↑:
+    /// KEY for the dir input (open). Enter: the dir (0 such dir: the input stays), esc / ↑:
     /// back to the prompt.
     pub(super) fn cwd_key(&mut self, key: KeyEvent) {
-        let Some(mut ta) = self.shell_state.cwd_edit.take() else {
+        let Some(mut input) = self.shell_state.cwd_edit.take() else {
             return;
         };
 
-        if self.shell_state.cwd_paths.key(key, &mut ta) {
-            self.shell_state.cwd_edit = Some(ta);
+        if self.shell_state.cwd_paths.key(key, &mut input) {
+            self.shell_state.cwd_edit = Some(input);
             return;
         }
 
@@ -166,26 +162,26 @@ impl View {
                 self.shell_state.cwd_paths.reset_input();
                 return;
             }
-            KeyCode::Enter if accept_shell_cwd(self, &ta.text()) => return,
+            KeyCode::Enter if accept_shell_cwd(self, &input.text()) => return,
             KeyCode::Enter => {}
             _ => {
-                let _ = ta.key(key);
+                let _ = input.key(key);
             }
         }
 
-        self.shell_state.cwd_edit = Some(ta);
+        self.shell_state.cwd_edit = Some(input);
     }
 
     /// ↑↓ in shell mode: the thread's `!commands` (UP: older), like a shell. True: taken (↓ past
     /// the newest: the draft again; ↓ on the draft: false).
     pub(super) fn shell_history_step(&mut self, up: bool) -> bool {
-        let mut cmds: Vec<String> = self.thread.items.iter().filter_map(shell_history_step_chat).collect();
+        let mut cmds: Vec<String> = self.thread.items.iter().filter_map(shell_command_of).collect();
 
         // newest kept: a repeat counts once, at its last run
         let mut seen = std::collections::HashSet::new();
 
         cmds.reverse();
-        cmds.retain(|character| seen.insert(character.clone()));
+        cmds.retain(|command| seen.insert(command.clone()));
         cmds.reverse();
 
         let at = match (self.shell_state.shell_at, up) {
@@ -199,9 +195,9 @@ impl View {
             (Some(i), false) if i + 1 < cmds.len() => i + 1,
             (Some(_), false) => {
                 self.shell_state.shell_at = None;
-                let directory = std::mem::take(&mut self.shell_state.shell_draft);
+                let draft = std::mem::take(&mut self.shell_state.shell_draft);
 
-                self.prompt.input.load_text(&directory);
+                self.prompt.input.load_text(&draft);
                 return true;
             }
         };
@@ -253,28 +249,20 @@ impl View {
     }
 }
 
-fn shell_history_step_chat(i: &chat::Item) -> Option<String> {
-    if let chat::Item::Shell { command, .. } = i {
+fn shell_command_of(item: &chat::Item) -> Option<String> {
+    if let chat::Item::Shell { command, .. } = item {
         Some(command.clone())
     } else {
         None
     }
 }
 
-fn shell_cmds_chat(i: &chat::Item) -> Option<String> {
-    if let chat::Item::Shell { command, .. } = i {
-        Some(command.clone())
-    } else {
-        None
-    }
-}
-
-fn shell_directory(directory: &str) -> &str {
-    if directory.is_empty() { "~" } else { directory }
+fn cd_dir(target: &str) -> &str {
+    if target.is_empty() { "~" } else { target }
 }
 fn read_shell_checkout(thread: &store::Thread, tx: &crate::infra::bus::Tx<Msg>) {
-    if let Some(directory) = busiest_checkout(thread) {
-        let _ = tx.send(Msg::ShellCwd(directory));
+    if let Some(dir) = busiest_checkout(thread) {
+        let _ = tx.send(Msg::ShellCwd(dir));
     }
 }
 fn accept_shell_cwd(view: &mut View, typed: &str) -> bool {

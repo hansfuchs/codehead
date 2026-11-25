@@ -41,11 +41,11 @@ pub(crate) fn dir_in(home: Option<&Path>, data: &Path, repo: &Path) -> PathBuf {
     let name = repo_name(repo);
 
     match home {
-        Some(height) => {
-            let agents = std::fs::read_to_string(height.join("AGENTS.md")).unwrap_or_default();
+        Some(home) => {
+            let agents = std::fs::read_to_string(home.join("AGENTS.md")).unwrap_or_default();
             let sub = crate::infra::home::notes_of(&agents, repo, &name).unwrap_or_else(|| name.clone());
 
-            height.join(sub.trim_end_matches('/')).join("projects")
+            home.join(sub.trim_end_matches('/')).join("projects")
         }
         None => data.join("projects").join(name),
     }
@@ -53,7 +53,7 @@ pub(crate) fn dir_in(home: Option<&Path>, data: &Path, repo: &Path) -> PathBuf {
 
 fn repo_name(repo: &Path) -> String {
     repo.file_name()
-        .map_or_else(|| "repo".into(), |count| count.to_string_lossy().into_owned())
+        .map_or_else(|| "repo".into(), |name| name.to_string_lossy().into_owned())
 }
 
 /// The projects of REPO: active first, then A→Z.
@@ -62,23 +62,22 @@ pub(crate) fn list(repo: &Path) -> Vec<Project> {
 }
 
 pub(crate) fn list_in(dir: &Path) -> Vec<Project> {
-    let mut value: Vec<Project> = std::fs::read_dir(dir)
+    let mut projects: Vec<Project> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
-        .map(|error| error.path())
-        .filter(|path_value| path_value.extension().is_some_and(|x| x == "md"))
-        .filter_map(|path_2| read(&path_2))
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .filter_map(|path| read(&path))
         .collect();
 
-    value.sort_by(|agent, bytes| {
-        agent
-            .done
-            .cmp(&bytes.done)
-            .then_with(|| agent.title.to_lowercase().cmp(&bytes.title.to_lowercase()))
+    projects.sort_by(|left, right| {
+        left.done
+            .cmp(&right.done)
+            .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
     });
 
-    value
+    projects
 }
 
 /// The brief at PATH.
@@ -108,8 +107,8 @@ pub(crate) fn parse(text: &str) -> (Option<String>, bool, String) {
 
     let goal = body
         .lines()
-        .map(|line_value| line_value.trim().trim_start_matches('#').trim())
-        .find(|line_2| !line_2.is_empty())
+        .map(|line| line.trim().trim_start_matches('#').trim())
+        .find(|line| !line.is_empty())
         .unwrap_or_default()
         .to_string();
 
@@ -118,11 +117,11 @@ pub(crate) fn parse(text: &str) -> (Option<String>, bool, String) {
 
 fn read_project_field(title: &mut Option<String>, done: &mut bool, line: &str) {
     if let Some((key, value)) = line.split_once(':') {
-        let value_value = value.trim().trim_matches('"').trim_matches('\'');
+        let value = value.trim().trim_matches('"').trim_matches('\'');
 
         match key.trim() {
-            "title" if !value_value.is_empty() => *title = Some(value_value.to_string()),
-            "done" => *done = value_value == "true" || value_value == "yes",
+            "title" if !value.is_empty() => *title = Some(value.to_string()),
+            "done" => *done = value == "true" || value == "yes",
             _ => {}
         }
     }
@@ -155,12 +154,12 @@ pub(crate) fn set_front(text: &str, key: &str, value: Option<&str>) -> String {
     let (front, body) = split_front(text);
     let mut lines: Vec<String> = front
         .lines()
-        .filter(|line| line.split_once(':').is_none_or(|(x, _)| x.trim() != key))
+        .filter(|line| line.split_once(':').is_none_or(|(name, _)| name.trim() != key))
         .map(String::from)
         .collect();
 
-    if let Some(value_value) = value {
-        lines.push(format!("{key}: {value_value}"));
+    if let Some(value) = value {
+        lines.push(format!("{key}: {value}"));
     }
 
     if lines.is_empty() {
@@ -219,13 +218,13 @@ pub(crate) fn create_in(dir: &Path, title: &str) -> Result<Project, String> {
 }
 
 /// Project P done / active again.
-pub(crate) fn set_done(path_value: &Project, done: bool) -> Result<(), String> {
+pub(crate) fn set_done(project: &Project, done: bool) -> Result<(), String> {
     let text =
-        std::fs::read_to_string(&path_value.path).map_err(|error| format!("{}: {error}", path_value.path.display()))?;
+        std::fs::read_to_string(&project.path).map_err(|error| format!("{}: {error}", project.path.display()))?;
     let text = set_front(&text, "done", done.then_some("true"));
 
-    crate::engine::write_atomic(&path_value.path, text.as_bytes())
-        .map_err(|error_value| format!("{}: {error_value}", path_value.path.display()))
+    crate::engine::write_atomic(&project.path, text.as_bytes())
+        .map_err(|error| format!("{}: {error}", project.path.display()))
 }
 
 /// The slugs of SLUGS that are projects of REPO (any state), in the order given, 0 dupes. Err:
@@ -238,16 +237,16 @@ pub(crate) fn resolve_in(all: &[Project], slugs: &[String]) -> Result<Vec<String
     let mut out: Vec<String> = Vec::new();
     let mut bad = Vec::new();
 
-    for text in slugs {
-        let text_value = text.trim();
+    for slug in slugs {
+        let wanted = slug.trim();
 
         match all
             .iter()
-            .find(|path| path.slug == text_value || path.title.eq_ignore_ascii_case(text_value))
+            .find(|project| project.slug == wanted || project.title.eq_ignore_ascii_case(wanted))
         {
-            Some(path_value) if !out.contains(&path_value.slug) => out.push(path_value.slug.clone()),
+            Some(project) if !out.contains(&project.slug) => out.push(project.slug.clone()),
             Some(_) => {}
-            None => bad.push(text_value.to_string()),
+            None => bad.push(wanted.to_string()),
         }
     }
 
@@ -257,8 +256,8 @@ pub(crate) fn resolve_in(all: &[Project], slugs: &[String]) -> Result<Vec<String
 
     let known: Vec<&str> = all
         .iter()
-        .filter(|path_2| !path_2.done)
-        .map(|path_3| path_3.slug.as_str())
+        .filter(|project| !project.done)
+        .map(|project| project.slug.as_str())
         .collect();
 
     Err(format!(
@@ -324,7 +323,7 @@ codehead renames it, also on the remote.",
 
     let Some(repo) = repo_of(thread) else { return text };
     let all = list(&repo);
-    let active: Vec<&Project> = all.iter().filter(|path| !path.done).collect();
+    let active: Vec<&Project> = all.iter().filter(|project| !project.done).collect();
 
     if active.is_empty() && thread.projects.is_empty() {
         return text;
@@ -336,16 +335,16 @@ codehead renames it, also on the remote.",
         dir(&repo).display()
     );
 
-    for path_value in &active {
+    for project in &active {
         let _ = write!(
             text,
             "\n- `{}`: {}{}",
-            path_value.slug,
-            path_value.title,
-            if path_value.goal.is_empty() {
+            project.slug,
+            project.title,
+            if project.goal.is_empty() {
                 String::new()
             } else {
-                format!(" ({})", path_value.goal)
+                format!(" ({})", project.goal)
             }
         );
     }

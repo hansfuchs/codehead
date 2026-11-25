@@ -37,10 +37,10 @@ impl View {
             .iter()
             .map(|agent| {
                 let effort = crate::engine::roster::get(&agent.name)
-                    .and_then(|result| result.effort)
+                    .and_then(|entry| entry.effort)
                     .or_else(|| (agent.harness == "claude").then(|| global.clone()))
-                    .filter(|error| error != "default")
-                    .map(|error| effort_label(&error))
+                    .filter(|effort| effort != "default")
+                    .map(|effort| effort_label(&effort))
                     .unwrap_or_default();
 
                 (
@@ -64,13 +64,13 @@ impl View {
     pub(super) fn sync_order(&mut self) {
         let first = self.agents.order.is_empty();
 
-        self.agents.order.retain(|count| self.agents.members.contains(count));
+        self.agents.order.retain(|name| self.agents.members.contains(name));
 
-        for count in self.agents.members.clone() {
-            sync_order_branch(self, count);
+        for name in self.agents.members.clone() {
+            add_to_order(self, name);
         }
 
-        self.agents.front.retain(|count| !self.agents.members.contains(count));
+        self.agents.front.retain(|name| !self.agents.members.contains(name));
 
         if first {
             self.stream.dirty = true;
@@ -84,11 +84,11 @@ impl View {
             .slots
             .borrow()
             .iter()
-            .map(|(count, _)| count.clone())
+            .map(|(name, _)| name.clone())
             .collect();
 
-        for count in named.iter().rev() {
-            bring_agent_front(self, count, &shown);
+        for name in named.iter().rev() {
+            bring_agent_front(self, name, &shown);
         }
     }
 
@@ -98,8 +98,8 @@ impl View {
             .agents
             .spawns
             .values()
-            .filter(|text| !text.done())
-            .map(|text| text.anim)
+            .filter(|spawn| !spawn.done())
+            .map(|spawn| spawn.anim)
             .collect();
 
         crate::domain::avatar::Spawn::random_except(&taken)
@@ -107,13 +107,13 @@ impl View {
 
     /// A spawn (or its text decode) runs: frames at 30 per second.
     pub(super) fn spawning(&self) -> bool {
-        self.agents.spawns.values().any(|text| !text.over()) || crate::features::cost::morphing()
+        self.agents.spawns.values().any(|spawn| !spawn.over()) || crate::features::cost::morphing()
     }
 
     /// The color of agent NAME now: blocked (a question waits on the owner): all warn yellow,
     /// else its own.
     pub(super) fn color(&self, name: &str) -> Color {
-        if self.thread.asks.iter().any(|query| query.agent == name) {
+        if self.thread.asks.iter().any(|ask| ask.agent == name) {
             theme::pal().attention()
         } else {
             self.agents.colors.get(name).copied().unwrap_or(theme::pal().accent)
@@ -122,24 +122,24 @@ impl View {
 
     /// The agent colors now (blocked agents: yellow).
     pub(super) fn colors_now(&self) -> chat::Colors {
-        let mut character = self.agents.colors.clone();
+        let mut colors = self.agents.colors.clone();
 
-        for query in &self.thread.asks {
-            character.insert(query.agent.clone(), theme::pal().attention());
+        for ask in &self.thread.asks {
+            colors.insert(ask.agent.clone(), theme::pal().attention());
         }
 
-        character
+        colors
     }
 
     /// The avatar status of agent NAME.
     pub(super) fn avatar_status(&self, name: &str) -> crate::domain::avatar::Status {
         use crate::domain::avatar::Status;
 
-        if self.thread.asks.iter().any(|query| query.agent == name) {
+        if self.thread.asks.iter().any(|ask| ask.agent == name) {
             Status::Blocked
         } else if self.thread.busy.contains(name) || self.thread.working(name) {
             Status::Working
-        } else if self.monitors.watches.iter().any(|width| width.agent == name) {
+        } else if self.monitors.watches.iter().any(|watch| watch.agent == name) {
             Status::Thinking
         } else {
             Status::Idle
@@ -148,7 +148,7 @@ impl View {
 
     /// The spawns over the header (and what is below it), in the agent colors.
     pub(super) fn draw_spawns(&mut self, frame: &mut Frame) {
-        self.agents.spawns.retain(|_, text| !text.over());
+        self.agents.spawns.retain(|_, spawn| !spawn.over());
         let area = frame.area();
 
         for (name, slot) in self.agents.slots.borrow().iter() {
@@ -196,20 +196,20 @@ fn draw_spawn_row(buffer: &mut ratatui::buffer::Buffer, geometry: &SpawnGeometry
     }
 }
 
-fn sync_order_branch(view: &mut View, count: String) {
-    if view.agents.order.contains(&count) {
+fn add_to_order(view: &mut View, name: String) {
+    if view.agents.order.contains(&name) {
         return;
     }
 
-    if view.agents.front.contains(&count) {
-        view.agents.order.insert(0, count.clone());
+    if view.agents.front.contains(&name) {
+        view.agents.order.insert(0, name.clone());
     } else {
-        view.agents.order.push(count.clone());
+        view.agents.order.push(name.clone());
     }
 
-    let sp = view.new_spawn();
+    let spawn = view.new_spawn();
 
-    view.agents.spawns.insert(count, sp);
+    view.agents.spawns.insert(name, spawn);
 }
 
 fn bring_agent_front(view: &mut View, name: &str, shown: &HashSet<String>) {
@@ -242,16 +242,16 @@ fn draw_spawns_sprite(
     name: &String,
     slot: ratatui::prelude::Rect,
 ) {
-    let Some(sp) = view.agents.spawns.get(name) else {
+    let Some(spawn) = view.agents.spawns.get(name) else {
         return;
     };
 
     let sprite = view.agents.profiles.get(name).map_or_else(
         || crate::domain::sprites::default_for(name).desynced(name),
-        |path| path.0.clone(),
+        |(sprite, _)| sprite.clone(),
     );
 
-    let Some(rows) = sp.rows(&sprite.avatar, view.avatar_status(name)) else {
+    let Some(rows) = spawn.rows(&sprite.avatar, view.avatar_status(name)) else {
         return;
     };
 

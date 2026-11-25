@@ -75,13 +75,13 @@ impl MergeTab {
 
     /// True: a redraw is due.
     pub(crate) fn poll(&mut self) -> bool {
-        let mut directory = self.list.poll();
+        let mut dirty = self.list.poll();
 
-        if let Some(message) = self.detail.as_mut() {
-            directory |= message.poll(true);
+        if let Some(detail) = self.detail.as_mut() {
+            dirty |= detail.poll(true);
         }
 
-        directory
+        dirty
     }
 
     fn task(&self, text: &str) -> String {
@@ -94,17 +94,17 @@ impl MergeTab {
         }
     }
 
-    fn act(agent: Act) -> Out {
-        match agent {
+    fn act(act: Act) -> Out {
+        match act {
             Act::None => Out::None,
-            Act::Toast(thread) => Out::Toast(thread),
+            Act::Toast(toast) => Out::Toast(toast),
             Act::Open(..) => Out::Toast("0 thread: 0 checkout to open".into()),
-            Act::Prompt(thread_value) => Out::Compose(thread_value),
+            Act::Prompt(prompt) => Out::Compose(prompt),
         }
     }
 
-    pub(crate) fn key(&mut self, key_value: KeyEvent) -> Out {
-        dispatch_tab_key(self, key_value)
+    pub(crate) fn key(&mut self, key: KeyEvent) -> Out {
+        dispatch_tab_key(self, key)
     }
 
     pub(crate) fn mouse(&mut self, event: MouseEvent) -> Out {
@@ -117,27 +117,27 @@ impl MergeTab {
             Some(_) if self.input_focus => {
                 "ctrl+⏎: new thread with this task · tab / esc: back to the pull request ".into()
             }
-            Some(message) => format!("{}· esc: the list ", message.hints()),
+            Some(detail) => format!("{}· esc: the list ", detail.hints()),
         }
     }
 
     pub(crate) fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        let Some(message) = self.detail.as_mut() else {
+        let Some(detail) = self.detail.as_mut() else {
             self.list.draw(frame, area, true);
             return;
         };
 
         let rows = (self.input.rows_for(area.width.saturating_sub(2)) as u16).clamp(1, 6);
-        let input_h = rows + 2;
+        let input_height = rows + 2;
         let top = Rect {
-            height: area.height.saturating_sub(input_h + 1),
+            height: area.height.saturating_sub(input_height + 1),
             ..area
         };
 
-        message.draw(frame, top, !self.input_focus);
-        let area_value = Rect {
+        detail.draw(frame, top, !self.input_focus);
+        let input_area = Rect {
             y: top.bottom() + 1,
-            height: input_h.min(area.height),
+            height: input_height.min(area.height),
             ..area
         };
 
@@ -147,20 +147,20 @@ impl MergeTab {
             theme::line()
         };
 
-        let bytes = Block::new()
+        let block = Block::new()
             .borders(Borders::ALL)
             .border_style(edge)
             .title(Span::styled(" prompt · i ", theme::muted()));
-        let inner = bytes.inner(area_value);
+        let inner = block.inner(input_area);
 
-        frame.render_widget(bytes, area_value);
+        frame.render_widget(block, input_area);
         self.input.render(frame, inner, self.input_focus);
         self.input_rect = inner;
     }
 
     /// A note of the PR view (an edit done), once.
     pub(crate) fn take_note(&mut self) -> Option<String> {
-        self.detail.as_mut().and_then(|message| message.note.take())
+        self.detail.as_mut().and_then(|detail| detail.note.take())
     }
 }
 
@@ -168,56 +168,56 @@ impl MergeTab {
 #[path = "merge_tab_tests.rs"]
 mod tests;
 
-fn dispatch_tab_key(widget_state: &mut MergeTab, key_value: KeyEvent) -> Out {
-    let Some(message) = widget_state.detail.as_mut() else {
-        return match widget_state.list.key(key_value) {
-            Pick::Open(error) => {
-                widget_state.open(&error.item.pr);
+fn dispatch_tab_key(tab: &mut MergeTab, key: KeyEvent) -> Out {
+    let Some(detail) = tab.detail.as_mut() else {
+        return match tab.list.key(key) {
+            Pick::Open(entry) => {
+                tab.open(&entry.item.pr);
                 Out::None
             }
-            Pick::Toast(thread) => Out::Toast(thread),
+            Pick::Toast(toast) => Out::Toast(toast),
             Pick::None => Out::None,
         };
     };
 
-    let ctrl = key_value
+    let ctrl = key
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
 
-    if widget_state.input_focus {
-        return dispatch_prompt_key(widget_state, key_value, ctrl);
+    if tab.input_focus {
+        return dispatch_prompt_key(tab, key, ctrl);
     }
 
-    if key_value.code == KeyCode::Esc && !message.takes_esc() {
-        widget_state.detail = None;
+    if key.code == KeyCode::Esc && !detail.takes_esc() {
+        tab.detail = None;
         return Out::Back;
     }
 
-    let agent = message.key(key_value);
+    let act = detail.key(key);
 
-    MergeTab::act(agent)
+    MergeTab::act(act)
 }
 
-fn dispatch_prompt_key(widget_state: &mut MergeTab, key_value: KeyEvent, ctrl: bool) -> Out {
-    match key_value.code {
+fn dispatch_prompt_key(tab: &mut MergeTab, key: KeyEvent, ctrl: bool) -> Out {
+    match key.code {
         // esc: back to the pull request (tab: the next region, the start screen's)
-        KeyCode::Esc => widget_state.input_focus = false,
+        KeyCode::Esc => tab.input_focus = false,
         KeyCode::Enter if ctrl => {
-            let text = widget_state.input.text();
+            let text = tab.input.text();
 
             if text.trim().is_empty() {
                 return Out::Toast("0 text".into());
             }
 
-            widget_state.input.set_text("");
-            widget_state.input_focus = false;
-            return Out::Compose(widget_state.task(text.trim()));
+            tab.input.set_text("");
+            tab.input_focus = false;
+            return Out::Compose(tab.task(text.trim()));
         }
         _ => {
-            if let Outcome::Ignored = widget_state.input.key(key_value)
-                && key_value.code == KeyCode::Enter
+            if let Outcome::Ignored = tab.input.key(key)
+                && key.code == KeyCode::Enter
             {
-                widget_state.input.newline();
+                tab.input.newline();
             }
         }
     }
@@ -225,37 +225,37 @@ fn dispatch_prompt_key(widget_state: &mut MergeTab, key_value: KeyEvent, ctrl: b
     Out::None
 }
 
-fn dispatch_tab_mouse(widget_state: &mut MergeTab, event: MouseEvent) -> Out {
+fn dispatch_tab_mouse(tab: &mut MergeTab, event: MouseEvent) -> Out {
     let at = Position {
         x: event.column,
         y: event.row,
     };
 
-    let Some(directory) = widget_state.detail.as_mut() else {
-        return match widget_state.list.mouse(event) {
-            Pick::Open(error) => {
-                widget_state.open(&error.item.pr);
+    let Some(detail) = tab.detail.as_mut() else {
+        return match tab.list.mouse(event) {
+            Pick::Open(entry) => {
+                tab.open(&entry.item.pr);
                 Out::None
             }
-            Pick::Toast(thread) => Out::Toast(thread),
+            Pick::Toast(toast) => Out::Toast(toast),
             Pick::None => Out::None,
         };
     };
 
-    if widget_state.input_rect.contains(at) {
+    if tab.input_rect.contains(at) {
         if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
-            widget_state.input_focus = true;
+            tab.input_focus = true;
         }
 
-        widget_state.input.mouse(event);
+        tab.input.mouse(event);
         return Out::None;
     }
 
     if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
-        widget_state.input_focus = false;
+        tab.input_focus = false;
     }
 
-    let agent = directory.mouse(event);
+    let act = detail.mouse(event);
 
-    MergeTab::act(agent)
+    MergeTab::act(act)
 }

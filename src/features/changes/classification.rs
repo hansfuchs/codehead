@@ -10,13 +10,14 @@ impl View {
 
     /// The model's group of PATH and the why of PATH, if the rank is current (as of `build`).
     pub(super) fn ranked(&self, path: &str) -> Option<(usize, &crate::domain::changes::rank::Group, &str)> {
-        let result = self.classifier.rank.as_ref().filter(|_| self.classifier.fresh_rank)?;
+        let rank = self.classifier.rank.as_ref().filter(|_| self.classifier.fresh_rank)?;
 
-        result.groups.iter().enumerate().find_map(|(group, gr)| {
-            gr.files
+        rank.groups.iter().enumerate().find_map(|(index, group)| {
+            group
+                .files
                 .iter()
                 .find(|file| file.path == path)
-                .map(|file| (group, gr, file.why.as_str()))
+                .map(|file| (index, group, file.why.as_str()))
         })
     }
 
@@ -30,7 +31,7 @@ impl View {
         let row = self.layout.rows.get(self.at)?;
         let head = self.layout.rows[..=self.at]
             .iter()
-            .rposition(|x| x.head && x.file == row.file)?;
+            .rposition(|above| above.head && above.file == row.file)?;
 
         Some((self.changes.files.get(row.file)?.path.clone(), self.at - head))
     }
@@ -58,10 +59,10 @@ impl View {
 /// ` · 2 staged · ↑1 ↓3 · git…`: the git side of the summary.
 fn git_state(view: &View) -> String {
     let mut text = String::new();
-    let count = view.changes.staged.len();
+    let staged = view.changes.staged.len();
 
-    if count > 0 {
-        let _ = write!(text, " · {count} staged");
+    if staged > 0 {
+        let _ = write!(text, " · {staged} staged");
     }
 
     if view.changes.ahead + view.changes.behind > 0 {
@@ -72,11 +73,11 @@ fn git_state(view: &View) -> String {
         text.push_str(" · git…");
     }
 
-    if let Some(path) = &view.pull_request.pr {
-        let _ = write!(text, " · PR #{} {}", path.number, path.state.to_lowercase());
+    if let Some(pr) = &view.pull_request.pr {
+        let _ = write!(text, " · PR #{} {}", pr.number, pr.state.to_lowercase());
 
-        if path.pass + path.fail + path.pending > 0 {
-            let _ = write!(text, " ✓{} ✗{} ●{}", path.pass, path.fail, path.pending);
+        if pr.pass + pr.fail + pr.pending > 0 {
+            let _ = write!(text, " ✓{} ✗{} ●{}", pr.pass, pr.fail, pr.pending);
         }
     }
 
@@ -84,13 +85,13 @@ fn git_state(view: &View) -> String {
         text.push_str(" · reviewing…");
     } else if let Some(error) = &view.reviewer.review_error {
         let _ = write!(text, " · {error}");
-    } else if let Some(result) = view
+    } else if let Some(review) = view
         .reviewer
         .review
         .as_ref()
-        .filter(|result| !result.findings.is_empty())
+        .filter(|review| !review.findings.is_empty())
     {
-        let _ = write!(text, " · {} findings ({})", result.findings.len(), result.model);
+        let _ = write!(text, " · {} findings ({})", review.findings.len(), review.model);
     }
 
     text
@@ -100,9 +101,9 @@ fn apply_rank_view(view: &mut View, force: bool) {
     let key = crate::domain::changes::rank::key(&view.changes.files);
 
     // a rank of an older codehead (0 levels): a new call too
-    let fresh = view.classifier.rank.as_ref().is_some_and(|result| {
-        result.key == key
-            && result
+    let fresh = view.classifier.rank.as_ref().is_some_and(|rank| {
+        rank.key == key
+            && rank
                 .groups
                 .iter()
                 .flat_map(|group| &group.files)
@@ -125,23 +126,24 @@ fn apply_rank_view(view: &mut View, force: bool) {
         view.classifier.rank_error = None;
     }
 
-    let Some(result) = view.classifier.rank.as_ref().filter(|result| result.key == key) else {
+    let Some(rank) = view.classifier.rank.as_ref().filter(|rank| rank.key == key) else {
         return;
     };
 
-    let pos: HashMap<&str, (usize, usize)> = result
+    let pos: HashMap<&str, (usize, usize)> = rank
         .groups
         .iter()
         .enumerate()
-        .flat_map(|(group, gr)| {
-            gr.files
+        .flat_map(|(group, ranked)| {
+            ranked
+                .files
                 .iter()
                 .enumerate()
-                .map(move |(key, file)| (file.path.as_str(), (group, key)))
+                .map(move |(index, file)| (file.path.as_str(), (group, index)))
         })
         .collect();
 
-    let pos: HashMap<String, (usize, usize)> = pos.into_iter().map(|(path, value)| (path.to_string(), value)).collect();
+    let pos: HashMap<String, (usize, usize)> = pos.into_iter().map(|(path, place)| (path.to_string(), place)).collect();
 
     // a stable sort: unranked files keep the path-rule order, after the groups
     view.changes
@@ -155,10 +157,10 @@ fn levels_view(view: &View) -> Vec<crate::domain::changes::rank::Level> {
         .classifier
         .rank
         .iter()
-        .flat_map(|result| &result.groups)
+        .flat_map(|rank| &rank.groups)
         .flat_map(|group| &group.files)
         .filter_map(|file| {
-            crate::domain::changes::rank::Level::parse(&file.level).map(|line| (file.path.as_str(), line))
+            crate::domain::changes::rank::Level::parse(&file.level).map(|level| (file.path.as_str(), level))
         })
         .collect();
 
@@ -178,15 +180,15 @@ fn poll_rank_view(view: &mut View) -> bool {
         return false;
     };
 
-    let Ok(result) = rx.try_recv() else { return false };
+    let Ok(read) = rx.try_recv() else { return false };
 
     view.classifier.ranking = None;
 
-    match result {
-        Ok(result) => {
+    match read {
+        Ok(rank) => {
             let cur = view.cursor_spot();
 
-            view.classifier.rank = Some(result);
+            view.classifier.rank = Some(rank);
             view.apply_rank(false);
             view.pending_cursor = cur;
         }
@@ -197,19 +199,21 @@ fn poll_rank_view(view: &mut View) -> bool {
 }
 
 fn summary_view(view: &View) -> Line<'static> {
-    let (add, del) = view.changes.files.iter().fold((0, 0), |(agent, directory), file| {
-        (agent + file.add, directory + file.del)
-    });
+    let (add, del) = view
+        .changes
+        .files
+        .iter()
+        .fold((0, 0), |(added, deleted), file| (added + file.add, deleted + file.del));
 
     let (done, all) = view.progress();
 
-    if let Some(character) = &view.commit_src {
-        let state = if character.pushed { "pushed" } else { "unpushed" };
+    if let Some(commit) = &view.commit_src {
+        let state = if commit.pushed { "pushed" } else { "unpushed" };
 
         return Line::from(vec![
-            Span::styled(format!(" ◆ {} ", character.short), theme::accent_bold()),
+            Span::styled(format!(" ◆ {} ", commit.short), theme::accent_bold()),
             Span::styled(
-                format!("{} · ", crate::ui::thread_card::fit(&character.subject, 60)),
+                format!("{} · ", crate::ui::thread_card::fit(&commit.subject, 60)),
                 theme::text(),
             ),
             Span::styled(format!("{all} files · "), theme::muted()),
@@ -223,8 +227,8 @@ fn summary_view(view: &View) -> Line<'static> {
         "classifying…".to_string()
     } else if let Some(error) = &view.classifier.rank_error {
         format!("path order · {error}")
-    } else if let Some(result) = view.classifier.rank.as_ref().filter(|_| view.classifier.fresh_rank) {
-        format!("order: {}", result.model)
+    } else if let Some(rank) = view.classifier.rank.as_ref().filter(|_| view.classifier.fresh_rank) {
+        format!("order: {}", rank.model)
     } else {
         "path order".to_string()
     };

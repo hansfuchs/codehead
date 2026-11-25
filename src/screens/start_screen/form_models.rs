@@ -9,7 +9,7 @@ impl App {
     pub(super) fn harness_items(form: &AgentForm) -> Vec<(String, dropdown::Row)> {
         let cur = form.harness_name();
 
-        let mut value: Vec<(String, dropdown::Row)> = form
+        let mut items: Vec<(String, dropdown::Row)> = form
             .harnesses
             .iter()
             .map(|(name, label, bin)| {
@@ -25,8 +25,8 @@ impl App {
             })
             .collect();
 
-        if !value.iter().any(|(count, _)| *count == cur) {
-            value.push((
+        if !items.iter().any(|(name, _)| *name == cur) {
+            items.push((
                 cur.clone(),
                 dropdown::Row {
                     text: cur,
@@ -37,41 +37,45 @@ impl App {
             ));
         }
 
-        value
+        items
     }
 
-    /// Rows of the model dropdown of harness H (value, row), and a status: models being read, a
+    /// Rows of the model dropdown of harness HARNESS (items, row), and a status: models being read, a
     /// read error. Claude Code: aliases + exact ids; others: `default` + the cached list.
-    pub(super) fn model_items(&self, form: &AgentForm, height: &str) -> (Vec<(String, dropdown::Row)>, Option<String>) {
+    pub(super) fn model_items(
+        &self,
+        form: &AgentForm,
+        harness: &str,
+    ) -> (Vec<(String, dropdown::Row)>, Option<String>) {
         let cur = form.model_id();
 
-        let row = |message: &crate::infra::models::Model| {
+        let row = |model: &crate::infra::models::Model| {
             (
-                message.id.clone(),
+                model.id.clone(),
                 dropdown::Row {
-                    text: message.id.clone(),
-                    detail: message.name.clone(),
-                    now: message.id == cur,
+                    text: model.id.clone(),
+                    detail: model.name.clone(),
+                    now: model.id == cur,
                     marks: Vec::new(),
                 },
             )
         };
 
-        let mut value: Vec<(String, dropdown::Row)> = Vec::new();
+        let mut items: Vec<(String, dropdown::Row)> = Vec::new();
         let mut status = None;
 
-        if height == "claude" {
-            value.extend(
+        if harness == "claude" {
+            items.extend(
                 crate::infra::models::claude(&crate::infra::config::models())
                     .iter()
                     .map(row),
             );
         } else {
-            model_items_error(self, height, row, &mut value, &mut status);
+            push_cached_models(self, harness, row, &mut items, &mut status);
         }
 
-        if !value.iter().any(|(id, _)| *id == cur) {
-            value.push((
+        if !items.iter().any(|(id, _)| *id == cur) {
+            items.push((
                 cur.clone(),
                 dropdown::Row {
                     text: cur,
@@ -82,15 +86,15 @@ impl App {
             ));
         }
 
-        (value, status)
+        (items, status)
     }
 
     /// The rows of FORM's open dropdown for its filter, best match first.
     pub(super) fn pick_items(&self, form: &AgentForm) -> Vec<(String, dropdown::Row)> {
-        let Some(path) = &form.pick else { return Vec::new() };
+        let Some(pick) = &form.pick else { return Vec::new() };
 
-        let all = if path.model {
-            self.model_items(form, &path.harness).0
+        let all = if pick.model {
+            self.model_items(form, &pick.harness).0
         } else {
             Self::harness_items(form)
         };
@@ -98,27 +102,27 @@ impl App {
         // the text (marked), the value and detail too (substring)
         let ranked = crate::ui::fuzzy::rank(
             &all,
-            &path.query,
-            |(_, result)| result.text.clone(),
-            |(value, result_value)| format!("{value} {}", result_value.detail),
+            &pick.query,
+            |(_, row)| row.text.clone(),
+            |(value, row)| format!("{value} {}", row.detail),
         );
         let mut slots: Vec<Option<(String, dropdown::Row)>> = all.into_iter().map(Some).collect();
 
         ranked
             .into_iter()
             .filter_map(|(i, marks)| {
-                let (value_value, mut result_2) = slots[i].take()?;
+                let (value, mut row) = slots[i].take()?;
 
-                result_2.marks = marks;
-                Some((value_value, result_2))
+                row.marks = marks;
+                Some((value, row))
             })
             .collect()
     }
 
-    /// The model list of harness H: from the cache file; 0 list or older than a day (or FORCE,
+    /// The model list of harness HARNESS: from the cache file; 0 list or older than a day (or FORCE,
     /// `r`): read in the background.
-    pub(super) fn ensure_models(&mut self, height: &str, force: bool) {
-        if height == "claude" {
+    pub(super) fn ensure_models(&mut self, harness: &str, force: bool) {
+        if harness == "claude" {
             return;
         }
 
@@ -126,52 +130,48 @@ impl App {
             .model_catalog
             .models
             .get_or_insert_with(crate::infra::models::load)
-            .get(height)
+            .get(harness)
             .is_some_and(crate::infra::models::fresh);
 
         if fresh && !force {
             return;
         }
 
-        let (probe, name) = (self.model_catalog.probe, height.to_string());
+        let (probe, name) = (self.model_catalog.probe, harness.to_string());
 
-        self.model_catalog.model_errors.remove(height);
+        self.model_catalog.model_errors.remove(harness);
 
         self.model_catalog.model_reads.request(name.clone(), move || {
-            probe(&name).map(|message| crate::infra::models::store(&name, &message))
+            probe(&name).map(|models| crate::infra::models::store(&name, &models))
         });
     }
 
     /// Enter / click on the harness (MODEL: model) field: its dropdown, the cursor on the current value.
     pub(super) fn open_form_pick(&mut self, form: &mut AgentForm, model: bool) {
-        let height = form.harness_name();
+        let harness = form.harness_name();
 
         if model {
-            self.ensure_models(&height, false);
+            self.ensure_models(&harness, false);
             form.field = F_MODEL;
         }
 
         form.pick = Some(FormPick {
             model,
-            harness: height,
+            harness,
             cursor: 0,
             offset: 0,
             query: String::new(),
         });
-        let cursor = self
-            .pick_items(form)
-            .iter()
-            .position(|(_, result)| result.now)
-            .unwrap_or(0);
+        let cursor = self.pick_items(form).iter().position(|(_, row)| row.now).unwrap_or(0);
 
-        if let Some(path) = &mut form.pick {
-            path.cursor = cursor;
+        if let Some(pick) = &mut form.pick {
+            pick.cursor = cursor;
         }
     }
 
     /// Value V picked: a harness → the field, then its model list; a model → the form.
     pub(super) fn choose_form_pick(&mut self, form: &mut AgentForm, value: &str) {
-        let model = form.pick.as_ref().is_some_and(|path| path.model);
+        let model = form.pick.as_ref().is_some_and(|pick| pick.model);
 
         form.pick = None;
         form.error = None;
@@ -193,29 +193,29 @@ impl App {
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let Some(path) = form.pick.as_mut() else { return };
-        let (model, height, query) = (path.model, path.harness.clone(), path.query.clone());
+        let Some(pick) = form.pick.as_mut() else { return };
+        let (model, harness, query) = (pick.model, pick.harness.clone(), pick.query.clone());
 
         match key.code {
             KeyCode::Esc => form.pick = None,
-            KeyCode::Up if count > 0 => path.cursor = (path.cursor + count - 1) % count,
-            KeyCode::Down if count > 0 => path.cursor = (path.cursor + 1) % count,
-            KeyCode::PageUp => path.cursor = path.cursor.saturating_sub(dropdown::MAX_ROWS),
-            KeyCode::PageDown if count > 0 => path.cursor = (path.cursor + dropdown::MAX_ROWS).min(count - 1),
-            KeyCode::Enter => match items.get(path.cursor) {
+            KeyCode::Up if count > 0 => pick.cursor = (pick.cursor + count - 1) % count,
+            KeyCode::Down if count > 0 => pick.cursor = (pick.cursor + 1) % count,
+            KeyCode::PageUp => pick.cursor = pick.cursor.saturating_sub(dropdown::MAX_ROWS),
+            KeyCode::PageDown if count > 0 => pick.cursor = (pick.cursor + dropdown::MAX_ROWS).min(count - 1),
+            KeyCode::Enter => match items.get(pick.cursor) {
                 Some((value, _)) => self.choose_form_pick(form, value),
                 None if model && !query.trim().is_empty() => self.choose_form_pick(form, query.trim()),
                 None => {}
             },
-            KeyCode::Char('r') if model && (ctrl || query.is_empty()) => self.ensure_models(&height, true),
+            KeyCode::Char('r') if model && (ctrl || query.is_empty()) => self.ensure_models(&harness, true),
             KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h')
-                if crate::ui::textarea::delete_key(&mut path.query, &key) =>
+                if crate::ui::textarea::delete_key(&mut pick.query, &key) =>
             {
-                (path.cursor, path.offset) = (0, 0);
+                (pick.cursor, pick.offset) = (0, 0);
             }
             KeyCode::Char(character) if typed => {
-                path.query.push(character);
-                (path.cursor, path.offset) = (0, 0);
+                pick.query.push(character);
+                (pick.cursor, pick.offset) = (0, 0);
             }
             _ => {}
         }
@@ -228,11 +228,11 @@ impl App {
             .regions
             .form_rows
             .iter()
-            .find(|(result, _)| result.contains(at))
+            .find(|(rect, _)| rect.contains(at))
             .map(|&(_, j)| j)
         {
             Some(j) => {
-                form_pick_click_value_value(self, form, j);
+                choose_form_row(self, form, j);
             }
             None => form.pick = None,
         }
@@ -282,52 +282,46 @@ impl FormPick {
     }
 }
 
-fn model_items_error(
-    app_state: &App,
-    height: &str,
+fn push_cached_models(
+    app: &App,
+    harness: &str,
     row: impl Fn(&crate::infra::models::Model) -> (String, dropdown::Row),
-    value: &mut Vec<(String, dropdown::Row)>,
+    items: &mut Vec<(String, dropdown::Row)>,
     status: &mut Option<String>,
 ) {
-    value.push(row(&crate::infra::models::Model {
+    items.push(row(&crate::infra::models::Model {
         id: "default".into(),
         name: "harness default".into(),
     }));
 
-    if let Some(error) = app_state
+    if let Some(cached) = app
         .model_catalog
         .models
         .as_ref()
-        .and_then(|message_value| message_value.get(height))
+        .and_then(|catalog| catalog.get(harness))
     {
-        value.extend(error.models.iter().map(row));
+        items.extend(cached.models.iter().map(row));
     }
 
-    if app_state.model_catalog.model_reads.waiting(&height.to_string()) {
+    if app.model_catalog.model_reads.waiting(&harness.to_string()) {
         *status = Some("reading models…".to_string());
-    } else if let Some(error_value) = app_state.model_catalog.model_errors.get(height) {
-        *status = Some(format!("models: {error_value}"));
+    } else if let Some(error) = app.model_catalog.model_errors.get(harness) {
+        *status = Some(format!("models: {error}"));
     }
 }
 
-fn draw_form_pick_items(
-    app_state: &mut App,
-    frame: &mut Frame<'_>,
-    bounds: Rect,
-    form: &mut AgentForm,
-    pick: &FormPick,
-) {
-    let items = app_state.pick_items(form);
+fn draw_form_pick_items(app: &mut App, frame: &mut Frame<'_>, bounds: Rect, form: &mut AgentForm, pick: &FormPick) {
+    let items = app.pick_items(form);
     let count = items.len();
 
     let total = if pick.model {
-        app_state.model_items(form, &pick.harness).0.len()
+        app.model_items(form, &pick.harness).0.len()
     } else {
         App::harness_items(form).len()
     };
 
     let status = if pick.model {
-        app_state.model_items(form, &pick.harness).1
+        app.model_items(form, &pick.harness).1
     } else {
         None
     };
@@ -339,15 +333,15 @@ fn draw_form_pick_items(
         width: 1,
         height: 1,
     };
-    let rows: Vec<dropdown::Row> = items.into_iter().map(|(_, result)| result).collect();
+    let rows: Vec<dropdown::Row> = items.into_iter().map(|(_, row)| row).collect();
     let width = rows
         .iter()
-        .map(|result_value| result_value.text.width() + result_value.detail.width() + 8)
+        .map(|row| row.text.width() + row.detail.width() + 8)
         .max()
         .unwrap_or(0)
         .clamp(44, 80) as u16;
 
-    if let Some(result_2) = dropdown::place(anchor, width, count, bounds, false) {
+    if let Some(area) = dropdown::place(anchor, width, count, bounds, false) {
         let cursor = pick.cursor.min(count.saturating_sub(1));
 
         let label = pick.label();
@@ -356,7 +350,7 @@ fn draw_form_pick_items(
 
         let (offset, drawn) = dropdown::list(
             frame,
-            result_2,
+            area,
             dropdown::List {
                 label: &label,
                 note: &note,
@@ -367,18 +361,18 @@ fn draw_form_pick_items(
             },
         );
 
-        if let Some(path_value) = form.pick.as_mut() {
-            (path_value.cursor, path_value.offset) = (cursor, offset);
+        if let Some(open) = form.pick.as_mut() {
+            (open.cursor, open.offset) = (cursor, offset);
         }
 
-        app_state.preview.regions.form_rows = drawn;
+        app.preview.regions.form_rows = drawn;
     }
 }
 
-fn form_pick_click_value_value(app_state: &mut App, form: &mut AgentForm, j: usize) {
-    if let Some((value, _)) = app_state.pick_items(form).get(j) {
-        let value_value = value.clone();
+fn choose_form_row(app: &mut App, form: &mut AgentForm, j: usize) {
+    if let Some((value, _)) = app.pick_items(form).get(j) {
+        let value = value.clone();
 
-        app_state.choose_form_pick(form, &value_value);
+        app.choose_form_pick(form, &value);
     }
 }

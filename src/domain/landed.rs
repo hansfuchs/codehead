@@ -95,7 +95,7 @@ impl Land {
     pub(crate) fn badge(&self) -> String {
         match self {
             Land::Dirty(count) => format!("{count} uncommitted"),
-            Land::Unpushed(count_value) => format!("{count_value} unpushed"),
+            Land::Unpushed(count) => format!("{count} unpushed"),
             Land::Unmerged => "pushed, not merged".into(),
             Land::PrOpen(pr) => format!("{pr} open"),
             Land::Abandoned(pr) => format!("abandoned: {pr} closed"),
@@ -136,21 +136,21 @@ static PRS: Mutex<Option<HashMap<String, Vec<PrSeen>>>> = Mutex::new(None);
 
 /// The landed state of thread ID (None: 0 pass read it yet).
 pub(crate) fn of(id: &str) -> Option<Land> {
-    LANDS.lock().ok().and_then(|message| message.as_ref()?.get(id).cloned())
+    LANDS.lock().ok().and_then(|lands| lands.as_ref()?.get(id).cloned())
 }
 
 /// The PRs of thread ID (the PR pass). New ones: its state again; a new merge: a fetch (the
 /// merge commit on the base branch).
 pub(crate) fn set_prs(id: &str, prs: &[PrSeen]) {
-    let Ok(mut message) = PRS.lock() else { return };
-    let old = message
+    let Ok(mut all) = PRS.lock() else { return };
+    let old = all
         .get_or_insert_with(HashMap::new)
         .insert(id.to_string(), prs.to_owned());
 
-    drop(message);
+    drop(all);
 
     if old.as_deref() != Some(prs) {
-        let merged = |value: &[PrSeen]| value.iter().filter(|path| path.state == State::Merged).count();
+        let merged = |list: &[PrSeen]| list.iter().filter(|pr| pr.state == State::Merged).count();
 
         if merged(prs) > old.as_deref().map_or(0, merged) {
             kick(In::Visible);
@@ -163,7 +163,7 @@ pub(crate) fn set_prs(id: &str, prs: &[PrSeen]) {
 fn prs_of(id: &str) -> Vec<PrSeen> {
     PRS.lock()
         .ok()
-        .and_then(|message| message.as_ref()?.get(id).cloned())
+        .and_then(|all| all.as_ref()?.get(id).cloned())
         .unwrap_or_default()
 }
 
@@ -201,8 +201,8 @@ pub(crate) fn version() -> u64 {
 
 /// True: a change.
 fn set(id: &str, land: Land) -> bool {
-    let Ok(mut message) = LANDS.lock() else { return false };
-    let new = message
+    let Ok(mut lands) = LANDS.lock() else { return false };
+    let new = lands
         .get_or_insert_with(HashMap::new)
         .insert(id.to_string(), land.clone())
         != Some(land);
@@ -216,11 +216,9 @@ fn set(id: &str, land: Land) -> bool {
 
 /// Thread ID gone. True: it had a state.
 fn unset(id: &str) -> bool {
-    let gone = LANDS.lock().is_ok_and(|mut message| {
-        message
-            .as_mut()
-            .is_some_and(|message_value| message_value.remove(id).is_some())
-    });
+    let gone = LANDS
+        .lock()
+        .is_ok_and(|mut lands| lands.as_mut().is_some_and(|lands| lands.remove(id).is_some()));
 
     if gone {
         VERSION.fetch_add(1, Ordering::Relaxed);
@@ -257,8 +255,8 @@ enum In {
 static KICK: Mutex<Option<Sender<In>>> = Mutex::new(None);
 
 fn kick(message: In) {
-    if let Ok(group) = KICK.lock()
-        && let Some(tx) = group.as_ref()
+    if let Ok(sender) = KICK.lock()
+        && let Some(tx) = sender.as_ref()
     {
         let _ = tx.send(message);
     }
@@ -309,27 +307,23 @@ pub(crate) fn start_at(threads: PathBuf) {
         return;
     }
 
-    if let Some(message) = std::fs::read(cache_path())
+    if let Some(cached) = std::fs::read(cache_path())
         .ok()
         .and_then(|bytes| serde_json::from_slice::<HashMap<String, Land>>(&bytes).ok())
-        && let Ok(mut line) = LANDS.lock()
+        && let Ok(mut lands) = LANDS.lock()
     {
-        *line = Some(message);
+        *lands = Some(cached);
     }
 
     let (tx, rx) = channel();
 
-    if let Ok(mut key) = KICK.lock() {
-        *key = Some(tx.clone());
+    if let Ok(mut kick) = KICK.lock() {
+        *kick = Some(tx.clone());
     }
 
     let topics = bus::subscribe();
 
-    std::thread::spawn(
-        move || {
-            if let ControlFlow::Break(()) = forward_bus_topics(&tx, topics) {}
-        },
-    );
+    std::thread::spawn(move || forward_bus_topics(&tx, topics));
 
     std::thread::Builder::new()
         .name("landed".into())
@@ -337,18 +331,16 @@ pub(crate) fn start_at(threads: PathBuf) {
         .ok();
 }
 
-fn forward_bus_topics(tx: &Sender<In>, topics: Receiver<Topic>) -> ControlFlow<()> {
-    for thread_value in topics {
-        if let ControlFlow::Break(()) = send_bus_topic(tx, thread_value) {
-            return ControlFlow::Break(());
+fn forward_bus_topics(tx: &Sender<In>, topics: Receiver<Topic>) {
+    for topic in topics {
+        if let ControlFlow::Break(()) = send_bus_topic(tx, topic) {
+            return;
         }
     }
-
-    ControlFlow::Continue(())
 }
 
-fn send_bus_topic(tx: &Sender<In>, thread_value: Topic) -> ControlFlow<()> {
-    if tx.send(In::Bus(thread_value)).is_err() {
+fn send_bus_topic(tx: &Sender<In>, topic: Topic) -> ControlFlow<()> {
+    if tx.send(In::Bus(topic)).is_err() {
         return ControlFlow::Break(());
     }
 
@@ -375,18 +367,18 @@ struct Co {
 
 impl Co {
     /// Git topic part K of its repo changes what this checkout shows.
-    fn hit(&self, key: &bus::Git) -> bool {
-        let base = |bytes: &str| bytes == "main" || bytes == "master" || self.def.as_deref() == Some(bytes);
+    fn hit(&self, part: &bus::Git) -> bool {
+        let base = |branch: &str| branch == "main" || branch == "master" || self.def.as_deref() == Some(branch);
 
-        match key {
+        match part {
             bus::Git::All => true,
             // the base moved: every branch's landed check; else only the checkouts on it
-            bus::Git::Branch(bytes_value) | bus::Git::Remote(bytes_value) => {
-                base(bytes_value) || self.branch.as_deref() == Some(bytes_value)
+            bus::Git::Branch(branch) | bus::Git::Remote(branch) => {
+                base(branch) || self.branch.as_deref() == Some(branch)
             }
-            bus::Git::Worktree(count) if count.is_empty() => self.own == self.common,
-            bus::Git::Worktree(count_value) => {
-                self.own.file_name().is_some_and(|file| file == count_value.as_str()) && self.own != self.common
+            bus::Git::Worktree(name) if name.is_empty() => self.own == self.common,
+            bus::Git::Worktree(name) => {
+                self.own.file_name().is_some_and(|own| own == name.as_str()) && self.own != self.common
             }
         }
     }

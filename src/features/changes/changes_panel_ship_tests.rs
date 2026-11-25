@@ -2,70 +2,70 @@ use super::*;
 
 #[test]
 fn the_panels_menu_has_the_ship_steps_a_stopped_rebase_only_its_own() {
-    let mut value = test_view();
+    let mut view = test_view();
 
     // S: 0 menu of its own any more
-    value.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+    view.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
 
-    assert!(value.modal_state.modal.is_none());
+    assert!(view.modal_state.modal.is_none());
 
-    let all = draw_ctx(&mut value, 120, 30).join("\n");
+    let all = draw_ctx(&mut view, 120, 30).join("\n");
 
     assert!(
         all.contains(" ship ") && all.contains("push") && all.contains("open the pull request"),
         "{all}"
     );
 
-    let (_, items) = value.ctx_items();
+    let (_, items) = view.ctx_items();
 
     assert!(
         items
             .iter()
-            .any(|i| i.label == "push" && i.asks && i.section == "ship/git"),
+            .any(|item| item.label == "push" && item.asks && item.section == "ship/git"),
         "push: outward, asks first"
     );
 
     // a stopped rebase: its steps only; the agents resolve at once, abort asks
-    value.changes.stopped = Some(vec!["src/a.rs".into()]);
-    let all = draw_ctx(&mut value, 120, 30).join("\n");
+    view.changes.stopped = Some(vec!["src/a.rs".into()]);
+    let all = draw_ctx(&mut view, 120, 30).join("\n");
 
     assert!(
         all.contains("resolve the conflicts") && !all.contains("open the pull request"),
         "{all}"
     );
-    assert!(matches!(ship(&mut value, "resolve the conflicts"), Act::Send(thread) if thread.contains("src/a.rs")));
+    assert!(matches!(ship(&mut view, "resolve the conflicts"), Act::Send(prompt) if prompt.contains("src/a.rs")));
 
-    let (_, items) = value.ctx_items();
+    let (_, items) = view.ctx_items();
 
     assert!(
-        items.iter().any(|i| i.label.contains("abort") && i.asks),
+        items.iter().any(|item| item.label.contains("abort") && item.asks),
         "abort: asks first"
     );
 }
 
 #[test]
 fn the_ship_section_hands_pr_steps_to_a_sub_thread_and_shows_the_open_pr() {
-    let mut value = prepare_ship_steps();
+    let mut view = prepare_ship_steps();
 
-    match ship(&mut value, "create PR draft") {
-        Act::Sub(thread) => assert!(
-            thread.starts_with("Open a draft pull request (`--draft`) for the branch `task/x`")
-                && thread.contains("git push -u origin task/x")
-                && thread.contains("--head task/x --base main --draft")
-                && !thread.contains("HEAD`,")
-                && thread.contains("uncommitted changes stay"),
-            "{thread}"
+    match ship(&mut view, "create PR draft") {
+        Act::Sub(task) => assert!(
+            task.starts_with("Open a draft pull request (`--draft`) for the branch `task/x`")
+                && task.contains("git push -u origin task/x")
+                && task.contains("--head task/x --base main --draft")
+                && !task.contains("HEAD`,")
+                && task.contains("uncommitted changes stay"),
+            "{task}"
         ),
-        agent_value => panic!("{agent_value:?}"),
+        other => panic!("{other:?}"),
     }
 
     // a PR open: its label on top, update description, 0 create rows
-    value.pull_request.pr = Some(crate::features::changes::Pr {
+    view.pull_request.pr = Some(crate::features::changes::Pr {
         number: 1234,
         url: "https://github.com/o/codehead/pull/1234".into(),
         ..Default::default()
     });
-    let all = draw_ctx(&mut value, 140, 40).join("\n");
+    let all = draw_ctx(&mut view, 140, 40).join("\n");
 
     assert!(
         all.contains("codehead#1234") && all.contains("update PR description") && !all.contains("create PR"),
@@ -73,53 +73,53 @@ fn the_ship_section_hands_pr_steps_to_a_sub_thread_and_shows_the_open_pr() {
     );
 
     // update PR on the newest main: uncommitted files → 0 sub-thread; a clean tree → the task
-    let up = value
+    let up = view
         .ship_rows()
         .iter()
-        .position(|result| result.label == "update PR on the newest main")
+        .position(|step| step.label == "update PR on the newest main")
         .unwrap();
 
-    assert!(value.ship_rows()[up].agent && value.ship_rows()[up].group == crate::features::changes::ShipGroup::Pr);
+    assert!(view.ship_rows()[up].agent && view.ship_rows()[up].group == crate::features::changes::ShipGroup::Pr);
     assert!(
-        matches!(ship(&mut value, "update PR on the newest main"), Act::Toast(thread_2) if thread_2.contains("uncommitted"))
+        matches!(ship(&mut view, "update PR on the newest main"), Act::Toast(toast) if toast.contains("uncommitted"))
     );
 
-    let files = std::mem::take(&mut value.changes.files);
+    let files = std::mem::take(&mut view.changes.files);
 
-    match ship(&mut value, "update PR on the newest main") {
-        Act::Sub(thread_value) => assert!(
-            thread_value.contains("git rebase origin/main")
-                && thread_value.contains("--force-with-lease origin task/x")
-                && thread_value.contains("`task/x`"),
-            "{thread_value}"
+    match ship(&mut view, "update PR on the newest main") {
+        Act::Sub(task) => assert!(
+            task.contains("git rebase origin/main")
+                && task.contains("--force-with-lease origin task/x")
+                && task.contains("`task/x`"),
+            "{task}"
         ),
-        agent_2 => panic!("{agent_2:?}"),
+        other => panic!("{other:?}"),
     }
 
-    value.changes.files = files;
+    view.changes.files = files;
 
     assert!(
-        matches!(ship(&mut value, "update PR description"), Act::Sub(thread_3) if thread_3.contains("gh pr edit 1234") && thread_3.contains("`headRefName` is not `task/x`"))
+        matches!(ship(&mut view, "update PR description"), Act::Sub(task) if task.contains("gh pr edit 1234") && task.contains("`headRefName` is not `task/x`"))
     );
 
     // ship: row 0, the state along, never merge
-    let first = value.ship_rows()[0].label.clone();
+    let first = view.ship_rows()[0].label.clone();
 
     assert!(
-        matches!(ship(&mut value, &first), Act::Sub(thread_4) if thread_4.contains("codehead#1234") && thread_4.contains("Never merge") && thread_4.contains("Never push to any branch but `task/x`") && !thread_4.contains("origin HEAD"))
+        matches!(ship(&mut view, &first), Act::Sub(task) if task.contains("codehead#1234") && task.contains("Never merge") && task.contains("Never push to any branch but `task/x`") && !task.contains("origin HEAD"))
     );
 }
 
 fn prepare_ship_steps() -> View {
-    let mut value = test_view();
+    let mut view = test_view();
 
-    value.focus_panel(true);
+    view.focus_panel(true);
 
-    assert!(value.scm.focus);
-    assert_eq!(value.hints(), "tab: next · ctrl+.: actions, ship ");
+    assert!(view.scm.focus);
+    assert_eq!(view.hints(), "tab: next · ctrl+.: actions, ship ");
 
     // 0 PR: ship, create PR, create PR draft; right of the panel, under a "ship" subheading
-    let rows = draw_ctx(&mut value, 140, 40);
+    let rows = draw_ctx(&mut view, 140, 40);
     let all = rows.join("\n");
 
     assert!(
@@ -144,31 +144,31 @@ fn prepare_ship_steps() -> View {
     );
     assert_eq!(
         rows.iter()
-            .filter(|line_value| line_value.contains('├') && line_value.contains('┤'))
+            .filter(|line| line.contains('├') && line.contains('┤'))
             .count(),
         3,
         "{all}"
     );
 
-    let at = rows.iter().find(|line_2| line_2.contains("create PR draft")).unwrap();
-    let px = usize::from(value.scm.rect.right());
+    let draft_row = rows.iter().find(|line| line.contains("create PR draft")).unwrap();
+    let px = usize::from(view.scm.rect.right());
 
     assert!(
-        at.chars().take(px).all(|character| character != '›')
-            && at.chars().nth(px).is_some_and(|character_value| character_value == '│'),
-        "{at}"
+        draft_row.chars().take(px).all(|symbol| symbol != '›')
+            && draft_row.chars().nth(px).is_some_and(|symbol| symbol == '│'),
+        "{draft_row}"
     );
 
     // create PR draft: 0 commits ahead → 0 sub-thread
-    assert!(matches!(ship(&mut value, "create PR draft"), Act::Toast(thread) if thread.contains("commit first")));
+    assert!(matches!(ship(&mut view, "create PR draft"), Act::Toast(toast) if toast.contains("commit first")));
 
     // 2 commits ahead, 0 branch (detached / 0 git): 0 sub-thread
-    value.changes.ahead = 2;
+    view.changes.ahead = 2;
 
-    assert!(matches!(ship(&mut value, "create PR draft"), Act::Toast(_)));
+    assert!(matches!(ship(&mut view, "create PR draft"), Act::Toast(_)));
 
     // on a branch: the sub-thread's task names it, a draft, the commits only
-    value.branch_override = Some("task/x".into());
+    view.branch_override = Some("task/x".into());
 
-    value
+    view
 }

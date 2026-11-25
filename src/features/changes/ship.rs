@@ -134,17 +134,17 @@ fn ship_cilog(view: &mut View) -> Act {
 }
 
 fn ship_full(view: &mut View) -> Act {
-    let bytes = match branch(view) {
-        Ok(bytes) => bytes,
-        Err(thread) => return Act::Toast(thread),
+    let branch = match checkout_branch(view) {
+        Ok(branch) => branch,
+        Err(error) => return Act::Toast(error),
     };
 
     view.pull_request.pr_at = None;
-    Act::Sub(ship_task(&bytes, &view.changes, view.pull_request.pr.as_ref()))
+    Act::Sub(ship_task(&branch, &view.changes, view.pull_request.pr.as_ref()))
 }
 
 fn ship_prrebase(view: &mut View) -> Act {
-    let Some(path) = view.pull_request.pr.clone() else {
+    let Some(pr) = view.pull_request.pr.clone() else {
         return Act::Toast("0 pull request on this branch".into());
     };
 
@@ -156,27 +156,27 @@ fn ship_prrebase(view: &mut View) -> Act {
         ));
     }
 
-    let bytes = match branch(view) {
-        Ok(bytes) => bytes,
-        Err(thread) => return Act::Toast(thread),
+    let branch = match checkout_branch(view) {
+        Ok(branch) => branch,
+        Err(error) => return Act::Toast(error),
     };
 
     view.pull_request.pr_at = None;
-    Act::Sub(pr_rebase_task(&bytes, &view.changes.base, &path))
+    Act::Sub(pr_rebase_task(&branch, &view.changes.base, &pr))
 }
 
 fn ship_prdesc(view: &mut View) -> Act {
-    let Some(path) = view.pull_request.pr.clone() else {
+    let Some(pr) = view.pull_request.pr.clone() else {
         return Act::Toast("0 pull request on this branch".into());
     };
 
-    let bytes = match branch(view) {
-        Ok(bytes) => bytes,
-        Err(thread) => return Act::Toast(thread),
+    let branch = match checkout_branch(view) {
+        Ok(branch) => branch,
+        Err(error) => return Act::Toast(error),
     };
 
     view.pull_request.pr_at = None;
-    Act::Sub(pr_desc_task(&bytes, &path))
+    Act::Sub(pr_desc_task(&branch, &pr))
 }
 
 fn ship_agentpr(view: &mut View, draft: bool) -> Act {
@@ -187,47 +187,47 @@ fn ship_agentpr(view: &mut View, draft: bool) -> Act {
         ));
     }
 
-    let bytes = match branch(view) {
-        Ok(bytes) => bytes,
-        Err(thread) => return Act::Toast(thread),
+    let branch = match checkout_branch(view) {
+        Ok(branch) => branch,
+        Err(error) => return Act::Toast(error),
     };
 
     view.pull_request.pr_at = None;
-    Act::Sub(pr_task(&bytes, &view.changes.base, draft))
+    Act::Sub(pr_task(&branch, &view.changes.base, draft))
 }
 
 fn ship_resolve(view: &mut View) -> Act {
-    let character = view.changes.stopped.clone().unwrap_or_default();
+    let conflicts = view.changes.stopped.clone().unwrap_or_default();
 
     Act::Send(format!(
         "The rebase on {} stopped with conflicts in: {}. Resolve each conflict (keep the intent of both sides), `git add` the files, then run `git -c core.editor=true rebase --continue`. Repeat until the rebase is done; report what you decided per conflict.",
         view.changes.base,
-        character.join(", ")
+        conflicts.join(", ")
     ))
 }
 
 /// The checkout's branch (the agent steps name it). Err: a detached HEAD, 0 git.
-fn branch(view: &View) -> Result<String, String> {
+fn checkout_branch(view: &View) -> Result<String, String> {
     #[cfg(test)]
-    if let Some(bytes) = &view.branch_override {
-        return Ok(bytes.clone());
+    if let Some(branch) = &view.branch_override {
+        return Ok(branch.clone());
     }
 
-    let bytes = git(&view.dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+    let branch = git(&view.dir, &["rev-parse", "--abbrev-ref", "HEAD"])
         .map_err(|error| format!("branch: {error}"))?
         .trim()
         .to_string();
 
-    if bytes.is_empty() || bytes == "HEAD" {
+    if branch.is_empty() || branch == "HEAD" {
         return Err("detached HEAD: check out a branch first".into());
     }
 
-    Ok(bytes)
+    Ok(branch)
 }
 
-/// Step S of the ship section.
-fn ship(text: Ship, view: &mut View) -> Act {
-    match text {
+/// Step STEP of the ship section.
+fn ship(step: Ship, view: &mut View) -> Act {
+    match step {
         Ship::Push => view.start_op(Op::Push),
         Ship::PushTo => view.ask_push_to(),
         Ship::Update => view.start_op(Op::Update(view.changes.base.clone())),
@@ -270,10 +270,10 @@ fn confirm_view(view: &mut View, yes: bool) -> Act {
     }
 
     view.stash_state.stash = stash::read(&view.id);
-    let count = view.stash_state.stash.len();
+    let before = view.stash_state.stash.len();
 
     match then {
-        Then::DropStash(id) => view.stash_state.stash.retain(|error| error.id != id),
+        Then::DropStash(id) => view.stash_state.stash.retain(|entry| entry.id != id),
         Then::ClearStash => view.stash_state.stash.clear(),
         Then::Uncommit(..) | Then::PushTo(_) => {}
     }
@@ -283,7 +283,7 @@ fn confirm_view(view: &mut View, yes: bool) -> Act {
 
     Act::Toast(format!(
         "stash: {} removed · {} left",
-        count - view.stash_state.stash.len(),
+        before - view.stash_state.stash.len(),
         view.stash_state.stash.len()
     ))
 }
@@ -307,28 +307,28 @@ fn ship_rows_view(view: &View) -> Vec<ShipRow> {
         }
     };
 
-    let character = &view.changes;
+    let changes = &view.changes;
 
-    if let Some(value) = rebase_ship_rows(row, character) {
-        return value;
+    if let Some(rows) = rebase_ship_rows(row, changes) {
+        return rows;
     }
 
-    let mut value = vec![row(
+    let mut rows = vec![row(
         Ship::Full,
         "ship: commit, push, PR, review, CI green".into(),
         "sub-thread".into(),
         true,
     )];
 
-    value.push(row(
+    rows.push(row(
         Ship::Push,
         "push".into(),
-        format!("{} ahead of {}", character.ahead, character.base),
+        format!("{} ahead of {}", changes.ahead, changes.base),
         true,
     ));
 
     if let Some((top, count)) = view.push_pick() {
-        value.push(row(
+        rows.push(row(
             Ship::PushTo,
             format!("push up to {} (picked)", top.short),
             format!("{count} commit{}", if count == 1 { "" } else { "s" }),
@@ -336,19 +336,19 @@ fn ship_rows_view(view: &View) -> Vec<ShipRow> {
         ));
     }
 
-    if character.base != "HEAD" {
-        value.push(row(
+    if changes.base != "HEAD" {
+        rows.push(row(
             Ship::Update,
-            format!("fetch + rebase on {}", character.base),
-            format!("{} behind", character.behind),
+            format!("fetch + rebase on {}", changes.base),
+            format!("{} behind", changes.behind),
             true,
         ));
     }
 
     match &view.pull_request.pr {
-        None => new_pull_request_rows(row, &mut value),
-        Some(path) => existing_pull_request_rows(row, character, &mut value, path),
+        None => new_pull_request_rows(row, &mut rows),
+        Some(pr) => existing_pull_request_rows(row, changes, &mut rows, pr),
     }
 
-    value
+    rows
 }

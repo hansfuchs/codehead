@@ -48,7 +48,7 @@ impl View {
 
     /// The view has the letters: the filter, a modal, the commit message.
     pub(crate) fn typing(&self) -> bool {
-        let peek = !self.scm.focus && self.peek.as_ref().is_some_and(|path| path.typing());
+        let peek = !self.scm.focus && self.peek.as_ref().is_some_and(|peek| peek.typing());
 
         peek || self.filter_state.filtering
             || self.modal_state.modal.is_some()
@@ -75,11 +75,11 @@ impl View {
     }
 
     /// The filter's text (the input along).
-    pub(super) fn set_filter(&mut self, thread: &str) {
-        self.filter_state.filter = thread.to_string();
+    pub(super) fn set_filter(&mut self, filter: &str) {
+        self.filter_state.filter = filter.to_string();
 
-        if self.filter_state.filter_ta.text() != thread {
-            self.filter_state.filter_ta.set_text(thread);
+        if self.filter_state.filter_ta.text() != filter {
+            self.filter_state.filter_ta.set_text(filter);
         }
     }
 
@@ -213,8 +213,8 @@ fn filter_key_view(view: &mut View, key: KeyEvent) -> Act {
             view.filter_state.filtering = false;
             view.rebuild_here();
 
-            if let Some(height) = view.layout.rows.iter().position(|result| result.head) {
-                view.at = height;
+            if let Some(head) = view.layout.rows.iter().position(|row| row.head) {
+                view.at = head;
                 view.top = 0;
             }
 
@@ -229,13 +229,13 @@ fn filter_key_view(view: &mut View, key: KeyEvent) -> Act {
                 return Act::None;
             }
 
-            let thread = view.filter_state.filter_ta.text();
+            let filter = view.filter_state.filter_ta.text();
 
-            if thread == view.filter_state.filter {
+            if filter == view.filter_state.filter {
                 return Act::None;
             }
 
-            view.filter_state.filter = thread;
+            view.filter_state.filter = filter;
         }
     }
 

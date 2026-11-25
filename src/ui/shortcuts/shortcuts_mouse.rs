@@ -14,38 +14,34 @@ impl Tab {
     }
 }
 
-fn pick_click(widget_state: &mut Pick, event: MouseEvent, ta: &mut TextArea) -> bool {
-    let path = Position {
+fn pick_click(pick: &mut Pick, event: MouseEvent, ta: &mut TextArea) -> bool {
+    let at = Position {
         x: event.column,
         y: event.row,
     };
 
-    if !widget_state.area.contains(path) {
+    if !pick.area.contains(at) {
         if matches!(event.kind, MouseEventKind::Moved) {
-            widget_state.hover = None;
+            pick.hover = None;
         }
 
         return false;
     }
 
-    let Some(output) = widget_state.open(ta) else {
+    let Some(open) = pick.open(ta) else {
         return false;
     };
 
-    let count = output.matches.len();
-    let hit = widget_state
-        .rows
-        .iter()
-        .find(|(result, _)| result.contains(path))
-        .map(|&(_, i)| i);
+    let count = open.matches.len();
+    let hit = pick.rows.iter().find(|(rect, _)| rect.contains(at)).map(|&(_, i)| i);
 
     match event.kind {
-        MouseEventKind::ScrollUp => widget_state.cursor = widget_state.cursor.saturating_sub(1),
-        MouseEventKind::ScrollDown => widget_state.cursor = (widget_state.cursor + 1).min(count - 1),
-        MouseEventKind::Moved => widget_state.hover = hit,
+        MouseEventKind::ScrollUp => pick.cursor = pick.cursor.saturating_sub(1),
+        MouseEventKind::ScrollDown => pick.cursor = (pick.cursor + 1).min(count - 1),
+        MouseEventKind::Moved => pick.hover = hit,
         MouseEventKind::Down(MouseButton::Left) => {
             if let Some(i) = hit {
-                widget_state.pick(ta, &output, i);
+                pick.pick(ta, &open, i);
             }
         }
         _ => {}
@@ -54,47 +50,47 @@ fn pick_click(widget_state: &mut Pick, event: MouseEvent, ta: &mut TextArea) -> 
     true
 }
 
-fn tab_click(widget_state: &mut Tab, event: MouseEvent) {
-    let path = Position {
+fn tab_click(tab: &mut Tab, event: MouseEvent) {
+    let at = Position {
         x: event.column,
         y: event.row,
     };
     let click = matches!(event.kind, MouseEventKind::Down(MouseButton::Left));
 
-    if widget_state.text_rect.contains(path) {
-        if click && widget_state.focus == Focus::List {
-            widget_state.focus = Focus::Text;
+    if tab.text_rect.contains(at) {
+        if click && tab.focus == Focus::List {
+            tab.focus = Focus::Text;
         }
 
-        widget_state.text.mouse(event);
+        tab.text.mouse(event);
         return;
     }
 
-    if widget_state.name_rect.contains(path) {
+    if tab.name_rect.contains(at) {
         if click {
-            widget_state.focus = Focus::Name;
+            tab.focus = Focus::Name;
         }
 
-        widget_state.name.mouse(event);
+        tab.name.mouse(event);
         return;
     }
 
-    if !click || !widget_state.list_rect.contains(path) {
+    if !click || !tab.list_rect.contains(at) {
         return;
     }
 
-    if widget_state.focus != Focus::List && !widget_state.store() {
+    if tab.focus != Focus::List && !tab.store() {
         return;
     }
 
-    widget_state.focus = Focus::List;
+    tab.focus = Focus::List;
 
-    if let Some(&(_, i)) = widget_state.rows.iter().find(|(result, _)| result.contains(path)) {
-        if i == widget_state.list.len() {
-            widget_state.add();
+    if let Some(&(_, i)) = tab.rows.iter().find(|(rect, _)| rect.contains(at)) {
+        if i == tab.list.len() {
+            tab.add();
         } else {
-            widget_state.at = i;
-            widget_state.load();
+            tab.at = i;
+            tab.load();
         }
     }
 }

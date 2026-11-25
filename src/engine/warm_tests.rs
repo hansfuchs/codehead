@@ -23,33 +23,33 @@ fn a_try_is_due_without_a_running_window_and_a_recent_try() {
 
 #[test]
 fn the_watch_triggers_1_min_after_a_reset_once() {
-    let value_value = |warm: Option<u64>| {
-        let mut value = json!({"claude": {"five_hour": {"resets": 1000}}});
+    let limits_with = |warm: Option<u64>| {
+        let mut limits = json!({"claude": {"five_hour": {"resets": 1000}}});
 
-        if let Some(thread) = warm {
-            value["_warm"]["claude"] = json!(thread);
+        if let Some(last_try) = warm {
+            limits["_warm"]["claude"] = json!(last_try);
         }
 
-        value
+        limits
     };
 
     // 0 report: 0 trigger (an API key, 0 plan)
     assert!(!due_new(&json!({}), "claude", 5000));
 
     // the window runs / reset < 60 s ago: 0 trigger; 60 s after: due
-    assert!(!due_new(&value_value(None), "claude", 900));
-    assert!(!due_new(&value_value(None), "claude", 1059));
-    assert!(due_new(&value_value(None), "claude", 1060));
+    assert!(!due_new(&limits_with(None), "claude", 900));
+    assert!(!due_new(&limits_with(None), "claude", 1059));
+    assert!(due_new(&limits_with(None), "claude", 1060));
 
     // a trigger before the reset (the last window's): due; after it: 0, until GAP
-    assert!(due_new(&value_value(Some(500)), "claude", 1060));
-    assert!(!due_new(&value_value(Some(1060)), "claude", 1200));
-    assert!(due_new(&value_value(Some(1060)), "claude", 1060 + GAP));
+    assert!(due_new(&limits_with(Some(500)), "claude", 1060));
+    assert!(!due_new(&limits_with(Some(1060)), "claude", 1200));
+    assert!(due_new(&limits_with(Some(1060)), "claude", 1060 + GAP));
 
     // codehead started hours after the reset: due; the last try GIVE_UP after the 1st chance: 0
-    assert!(due_new(&value_value(None), "claude", 1000 + 5 * GIVE_UP));
+    assert!(due_new(&limits_with(None), "claude", 1000 + 5 * GIVE_UP));
     assert!(!due_new(
-        &value_value(Some(1060 + GIVE_UP)),
+        &limits_with(Some(1060 + GIVE_UP)),
         "claude",
         1060 + 2 * GIVE_UP
     ));

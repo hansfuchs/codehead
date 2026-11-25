@@ -49,32 +49,32 @@ impl Mesh {
     }
     /// Z on the plane of the front face at (X, Y).
     pub(crate) fn front_z(&self, x: f32, y: f32) -> f32 {
-        let file = &self.faces[0];
-        let (agent, bytes, character) = (self.verts[file[0]], self.verts[file[1]], self.verts[file[2]]);
-        let count = cross(sub(bytes, agent), sub(character, agent));
+        let face = &self.faces[0];
+        let (first, second, third) = (self.verts[face[0]], self.verts[face[1]], self.verts[face[2]]);
+        let normal = cross(sub(second, first), sub(third, first));
 
-        if count.2.abs() < 1e-4 {
-            agent.2
+        if normal.2.abs() < 1e-4 {
+            first.2
         } else {
-            agent.2 - (count.0 * (x - agent.0) + count.1 * (y - agent.1)) / count.2
+            first.2 - (normal.0 * (x - first.0) + normal.1 * (y - first.1)) / normal.2
         }
     }
 }
-pub(crate) fn ngon(count: usize, rx: f32, ry: f32, rot: f32) -> Vec<(f32, f32)> {
-    (0..count)
+pub(crate) fn ngon(sides: usize, rx: f32, ry: f32, rot: f32) -> Vec<(f32, f32)> {
+    (0..sides)
         .map(|i| {
-            let agent = rot + std::f32::consts::TAU * i as f32 / count as f32;
+            let angle = rot + std::f32::consts::TAU * i as f32 / sides as f32;
 
-            (rx * agent.cos(), ry * agent.sin())
+            (rx * angle.cos(), ry * angle.sin())
         })
         .collect()
 }
 /// Half circle of radius R around (0, CY) from angle A0, ccw, N steps.
-pub(crate) fn arc(result: f32, cy: f32, a0: f32, count: usize) -> impl Iterator<Item = (f32, f32)> {
-    (0..=count).map(move |i| {
-        let agent = a0 + std::f32::consts::PI * i as f32 / count as f32;
+pub(crate) fn arc(radius: f32, cy: f32, a0: f32, steps: usize) -> impl Iterator<Item = (f32, f32)> {
+    (0..=steps).map(move |i| {
+        let angle = a0 + std::f32::consts::PI * i as f32 / steps as f32;
 
-        (result * agent.cos(), cy + result * agent.sin())
+        (radius * angle.cos(), cy + radius * angle.sin())
     })
 }
 pub(crate) fn rect(width: f32, height: f32) -> Vec<(f32, f32)> {
@@ -166,7 +166,7 @@ impl Solid {
         }
     }
 
-    fn trapezoid_prism_mesh(self, error: (f32, f32)) -> (Mesh, (f32, f32), f32) {
+    fn trapezoid_prism_mesh(self, eyes: (f32, f32)) -> (Mesh, (f32, f32), f32) {
         // the front leans: its top (or bottom) set back
         let (zt, zb) = if self == Solid::TrapPrism {
             (0.0, 2.8)
@@ -182,34 +182,34 @@ impl Solid {
             (5.5, -5.5, -2.8),
         ];
 
-        (Mesh::loft(&front, &back), error, 0.0)
+        (Mesh::loft(&front, &back), eyes, 0.0)
     }
 }
 
-fn wedge_mesh(path: impl Fn(Vec<(f32, f32)>, f32, f32) -> Mesh, error: (f32, f32)) -> (Mesh, (f32, f32), f32) {
-    let mut message = path(rect(5.5, 5.5), 6.0, 1.0);
+fn wedge_mesh(prism: impl Fn(Vec<(f32, f32)>, f32, f32) -> Mesh, eyes: (f32, f32)) -> (Mesh, (f32, f32), f32) {
+    let mut mesh = prism(rect(5.5, 5.5), 6.0, 1.0);
 
     // the top of the back edge pulled down: a wedge leaning back
-    for value in message.verts.iter_mut().skip(4).take(2) {
-        value.1 -= 4.0;
+    for vertex in mesh.verts.iter_mut().skip(4).take(2) {
+        vertex.1 -= 4.0;
     }
 
-    (message, error, 0.0)
+    (mesh, eyes, 0.0)
 }
 
-fn star_mesh(path: impl Fn(Vec<(f32, f32)>, f32, f32) -> Mesh) -> (Mesh, (f32, f32), f32) {
+fn star_mesh(prism: impl Fn(Vec<(f32, f32)>, f32, f32) -> Mesh) -> (Mesh, (f32, f32), f32) {
     // 4 points (up, down, left, right), the inner corners on the diagonals; the
     // loop starts on an inner corner: the 2nd vertex convex (the front normal +z)
-    let output_2: Vec<(f32, f32)> = (0..8)
+    let outline: Vec<(f32, f32)> = (0..8)
         .map(|i| {
-            let agent = -PI / 4.0 + PI / 4.0 * i as f32;
+            let angle = -PI / 4.0 + PI / 4.0 * i as f32;
             let (rx, ry) = if i % 2 == 1 { (6.8, 7.6) } else { (3.9, 3.9) };
 
-            (rx * agent.cos(), ry * agent.sin())
+            (rx * angle.cos(), ry * angle.sin())
         })
         .collect();
 
-    (path(output_2, 1.8, 1.0), (2.0, 1.5), 0.0)
+    (prism(outline, 1.8, 1.0), (2.0, 1.5), 0.0)
 }
 
 const DEFAULT_EYES: (f32, f32) = (4.0, 2.0);
@@ -243,17 +243,17 @@ fn trapezoid_mesh() -> (Mesh, (f32, f32), f32) {
     )
 }
 fn arch_mesh() -> (Mesh, (f32, f32), f32) {
-    let mut output = vec![(6.0, -6.0)];
+    let mut outline = vec![(6.0, -6.0)];
 
-    output.extend(arc(6.0, 1.0, 0.0, 8));
-    output.push((-6.0, -6.0));
-    (prism_mesh(output, 3.0, 1.0), DEFAULT_EYES, 0.0)
+    outline.extend(arc(6.0, 1.0, 0.0, 8));
+    outline.push((-6.0, -6.0));
+    (prism_mesh(outline, 3.0, 1.0), DEFAULT_EYES, 0.0)
 }
 fn capsule_mesh() -> (Mesh, (f32, f32), f32) {
-    let mut output_value: Vec<(f32, f32)> = arc(5.6, 1.4, 0.0, 8).collect();
+    let mut outline: Vec<(f32, f32)> = arc(5.6, 1.4, 0.0, 8).collect();
 
-    output_value.extend(arc(5.6, -1.4, PI, 8));
-    (prism_mesh(output_value, 2.5, 1.0), DEFAULT_EYES, 0.0)
+    outline.extend(arc(5.6, -1.4, PI, 8));
+    (prism_mesh(outline, 2.5, 1.0), DEFAULT_EYES, 0.0)
 }
 fn shield_mesh() -> (Mesh, (f32, f32), f32) {
     (
@@ -329,7 +329,7 @@ fn rhomb_mesh() -> (Mesh, (f32, f32), f32) {
     )
 }
 fn crystal_mesh() -> (Mesh, (f32, f32), f32) {
-    let out = vec![
+    let outline = vec![
         (6.2, 1.0),
         (3.0, 6.8),
         (-3.6, 5.8),
@@ -338,7 +338,7 @@ fn crystal_mesh() -> (Mesh, (f32, f32), f32) {
         (3.6, -5.8),
     ];
 
-    (Mesh::prism(out, 4.0, 0.7, (1.2, -0.8), 0.25), DEFAULT_EYES, 0.0)
+    (Mesh::prism(outline, 4.0, 0.7, (1.2, -0.8), 0.25), DEFAULT_EYES, 0.0)
 }
 fn kite_mesh() -> (Mesh, (f32, f32), f32) {
     (

@@ -29,24 +29,25 @@ impl View {
             .iter()
             .map(|line| line.get(indent..).unwrap_or("").to_string())
             .collect();
-        let thread = lines.join("\n").trim_matches('\n').to_string();
+        let text = lines.join("\n").trim_matches('\n').to_string();
 
-        (!thread.trim().is_empty()).then_some(thread)
+        (!text.trim().is_empty()).then_some(text)
     }
 
     /// The rows of the message (stream item) at ROW: first, last.
     pub(super) fn item_rows(&self, row: usize) -> (usize, usize) {
-        let text = &self.stream.drawn.starts;
+        let starts = &self.stream.drawn.starts;
         let last = self.stream.drawn.rows.len().saturating_sub(1);
 
-        match text.partition_point(|&x| x <= row).checked_sub(1) {
+        match starts.partition_point(|&start| start <= row).checked_sub(1) {
             Some(i) => (
-                text[i],
-                text.get(i + 1)
-                    .map_or(last, |count| count.saturating_sub(1))
-                    .max(text[i]),
+                starts[i],
+                starts
+                    .get(i + 1)
+                    .map_or(last, |next| next.saturating_sub(1))
+                    .max(starts[i]),
             ),
-            None => (0, text.first().map_or(last, |count| count.saturating_sub(1))),
+            None => (0, starts.first().map_or(last, |first| first.saturating_sub(1))),
         }
     }
 
@@ -78,7 +79,7 @@ impl View {
 
     /// Fire an interrupt armed by a single Esc once `DOUBLE_ESC` ends. True: state changed.
     pub(super) fn tick_esc(&mut self) -> bool {
-        if self.esc_interrupt.is_some_and(|thread| thread.elapsed() >= DOUBLE_ESC) {
+        if self.esc_interrupt.is_some_and(|at| at.elapsed() >= DOUBLE_ESC) {
             self.esc_interrupt = None;
             self.interrupt();
             return true;
@@ -161,29 +162,29 @@ impl View {
 
 fn selected_row(view: &View, r0: usize, c0: u16, r1: usize, c1: u16, out: &mut Vec<String>, row_index: usize) {
     let row = &view.stream.drawn.rows[row_index];
-    let text: String = row.line.spans.iter().map(|text| text.content.as_ref()).collect();
+    let text: String = row.line.spans.iter().map(|span| span.content.as_ref()).collect();
 
-    let Some((agent, bytes)) = content_cols(&text) else {
+    let Some((start, end)) = content_cols(&text) else {
         return;
     };
 
     let chars: Vec<char> = text.chars().collect();
 
-    let agent = if row_index == r0 {
-        agent.max(usize::from(c0))
+    let start = if row_index == r0 {
+        start.max(usize::from(c0))
     } else {
-        agent
+        start
     };
 
-    let bytes = if row_index == r1 {
-        bytes.min(usize::from(c1) + 1)
+    let end = if row_index == r1 {
+        end.min(usize::from(c1) + 1)
     } else {
-        bytes
+        end
     };
 
     let piece: String = chars
-        .get(agent.min(bytes)..bytes)
-        .map(|character| character.iter().collect())
+        .get(start.min(end)..end)
+        .map(|slice| slice.iter().collect())
         .unwrap_or_default();
     let piece = piece.trim_end();
     let piece = piece

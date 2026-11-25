@@ -29,8 +29,8 @@ fn render(path: &PathBuf, width: u16) -> String {
         .output();
 
     match glow {
-        Ok(output_value) if output_value.status.success() && !output_value.stdout.is_empty() => {
-            String::from_utf8_lossy(&output_value.stdout).into_owned()
+        Ok(output) if output.status.success() && !output.stdout.is_empty() => {
+            String::from_utf8_lossy(&output.stdout).into_owned()
         }
         _ => std::fs::read_to_string(path).unwrap_or_default(),
     }
@@ -44,7 +44,7 @@ impl Previews {
     /// Lines for PATH at WIDTH, or None while rendering.
     pub(crate) fn get(&mut self, path: PathBuf, width: u16) -> Option<&Vec<Line<'static>>> {
         let mtime = std::fs::metadata(&path)
-            .and_then(|message| message.modified())
+            .and_then(|meta| meta.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let key = (path, width, mtime);
 
@@ -57,8 +57,8 @@ impl Previews {
         self.cache.get(&key).or_else(|| {
             self.cache
                 .iter()
-                .filter(|((path_value, _, _), _)| *path_value == key.0)
-                .max_by_key(|((_, width_value, thread), _)| (*width_value == width, *thread))
+                .filter(|((cached_path, _, _), _)| *cached_path == key.0)
+                .max_by_key(|((_, cached_width, cached_mtime), _)| (*cached_width == width, *cached_mtime))
                 .map(|(_, lines)| lines)
         })
     }
@@ -91,8 +91,8 @@ fn read_previews(
 ) {
     while let Ok(mut key) = job_rx.recv() {
         // only the newest request matters (fast scrolling)
-        while let Ok(key_value) = job_rx.try_recv() {
-            key = key_value;
+        while let Ok(newer) = job_rx.try_recv() {
+            key = newer;
         }
 
         let out = render(&key.0, key.1);
@@ -103,15 +103,15 @@ fn read_previews(
     }
 }
 
-fn poll_previews(widget_state: &mut Previews) -> bool {
+fn poll_previews(previews: &mut Previews) -> bool {
     let mut any = false;
 
-    while let Ok((key, out)) = widget_state.rx.try_recv() {
-        if widget_state.pending.as_ref() == Some(&key) {
-            widget_state.pending = None;
+    while let Ok((key, out)) = previews.rx.try_recv() {
+        if previews.pending.as_ref() == Some(&key) {
+            previews.pending = None;
         }
 
-        widget_state.cache.insert(key, ansi::to_lines(&out));
+        previews.cache.insert(key, ansi::to_lines(&out));
         any = true;
     }
 

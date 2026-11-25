@@ -1,5 +1,4 @@
 use super::{BTreeMap, CFG, File, PathBuf, RwLock, expand, get, layout};
-use std::ops::ControlFlow;
 
 /// Setting KEY of F (a settings field), None: unset (the default applies).
 impl File {
@@ -25,19 +24,19 @@ impl File {
             "keys.menu" => self.menu_key.clone(),
             "keys.command" => self.command_key.clone(),
             "colors.scheme" => self.scheme.clone(),
-            key_value if key_value.starts_with("harness.") => {
-                let (name, field) = key_value["harness.".len()..].split_once('.')?;
+            harness_key if harness_key.starts_with("harness.") => {
+                let (name, field) = harness_key["harness.".len()..].split_once('.')?;
 
                 self.harness.get(name)?.get(field).cloned()
             }
-            key_2 => key_2
+            other => other
                 .strip_prefix("colors.")
-                .and_then(|count| self.colors.get(count).cloned()),
+                .and_then(|color| self.colors.get(color).cloned()),
         }
     }
 
     pub(crate) fn set(&mut self, key: &str, value: Option<String>) {
-        apply_value(self, key, value);
+        set_key(self, key, value);
     }
 }
 
@@ -93,9 +92,7 @@ pub(super) fn expand_with(aliases: &BTreeMap<String, String>, text: &str) -> Str
 
     let word = &text[start..];
 
-    out.push_str(
-        &alias_path(aliases, word).map_or_else(|| word.to_string(), |path_value| path_value.display().to_string()),
-    );
+    out.push_str(&alias_path(aliases, word).map_or_else(|| word.to_string(), |path| path.display().to_string()));
 
     out
 }
@@ -135,7 +132,7 @@ pub(crate) fn notes() -> PathBuf {
     env("CODEHEAD_NOTES")
         .map(PathBuf::from)
         .or_else(|| get().notes.as_deref().map(expand))
-        .or_else(|| layout().and_then(|directory| Some(directory.parent()?.join("notes"))))
+        .or_else(|| layout().and_then(|layout| Some(layout.parent()?.join("notes"))))
         .unwrap_or_else(|| app_dir().join("notes"))
 }
 
@@ -161,11 +158,7 @@ pub(crate) fn styles() -> PathBuf {
     env("CODEHEAD_STYLES")
         .map(PathBuf::from)
         .or_else(|| get().styles.as_deref().map(expand))
-        .or_else(|| {
-            layout()
-                .map(|directory| directory.join("styles"))
-                .filter(|directory_value| directory_value.is_dir())
-        })
+        .or_else(|| layout().map(|layout| layout.join("styles")).filter(|dir| dir.is_dir()))
         .unwrap_or_else(|| app_dir().join("output-styles"))
 }
 
@@ -188,8 +181,8 @@ pub(crate) fn models() -> Vec<String> {
         .unwrap_or_else(|| "fable,opus,sonnet,haiku".into());
 
     raw.split(',')
-        .map(|message| message.trim().to_string())
-        .filter(|message_value| !message_value.is_empty())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
         .collect()
 }
 
@@ -197,7 +190,7 @@ pub(crate) fn models() -> Vec<String> {
 pub(crate) fn thoughts() -> crate::domain::chat::Thoughts {
     env("CODEHEAD_THOUGHTS")
         .or_else(|| get().thoughts.clone())
-        .and_then(|message| crate::domain::chat::Thoughts::parse(&message))
+        .and_then(|value| crate::domain::chat::Thoughts::parse(&value))
         .unwrap_or_default()
 }
 
@@ -205,7 +198,7 @@ pub(crate) fn thoughts() -> crate::domain::chat::Thoughts {
 pub(crate) fn edits() -> crate::engine::edits::Mode {
     env("CODEHEAD_EDITS")
         .or_else(|| get().edits.clone())
-        .and_then(|message| crate::engine::edits::Mode::parse(&message))
+        .and_then(|value| crate::engine::edits::Mode::parse(&value))
         .unwrap_or_default()
 }
 
@@ -218,7 +211,7 @@ pub(crate) fn review_model() -> Option<String> {
 
     value
         .strip_prefix("claude:")
-        .filter(|message| !message.is_empty())
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
 }
 
@@ -229,7 +222,7 @@ pub(crate) fn previews() -> String {
     env("CODEHEAD_PREVIEWS")
         .or_else(|| get().previews.clone())
         .map(|value| value.trim().to_lowercase())
-        .filter(|value_value| !value_value.is_empty())
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "auto".into())
 }
 
@@ -237,13 +230,13 @@ pub(crate) fn previews() -> String {
 pub(crate) fn ports() -> crate::infra::portless::Mode {
     env("CODEHEAD_PORTS")
         .or_else(|| get().ports.clone())
-        .and_then(|message| crate::infra::portless::Mode::parse(&message))
+        .and_then(|value| crate::infra::portless::Mode::parse(&value))
         .unwrap_or_default()
 }
 
 /// The `editor` setting (None: unset; `auto` applies).
 pub(crate) fn editor() -> Option<String> {
-    get().editor.clone().filter(|text| !text.is_empty())
+    get().editor.clone().filter(|value| !value.is_empty())
 }
 
 /// The model that ranks the changes view: $`CODEHEAD_RANK`, else `rank`, else claude:haiku.
@@ -255,7 +248,7 @@ pub(crate) fn rank_model() -> Option<String> {
 
     value
         .strip_prefix("claude:")
-        .filter(|message| !message.is_empty())
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
 }
 
@@ -264,8 +257,8 @@ pub(crate) fn rank_model() -> Option<String> {
 pub(crate) fn classify() -> Option<String> {
     env("CODEHEAD_CLASSIFY")
         .or_else(|| get().classify.clone())
-        .map(|text| text.trim().to_string())
-        .filter(|text_value| !text_value.is_empty())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// How the thread view draws messages: $`CODEHEAD_MESSAGES`, else `messages`, else bubbles.
@@ -276,69 +269,66 @@ pub(crate) fn messages() -> crate::domain::chat::Look {
         .unwrap_or_default()
 }
 
-fn apply_value(widget_state: &mut File, key: &str, value: Option<String>) {
+fn set_key(file: &mut File, key: &str, value: Option<String>) {
     match key {
-        "notes" => widget_state.notes = value,
-        "home" => widget_state.home = value,
-        "device" => widget_state.device = value,
-        "repo" => widget_state.repo = value,
-        "styles" => widget_state.styles = value,
-        "agent" => widget_state.agent = value,
-        "prefix" => widget_state.prefix = value,
-        "models" => widget_state.models = value,
-        "messages" => widget_state.messages = value,
-        "thoughts" => widget_state.thoughts = value,
-        "edits" => widget_state.edits = value,
-        "rank" => widget_state.rank = value,
-        "classify" => widget_state.classify = value,
-        "review" => widget_state.review = value,
-        "editor" => widget_state.editor = value,
-        "ports" => widget_state.ports = value,
-        "previews" => widget_state.previews = value,
-        "keys.menu" => widget_state.menu_key = value,
-        "keys.command" => widget_state.command_key = value,
-        "colors.scheme" => widget_state.scheme = value,
-        key_value if key_value.starts_with("harness.") => {
-            if let ControlFlow::Break(()) = set_harness_field(widget_state, value, key_value) {}
+        "notes" => file.notes = value,
+        "home" => file.home = value,
+        "device" => file.device = value,
+        "repo" => file.repo = value,
+        "styles" => file.styles = value,
+        "agent" => file.agent = value,
+        "prefix" => file.prefix = value,
+        "models" => file.models = value,
+        "messages" => file.messages = value,
+        "thoughts" => file.thoughts = value,
+        "edits" => file.edits = value,
+        "rank" => file.rank = value,
+        "classify" => file.classify = value,
+        "review" => file.review = value,
+        "editor" => file.editor = value,
+        "ports" => file.ports = value,
+        "previews" => file.previews = value,
+        "keys.menu" => file.menu_key = value,
+        "keys.command" => file.command_key = value,
+        "colors.scheme" => file.scheme = value,
+        harness_key if harness_key.starts_with("harness.") => {
+            set_harness_field(file, value, harness_key);
         }
-        key_2 => {
-            if let Some(count) = key_2.strip_prefix("colors.") {
+        other => {
+            if let Some(color) = other.strip_prefix("colors.") {
                 match value {
-                    Some(value_2) => widget_state.colors.insert(count.to_string(), value_2),
-                    None => widget_state.colors.remove(count),
+                    Some(value) => file.colors.insert(color.to_string(), value),
+                    None => file.colors.remove(color),
                 };
             }
         }
     }
 }
 
-fn set_harness_field(widget_state: &mut File, value: Option<String>, key_value: &str) -> ControlFlow<()> {
-    let Some((name, field)) = key_value["harness.".len()..].split_once('.') else {
-        return ControlFlow::Break(());
+fn set_harness_field(file: &mut File, value: Option<String>, harness_key: &str) {
+    let Some((name, field)) = harness_key["harness.".len()..].split_once('.') else {
+        return;
     };
 
     match value {
-        Some(value_value) => {
-            widget_state
-                .harness
+        Some(value) => {
+            file.harness
                 .entry(name.to_string())
                 .or_default()
-                .insert(field.to_string(), value_value);
+                .insert(field.to_string(), value);
         }
         None => {
-            remove_harness_field(widget_state, name, field);
+            remove_harness_field(file, name, field);
         }
     }
-
-    ControlFlow::Continue(())
 }
 
-fn remove_harness_field(widget_state: &mut File, name: &str, field: &str) {
-    if let Some(thread) = widget_state.harness.get_mut(name) {
-        thread.remove(field);
+fn remove_harness_field(file: &mut File, name: &str, field: &str) {
+    if let Some(fields) = file.harness.get_mut(name) {
+        fields.remove(field);
 
-        if thread.is_empty() {
-            widget_state.harness.remove(name);
+        if fields.is_empty() {
+            file.harness.remove(name);
         }
     }
 }

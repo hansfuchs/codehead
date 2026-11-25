@@ -239,19 +239,16 @@ fn parse_commit(value: &Value) -> Commit {
 
 pub(super) fn parse_items(value: &Value) -> Vec<Item> {
     nodes(value)
-        .filter_map(|count| {
+        .filter_map(|node| {
             Some(Item {
-                pr: PrRef::new(
-                    count["repository"]["nameWithOwner"].as_str()?,
-                    count["number"].as_u64()?,
-                ),
-                title: count["title"].as_str().unwrap_or_default().to_string(),
+                pr: PrRef::new(node["repository"]["nameWithOwner"].as_str()?, node["number"].as_u64()?),
+                title: node["title"].as_str().unwrap_or_default().to_string(),
                 state: State::of(
-                    count["state"].as_str().unwrap_or_default(),
-                    count["isDraft"].as_bool().unwrap_or(false),
+                    node["state"].as_str().unwrap_or_default(),
+                    node["isDraft"].as_bool().unwrap_or(false),
                 ),
-                created: iso(count["createdAt"].as_str().unwrap_or_default()),
-                head: count["headRefName"].as_str().unwrap_or_default().to_string(),
+                created: iso(node["createdAt"].as_str().unwrap_or_default()),
+                head: node["headRefName"].as_str().unwrap_or_default().to_string(),
             })
         })
         .collect()

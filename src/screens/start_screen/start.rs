@@ -24,7 +24,7 @@ pub(crate) struct Plan {
 
 /// The plan of TARGET in REPO (CWD: the dir of an in-place start).
 pub(crate) fn plan(repo: &Path, cwd: &Path, target: &Target) -> Plan {
-    let mut path_value = Plan {
+    let mut plan = Plan {
         dir: repo.to_path_buf(),
         label: String::new(),
         prep: None,
@@ -34,57 +34,53 @@ pub(crate) fn plan(repo: &Path, cwd: &Path, target: &Target) -> Plan {
     let repo_arg = repo.display().to_string();
 
     match target {
-        Target::Checkout {
-            branch: bytes,
-            switch,
-            stash,
-        } => {
+        Target::Checkout { branch, switch, stash } => {
             // git first: switch the main checkout (existing branch not checked out anywhere)
-            match threads::checkouts(repo).get(bytes) {
-                Some(directory) => path_value.dir = PathBuf::from(directory),
+            match threads::checkouts(repo).get(branch) {
+                Some(dir) => plan.dir = PathBuf::from(dir),
                 None if *switch => {
-                    path_value.prep = Some(["git", "-C", &repo_arg, "switch", bytes].map(String::from).to_vec());
-                    path_value.stash = *stash;
+                    plan.prep = Some(["git", "-C", &repo_arg, "switch", branch].map(String::from).to_vec());
+                    plan.stash = *stash;
                 }
                 None => {}
             }
 
-            path_value.label.clone_from(bytes);
+            plan.label.clone_from(branch);
         }
-        Target::NewBranch(bytes_value) => {
-            path_value.prep = Some(
-                ["git", "-C", &repo_arg, "switch", "-c", bytes_value]
+        Target::NewBranch(branch) => {
+            plan.prep = Some(
+                ["git", "-C", &repo_arg, "switch", "-c", branch]
                     .map(String::from)
                     .to_vec(),
             );
-            path_value.label.clone_from(bytes_value);
+            plan.label.clone_from(branch);
         }
-        Target::Branch(bytes_2) => {
-            path_value.worktree = Some(bytes_2.clone());
-            path_value.label.clone_from(bytes_2);
+        Target::Branch(branch) => {
+            plan.worktree = Some(branch.clone());
+            plan.label.clone_from(branch);
         }
         Target::Worktree { path, branch } => {
-            path_value.dir = PathBuf::from(path);
-            path_value.label.clone_from(branch);
+            plan.dir = PathBuf::from(path);
+            plan.label.clone_from(branch);
         }
-        Target::Dir(directory_value) => {
-            path_value.dir = PathBuf::from(directory_value);
-            path_value.label = path_value
+        Target::Dir(dir) => {
+            plan.dir = PathBuf::from(dir);
+            plan.label = plan
                 .dir
                 .file_name()
-                .map(|count| count.to_string_lossy().into_owned())
+                .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
         }
         Target::InPlace => {
-            path_value.dir = cwd.to_path_buf();
-            path_value.label = cwd
+            plan.dir = cwd.to_path_buf();
+            plan.label = cwd
                 .file_name()
-                .map(|count_value| count_value.to_string_lossy().into_owned())
+                .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
         }
     }
 
-    path_value
+    plan
 }
 
 /// The form's outcome: what to start, where.
@@ -106,47 +102,47 @@ pub(crate) struct Start<'a> {
 /// sends the task (`kickoff`). Err: the switch or the save failed, 0 thread. Note: 0 host; the
 /// task waits as the thread's prompt draft.
 pub(crate) fn launch(
-    text: &Start,
+    start: &Start,
     plan: &Plan,
     host: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<(Thread, Option<String>), String> {
-    prepare_target(text, plan)?;
+    prepare_target(start, plan)?;
 
     engine::trace("start: git ready");
-    let title = text.message.lines().next().unwrap_or_default().to_string();
-    let mut thread = Thread::new(&title, text.message, &plan.dir, text.agents.to_vec());
+    let title = start.message.lines().next().unwrap_or_default().to_string();
+    let mut thread = Thread::new(&title, start.message, &plan.dir, start.agents.to_vec());
 
-    thread.owner_choices.title_set = text.title_set;
+    thread.owner_choices.title_set = start.title_set;
 
-    if let Some(path) = text.projects {
-        thread.projects = path.to_vec();
+    if let Some(projects) = start.projects {
+        thread.projects = projects.to_vec();
         thread.owner_choices.projects_set = true;
     }
 
     // a thread on main in an existing checkout: the host pulls main (ff only) before the 1st turn,
     // the view opens at once; a failed pull: the agents get a note on it
     thread.pull = plan.worktree.is_none()
-        && matches!(text.target, Target::Checkout { .. } | Target::Worktree { .. })
+        && matches!(start.target, Target::Checkout { .. } | Target::Worktree { .. })
         && (plan.label == "main" || plan.label == "master");
 
-    if let Some(bytes) = &plan.worktree {
+    if let Some(branch) = &plan.worktree {
         // the host makes it (fetch, `worktree add`, local files, port, setup) before the 1st turn
-        let path_value = threads::worktree_path(text.repo, bytes);
+        let path = threads::worktree_path(start.repo, branch);
 
-        if path_value.exists() {
-            return Err(format!("{} exists", path_value.display()));
+        if path.exists() {
+            return Err(format!("{} exists", path.display()));
         }
 
-        thread.worktree_pending = Some(bytes.clone());
-        thread.branch = Some(bytes.clone());
-    } else if !plan.label.is_empty() && text.repo.join(".git").exists() {
-        thread.branch = Some(threads::current_branch(&plan.dir)).filter(|bytes_value| !bytes_value.is_empty());
+        thread.worktree_pending = Some(branch.clone());
+        thread.branch = Some(branch.clone());
+    } else if !plan.label.is_empty() && start.repo.join(".git").exists() {
+        thread.branch = Some(threads::current_branch(&plan.dir)).filter(|branch| !branch.is_empty());
     }
 
     // each agent's flow: its start step (the 1st, else the owner's pick) goes to the agent with
     // the task (the host's `prompt`)
-    if !text.flows.is_empty() {
-        launch_lib(text, &mut thread);
+    if !start.flows.is_empty() {
+        set_flows(start, &mut thread);
     }
 
     thread.kickoff = true;
@@ -157,15 +153,15 @@ pub(crate) fn launch(
     // thread opens with the task as its prompt draft, never lost
     let note = match host(&thread.id) {
         Ok(()) => None,
-        Err(error_value) => {
+        Err(error) => {
             // the owner sends the draft: 0 2nd copy from a host started later
             thread.kickoff = false;
-            let _ = engine::store::update(&thread.id, |thread_value| thread_value.kickoff = false);
+            let _ = engine::store::update(&thread.id, |saved| saved.kickoff = false);
 
-            crate::domain::drafts::save_prompt_draft(&thread.id, text.message);
+            crate::domain::drafts::save_prompt_draft(&thread.id, start.message);
             Some(format!(
                 "task not sent: {} · the task waits in the prompt · ctrl+enter: send",
-                error_value.lines().next().unwrap_or_default()
+                error.lines().next().unwrap_or_default()
             ))
         }
     };
@@ -175,48 +171,44 @@ pub(crate) fn launch(
     Ok((thread, note))
 }
 
-fn launch_lib(text: &Start<'_>, thread: &mut Thread) {
+fn set_flows(start: &Start<'_>, thread: &mut Thread) {
     let lib = engine::flows::Library::load(Some(&thread.work_dir()));
 
-    for (agent, slug, start) in text.flows {
-        if let Some(fl) = lib.flow(slug) {
+    for (agent, slug, step) in start.flows {
+        if let Some(flow) = lib.flow(slug) {
             thread.set_flow(
                 agent,
-                Some(engine::flows::run::FlowState::new(fl, &lib, *start, engine::now_ms())),
+                Some(engine::flows::run::FlowState::new(flow, &lib, *step, engine::now_ms())),
             );
         }
     }
 }
 
 /// Branch name of a checkout target (stash message).
-pub(crate) fn target_label(thread: &Target) -> String {
-    match thread {
+pub(crate) fn target_label(target: &Target) -> String {
+    match target {
         Target::Checkout { branch, .. } => branch.clone(),
         _ => String::new(),
     }
 }
 
-fn prepare_target(text: &Start, plan: &Plan) -> Result<(), String> {
-    let repo = text.repo.display().to_string();
+fn prepare_target(start: &Start, plan: &Plan) -> Result<(), String> {
+    let repo = start.repo.display().to_string();
 
-    if let Some(group) = &plan.prep {
-        let run = |group_value: &[String]| match Command::new(&group_value[0])
-            .args(&group_value[1..])
-            .stdin(Stdio::null())
-            .output()
-        {
+    if let Some(argv) = &plan.prep {
+        let run = |argv: &[String]| match Command::new(&argv[0]).args(&argv[1..]).stdin(Stdio::null()).output() {
             Ok(output) if output.status.success() => Ok(()),
-            Ok(output_value) => Err(format!(
+            Ok(output) => Err(format!(
                 "{}: {}",
-                group_value.join(" "),
-                String::from_utf8_lossy(&output_value.stderr).trim()
+                argv.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
             )),
-            Err(error) => Err(format!("{}: {error}", group_value.join(" "))),
+            Err(error) => Err(format!("{}: {error}", argv.join(" "))),
         };
-        let mut res = run(group);
+        let mut res = run(argv);
 
         if res.is_err() && plan.stash {
-            let st: Vec<String> = [
+            let stash: Vec<String> = [
                 "git",
                 "-C",
                 &repo,
@@ -224,12 +216,12 @@ fn prepare_target(text: &Start, plan: &Plan) -> Result<(), String> {
                 "push",
                 "--include-untracked",
                 "-m",
-                &format!("codehead: before switch to {}", target_label(text.target)),
+                &format!("codehead: before switch to {}", target_label(start.target)),
             ]
             .map(String::from)
             .to_vec();
 
-            res = run(&st).and_then(|()| run(group));
+            res = run(&stash).and_then(|()| run(argv));
         }
 
         res?;

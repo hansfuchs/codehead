@@ -5,7 +5,7 @@ impl View {
         if let Some((agent, act)) = self
             .flowbars
             .iter_mut()
-            .find_map(|bytes| bytes.key(key).map(|agent| (bytes.agent.clone(), agent)))
+            .find_map(|bar| bar.key(key).map(|act| (bar.agent.clone(), act)))
         {
             let edit = matches!(act, crate::features::flows::flow_bar::Act::Edit(_));
 
@@ -18,7 +18,7 @@ impl View {
     }
     pub(super) fn key_subthreads(&mut self, key: KeyEvent) -> Option<bool> {
         if let Some(act) = self.subthreads.key(key) {
-            return Some(key_subthreads_thread(self, act));
+            return Some(subthread_act(self, act));
         }
 
         None
@@ -26,7 +26,7 @@ impl View {
 
     pub(super) fn key_activity(&mut self, key: KeyEvent) -> Option<bool> {
         if let Some(act) = self.subagents.key(key, &self.thread.subs) {
-            key_activity_crate(self, act);
+            stop_subagent(self, act);
             return Some(false);
         }
 
@@ -40,7 +40,7 @@ impl View {
     }
 }
 
-fn key_subthreads_thread(view: &mut View, act: crate::features::activity_rows::subthreads::Act) -> bool {
+fn subthread_act(view: &mut View, act: crate::features::activity_rows::subthreads::Act) -> bool {
     match act {
         crate::features::activity_rows::subthreads::Act::Stop(kid) => view.stop_sub(&kid),
         crate::features::activity_rows::subthreads::Act::Open(kid) => {
@@ -72,14 +72,14 @@ fn take_monitor_note(view: &mut View) {
     }
 }
 
-fn key_activity_crate(view: &mut View, act: crate::features::activity_rows::subagents::Act) {
+fn stop_subagent(view: &mut View, act: crate::features::activity_rows::subagents::Act) {
     if let crate::features::activity_rows::subagents::Act::Stop(id) = act {
         let what = view
             .thread
             .subs
             .iter()
-            .find(|text| text.id == id)
-            .map(|text| text.description.clone())
+            .find(|sub| sub.id == id)
+            .map(|sub| sub.description.clone())
             .unwrap_or_default();
 
         view.host("sub_stop", json!({"op": "sub_stop", "id": id}));

@@ -5,18 +5,23 @@ impl View {
         build_view(self, width);
     }
 
-    /// The painted lines of hunk H of F (made once per diff of the file).
-    pub(super) fn painted(&self, file: &FileDiff, height: usize) -> std::rc::Rc<Vec<Painted>> {
-        let key = (file.hash, height);
+    /// The painted lines of HUNK of FILE (made once per diff of the file).
+    pub(super) fn painted(&self, file: &FileDiff, hunk: usize) -> std::rc::Rc<Vec<Painted>> {
+        let key = (file.hash, hunk);
 
-        if let Some(path) = self.layout.paints.borrow().get(&key) {
-            return path.clone();
+        if let Some(painted) = self.layout.paints.borrow().get(&key) {
+            return painted.clone();
         }
 
-        let path = std::rc::Rc::new(file.hunks.get(height).map(|x| paint(file, x)).unwrap_or_default());
+        let painted = std::rc::Rc::new(
+            file.hunks
+                .get(hunk)
+                .map(|diff_hunk| paint(file, diff_hunk))
+                .unwrap_or_default(),
+        );
 
-        self.layout.paints.borrow_mut().insert(key, path.clone());
-        path
+        self.layout.paints.borrow_mut().insert(key, painted.clone());
+        painted
     }
 }
 
@@ -46,7 +51,7 @@ fn build_file_rows(side: bool, shown: &[usize], view: &mut View) {
                 i,
                 file.hunks
                     .iter()
-                    .flat_map(|height| &height.lines)
+                    .flat_map(|hunk| &hunk.lines)
                     .filter_map(|line| line.new.max(line.old))
                     .max()
                     .unwrap_or(1)
@@ -71,12 +76,12 @@ fn append_group_rows(
     file: &FileDiff,
 ) {
     if view.filter_state.filter.trim().is_empty() {
-        let group = view.ranked(&file.path).map(|x| x.0);
+        let group = view.ranked(&file.path).map(|(index, _, _)| index);
 
         let new_group = match (*last, group) {
             (None, _) => true,
-            (Some((pg, _)), Some(gi)) => pg != Some(gi),
-            (Some((pg, pc)), None) => pg.is_some() || pc != file.cat,
+            (Some((last_group, _)), Some(index)) => last_group != Some(index),
+            (Some((last_group, last_cat)), None) => last_group.is_some() || last_cat != file.cat,
         };
 
         if new_group {
@@ -88,7 +93,7 @@ fn append_group_rows(
     }
 }
 
-/// The rows of file I (F): its head, then (unfolded) the why, the hunks, findings and
+/// The rows of file I (FILE): its head, then (unfolded) the why, the hunks, findings and
 /// comments under their lines, the foot.
 fn file_rows(rows: &mut Vec<Row>, i: usize, file: &FileDiff, side: bool, view: &View) {
     let first = file.first_line();
@@ -99,7 +104,7 @@ fn file_rows(rows: &mut Vec<Row>, i: usize, file: &FileDiff, side: bool, view: &
         return;
     }
 
-    if view.ranked(&file.path).is_some_and(|x| !x.2.is_empty()) {
+    if view.ranked(&file.path).is_some_and(|(_, _, why)| !why.is_empty()) {
         rows.push(Row::new(Body::Why, i, Some(first)));
     }
 
@@ -110,23 +115,23 @@ fn file_rows(rows: &mut Vec<Row>, i: usize, file: &FileDiff, side: bool, view: &
     // a new or deleted file: 1 side only, unified uses the room
     let side = side && !matches!(file.status, Status::New | Status::Deleted);
 
-    for (hi, hunk) in file.hunks.iter().enumerate() {
-        rows.push(Row::new(Body::Hunk(hi), i, Some(hunk.new.max(1))));
-        let ls = &hunk.lines;
+    for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+        rows.push(Row::new(Body::Hunk(hunk_index), i, Some(hunk.new.max(1))));
+        let lines = &hunk.lines;
 
         if !side {
             rows.extend(
-                ls.iter()
+                lines
+                    .iter()
                     .enumerate()
-                    .map(|(key, line)| Row::new(Body::Diff(hi, key), i, line.new.or(line.old))),
+                    .map(|(index, line)| Row::new(Body::Diff(hunk_index, index), i, line.new.or(line.old))),
             );
             continue;
         }
 
         // side by side: a run of removed lines pairs with the added lines after it
-        let key = 0;
 
-        side_rows(rows, i, hi, ls, key);
+        side_rows(rows, i, hunk_index, lines, 0);
     }
 
     // findings, then review comments: under the 1st diff row of their line, else at the box's end
@@ -135,11 +140,11 @@ fn file_rows(rows: &mut Vec<Row>, i: usize, file: &FileDiff, side: bool, view: &
     rows.push(Row::new(Body::Foot, i, None));
 }
 
-fn side_rows(rows: &mut Vec<Row>, i: usize, hi: usize, lines: &[super::DLine], mut offset: usize) {
+fn side_rows(rows: &mut Vec<Row>, i: usize, hunk_index: usize, lines: &[super::DLine], mut offset: usize) {
     while offset < lines.len() {
         if lines[offset].kind == Kind::Ctx {
             rows.push(Row::new(
-                Body::Side(hi, Some(offset), Some(offset)),
+                Body::Side(hunk_index, Some(offset), Some(offset)),
                 i,
                 lines[offset].new,
             ));
@@ -159,11 +164,11 @@ fn side_rows(rows: &mut Vec<Row>, i: usize, hi: usize, lines: &[super::DLine], m
                 (j < added).then_some(offset + removed + j),
             );
             let at = new_index
-                .and_then(|x| lines[x].new)
+                .and_then(|index| lines[index].new)
                 .or_else(|| (added > 0).then(|| lines[offset + removed].new).flatten())
-                .or_else(|| old_index.and_then(|x| lines[x].old));
+                .or_else(|| old_index.and_then(|index| lines[index].old));
 
-            rows.push(Row::new(Body::Side(hi, old_index, new_index), i, at));
+            rows.push(Row::new(Body::Side(hunk_index, old_index, new_index), i, at));
         }
 
         offset += removed + added;
@@ -171,55 +176,51 @@ fn side_rows(rows: &mut Vec<Row>, i: usize, hi: usize, lines: &[super::DLine], m
 }
 
 fn append_file_notes(rows: &mut Vec<Row>, i: usize, file: &FileDiff, view: &View) {
-    let start = rows
-        .iter()
-        .rposition(|result| result.head && result.file == i)
-        .unwrap_or(0);
+    let start = rows.iter().rposition(|row| row.head && row.file == i).unwrap_or(0);
     let mut notes: Vec<(u32, Vec<Row>)> = Vec::new();
 
     collect_file_notes(i, file, &mut notes, view);
 
-    let added =
-        |result: &Row| result.comment.is_some() || result.finding.is_some() || matches!(result.body, Body::Gh(..));
+    let added = |row: &Row| row.comment.is_some() || row.finding.is_some() || matches!(row.body, Body::Gh(..));
 
-    for (line, new) in notes {
+    for (line, note_rows) in notes {
         // the last row of the 1st run on that line (a removed line, then the added one)
         // 0 why / note row (they carry the 1st changed line too)
-        let hit = |result: &Row| {
-            !result.head
-                && !result.hunk
-                && !matches!(result.body, Body::Why | Body::Note(_))
-                && !added(result)
-                && result.at == Some(line)
+        let hit = |row: &Row| {
+            !row.head
+                && !row.hunk
+                && !matches!(row.body, Body::Why | Body::Note(_))
+                && !added(row)
+                && row.at == Some(line)
         };
 
-        let at = rows[start..].iter().position(hit).map_or(rows.len(), |path| {
-            let first = start + path;
+        let at = rows[start..].iter().position(hit).map_or(rows.len(), |offset| {
+            let first = start + offset;
 
-            first + 1 + rows[first + 1..].iter().take_while(|result| hit(result)).count()
+            first + 1 + rows[first + 1..].iter().take_while(|row| hit(row)).count()
         });
 
         // after the notes already under that row
-        let at = at + rows[at..].iter().take_while(|result| added(result)).count();
+        let at = at + rows[at..].iter().take_while(|row| added(row)).count();
 
-        rows.splice(at..at, new);
+        rows.splice(at..at, note_rows);
     }
 }
 
-fn collect_file_notes(i: usize, file: &FileDiff, rows: &mut Vec<(u32, Vec<Row>)>, view: &View) {
-    for (fi, x) in view
+fn collect_file_notes(i: usize, file: &FileDiff, notes: &mut Vec<(u32, Vec<Row>)>, view: &View) {
+    for (fi, finding) in view
         .reviewer
         .review
         .iter()
-        .flat_map(|result| result.findings.iter().enumerate())
-        .filter(|(_, x)| x.file == file.path)
+        .flat_map(|review| review.findings.iter().enumerate())
+        .filter(|(_, finding)| finding.file == file.path)
     {
-        let count = 1 + x.body.lines().take(3).count();
+        let count = 1 + finding.body.lines().take(3).count();
 
-        rows.push((
-            x.line,
+        notes.push((
+            finding.line,
             (0..count)
-                .map(|key| Row::new(Body::Finding(fi, key), i, Some(x.line)))
+                .map(|row| Row::new(Body::Finding(fi, row), i, Some(finding.line)))
                 .collect(),
         ));
     }
@@ -237,10 +238,10 @@ fn collect_file_notes(i: usize, file: &FileDiff, rows: &mut Vec<(u32, Vec<Row>)>
     for (ci, comment) in here.into_iter().map(|ci| (ci, &view.comment_state.comments[ci])) {
         let count = view.clines(comment).len();
 
-        rows.push((
+        notes.push((
             comment.line,
             (0..count)
-                .map(|comment_value| Row::new(Body::Comment(ci, comment_value), i, Some(comment.line)))
+                .map(|line| Row::new(Body::Comment(ci, line), i, Some(comment.line)))
                 .collect(),
         ));
     }
@@ -249,16 +250,16 @@ fn collect_file_notes(i: usize, file: &FileDiff, rows: &mut Vec<(u32, Vec<Row>)>
     for (ti, thread) in view
         .pr_src
         .iter()
-        .flat_map(|text| text.threads.iter().enumerate())
+        .flat_map(|src| src.threads.iter().enumerate())
         .filter(|(_, thread)| thread.path.as_deref() == Some(file.path.as_str()))
     {
         let count = gh_lines(thread, usize::MAX).len();
         let line = thread.line.unwrap_or(0);
 
-        rows.push((
+        notes.push((
             line,
             (0..count)
-                .map(|key| Row::new(Body::Gh(ti, key), i, Some(line)))
+                .map(|row| Row::new(Body::Gh(ti, row), i, Some(line)))
                 .collect(),
         ));
     }
@@ -284,15 +285,15 @@ fn build_view(view: &mut View, width: u16) {
         .classifier
         .rank
         .as_ref()
-        .is_some_and(|result| result.key == crate::domain::changes::rank::key(&view.changes.files));
+        .is_some_and(|rank| rank.key == crate::domain::changes::rank::key(&view.changes.files));
 
     // reviewed / all per level
     let levels = view.levels();
     let mut counts = [(0, 0); 4];
 
-    for (file, line) in view.changes.files.iter().zip(&levels) {
-        counts[*line as usize].1 += 1;
-        counts[*line as usize].0 += usize::from(view.is_reviewed(file));
+    for (file, level) in view.changes.files.iter().zip(&levels) {
+        counts[*level as usize].1 += 1;
+        counts[*level as usize].0 += usize::from(view.is_reviewed(file));
     }
 
     view.classifier.counts = counts;
@@ -300,10 +301,10 @@ fn build_view(view: &mut View, width: u16) {
     // the shown files: the filter's hits (by relevance), else all by level (the panel's order)
     let shown: Vec<usize> = if view.filter_state.filter.trim().is_empty() {
         view.filter_state.hits.clear();
-        let mut value: Vec<usize> = (0..view.changes.files.len()).collect();
+        let mut order: Vec<usize> = (0..view.changes.files.len()).collect();
 
-        value.sort_by_key(|&i| levels[i] as usize);
-        value
+        order.sort_by_key(|&i| levels[i] as usize);
+        order
     } else {
         let hits = crate::ui::fuzzy::rank(
             &view.changes.files,
@@ -313,7 +314,7 @@ fn build_view(view: &mut View, width: u16) {
         );
 
         view.filter_state.hits = hits.iter().cloned().collect();
-        hits.into_iter().map(|height| height.0).collect()
+        hits.into_iter().map(|(index, _)| index).collect()
     };
 
     view.classifier.lv = levels;
@@ -323,13 +324,9 @@ fn build_view(view: &mut View, width: u16) {
     // the cursor back on its file: the same row of it (a new diff: up to its last row)
     if let Some((path, off)) = view.pending_cursor.take()
         && let Some(i) = view.changes.files.iter().position(|file| file.path == path)
-        && let Some(row) = view
-            .layout
-            .rows
-            .iter()
-            .position(|result| result.head && result.file == i)
+        && let Some(row) = view.layout.rows.iter().position(|row| row.head && row.file == i)
     {
-        let count = view.layout.rows[row..].iter().take_while(|x| x.file == i).count();
+        let count = view.layout.rows[row..].iter().take_while(|next| next.file == i).count();
 
         view.at = row + off.min(count.saturating_sub(1));
     }
@@ -341,9 +338,9 @@ fn build_view(view: &mut View, width: u16) {
         .layout
         .rows
         .get(view.at)
-        .is_some_and(|result| result.head || result.at.is_some())
-        && let Some(height) = view.layout.rows.iter().position(|result| result.head)
+        .is_some_and(|row| row.head || row.at.is_some())
+        && let Some(head) = view.layout.rows.iter().position(|row| row.head)
     {
-        view.at = height;
+        view.at = head;
     }
 }

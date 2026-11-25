@@ -2,7 +2,6 @@ use super::{
     Block, BorderType, Borders, Clear, FlowBar, Frame, Line, Mode, Paragraph, Rect, Span, flow_rail, flows, rail_row,
     theme,
 };
-use std::ops::ControlFlow;
 
 impl FlowBar {
     pub(crate) fn render(&mut self, frame: &mut Frame, area: Rect, focus: bool) {
@@ -10,38 +9,32 @@ impl FlowBar {
     }
 }
 
-fn finish_render(frame: &mut Frame<'_>, focus: bool, inner: Rect, view_state: &mut FlowBar) {
-    match view_state.popup_state.mode.clone() {
-        Mode::Steps => view_state.draw_steps(frame, inner, focus),
+fn draw_mode(frame: &mut Frame<'_>, focus: bool, inner: Rect, bar: &mut FlowBar) {
+    match bar.popup_state.mode.clone() {
+        Mode::Steps => bar.draw_steps(frame, inner, focus),
         Mode::Pick(query) => {
-            render_mode_pick_query(frame, focus, inner, &query, view_state);
+            draw_flow_picker(frame, focus, inner, &query, bar);
         }
         Mode::How(slug) => {
-            render_mode_how_slug(frame, focus, inner, &slug, view_state);
+            draw_switch_choices(frame, focus, inner, &slug, bar);
         }
         Mode::Start(slug) => {
-            if let ControlFlow::Break(()) = finish_render_mode_start_slug(frame, focus, inner, view_state, &slug) {}
+            draw_start_step(frame, focus, inner, bar, &slug);
         }
     }
 }
 
-fn finish_render_mode_start_slug(
-    frame: &mut Frame<'_>,
-    focus: bool,
-    inner: Rect,
-    view_state: &mut FlowBar,
-    slug: &str,
-) -> ControlFlow<()> {
-    let Some(fl) = view_state.lib.flow(slug).cloned() else {
-        return ControlFlow::Break(());
+fn draw_start_step(frame: &mut Frame<'_>, focus: bool, inner: Rect, bar: &mut FlowBar, slug: &str) {
+    let Some(flow) = bar.lib.flow(slug).cloned() else {
+        return;
     };
 
     frame.render_widget(
-        Paragraph::new(Line::styled(format!("{}: start at", fl.name), theme::bold())),
+        Paragraph::new(Line::styled(format!("{}: start at", flow.name), theme::bold())),
         Rect { height: 1, ..inner },
     );
-    let nodes = flows::resolve(&fl, &view_state.lib);
-    let rows: Vec<flow_rail::Row> = nodes.iter().map(|count| rail_row(count, "○", theme::muted())).collect();
+    let nodes = flows::resolve(&flow, &bar.lib);
+    let rows: Vec<flow_rail::Row> = nodes.iter().map(|node| rail_row(node, "○", theme::muted())).collect();
     let arcs = flow_rail::arcs(&nodes, |_| 0);
     let list = Rect {
         y: inner.y + 2,
@@ -49,38 +42,30 @@ fn finish_render_mode_start_slug(
         ..inner
     };
 
-    view_state.popup_state.offset = crate::ui::dropdown::fit(
-        view_state.popup_state.offset,
-        view_state.popup_state.cur,
+    bar.popup_state.offset = crate::ui::dropdown::fit(
+        bar.popup_state.offset,
+        bar.popup_state.cur,
         rows.len(),
         usize::from(list.height),
     );
-    view_state.popup_state.rows = flow_rail::draw(
+    bar.popup_state.rows = flow_rail::draw(
         frame.buffer_mut(),
         list,
         &rows,
         &arcs,
-        Some(view_state.popup_state.cur),
+        Some(bar.popup_state.cur),
         focus,
-        view_state.popup_state.offset,
+        bar.popup_state.offset,
     );
-
-    ControlFlow::Continue(())
 }
 
-fn render_mode_how_slug(frame: &mut Frame<'_>, focus: bool, inner: Rect, slug: &str, view_state: &mut FlowBar) {
-    let name = view_state
-        .lib
-        .flow(slug)
-        .map_or(slug.to_string(), |file| file.name.clone());
-    let cur = view_state
+fn draw_switch_choices(frame: &mut Frame<'_>, focus: bool, inner: Rect, slug: &str, bar: &mut FlowBar) {
+    let name = bar.lib.flow(slug).map_or(slug.to_string(), |flow| flow.name.clone());
+    let cur = bar.state.as_ref().map_or(String::new(), |run| run.title.clone());
+    let left = bar
         .state
         .as_ref()
-        .map_or(String::new(), |text_2| text_2.title.clone());
-    let left = view_state
-        .state
-        .as_ref()
-        .map_or(0, |text_3| view_state.nodes.len().saturating_sub(text_3.node));
+        .map_or(0, |run| bar.nodes.len().saturating_sub(run.node));
 
     frame.render_widget(
         Paragraph::new(Line::styled(format!("change flow: {cur} → {name}"), theme::bold())),
@@ -95,7 +80,7 @@ fn render_mode_how_slug(frame: &mut Frame<'_>, focus: bool, inner: Rect, slug: &
         ("cancel".to_string(), String::new()),
     ];
 
-    view_state.list(
+    bar.list(
         frame,
         Rect {
             y: inner.y + 2,
@@ -107,7 +92,7 @@ fn render_mode_how_slug(frame: &mut Frame<'_>, focus: bool, inner: Rect, slug: &
     );
 }
 
-fn render_mode_pick_query(frame: &mut Frame<'_>, focus: bool, inner: Rect, query: &str, view_state: &mut FlowBar) {
+fn draw_flow_picker(frame: &mut Frame<'_>, focus: bool, inner: Rect, query: &str, bar: &mut FlowBar) {
     let head = Rect { height: 1, ..inner };
 
     frame.render_widget(
@@ -123,24 +108,21 @@ fn render_mode_pick_query(frame: &mut Frame<'_>, focus: bool, inner: Rect, query
         ..inner
     };
 
-    let rows: Vec<(String, String)> = view_state
+    let rows: Vec<(String, String)> = bar
         .picks(query)
         .into_iter()
         .map(|i| {
-            let fl = &view_state.lib.flows[i];
-            let cur = view_state
-                .state
-                .as_ref()
-                .is_some_and(|text_value| text_value.flow == fl.slug);
+            let flow = &bar.lib.flows[i];
+            let cur = bar.state.as_ref().is_some_and(|run| run.flow == flow.slug);
 
             (
-                format!("{}{}", fl.name, if cur { " (current)" } else { "" }),
-                format!("{} steps · {}", fl.steps.len(), fl.description),
+                format!("{}{}", flow.name, if cur { " (current)" } else { "" }),
+                format!("{} steps · {}", flow.steps.len(), flow.description),
             )
         })
         .collect();
 
-    view_state.list(frame, list, &rows, focus);
+    bar.list(frame, list, &rows, focus);
 }
 
 fn render_flow_bar(state: &mut FlowBar, frame: &mut Frame, area: Rect, focus: bool) {
@@ -174,13 +156,13 @@ fn render_flow_bar(state: &mut FlowBar, frame: &mut Frame, area: Rect, focus: bo
         return;
     }
 
-    let area_value = Rect {
+    let popup = Rect {
         height: area.height - 1,
         ..area
     };
 
-    state.popup_state.popup = area_value;
-    frame.render_widget(Clear, area_value);
+    state.popup_state.popup = popup;
+    frame.render_widget(Clear, popup);
     let (title, keys) = state.frame_text();
     let block = Block::new()
         .borders(Borders::ALL)
@@ -188,9 +170,9 @@ fn render_flow_bar(state: &mut FlowBar, frame: &mut Frame, area: Rect, focus: bo
         .border_style(theme::accent())
         .title(Span::styled(format!(" {title} "), theme::accent_bold()))
         .title_bottom(Line::styled(format!(" {keys} "), theme::muted()).right_aligned());
-    let inner = block.inner(area_value);
+    let inner = block.inner(popup);
 
-    frame.render_widget(block, area_value);
+    frame.render_widget(block, popup);
     let inner = Rect {
         x: inner.x + 1,
         width: inner.width.saturating_sub(2),
@@ -201,5 +183,5 @@ fn render_flow_bar(state: &mut FlowBar, frame: &mut Frame, area: Rect, focus: bo
         return;
     }
 
-    finish_render(frame, focus, inner, state);
+    draw_mode(frame, focus, inner, state);
 }

@@ -12,31 +12,31 @@ const IMAGE_EXT: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "heic"];
 
 /// Paste of 1 dropped file path: `'/a b.png'`, `/a\ b.png`, `file:///a.png`. None: not 1 existing file.
 pub(crate) fn dropped_file(text: &str) -> Option<PathBuf> {
-    let thread = text.trim();
+    let trimmed = text.trim();
 
-    if thread.contains('\n') {
+    if trimmed.contains('\n') {
         return None;
     }
 
-    let thread_value = thread.strip_prefix("file://").unwrap_or(thread);
-    let thread_2 = thread_value
+    let unprefixed = trimmed.strip_prefix("file://").unwrap_or(trimmed);
+    let unquoted = unprefixed
         .strip_prefix('\'')
         .and_then(|x| x.strip_suffix('\''))
-        .or_else(|| thread_value.strip_prefix('"').and_then(|x| x.strip_suffix('"')))
-        .map_or_else(|| thread_value.replace("\\ ", " "), String::from);
-    let path = PathBuf::from(thread_2);
+        .or_else(|| unprefixed.strip_prefix('"').and_then(|x| x.strip_suffix('"')))
+        .map_or_else(|| unprefixed.replace("\\ ", " "), String::from);
+    let path = PathBuf::from(unquoted);
 
     (path.is_absolute() && path.is_file()).then_some(path)
 }
 
 pub(crate) fn is_image(path: &Path) -> bool {
     path.extension()
-        .is_some_and(|error| IMAGE_EXT.contains(&error.to_string_lossy().to_lowercase().as_str()))
+        .is_some_and(|ext| IMAGE_EXT.contains(&ext.to_string_lossy().to_lowercase().as_str()))
 }
 
 /// Marker for a long paste, like Claude Code: `[Pasted text #1 +12 lines]`.
-pub(crate) fn text_marker(count_value: usize, text: &str) -> String {
-    format!("[Pasted text #{count_value} +{} lines]", text.lines().count())
+pub(crate) fn text_marker(number: usize, text: &str) -> String {
+    format!("[Pasted text #{number} +{} lines]", text.lines().count())
 }
 
 /// What a paste turns into.
@@ -61,21 +61,21 @@ impl Paster {
     /// The counters go on after the files already in DIR (`image-N.png`, `pasted-text-N.txt`):
     /// a new paste never overwrites the file of an earlier message.
     pub(crate) fn new(dir: PathBuf) -> Paster {
-        let mut path = Paster {
+        let mut paster = Paster {
             dir,
             images: 0,
             texts: 0,
         };
 
-        for error in std::fs::read_dir(&path.dir).into_iter().flatten().flatten() {
-            let name = error.file_name();
+        for entry in std::fs::read_dir(&paster.dir).into_iter().flatten().flatten() {
+            let name = entry.file_name();
             let name = name.to_string_lossy();
             let count = |pre: &str, ext: &str| name.strip_prefix(pre)?.strip_suffix(ext)?.parse::<usize>().ok();
 
-            restore_paste_counters(&mut path, count);
+            restore_paste_counters(&mut paster, count);
         }
 
-        path
+        paster
     }
 
     /// MARKER (`[Image #3]`, `[Pasted text #2 +5 lines]`) is in use: new pastes number after it.
@@ -89,16 +89,16 @@ impl Paster {
                 .ok()
         };
 
-        if let Some(count_value) = count("[Image #") {
-            self.images = self.images.max(count_value);
-        } else if let Some(count_2) = count("[Pasted text #") {
-            self.texts = self.texts.max(count_2);
+        if let Some(number) = count("[Image #") {
+            self.images = self.images.max(number);
+        } else if let Some(number) = count("[Pasted text #") {
+            self.texts = self.texts.max(number);
         }
     }
 
     /// A paste event's text. Empty (cmd+v on an image in some terminals): the clipboard image.
     pub(crate) fn paste(&mut self, text: &str) -> Pasted {
-        paste_paster(self, text)
+        paste_into(self, text)
     }
 
     /// ctrl+v (Claude Code's image key): the clipboard image, else the clipboard text.
@@ -114,23 +114,23 @@ impl Paster {
         }
 
         match clip::paste() {
-            Some(thread) if !thread.is_empty() => self.paste(&thread),
+            Some(text) if !text.is_empty() => self.paste(&text),
             _ => Pasted::Nothing,
         }
     }
 }
 
 fn restore_paste_counters(paster: &mut Paster, count: impl Fn(&str, &str) -> Option<usize>) {
-    if let Some(count_value) = count("image-", ".png") {
-        paster.images = paster.images.max(count_value);
+    if let Some(number) = count("image-", ".png") {
+        paster.images = paster.images.max(number);
     } else {
         restore_text_counter(paster, count);
     }
 }
 
 fn restore_text_counter(paster: &mut Paster, count: impl Fn(&str, &str) -> Option<usize>) {
-    if let Some(count_2) = count("pasted-text-", ".txt") {
-        paster.texts = paster.texts.max(count_2);
+    if let Some(number) = count("pasted-text-", ".txt") {
+        paster.texts = paster.texts.max(number);
     }
 }
 
@@ -138,7 +138,7 @@ fn restore_text_counter(paster: &mut Paster, count: impl Fn(&str, &str) -> Optio
 #[path = "prompt_input_attach_tests.rs"]
 mod tests;
 
-fn paste_paster(paster: &mut Paster, text: &str) -> Pasted {
+fn paste_into(paster: &mut Paster, text: &str) -> Pasted {
     if text.is_empty() {
         return paster.clipboard();
     }
@@ -161,10 +161,10 @@ fn paste_paster(paster: &mut Paster, text: &str) -> Pasted {
 
     // terminals paste line breaks as \r: count and store them as \n
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
-    let file_value = paster.dir.join(format!("pasted-text-{}.txt", paster.texts + 1));
+    let file = paster.dir.join(format!("pasted-text-{}.txt", paster.texts + 1));
     let _ = std::fs::create_dir_all(&paster.dir);
 
-    if std::fs::write(&file_value, &text).is_err() {
+    if std::fs::write(&file, &text).is_err() {
         return Pasted::Text(text);
     }
 
@@ -172,6 +172,6 @@ fn paste_paster(paster: &mut Paster, text: &str) -> Pasted {
 
     Pasted::File {
         marker: text_marker(paster.texts, &text),
-        path: file_value,
+        path: file,
     }
 }

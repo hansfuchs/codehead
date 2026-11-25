@@ -206,19 +206,13 @@ impl Menu {
 
     /// New cards (a read): the cursor stays on its thread.
     #[cfg(test)]
-    fn set_cards(&mut self, character: Vec<Card>) {
-        self.list.set_cards(character);
+    fn set_cards(&mut self, cards: Vec<Card>) {
+        self.list.set_cards(cards);
     }
 
     /// New messages (a read): the hits again, the cursor stays on its message.
-    pub(crate) fn set_msgs(&mut self, message: Vec<crate::domain::search::Msg>) {
-        let key = |message_value: &crate::domain::search::Msg| {
-            (
-                message_value.thread.clone(),
-                message_value.ts,
-                message_value.from.clone(),
-            )
-        };
+    pub(crate) fn set_msgs(&mut self, msgs: Vec<crate::domain::search::Msg>) {
+        let key = |msg: &crate::domain::search::Msg| (msg.thread.clone(), msg.ts, msg.from.clone());
 
         let picked = self
             .search_state
@@ -227,14 +221,14 @@ impl Menu {
             .and_then(|&i| self.search_state.msgs.as_ref()?.get(i))
             .map(key);
 
-        self.search_state.msgs = Some(message);
+        self.search_state.msgs = Some(msgs);
         let query = self.search_state.search.text();
         let msgs = self.search_state.msgs.as_deref().unwrap_or_default();
 
         self.search_state.hits = crate::domain::search::find(msgs, &query);
         self.search_state.hits_for = query;
         self.search_state.scursor = picked
-            .and_then(|key_value| self.search_state.hits.iter().position(|&i| key(&msgs[i]) == key_value))
+            .and_then(|picked| self.search_state.hits.iter().position(|&i| key(&msgs[i]) == picked))
             .unwrap_or(0);
     }
 
@@ -243,7 +237,7 @@ impl Menu {
         self.list
             .cards
             .iter()
-            .find(|character| character.id == message.thread)
+            .find(|card| card.id == message.thread)
             .cloned()
             .unwrap_or_else(|| Card {
                 id: message.thread.clone(),
@@ -273,16 +267,16 @@ impl Menu {
                 self.level = Level::Bar;
                 Action::None
             }
-            thread_list::Out::Open(character) => Action::Open(*character),
+            thread_list::Out::Open(card) => Action::Open(*card),
             thread_list::Out::Home => Action::Home(Home::Threads),
             thread_list::Out::None | thread_list::Out::Pass => Action::None,
         }
     }
 
-    fn switch(&mut self, directory: isize) {
-        let i = TABS.iter().position(|(thread, _)| *thread == self.tab).unwrap_or(0) as isize;
+    fn switch(&mut self, delta: isize) {
+        let i = TABS.iter().position(|(tab, _)| *tab == self.tab).unwrap_or(0) as isize;
 
-        self.tab = TABS[(i + directory).rem_euclid(TABS.len() as isize) as usize].0;
+        self.tab = TABS[(i + delta).rem_euclid(TABS.len() as isize) as usize].0;
         self.level = Level::Bar;
     }
 
@@ -300,7 +294,7 @@ impl Menu {
             Body,
         }
 
-        let rs: &[Region] = match self.tab {
+        let regions: &[Region] = match self.tab {
             Tab::Threads if self.list.has_stats() => &[
                 Region::Bar,
                 Region::Repos,
@@ -333,8 +327,8 @@ impl Menu {
             (Level::Body, _) => Region::Body,
         };
 
-        let at = rs.iter().position(|result| *result == now).unwrap_or(0) as isize;
-        let to = rs[(at + if back { -1 } else { 1 }).rem_euclid(rs.len() as isize) as usize];
+        let at = regions.iter().position(|region| *region == now).unwrap_or(0) as isize;
+        let to = regions[(at + if back { -1 } else { 1 }).rem_euclid(regions.len() as isize) as usize];
 
         self.level = match to {
             Region::Bar => Level::Bar,
@@ -372,32 +366,26 @@ impl Menu {
     /// left, its flow moved on). The cursor stays on its command.
     pub(crate) fn set_items(&mut self, items: Vec<Item>) {
         let same = self.items.len() == builtins().len() + items.len()
-            && self
-                .items
-                .iter()
-                .skip(builtins().len())
-                .zip(&items)
-                .all(|(agent, bytes)| {
-                    (agent.id, &agent.label, &agent.key, agent.section)
-                        == (bytes.id, &bytes.label, &bytes.key, bytes.section)
-                });
+            && self.items.iter().skip(builtins().len()).zip(&items).all(|(old, new)| {
+                (old.id, &old.label, &old.key, old.section) == (new.id, &new.label, &new.key, new.section)
+            });
 
         if same {
             return;
         }
 
-        let picked = self.items.get(self.qcursor).map(|it| it.id);
+        let picked = self.items.get(self.qcursor).map(|item| item.id);
 
         self.items = builtins();
         self.items.extend(items);
         self.qcursor = picked
-            .and_then(|id| self.items.iter().position(|it| it.id == id))
+            .and_then(|id| self.items.iter().position(|item| item.id == id))
             .unwrap_or(0)
             .min(self.items.len() - 1);
     }
 
     fn run_item(&mut self, i: usize) -> Action {
-        match self.items.get(i).map(|it| it.id) {
+        match self.items.get(i).map(|item| item.id) {
             Some(NEW) => Action::Home(Home::New),
             Some(HOME) => Action::Back,
             Some(SEARCH) => {
@@ -423,15 +411,15 @@ impl Menu {
             self.layout
                 .rows
                 .iter()
-                .find(|(result, _)| result.contains(at))
-                .map(|(result_value, _)| *result_value)
+                .find(|(rect, _)| rect.contains(at))
+                .map(|(rect, _)| *rect)
         })
         .or_else(|| {
             self.layout
                 .tab_rects
                 .iter()
-                .find(|(result_2, _)| result_2.contains(at))
-                .map(|(result_3, _)| *result_3)
+                .find(|(rect, _)| rect.contains(at))
+                .map(|(rect, _)| *rect)
         })
     }
 

@@ -13,7 +13,7 @@ fn card(id: &str, state: &str, activity: u64) -> Card {
 #[test]
 fn a_card_with_an_open_question_shows_blocked_also_while_its_turn_runs() {
     let base = card("t", "open", 0);
-    let character = Card {
+    let card = Card {
         agents: crate::domain::thread_card::AgentActivity {
             busy: true,
             blocked: true,
@@ -28,7 +28,7 @@ fn a_card_with_an_open_question_shows_blocked_also_while_its_turn_runs() {
     draw_card(
         &mut buf,
         area,
-        &character,
+        &card,
         Look {
             cur: false,
             here: false,
@@ -38,7 +38,7 @@ fn a_card_with_an_open_question_shows_blocked_also_while_its_turn_runs() {
     );
     let text: String = (0..CARD_H)
         .flat_map(|y| (0..40).map(move |x| (x, y)))
-        .map(|path| buf[path].symbol().to_string())
+        .map(|cell| buf[cell].symbol().to_string())
         .collect();
 
     assert!(text.contains("? blocked") && !text.contains("working"), "{text}");
@@ -48,12 +48,12 @@ fn a_card_with_an_open_question_shows_blocked_also_while_its_turn_runs() {
 #[test]
 fn a_card_shows_its_projects_below_the_title() {
     let base = card("t", "open", 0);
-    let character = Card {
+    let card = Card {
         projects: vec!["bug-fixes".into(), "ux".into()],
         agents: crate::domain::thread_card::AgentActivity { live: 1, ..base.agents },
         ..base
     };
-    let height = card_h(&character);
+    let height = card_h(&card);
 
     assert_eq!(height, CARD_H + 1);
 
@@ -63,7 +63,7 @@ fn a_card_shows_its_projects_below_the_title() {
     draw_card(
         &mut buf,
         area,
-        &character,
+        &card,
         Look {
             cur: false,
             here: false,
@@ -87,7 +87,7 @@ fn a_card_shows_its_projects_below_the_title() {
 #[test]
 fn a_card_with_a_running_monitor_shows_monitoring() {
     let base = card("t", "open", 0);
-    let character = Card {
+    let card = Card {
         agents: crate::domain::thread_card::AgentActivity {
             busy: true,
             monitoring: true,
@@ -102,7 +102,7 @@ fn a_card_with_a_running_monitor_shows_monitoring() {
     draw_card(
         &mut buf,
         area,
-        &character,
+        &card,
         Look {
             cur: false,
             here: false,
@@ -112,7 +112,7 @@ fn a_card_with_a_running_monitor_shows_monitoring() {
     );
     let text: String = (0..CARD_H)
         .flat_map(|y| (0..40).map(move |x| (x, y)))
-        .map(|path| buf[path].symbol().to_string())
+        .map(|cell| buf[cell].symbol().to_string())
         .collect();
 
     assert!(
@@ -141,7 +141,7 @@ fn a_card_with_an_unsent_prompt_shows_it() {
     assert!(has_draft(id));
 
     let base = card(id, "open", 0);
-    let character = Card {
+    let card = Card {
         draft: true,
         agents: crate::domain::thread_card::AgentActivity { live: 1, ..base.agents },
         ..base
@@ -152,7 +152,7 @@ fn a_card_with_an_unsent_prompt_shows_it() {
     draw_card(
         &mut buf,
         area,
-        &character,
+        &card,
         Look {
             cur: false,
             here: false,

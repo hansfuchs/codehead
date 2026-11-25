@@ -40,14 +40,14 @@ pub(super) fn link(items: &[Item]) -> Vec<Option<Link>> {
         .unwrap_or_else(|| json!({}));
     let mut by_pr: HashMap<String, &crate::engine::store::Thread> = HashMap::new();
 
-    for current_thread in &threads {
-        for key_2 in remembered[&current_thread.id]
+    for thread in &threads {
+        for key in remembered[&thread.id]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
         {
-            by_pr.entry(key_2.to_string()).or_insert(current_thread);
+            by_pr.entry(key.to_string()).or_insert(thread);
         }
     }
 
@@ -55,21 +55,21 @@ pub(super) fn link(items: &[Item]) -> Vec<Option<Link>> {
     let mut repo_of: HashMap<String, Option<String>> = HashMap::new();
     let mut by_branch: HashMap<(String, String), &crate::engine::store::Thread> = HashMap::new();
 
-    for candidate_thread in &threads {
-        index_checkouts(&mut repo_of, &mut by_branch, candidate_thread);
+    for thread in &threads {
+        index_checkouts(&mut repo_of, &mut by_branch, thread);
     }
 
     items
         .iter()
         .map(|item| {
-            let matched_thread = by_pr
+            let thread = by_pr
                 .get(&item.pr.key())
                 .or_else(|| by_branch.get(&(item.pr.repo.clone(), item.head.clone())))?;
 
             Some(Link {
-                id: matched_thread.id.clone(),
-                title: matched_thread.title.clone(),
-                dir: matched_thread.work_dir(),
+                id: thread.id.clone(),
+                title: thread.title.clone(),
+                dir: thread.work_dir(),
             })
         })
         .collect()
@@ -81,7 +81,7 @@ pub(super) fn index_checkouts<'threads>(
     thread: &'threads crate::engine::store::Thread,
 ) {
     for checkout in thread.all_checkouts() {
-        let Some(branch_value) = checkout.branch.clone() else {
+        let Some(branch) = checkout.branch.clone() else {
             continue;
         };
 
@@ -90,8 +90,8 @@ pub(super) fn index_checkouts<'threads>(
             .or_insert_with(|| gh::repo_of_dir(std::path::Path::new(&checkout.dir)))
             .clone();
 
-        if let Some(repository) = repo {
-            by_branch.entry((repository, branch_value)).or_insert(thread);
+        if let Some(repo) = repo {
+            by_branch.entry((repo, branch)).or_insert(thread);
         }
     }
 }
@@ -115,12 +115,12 @@ pub(super) fn load() -> Result<Vec<Entry>, String> {
 }
 
 pub(super) fn cached() -> Vec<Entry> {
-    let value: Value = std::fs::read(dir().join("mine.json"))
+    let cache: Value = std::fs::read(dir().join("mine.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
 
-    value
+    cache
         .as_array()
         .into_iter()
         .flatten()

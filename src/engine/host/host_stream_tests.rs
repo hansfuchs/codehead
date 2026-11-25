@@ -2,40 +2,43 @@ use super::*;
 
 #[test]
 pub(crate) fn subscribers_get_live_text_then_chunks_and_wakes() {
-    let (agent, bytes) = UnixStream::pair().unwrap();
+    let (server, client) = UnixStream::pair().unwrap();
     let (tx, rx) = mpsc::channel::<Input>();
 
-    std::thread::spawn(move || serve(agent, &tx));
-    let mut width = bytes.try_clone().unwrap();
+    std::thread::spawn(move || serve(server, &tx));
+    let mut writer = client.try_clone().unwrap();
 
-    writeln!(width, "{}", json!({"op": "subscribe"})).unwrap();
+    writeln!(writer, "{}", json!({"op": "subscribe"})).unwrap();
 
-    let Ok(Input::Subscribe(text)) = rx.recv() else {
+    let Ok(Input::Subscribe(subscriber)) = rx.recv() else {
         panic!("0 subscribe")
     };
 
-    let (htx, _hrx) = mpsc::channel();
-    let mut path = test_host("t".into(), htx);
+    let (htx, harness_rx) = mpsc::channel();
+    let mut host = test_host("t".into(), htx);
 
-    path.live.insert("ada".into(), "Hel".into());
-    path.subscribe(text);
-    path.harness("ada".into(), Out::Delta("lo".into()));
-    path.push(&json!({"op": "wake"}));
-    let mut result = BufReader::new(bytes);
+    host.live.insert("ada".into(), "Hel".into());
+    host.subscribe(subscriber);
+    host.harness("ada".into(), Out::Delta("lo".into()));
+    host.push(&json!({"op": "wake"}));
+    let mut reader = BufReader::new(client);
 
-    let mut line = || {
-        let mut line_value = String::new();
+    let mut next_line = || {
+        let mut line = String::new();
 
-        result.read_line(&mut line_value).unwrap();
-        serde_json::from_str::<Value>(&line_value).unwrap()
+        reader.read_line(&mut line).unwrap();
+        serde_json::from_str::<Value>(&line).unwrap()
     };
 
-    assert_eq!(line()["ok"], true);
-    assert_eq!(line(), json!({"op": "live", "agent": "ada", "text": "Hel"}));
-    assert_eq!(line(), json!({"op": "delta", "agent": "ada", "text": "lo"}));
-    assert_eq!(line(), json!({"op": "wake"}));
-    assert_eq!(path.live["ada"], "Hello");
+    assert_eq!(next_line()["ok"], true);
+    assert_eq!(next_line(), json!({"op": "live", "agent": "ada", "text": "Hel"}));
+    assert_eq!(next_line(), json!({"op": "delta", "agent": "ada", "text": "lo"}));
+    assert_eq!(next_line(), json!({"op": "wake"}));
+    assert_eq!(host.live["ada"], "Hello");
+
+    drop(harness_rx);
 }
+
 #[test]
 pub(crate) fn mentions_match_names_once_in_order() {
     let names = vec!["ada".to_string(), "bob".to_string(), "r2-d2".to_string()];

@@ -28,18 +28,18 @@ pub(super) fn open_current(mcp_tab: &mut McpTab) {
 
     match &item.key {
         Key::Codehead(name) => {
-            open_current_key_codehead_name(mcp_tab, &item, name);
+            open_codehead_server(mcp_tab, &item, name);
         }
         Key::Native { .. } => mcp_tab.modal = Some(self::info_for(&item, mcp_tab)),
     }
 }
 
-fn open_current_key_codehead_name(mcp_tab: &mut McpTab, item: &Item, name: &String) {
-    if let Some(text_value) = mcp_tab.servers.iter().find(|text| &text.name == name).cloned() {
+fn open_codehead_server(mcp_tab: &mut McpTab, item: &Item, name: &String) {
+    if let Some(server) = mcp_tab.servers.iter().find(|server| &server.name == name).cloned() {
         if !item.action.is_empty() && !item.action.starts_with("plain text") {
             mcp_tab.modal = Some(self::info_for(item, mcp_tab));
         } else {
-            mcp_tab.modal = Some(Modal::Edit(Box::new(EditForm::of(Some(&text_value)))));
+            mcp_tab.modal = Some(Modal::Edit(Box::new(EditForm::of(Some(&server)))));
         }
     }
 }
@@ -68,8 +68,8 @@ pub(super) fn import_current(mcp_tab: &mut McpTab) {
     let source = mcp_tab
         .natives
         .iter()
-        .find(|count| count.harness == harness && count.name == name)
-        .map(|count_value| count_value.source.clone())
+        .find(|native| native.harness == harness && native.name == name)
+        .map(|native| native.source.clone())
         .unwrap_or_default();
 
     if harness == "claude" && (source == "claudeai" || source == "plugin") {
@@ -104,12 +104,11 @@ pub(super) fn open_agents(name: &str, mcp_tab: &mut McpTab) {
     let mut rows: Vec<(Agent, bool)> = mcp_tab
         .agents
         .iter()
-        .map(|agent| (agent.clone(), agent.mcp.iter().any(|message| message == name)))
+        .map(|agent| (agent.clone(), agent.mcp.iter().any(|listed| listed == name)))
         .collect();
 
-    rows.sort_by(|agent_value, bytes| {
-        (harness_order(&agent_value.0.harness), &agent_value.0.name)
-            .cmp(&(harness_order(&bytes.0.harness), &bytes.0.name))
+    rows.sort_by(|left, right| {
+        (harness_order(&left.0.harness), &left.0.name).cmp(&(harness_order(&right.0.harness), &right.0.name))
     });
 
     mcp_tab.modal = Some(Modal::Agents(Pick {
@@ -130,9 +129,9 @@ pub(super) fn toggle_allow(mcp_tab: &mut McpTab) {
 
     let mut all = mcp_tab.servers.clone();
 
-    if let Some(text_value) = all.iter_mut().find(|text| text.name == name) {
-        text_value.auto_allow = !text_value.auto_allow;
-        let selected = text_value.auto_allow;
+    if let Some(server) = all.iter_mut().find(|server| server.name == name) {
+        server.auto_allow = !server.auto_allow;
+        let selected = server.auto_allow;
 
         match servers::save(&all) {
             Ok(()) => {
@@ -162,12 +161,14 @@ pub(super) fn open_add(mcp_tab: &mut McpTab) {
 /// The import of HARNESS's server NAME ended: R (the server, the toast) in the lists.
 pub(super) fn imported(harness: &str, name: &str, result: Result<(Server, String), String>, mcp_tab: &mut McpTab) {
     match result {
-        Ok((text, message)) => {
+        Ok((server, message)) => {
             mcp_tab.load();
-            mcp_tab.natives.retain(|x| !(x.harness == harness && x.name == name));
+            mcp_tab
+                .natives
+                .retain(|native| !(native.harness == harness && native.name == name));
             self::say(message, false, mcp_tab);
             self::probe(mcp_tab);
-            self::open_agents(&text.name, mcp_tab);
+            self::open_agents(&server.name, mcp_tab);
         }
         Err(error) => self::say(error, true, mcp_tab),
     }
@@ -177,11 +178,11 @@ pub(super) fn save_agents(selection: &Pick, mcp_tab: &mut McpTab) {
     let mut count = 0;
 
     for (agent, selected) in &selection.rows {
-        let Some(mut cur) = roster::get(&agent.name) else {
+        let Some(mut stored) = roster::get(&agent.name) else {
             continue;
         };
 
-        let has = cur.mcp.contains(&selection.name);
+        let has = stored.mcp.contains(&selection.name);
 
         if has == *selected {
             count += usize::from(*selected);
@@ -189,13 +190,13 @@ pub(super) fn save_agents(selection: &Pick, mcp_tab: &mut McpTab) {
         }
 
         if *selected {
-            cur.mcp.push(selection.name.clone());
+            stored.mcp.push(selection.name.clone());
             count += 1;
         } else {
-            cur.mcp.retain(|message| *message != selection.name);
+            stored.mcp.retain(|listed| *listed != selection.name);
         }
 
-        if let Err(error) = roster::save(&cur) {
+        if let Err(error) = roster::save(&stored) {
             return self::say(error, true, mcp_tab);
         }
     }

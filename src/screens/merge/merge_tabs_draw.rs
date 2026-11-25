@@ -29,7 +29,7 @@ pub(super) fn draw_sub_tabs(merge: &mut Merge, frame: &mut Frame<'_>, area: Rect
     let mut x = area.x + 1;
     let mut spans = Vec::new();
 
-    for (changes, label) in [(Sub::Overview, " overview "), (Sub::Changes, " changes ")] {
+    for (view, label) in [(Sub::Overview, " overview "), (Sub::Changes, " changes ")] {
         draw_sub_tab(
             merge,
             SubTabLabel {
@@ -39,31 +39,25 @@ pub(super) fn draw_sub_tabs(merge: &mut Merge, frame: &mut Frame<'_>, area: Rect
             },
             &mut x,
             &mut spans,
-            changes,
+            view,
             label,
         );
     }
 
-    let busy = merge
+    let (reading, busy, read_at) = merge
         .tab_ref()
-        .map(|thread_2| {
-            (
-                thread_2.reads.reading,
-                thread_2.input.busy.is_some(),
-                thread_2.reads.read_at,
-            )
-        })
+        .map(|tab| (tab.reads.reading, tab.input.busy.is_some(), tab.reads.read_at))
         .unwrap_or_default();
 
-    let state = if busy.1 {
+    let state = if busy {
         "  · gh …".to_string()
     } else if merge.active.elapsed() > SLEEP {
         "  · asleep: a key wakes it".to_string()
-    } else if busy.0 {
+    } else if reading {
         "  · reading…".to_string()
     } else {
-        busy.2
-            .map(|thread_3| format!("  · read {}s ago · r: again", thread_3.elapsed().as_secs()))
+        read_at
+            .map(|at| format!("  · read {}s ago · r: again", at.elapsed().as_secs()))
             .unwrap_or_default()
     };
 
@@ -91,7 +85,7 @@ pub(super) fn draw_sub_tab(
 
     let label_width = label.width() as u16;
 
-    let st = if view == sub {
+    let style = if view == sub {
         if on {
             theme::pill().add_modifier(Modifier::BOLD)
         } else {
@@ -112,7 +106,7 @@ pub(super) fn draw_sub_tab(
         },
         view,
     ));
-    spans.push(Span::styled(label, st));
+    spans.push(Span::styled(label, style));
     *x += label_width + 1;
 }
 
@@ -126,9 +120,9 @@ pub(super) fn draw_pull_request_tab(
 ) {
     let TabLabel { area, current, on } = look;
     let label = format!(" {} ", pr.label());
-    let width_value = label.width() as u16;
+    let width = label.width() as u16;
 
-    let st = if i == current {
+    let style = if i == current {
         if on {
             theme::pill().add_modifier(Modifier::BOLD)
         } else {
@@ -142,14 +136,14 @@ pub(super) fn draw_pull_request_tab(
         Rect {
             x: *x,
             y: area.y,
-            width: width_value,
+            width,
             height: 1,
         },
         i,
     ));
-    spans.push(Span::styled(label, st));
+    spans.push(Span::styled(label, style));
     spans.push(Span::raw(" "));
-    *x += width_value + 1;
+    *x += width + 1;
 }
 
 #[derive(Clone, Copy)]

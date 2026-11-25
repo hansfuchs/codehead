@@ -12,18 +12,18 @@ impl Settings {
     }
 }
 
-fn mouse_hit_field_i(i: usize, form: &mut Form) {
-    let key = super::alias_of(i, form);
+fn open_alias_field(i: usize, form: &mut Form) {
+    let alias = super::alias_of(i, form);
 
-    if form.editing.is_none_or(|error| super::alias_of(error, form) != key) {
+    if form.editing.is_none_or(|open| super::alias_of(open, form) != alias) {
         form.commit();
     }
 
-    form.focus = form.plain() + key;
+    form.focus = form.plain() + alias;
     form.editing = Some(i);
 }
 
-fn mouse_hit_field_i_if(i: usize, form: &mut Form) {
+fn focus_plain_field(i: usize, form: &mut Form) {
     if form.focus != i {
         form.commit();
     }
@@ -60,7 +60,7 @@ fn mouse_form(form: &mut Form, event: MouseEvent) -> Action {
     }
 
     if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
-        && let Some(&(_, hit)) = form.rows.iter().find(|(result, _)| result.contains(at))
+        && let Some(&(_, hit)) = form.rows.iter().find(|(rect, _)| rect.contains(at))
     {
         match hit {
             Hit::Add => {
@@ -75,10 +75,10 @@ fn mouse_form(form: &mut Form, event: MouseEvent) -> Action {
                 return Action::None;
             }
             Hit::Field(i) if i < form.plain() => {
-                mouse_hit_field_i_if(i, form);
+                focus_plain_field(i, form);
             }
             Hit::Field(i) => {
-                mouse_hit_field_i(i, form);
+                open_alias_field(i, form);
             }
         }
     }
@@ -97,9 +97,9 @@ fn mouse_settings(settings: &mut Settings, event: MouseEvent) -> Action {
     };
 
     if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
-        && let Some(&(_, text)) = settings.bar_hits.iter().find(|(result, _)| result.contains(at))
+        && let Some(&(_, sub)) = settings.bar_hits.iter().find(|(rect, _)| rect.contains(at))
     {
-        settings.switch(text);
+        settings.switch(sub);
         settings.bar = false;
         return Action::None;
     }

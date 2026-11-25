@@ -2,54 +2,53 @@ use super::{Focus, KeyCode, KeyEvent, KeyModifiers, Pick, Tab, TextArea, all, va
 
 impl Pick {
     /// Key for the dropdown. true: used (the input must not see it).
-    pub(crate) fn key(&mut self, key_value: KeyEvent, ta: &mut TextArea) -> bool {
-        pick_key(self, key_value, ta)
+    pub(crate) fn key(&mut self, key: KeyEvent, ta: &mut TextArea) -> bool {
+        pick_key(self, key, ta)
     }
 }
 
 impl Tab {
     /// A key. False: ↑ on the 1st row (the sub-tab bar takes the keys).
-    pub(crate) fn key(&mut self, key_value: KeyEvent) -> bool {
+    pub(crate) fn key(&mut self, key: KeyEvent) -> bool {
         match self.focus {
-            Focus::List => key_list(self, key_value),
-            Focus::Name | Focus::Text if key_value.code == KeyCode::Esc => key_escape(self),
-            Focus::Name => key_name(self, key_value),
-            Focus::Text => key_text(self, key_value),
+            Focus::List => key_list(self, key),
+            Focus::Name | Focus::Text if key.code == KeyCode::Esc => key_escape(self),
+            Focus::Name => key_name(self, key),
+            Focus::Text => key_text(self, key),
         }
     }
 }
 
-fn pick_key(widget_state: &mut Pick, key_value: KeyEvent, ta: &mut TextArea) -> bool {
-    let Some(output) = widget_state.open(ta) else {
+fn pick_key(pick: &mut Pick, key: KeyEvent, ta: &mut TextArea) -> bool {
+    let Some(open) = pick.open(ta) else {
         return false;
     };
 
-    let plain = key_value.modifiers.is_empty() || key_value.modifiers == KeyModifiers::SHIFT;
-    let count = output.matches.len();
+    let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+    let count = open.matches.len();
 
-    match key_value.code {
+    match key.code {
         KeyCode::Up | KeyCode::Down if plain => {
-            widget_state.cursor = if key_value.code == KeyCode::Up {
-                (widget_state.cursor + count - 1) % count
+            pick.cursor = if key.code == KeyCode::Up {
+                (pick.cursor + count - 1) % count
             } else {
-                (widget_state.cursor + 1) % count
+                (pick.cursor + 1) % count
             };
 
-            widget_state.hover = None;
-            let name = output.list[output.matches[widget_state.cursor]].name.clone();
+            pick.hover = None;
+            let name = open.list[open.matches[pick.cursor]].name.clone();
 
-            widget_state
-                .preview
-                .show(ta, output.at, &format!("#{}", output.query), &format!("#{name}"));
+            pick.preview
+                .show(ta, open.at, &format!("#{}", open.query), &format!("#{name}"));
         }
-        KeyCode::Tab | KeyCode::Enter if key_value.modifiers.is_empty() => {
-            widget_state.pick(ta, &output, widget_state.cursor);
+        KeyCode::Tab | KeyCode::Enter if key.modifiers.is_empty() => {
+            pick.pick(ta, &open, pick.cursor);
         }
-        KeyCode::Esc if key_value.modifiers.is_empty() => widget_state.closed = Some(output.at),
+        KeyCode::Esc if key.modifiers.is_empty() => pick.closed = Some(open.at),
         KeyCode::Char(character)
             if plain
                 && (character.is_alphanumeric() || character == '_' || character == '-')
-                && widget_state.preview.revert(ta) =>
+                && pick.preview.revert(ta) =>
         {
             return false;
         }
@@ -59,15 +58,15 @@ fn pick_key(widget_state: &mut Pick, key_value: KeyEvent, ta: &mut TextArea) -> 
     true
 }
 
-fn key_list(tab: &mut Tab, key_value: KeyEvent) -> bool {
-    let ctrl = key_value.modifiers.contains(KeyModifiers::CONTROL);
+fn key_list(tab: &mut Tab, key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let count = tab.list.len() + 1;
 
-    if !matches!(key_value.code, KeyCode::Char('d') | KeyCode::Delete) {
+    if !matches!(key.code, KeyCode::Char('d') | KeyCode::Delete) {
         tab.armed = false;
     }
 
-    match key_value.code {
+    match key.code {
         KeyCode::Up | KeyCode::Char('k') if tab.at == 0 => return false,
         KeyCode::Up | KeyCode::Char('k') => {
             tab.at -= 1;
@@ -82,7 +81,7 @@ fn key_list(tab: &mut Tab, key_value: KeyEvent) -> bool {
             tab.text.move_end();
             tab.focus = Focus::Text;
         }
-        KeyCode::Char('n') if ctrl || key_value.modifiers.is_empty() => tab.add(),
+        KeyCode::Char('n') if ctrl || key.modifiers.is_empty() => tab.add(),
         // R: rename (as in the flows tab; r reads again on every screen)
         KeyCode::Char('R') if tab.at < tab.list.len() => {
             tab.name.move_end();
@@ -113,9 +112,11 @@ fn key_escape(tab: &mut Tab) -> bool {
     tab.error = None;
 
     // a new shortcut never saved: it goes
-    if tab.list.get(tab.at).is_some_and(|text_value| {
-        text_value.text.is_empty() && !all().iter().any(|agent| agent.name == text_value.name)
-    }) {
+    if tab
+        .list
+        .get(tab.at)
+        .is_some_and(|shortcut| shortcut.text.is_empty() && !all().iter().any(|saved| saved.name == shortcut.name))
+    {
         tab.list.remove(tab.at);
         tab.at = tab.at.min(tab.list.len());
     }
@@ -126,8 +127,8 @@ fn key_escape(tab: &mut Tab) -> bool {
     true
 }
 
-fn key_name(tab: &mut Tab, key_value: KeyEvent) -> bool {
-    match key_value.code {
+fn key_name(tab: &mut Tab, key: KeyEvent) -> bool {
+    match key.code {
         KeyCode::Enter | KeyCode::Down => {
             let name = tab.name.text().trim().to_string();
 
@@ -137,7 +138,7 @@ fn key_name(tab: &mut Tab, key_value: KeyEvent) -> bool {
                 .list
                 .iter()
                 .enumerate()
-                .any(|(i, text_2)| i != tab.at && text_2.name == name)
+                .any(|(i, shortcut)| i != tab.at && shortcut.name == name)
             {
                 tab.error = Some(format!("#{name} exists already"));
             } else {
@@ -147,17 +148,17 @@ fn key_name(tab: &mut Tab, key_value: KeyEvent) -> bool {
             }
         }
         _ => {
-            tab.name.key(key_value);
+            tab.name.key(key);
         }
     }
 
     true
 }
 
-fn key_text(tab: &mut Tab, key_value: KeyEvent) -> bool {
-    let ctrl = key_value.modifiers.contains(KeyModifiers::CONTROL);
+fn key_text(tab: &mut Tab, key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-    match key_value.code {
+    match key.code {
         // ctrl+s / ctrl+enter: saved, back to the list
         KeyCode::Char('s') if ctrl => {
             if tab.store() {
@@ -165,7 +166,7 @@ fn key_text(tab: &mut Tab, key_value: KeyEvent) -> bool {
             }
         }
         KeyCode::Enter
-            if key_value
+            if key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
         {
@@ -175,9 +176,7 @@ fn key_text(tab: &mut Tab, key_value: KeyEvent) -> bool {
         }
         KeyCode::Up if tab.text.on_first_row() => tab.focus = Focus::Name,
         _ => {
-            if !matches!(tab.text.key(key_value), crate::ui::textarea::Outcome::Handled)
-                && key_value.code == KeyCode::Enter
-            {
+            if !matches!(tab.text.key(key), crate::ui::textarea::Outcome::Handled) && key.code == KeyCode::Enter {
                 tab.text.newline();
             }
         }

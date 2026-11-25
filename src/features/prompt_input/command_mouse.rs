@@ -8,24 +8,19 @@ impl Command {
     }
 }
 
-fn mouse_mouseeventkind_down_mousebutton_left(
+fn click_row(
     ta: &mut TextArea,
-    path_value: Position,
+    point: Position,
     at: crate::ui::textarea::Pos,
     query: &str,
-    directory: usize,
+    depth: usize,
     command: &mut Command,
 ) -> Option<bool> {
-    let Some((_, level, row)) = command
-        .rows
-        .iter()
-        .find(|(result_value, _, _)| result_value.contains(path_value))
-        .copied()
-    else {
+    let Some((_, level, row)) = command.rows.iter().find(|(rect, _, _)| rect.contains(point)).copied() else {
         return Some(true);
     };
 
-    if level < directory {
+    if level < depth {
         // a row of a parent: back to it, then its submenu (rows of a parent: unfiltered)
         command.path.truncate(level);
         command.cursor[level] = row;
@@ -37,7 +32,7 @@ fn mouse_mouseeventkind_down_mousebutton_left(
 
         super::activate(ta, at, "", command);
     } else {
-        command.cursor[directory] = row;
+        command.cursor[depth] = row;
         super::activate(ta, at, query, command);
     }
 
@@ -45,12 +40,12 @@ fn mouse_mouseeventkind_down_mousebutton_left(
 }
 
 fn mouse_command(command: &mut Command, event: MouseEvent, ta: &mut TextArea) -> bool {
-    let path_value = Position {
+    let point = Position {
         x: event.column,
         y: event.row,
     };
 
-    if !command.areas.iter().any(|result| result.contains(path_value)) {
+    if !command.areas.iter().any(|rect| rect.contains(point)) {
         return false;
     }
 
@@ -59,20 +54,18 @@ fn mouse_command(command: &mut Command, event: MouseEvent, ta: &mut TextArea) ->
     };
 
     let count = command.settle(&query);
-    let directory = super::depth(command);
+    let depth = super::depth(command);
 
     match event.kind {
         MouseEventKind::ScrollUp if count > 0 => {
-            command.cursor[directory] = command.cursor[directory].saturating_sub(3);
+            command.cursor[depth] = command.cursor[depth].saturating_sub(3);
         }
         MouseEventKind::ScrollDown if count > 0 => {
-            command.cursor[directory] = (command.cursor[directory] + 3).min(count - 1);
+            command.cursor[depth] = (command.cursor[depth] + 3).min(count - 1);
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(value) =
-                self::mouse_mouseeventkind_down_mousebutton_left(ta, path_value, at, &query, directory, command)
-            {
-                return value;
+            if let Some(used) = self::click_row(ta, point, at, &query, depth, command) {
+                return used;
             }
         }
         _ => {}

@@ -1,7 +1,7 @@
 #[test]
 fn frontmatter_split() {
-    let text = super::parse("x", "---\nname: MECHA\ndescription: d\n---\n\nbody line\n");
+    let style = super::parse("x", "---\nname: MECHA\ndescription: d\n---\n\nbody line\n");
 
-    assert_eq!(text.name, "MECHA");
-    assert_eq!(text.body, "body line");
+    assert_eq!(style.name, "MECHA");
+    assert_eq!(style.body, "body line");
 }

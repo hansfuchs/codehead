@@ -64,18 +64,18 @@ pub(crate) struct SubThreads {
     reader: SubthreadReads,
 }
 
-/// The 1st non-empty line of S, cut to N chars.
-fn line(text: &str, count_value: usize) -> String {
-    let line_2 = text
+/// The 1st non-empty line of TEXT, cut to MAX chars.
+fn line(text: &str, max: usize) -> String {
+    let first = text
         .lines()
-        .find(|line_value| !line_value.trim().is_empty())
+        .find(|line| !line.trim().is_empty())
         .unwrap_or_default()
         .trim();
 
-    if line_2.chars().count() > count_value {
-        line_2.chars().take(count_value.saturating_sub(1)).collect::<String>() + "…"
+    if first.chars().count() > max {
+        first.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
     } else {
-        line_2.to_string()
+        first.to_string()
     }
 }
 
@@ -83,10 +83,10 @@ fn line(text: &str, count_value: usize) -> String {
 pub(crate) fn steps(events: &[store::Event]) -> Vec<String> {
     let mut out: Vec<String> = events
         .iter()
-        .filter_map(|error| {
-            let who = error.agent.clone().unwrap_or_default();
+        .filter_map(|event| {
+            let who = event.agent.clone().unwrap_or_default();
 
-            match &error.kind {
+            match &event.kind {
                 Kind::Text { text } if !text.trim().is_empty() => Some(format!("{who}: {}", line(text, 200))),
                 Kind::Tool { name, input, .. } => {
                     Some(format!("{who}: {}", crate::domain::handoff::tool_line(name, input)))
@@ -114,16 +114,16 @@ fn read(main: &str) -> Vec<Kid> {
 
     for id in &thread.kids {
         // gone (it ended a moment ago): the thread's host drops it (`kids_check`, lost ones too)
-        let Some(key) = store::load(id) else { continue };
+        let Some(meta) = store::load(id) else { continue };
         let alive = crate::engine::client::alive(id);
         let busy = alive && !crate::engine::client::state(id).1.is_empty();
         let events = store::events_tail(id, 1 << 16);
 
         out.push(Kid {
             id: id.clone(),
-            title: key.title.clone(),
-            agents: key.agents.clone(),
-            start: key.created,
+            title: meta.title.clone(),
+            agents: meta.agents.clone(),
+            start: meta.created,
             busy,
             asking: asking(&events),
             watches: if alive {
@@ -142,10 +142,10 @@ fn read(main: &str) -> Vec<Kid> {
 pub(crate) fn asking(events: &[store::Event]) -> bool {
     let mut open: Vec<&str> = Vec::new();
 
-    for error in events {
-        match &error.kind {
+    for event in events {
+        match &event.kind {
             Kind::Ask { id, .. } => open.push(id),
-            Kind::Answer { id, .. } => open.retain(|x| x != id),
+            Kind::Answer { id, .. } => open.retain(|open_id| open_id != id),
             Kind::TurnEnd { .. } => open.clear(),
             _ => {}
         }
@@ -176,15 +176,15 @@ impl SubThreads {
     }
 
     /// A sub-thread just started (shown at once, before the next read).
-    pub(crate) fn started(&mut self, key: Kid) {
-        if !self.kids.iter().any(|x| x.id == key.id) {
-            self.kids.push(key);
+    pub(crate) fn started(&mut self, kid: Kid) {
+        if !self.kids.iter().any(|known| known.id == kid.id) {
+            self.kids.push(kid);
         }
     }
 
     /// A sub-thread stopped by the owner: out of the row at once.
     pub(crate) fn gone(&mut self, id: &str) {
-        self.kids.retain(|key| key.id != id);
+        self.kids.retain(|kid| kid.id != id);
 
         if self.kids.is_empty() {
             self.open = false;
@@ -194,12 +194,12 @@ impl SubThreads {
     fn current(&self) -> Option<&Kid> {
         self.kids
             .iter()
-            .find(|key| Some(&key.id) == self.selected.as_ref())
+            .find(|kid| Some(&kid.id) == self.selected.as_ref())
             .or(self.kids.first())
     }
 
-    pub(crate) fn key(&mut self, key_value: KeyEvent) -> Option<Act> {
-        key_sub_threads(self, key_value)
+    pub(crate) fn key(&mut self, key: KeyEvent) -> Option<Act> {
+        key_sub_threads(self, key)
     }
 
     pub(crate) fn mouse(&mut self, event: MouseEvent) -> bool {
@@ -260,8 +260,8 @@ fn tick_sub_threads(subthreads: &mut SubThreads, main: &str) -> bool {
         .topics
         .get_or_insert_with(crate::infra::bus::subscribe);
 
-    for thread_value in topics.try_iter() {
-        subthreads.reader.due |= topic_is_relevant(main, thread_value, &subthreads.kids);
+    for topic in topics.try_iter() {
+        subthreads.reader.due |= topic_is_relevant(main, topic, &subthreads.kids);
     }
 
     if (subthreads.reader.due || !subthreads.reader.read_once) && subthreads.reader.read.is_none() && !cfg!(test) {
@@ -281,12 +281,7 @@ fn tick_sub_threads(subthreads: &mut SubThreads, main: &str) -> bool {
 
     let mut changed = false;
 
-    if let Some(kids) = subthreads
-        .reader
-        .read
-        .as_ref()
-        .and_then(|result| result.try_recv().ok())
-    {
+    if let Some(kids) = subthreads.reader.read.as_ref().and_then(|read| read.try_recv().ok()) {
         subthreads.reader.read = None;
         changed = kids != subthreads.kids;
         subthreads.kids = kids;
@@ -308,34 +303,26 @@ fn key_sub_threads(subthreads: &mut SubThreads, key: KeyEvent) -> Option<Act> {
 
     let at = subthreads
         .current()
-        .and_then(|character| subthreads.kids.iter().position(|key_2| key_2.id == character.id))
+        .and_then(|current| subthreads.kids.iter().position(|kid| kid.id == current.id))
         .unwrap_or(0);
 
     match key.code {
         KeyCode::Up => {
-            subthreads.selected = subthreads.kids.get(at.saturating_sub(1)).map(|key_3| key_3.id.clone());
+            subthreads.selected = subthreads.kids.get(at.saturating_sub(1)).map(|kid| kid.id.clone());
         }
         KeyCode::Down => {
             subthreads.selected = subthreads
                 .kids
                 .get((at + 1).min(subthreads.kids.len().saturating_sub(1)))
-                .map(|key_4| key_4.id.clone());
+                .map(|kid| kid.id.clone());
         }
         KeyCode::PageDown => subthreads.scroll += 5,
         KeyCode::PageUp => subthreads.scroll = subthreads.scroll.saturating_sub(5),
         KeyCode::Char('d') if key.modifiers.is_empty() => {
-            return Some(
-                subthreads
-                    .current()
-                    .map_or(Act::None, |character_value| Act::Stop(character_value.id.clone())),
-            );
+            return Some(subthreads.current().map_or(Act::None, |kid| Act::Stop(kid.id.clone())));
         }
         KeyCode::Enter => {
-            return Some(
-                subthreads
-                    .current()
-                    .map_or(Act::None, |character_2| Act::Open(character_2.id.clone())),
-            );
+            return Some(subthreads.current().map_or(Act::None, |kid| Act::Open(kid.id.clone())));
         }
         _ => subthreads.open = false,
     }
@@ -370,7 +357,7 @@ fn mouse_sub_threads(subthreads: &mut SubThreads, event: MouseEvent) -> bool {
 }
 
 fn lines_sub_threads(subthreads: &SubThreads, width: usize) -> Vec<Line<'static>> {
-    let selected = subthreads.current().map(|key| key.id.clone());
+    let selected = subthreads.current().map(|kid| kid.id.clone());
 
     let mut out: Vec<Line<'static>> = Vec::new();
 
@@ -396,14 +383,14 @@ fn lines_sub_threads(subthreads: &SubThreads, width: usize) -> Vec<Line<'static>
         };
 
         let tail = format!(" · @{} · {} · {state}", kid.agents.join(" @"), took(kid.start));
-        let title_value = super::popup::truncate(
+        let title = super::popup::truncate(
             format!("{}{}", if selected_row { "› " } else { "  " }, kid.title),
             width.saturating_sub(tail.chars().count()),
         );
 
         out.push(Line::from(vec![
             Span::styled(
-                title_value,
+                title,
                 if selected_row {
                     theme::accent_bold()
                 } else {
@@ -458,7 +445,7 @@ fn render_sub_threads(subthreads: &mut SubThreads, frame: &mut Frame, area: Rect
     let what = subthreads
         .kids
         .iter()
-        .map(|key| line(&key.title, 40))
+        .map(|kid| line(&kid.title, 40))
         .collect::<Vec<_>>()
         .join(" · ");
 
@@ -482,14 +469,14 @@ fn render_sub_threads(subthreads: &mut SubThreads, frame: &mut Frame, area: Rect
         return;
     }
 
-    let area_value = Rect {
+    let popup_area = Rect {
         height: area.height - 1,
         ..area
     };
 
-    subthreads.popup = area_value;
+    subthreads.popup = popup_area;
     let hint = " ↑↓ select · enter open · d stop · pgup/pgdn scroll · esc close ";
-    let inner = super::popup::draw_frame(frame, area_value, " sub-threads ", hint);
+    let inner = super::popup::draw_frame(frame, popup_area, " sub-threads ", hint);
     let lines = subthreads.lines(inner.width.max(1) as usize);
 
     super::popup::draw_lines(

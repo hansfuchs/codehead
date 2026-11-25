@@ -35,7 +35,7 @@ impl View {
         let show_cost = header.height > 0 && header.width >= MIN_COST_WIDTH;
 
         let cost = if show_cost {
-            let cards: Vec<Card> = self.agents.order.iter().map(|count| self.card(count)).collect();
+            let cards: Vec<Card> = self.agents.order.iter().map(|name| self.card(name)).collect();
             let (all, first) = (cards_w(&cards), cards_w(&cards[..cards.len().min(1)]));
             let room = (header.width + 1).saturating_sub(all);
             let min = MIN_COST_BOX
@@ -56,30 +56,30 @@ impl View {
         self.draw_header(frame, header, cost);
 
         if show_cost {
-            draw_header_cost_text(self, frame, cost);
+            draw_cost(self, frame, cost);
         }
     }
 }
 
-fn draw_header_cost_text(view: &mut View, frame: &mut Frame<'_>, cost: Rect) {
+fn draw_cost(view: &mut View, frame: &mut Frame<'_>, cost: Rect) {
     if view.cost_at.elapsed() > Duration::from_secs(3) {
-        draw_header_cost_text_body(view);
+        read_cost(view);
     }
 
-    if let Some(text) = &view.cost {
+    if let Some(snap) = &view.cost {
         let next = crate::features::cost::Next {
             to: view.recipients(),
             chars: view.prompt.input.text().chars().count(),
         };
 
-        crate::features::cost::draw_in(frame, cost, text, view.cost_at.elapsed(), &next);
+        crate::features::cost::draw_in(frame, cost, snap, view.cost_at.elapsed(), &next);
     } else {
         // a new thread: the last box until this one's numbers come (then it morphs)
         crate::features::cost::draw_last(frame, cost);
     }
 }
 
-fn draw_header_cost_text_body(view: &mut View) {
+fn read_cost(view: &mut View) {
     view.cost_at = Instant::now();
     let (id, tx) = (view.id.clone(), view.tx.clone());
 

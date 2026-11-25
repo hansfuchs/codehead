@@ -24,7 +24,7 @@ pub(crate) fn code_rows(
     };
 
     let lines: Vec<&str> = text.trim_end_matches('\n').split('\n').collect();
-    let mw: usize = margin.iter().map(|text_value| text_value.content.width()).sum();
+    let mw: usize = margin.iter().map(|span| span.content.width()).sum();
     let room = width.saturating_sub(mw + 2).max(1);
     let bg = Style::default().bg(theme::pal().surface0);
     let mut out = Vec::new();
@@ -83,12 +83,12 @@ fn draw_code_rows(
         bg,
     } = settings;
 
-    for (i, line_value) in lines.iter().enumerate() {
+    for (i, line) in lines.iter().enumerate() {
         draw_code_line(
             &mut out,
             colored,
             i,
-            line_value,
+            line,
             CodeRow {
                 margin,
                 wrap,
@@ -102,13 +102,7 @@ fn draw_code_rows(
     out
 }
 
-fn draw_code_line(
-    out: &mut Vec<Row>,
-    colored: Option<&CodeColors>,
-    i: usize,
-    line_value: &&str,
-    settings: CodeRow<'_>,
-) {
+fn draw_code_line(out: &mut Vec<Row>, colored: Option<&CodeColors>, i: usize, line: &&str, settings: CodeRow<'_>) {
     let CodeRow {
         margin,
         wrap,
@@ -117,17 +111,10 @@ fn draw_code_line(
         bg,
     } = settings;
 
-    let chars: Vec<(Color, char)> = match (fg, colored.and_then(|character| character.get(i))) {
-        (Some(fg), _) => line_value
-            .chars()
-            .filter(|character_value| !character_value.is_control())
-            .map(|character_2| (fg, character_2))
-            .collect(),
-        (None, Some(character_3)) => character_3.clone(),
-        (None, None) => line_value
-            .chars()
-            .map(|character_4| (theme::pal().text, character_4))
-            .collect(),
+    let chars: Vec<(Color, char)> = match (fg, colored.and_then(|colored| colored.get(i))) {
+        (Some(fg), _) => line.chars().filter(|ch| !ch.is_control()).map(|ch| (fg, ch)).collect(),
+        (None, Some(colors)) => colors.clone(),
+        (None, None) => line.chars().map(|ch| (theme::pal().text, ch)).collect(),
     };
 
     let segments: Vec<std::ops::Range<usize>> = if wrap {
@@ -136,8 +123,8 @@ fn draw_code_line(
         std::iter::once(0..cut_at(&chars, room)).collect()
     };
 
-    for (key, seg) in segments.into_iter().enumerate() {
-        draw_code_segment(out, margin, room, bg, &chars, key, seg);
+    for (row, seg) in segments.into_iter().enumerate() {
+        draw_code_segment(out, margin, room, bg, &chars, row, seg);
     }
 }
 
@@ -147,24 +134,24 @@ fn draw_code_segment(
     room: usize,
     bg: Style,
     chars: &[(Color, char)],
-    key: usize,
+    row: usize,
     seg: std::ops::Range<usize>,
 ) {
     let mut spans = margin.to_vec();
 
     spans.push(Span::styled(" ", bg));
-    let mut width_value = 0;
+    let mut width = 0;
 
     // a continuation row: `↪ ` (the line goes on, 0 new line in the source)
-    if key > 0 {
+    if row > 0 {
         spans.push(Span::styled(CONT, bg.fg(theme::pal().subtext0)));
-        width_value += CONT.width();
+        width += CONT.width();
     }
 
     let mut run = String::new();
     let mut run_color = None;
 
-    for &(color, character_5) in &chars[seg] {
+    for &(color, ch) in &chars[seg] {
         if run_color != Some(color) && !run.is_empty() {
             spans.push(Span::styled(
                 std::mem::take(&mut run),
@@ -173,15 +160,15 @@ fn draw_code_segment(
         }
 
         run_color = Some(color);
-        run.push(character_5);
-        width_value += unicode_width::UnicodeWidthChar::width(character_5).unwrap_or(0);
+        run.push(ch);
+        width += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
     }
 
     if !run.is_empty() {
         spans.push(Span::styled(run, bg.fg(run_color.unwrap_or(theme::pal().text))));
     }
 
-    spans.push(Span::styled(" ".repeat((room + 1).saturating_sub(width_value)), bg));
+    spans.push(Span::styled(" ".repeat((room + 1).saturating_sub(width)), bg));
     out.push(Row::plain(Line::from(spans)));
 }
 
@@ -209,7 +196,7 @@ pub(super) fn cut_at(chars: &[(Color, char)], room: usize) -> usize {
 /// A row ends after a space or a separator (`,` `;` `)` `/` …) in its 2nd half, else at the room.
 pub(super) fn wrap_code(chars: &[(Color, char)], room: usize) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
-    let mut text = 0;
+    let mut start = 0;
 
     loop {
         let budget = if out.is_empty() {
@@ -218,23 +205,23 @@ pub(super) fn wrap_code(chars: &[(Color, char)], room: usize) -> Vec<std::ops::R
             room.saturating_sub(CONT.width()).max(1)
         };
 
-        let error = text + cut_at(&chars[text..], budget);
+        let fit_end = start + cut_at(&chars[start..], budget);
 
-        if error >= chars.len() {
-            out.push(text..chars.len());
+        if fit_end >= chars.len() {
+            out.push(start..chars.len());
             return out;
         }
 
-        let half = text + (error - text) / 2;
-        let brk = (half + 1..=error)
+        let half = start + (fit_end - start) / 2;
+        let brk = (half + 1..=fit_end)
             .rev()
-            .find(|&key| chars[key - 1].1.is_whitespace() || ",;:)]}/|&=>.-".contains(chars[key - 1].1));
+            .find(|&at| chars[at - 1].1.is_whitespace() || ",;:)]}/|&=>.-".contains(chars[at - 1].1));
 
         // 0 chars fit (a wide char in a 1-column room): take 1 anyway
-        let end = brk.unwrap_or(error).max(text + 1);
+        let end = brk.unwrap_or(fit_end).max(start + 1);
 
-        out.push(text..end);
-        text = end;
+        out.push(start..end);
+        start = end;
     }
 }
 

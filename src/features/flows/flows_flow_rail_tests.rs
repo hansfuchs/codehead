@@ -16,9 +16,9 @@ fn text(buf: &Buffer, area: Rect) -> Vec<String> {
 fn nested_arcs_take_their_own_columns() {
     let rows: Vec<Row> = ["a", "b", "c", "d"]
         .iter()
-        .map(|style| Row {
+        .map(|title| Row {
             mark: ("○".into(), Style::default()),
-            title: style.to_string(),
+            title: title.to_string(),
             ..Default::default()
         })
         .collect();
@@ -40,16 +40,10 @@ fn nested_arcs_take_their_own_columns() {
     let mut buf = Buffer::empty(area);
 
     draw(&mut buf, area, &rows, &arcs, Some(1), true, 0);
-    let thread = text(&buf, area);
+    let lines = text(&buf, area);
 
-    assert!(thread[0].contains("◀────┐"), "{thread:?}");
-    assert!(thread[1].contains("◀─┐  │"), "{thread:?}");
-    assert!(
-        thread[2].contains("──┘  │") && thread[2].ends_with("inner"),
-        "{thread:?}"
-    );
-    assert!(
-        thread[3].contains("─────┘") && thread[3].ends_with("outer"),
-        "{thread:?}"
-    );
+    assert!(lines[0].contains("◀────┐"), "{lines:?}");
+    assert!(lines[1].contains("◀─┐  │"), "{lines:?}");
+    assert!(lines[2].contains("──┘  │") && lines[2].ends_with("inner"), "{lines:?}");
+    assert!(lines[3].contains("─────┘") && lines[3].ends_with("outer"), "{lines:?}");
 }

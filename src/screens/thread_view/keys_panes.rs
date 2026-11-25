@@ -12,7 +12,7 @@ impl View {
 
         let pane = match key.code {
             KeyCode::F(number @ 1..=4) if key.modifiers.is_empty() => Some(usize::from(number) - 1),
-            KeyCode::Char(character @ '1'..='4') if alt != ctrl => Some(usize::from(character as u8 - b'1')),
+            KeyCode::Char(digit @ '1'..='4') if alt != ctrl => Some(usize::from(digit as u8 - b'1')),
             _ => None,
         };
 

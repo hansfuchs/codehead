@@ -9,9 +9,9 @@ impl View {
         add_comment_at_view(self, spots, text, level);
     }
 
-    /// The diff lines of S (`+ let b = 3;`): the selected lines of its file, else its line.
-    pub(super) fn quote(&self, text: &Spot) -> String {
-        quote_view(self, text)
+    /// The diff lines of SPOT (`+ let b = 3;`): the selected lines of its file, else its line.
+    pub(super) fn quote(&self, spot: &Spot) -> String {
+        quote_view(self, spot)
     }
 
     /// The comment modal on SPOTS (the selection, else the cursor's line).
@@ -30,15 +30,15 @@ impl View {
         reply_comment_view(self, ci);
     }
 
-    /// The view's pending changes to the file, then F (a write of `threads` under the lock, on
+    /// The view's pending changes to the file, then WRITE (a write of `threads` under the lock, on
     /// the thread's id), then the file read again.
-    pub(super) fn write_through<T>(&mut self, file: impl FnOnce(&str) -> T) -> T {
+    pub(super) fn write_through<T>(&mut self, write: impl FnOnce(&str) -> T) -> T {
         if self.comment_state.comments != self.comment_state.comments_base {
             self.save_comments();
         }
 
         let id = self.id.clone();
-        let out = file(&id);
+        let out = write(&id);
 
         self.comment_state.comments = read_comments(&id);
         self.comment_state.comments_base = self.comment_state.comments.clone();
@@ -69,7 +69,7 @@ fn save_new_comment(view: &mut View, spots: &[Spot], level: super::rank::Level, 
         .rev()
         .take(count)
         .rev()
-        .map(|character| character.id.clone())
+        .map(|comment| comment.id.clone())
         .collect();
     let mut acts = ids.iter().filter_map(|id| mention(id, message, "", view));
 
@@ -85,13 +85,15 @@ fn save_new_comment(view: &mut View, spots: &[Spot], level: super::rank::Level, 
         ));
     };
 
-    for agent in acts {
+    for more in acts {
         if let Act::Mention {
-            text: t2, context: c2, ..
-        } = agent
+            text: more_text,
+            context: more_context,
+            ..
+        } = more
         {
-            text = format!("{text}\n{t2}");
-            context = format!("{context}\n\n{c2}");
+            text = format!("{text}\n{more_text}");
+            context = format!("{context}\n\n{more_context}");
         }
     }
 
@@ -99,7 +101,7 @@ fn save_new_comment(view: &mut View, spots: &[Spot], level: super::rank::Level, 
         .comment_state
         .comments
         .iter_mut()
-        .filter(|character| ids.contains(&character.id))
+        .filter(|comment| ids.contains(&comment.id))
     {
         comment.sent = true;
     }
@@ -122,17 +124,17 @@ fn save_reply(view: &mut View, message: &str, id: &str) -> Act {
         .unwrap_or_else(|| Act::Toast(format!("reply on {id} · ctrl+enter: in the batch · @agent: at once")))
 }
 
-fn save_edited_reply(view: &mut View, message: &str, id: &str, result: usize) -> Act {
+fn save_edited_reply(view: &mut View, message: &str, id: &str, reply: usize) -> Act {
     let old = view
         .comment_state
         .comments
         .iter()
-        .find(|character| character.id == id)
-        .and_then(|character| character.replies.get(result))
-        .map(|x| x.text.clone())
+        .find(|comment| comment.id == id)
+        .and_then(|comment| comment.replies.get(reply))
+        .map(|edited| edited.text.clone())
         .unwrap_or_default();
 
-    if let Err(error) = view.write_through(|thread_id| threads::edit(thread_id, id, Some(result), message)) {
+    if let Err(error) = view.write_through(|thread_id| threads::edit(thread_id, id, Some(reply), message)) {
         return Act::Toast(error);
     }
 
@@ -148,12 +150,7 @@ fn save_edited_reply(view: &mut View, message: &str, id: &str, result: usize) ->
 }
 
 fn save_edited_comment(view: &mut View, level: super::rank::Level, message: &str, id: &str) -> Act {
-    let Some(ci) = view
-        .comment_state
-        .comments
-        .iter()
-        .position(|character| character.id == id)
-    else {
+    let Some(ci) = view.comment_state.comments.iter().position(|comment| comment.id == id) else {
         return Act::Toast(format!("{id}: gone"));
     };
 
@@ -179,15 +176,15 @@ fn save_edited_comment(view: &mut View, level: super::rank::Level, message: &str
 
 /// The agents a text can name: the roster, the thread's members.
 fn agent_names(view: &View) -> Vec<String> {
-    let mut value: Vec<String> = view.agents.iter().map(|agent| agent.name.clone()).collect();
+    let mut names: Vec<String> = view.agents.iter().map(|agent| agent.name.clone()).collect();
 
-    value.extend(
+    names.extend(
         view.members
             .iter()
-            .filter(|message| !view.agents.iter().any(|agent| &agent.name == *message))
+            .filter(|member| !view.agents.iter().any(|agent| &agent.name == *member))
             .cloned(),
     );
-    value
+    names
 }
 
 /// The owner's TEXT on comment ID names agents (0 of OLD, the text before an edit): they get
@@ -197,18 +194,14 @@ fn mention(id: &str, text: &str, old: &str, view: &View) -> Option<Act> {
     let before = threads::mentioned(old, &names, "");
     let to: Vec<String> = threads::mentioned(text, &names, "")
         .into_iter()
-        .filter(|count| !before.contains(count))
+        .filter(|name| !before.contains(name))
         .collect();
 
     if to.is_empty() {
         return None;
     }
 
-    let comment = view
-        .comment_state
-        .comments
-        .iter()
-        .find(|character| character.id == id)?;
+    let comment = view.comment_state.comments.iter().find(|comment| comment.id == id)?;
 
     Some(Act::Mention {
         to,
@@ -224,15 +217,15 @@ fn add_comment_at_view(view: &mut View, spots: &[Spot], text: &str, level: crate
         return;
     }
 
-    for text_value in spots {
-        let quote = view.quote(text_value);
+    for spot in spots {
+        let quote = view.quote(spot);
         let root = view.dir.to_string_lossy().into_owned();
 
         view.comment_state.comments.push(Comment {
-            path: text_value.path.clone(),
-            line: text_value.line,
+            path: spot.path.clone(),
+            line: spot.line,
             text: text.to_string(),
-            lines: text_value.lines.clone(),
+            lines: spot.lines.clone(),
             quote,
             level,
             root,
@@ -245,29 +238,29 @@ fn add_comment_at_view(view: &mut View, spots: &[Spot], text: &str, level: crate
     view.rebuild_here();
 }
 
-fn quote_view(view: &View, text: &Spot) -> String {
-    let Some(file) = view.changes.files.iter().find(|file| file.path == text.path) else {
+fn quote_view(view: &View, spot: &Spot) -> String {
+    let Some(file) = view.changes.files.iter().find(|file| file.path == spot.path) else {
         return String::new();
     };
 
-    let sign = |key: Kind| match key {
+    let sign = |kind: Kind| match kind {
         Kind::Add => '+',
         Kind::Del => '-',
         Kind::Ctx => ' ',
     };
-    let all = file.hunks.iter().flat_map(|height| &height.lines);
+    let all = file.hunks.iter().flat_map(|hunk| &hunk.lines);
 
-    let lines: Vec<&DLine> = match view.selection_state.sel.get(&text.path) {
+    let lines: Vec<&DLine> = match view.selection_state.sel.get(&spot.path) {
         Some(set) => all
             .filter(|line| lkey(line).is_some_and(|key| set.contains(&key)))
             .take(40)
             .collect(),
         None => all
             .clone()
-            .find(|line| line.new == Some(text.line))
+            .find(|line| line.new == Some(spot.line))
             .or_else(|| {
                 all.clone()
-                    .find(|line| line.kind == Kind::Del && line.old == Some(text.line))
+                    .find(|line| line.kind == Kind::Del && line.old == Some(spot.line))
             })
             .into_iter()
             .collect(),
@@ -283,16 +276,16 @@ fn quote_view(view: &View, text: &Spot) -> String {
 fn open_comment_view(view: &mut View, spots: Vec<Spot>) {
     let mut quote = Vec::new();
 
-    for (i, text) in spots.iter().enumerate() {
+    for (i, spot) in spots.iter().enumerate() {
         if spots.len() > 1 && i > 0 {
             quote.push(QLine::Gap);
         }
 
         if spots.len() > 1 {
-            quote.push(QLine::Path(text.label()));
+            quote.push(QLine::Path(spot.label()));
         }
 
-        quote.extend(view.quote(text).lines().map(|line| QLine::Code(line.to_string())));
+        quote.extend(view.quote(spot).lines().map(|line| QLine::Code(line.to_string())));
     }
 
     let title = spots.iter().map(Spot::label).collect::<Vec<_>>().join(", ");
@@ -321,10 +314,10 @@ fn edit_comment_view(view: &mut View, ci: usize, reply: Option<usize>) {
         .map(|line| QLine::Code(line.to_string()))
         .collect();
 
-    let (target, text) = match reply.and_then(|result| comment.replies.get(result).map(|x| (result, x))) {
-        Some((result, x)) => {
-            quote.extend(thread_lines(comment, Some(result)));
-            (Target::EditReply(comment.id.clone(), result), x.text.clone())
+    let (target, text) = match reply.and_then(|index| comment.replies.get(index).map(|edited| (index, edited))) {
+        Some((index, edited)) => {
+            quote.extend(thread_lines(comment, Some(index)));
+            (Target::EditReply(comment.id.clone(), index), edited.text.clone())
         }
         None => (Target::Edit(comment.id.clone()), comment.text.clone()),
     };
@@ -386,7 +379,7 @@ fn save_comment_view(view: &mut View) -> Act {
 
     match target {
         Target::Edit(id) => save_edited_comment(view, level, &message, &id),
-        Target::EditReply(id, result) => save_edited_reply(view, &message, &id, result),
+        Target::EditReply(id, reply) => save_edited_reply(view, &message, &id, reply),
         Target::Reply(_) if message.is_empty() => Act::Toast("0 text: 0 reply".into()),
         Target::Reply(id) => save_reply(view, &message, &id),
         Target::New if message.is_empty() => Act::Toast("0 text: 0 comment".into()),

@@ -7,7 +7,7 @@ impl View {
         }
 
         if layout.flow.height > 0 {
-            draw_activity_mut(self, frame, layout);
+            draw_flowbars(self, frame, layout);
         }
 
         if layout.subagents.height > 0 {
@@ -24,13 +24,13 @@ impl View {
     }
 }
 
-fn draw_activity_mut(view: &mut View, frame: &mut Frame<'_>, layout: &ActivityLayout) {
+fn draw_flowbars(view: &mut View, frame: &mut Frame<'_>, layout: &ActivityLayout) {
     let mut y = layout.flow.y;
 
-    for (bytes, height) in view.flowbars.iter_mut().zip(&layout.flow_rows) {
+    for (bar, height) in view.flowbars.iter_mut().zip(&layout.flow_rows) {
         let height = (*height).min(layout.flow.bottom().saturating_sub(y));
 
-        bytes.render(
+        bar.render(
             frame,
             Rect {
                 y,

@@ -175,8 +175,8 @@ pub(crate) fn guess(text: &str) -> Option<&'static str> {
     let tag = |name: &str| {
         MAJOR
             .iter()
-            .find(|(count_value, _)| *count_value == name)
-            .map(|(_, thread)| *thread)
+            .find(|(language, _)| *language == name)
+            .map(|(_, fence)| *fence)
     };
 
     if serde_json::from_str::<serde_json::Value>(text).is_ok_and(|value| value.is_object() || value.is_array()) {
@@ -184,30 +184,30 @@ pub(crate) fn guess(text: &str) -> Option<&'static str> {
     }
 
     if let Ok(names) = hyperpolyglot::detectors::get_languages_from_shebang(text.as_bytes())
-        && let Some(thread_value) = names.iter().find_map(|count_2| tag(count_2))
+        && let Some(fence) = names.iter().find_map(|language| tag(language))
     {
-        return Some(thread_value);
+        return Some(fence);
     }
 
     // strong marks the classifier misses on short snippets
-    let thread_2 = text.trim_start();
+    let trimmed = text.trim_start();
 
-    if thread_2.starts_with("<?php") {
+    if trimmed.starts_with("<?php") {
         return Some("php");
     }
 
-    if thread_2.starts_with("<!DOCTYPE") || thread_2.starts_with("<html") {
+    if trimmed.starts_with("<!DOCTYPE") || trimmed.starts_with("<html") {
         return Some("html");
     }
 
-    if thread_2.starts_with("package ") && text.contains("func ") {
+    if trimmed.starts_with("package ") && text.contains("func ") {
         return Some("go");
     }
 
-    let names: Vec<&'static str> = MAJOR.iter().map(|(count_3, _)| *count_3).collect();
+    let names: Vec<&'static str> = MAJOR.iter().map(|(language, _)| *language).collect();
     let words = text
         .split(|character: char| !character.is_alphanumeric())
-        .filter(|width| !width.is_empty())
+        .filter(|word| !word.is_empty())
         .count();
 
     if words == 0 {
@@ -231,17 +231,17 @@ pub(crate) fn looks_code(text: &str) -> bool {
 
     let marked = lines
         .iter()
-        .filter(|line_value| {
-            let thread = line_value.trim_end();
+        .filter(|line| {
+            let trimmed = line.trim_end();
 
-            thread.ends_with([';', '{', '}', ')', ':', ']', ','])
-                || thread.starts_with("    ")
-                || thread.starts_with('\t')
-                || thread.trim_start().starts_with("//")
-                || thread.trim_start().starts_with("/*")
-                || thread.contains(" = ")
-                || thread.contains("=>")
-                || thread.contains("->")
+            trimmed.ends_with([';', '{', '}', ')', ':', ']', ','])
+                || trimmed.starts_with("    ")
+                || trimmed.starts_with('\t')
+                || trimmed.trim_start().starts_with("//")
+                || trimmed.trim_start().starts_with("/*")
+                || trimmed.contains(" = ")
+                || trimmed.contains("=>")
+                || trimmed.contains("->")
         })
         .count();
 
@@ -262,24 +262,24 @@ pub(crate) fn highlight(text: &str, language: &str) -> Lines {
     use std::hash::{Hash, Hasher};
     use std::sync::Mutex;
     static CACHE: OnceLock<Mutex<HashMap<(u64, String), Lines>>> = OnceLock::new();
-    let mut height = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
 
-    text.hash(&mut height);
-    let key = (height.finish(), language.to_string());
+    text.hash(&mut hasher);
+    let key = (hasher.finish(), language.to_string());
     let cache = CACHE.get_or_init(Default::default);
 
-    if let Some(line) = cache.lock().ok().and_then(|character| character.get(&key).cloned()) {
-        return line;
+    if let Some(cached) = cache.lock().ok().and_then(|map| map.get(&key).cloned()) {
+        return cached;
     }
 
     let lines = Lines::new(highlight_all(text, language));
 
-    if let Ok(mut character_value) = cache.lock() {
-        if character_value.len() >= CACHE_CAP {
-            character_value.clear();
+    if let Ok(mut map) = cache.lock() {
+        if map.len() >= CACHE_CAP {
+            map.clear();
         }
 
-        character_value.insert(key, lines.clone());
+        map.insert(key, lines.clone());
     }
 
     lines
@@ -315,8 +315,8 @@ fn highlight_all_out(
         }
         Err(_) => out.extend(
             line.chars()
-                .filter(|character_2| !character_2.is_control())
-                .map(|character_3| (crate::ui::theme::pal().text, character_3)),
+                .filter(|character| !character.is_control())
+                .map(|character| (crate::ui::theme::pal().text, character)),
         ),
     }
 
@@ -330,8 +330,8 @@ fn append_highlighted_spans(
     for (style, text) in spans {
         let fg = style.foreground;
 
-        for character_value in text.chars().filter(|character| !matches!(character, '\n' | '\r')) {
-            append_highlight_char(out, Color::Rgb(fg.r, fg.g, fg.b), character_value);
+        for character in text.chars().filter(|character| !matches!(character, '\n' | '\r')) {
+            append_highlight_char(out, Color::Rgb(fg.r, fg.g, fg.b), character);
         }
     }
 }
@@ -346,10 +346,10 @@ pub(crate) fn last_line(text: &str, language: &str) -> Vec<(Color, char)> {
 #[path = "code_tests.rs"]
 mod tests;
 
-fn append_highlight_char(out: &mut Vec<(Color, char)>, color: Color, character_value: char) {
-    if character_value == '\t' {
+fn append_highlight_char(out: &mut Vec<(Color, char)>, color: Color, character: char) {
+    if character == '\t' {
         out.extend(std::iter::repeat_n((color, ' '), 4));
-    } else if !character_value.is_control() {
-        out.push((color, character_value));
+    } else if !character.is_control() {
+        out.push((color, character));
     }
 }

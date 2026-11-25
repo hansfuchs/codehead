@@ -1,24 +1,24 @@
 use super::{KeyCode, KeyEvent, KeyModifiers, Path, ShellComp, TextArea, context};
 
 impl ShellComp {
-    /// Key K (shell mode's prompt TA, DIR its dir, THREAD the thread's `!commands`). True: used.
-    pub(crate) fn key(&mut self, key_value: KeyEvent, ta: &mut TextArea, dir: &Path, thread: &[String]) -> bool {
-        key_shell_comp(self, key_value, ta, dir, thread)
+    /// Key K (shell mode's prompt TA, DIR its dir, `thread_commands` the thread's `!commands`). True: used.
+    pub(crate) fn key(&mut self, key: KeyEvent, ta: &mut TextArea, dir: &Path, thread_commands: &[String]) -> bool {
+        key_shell_comp(self, key, ta, dir, thread_commands)
     }
 }
 
 fn open_forced_completion(
     ta: &mut TextArea,
     dir: &Path,
-    thread: &[String],
+    thread_commands: &[String],
     shell: &mut ShellComp,
 ) -> Result<Option<(super::Ctx, Vec<super::Entry>)>, bool> {
     let Some(ctx) = context(ta) else { return Err(false) };
 
     shell.closed = None;
     shell.forced = Some(ctx.at);
-    Ok(match shell.open(ta, dir, thread) {
-        Some(output_value) => Some(output_value),
+    Ok(match shell.open(ta, dir, thread_commands) {
+        Some(rows) => Some(rows),
         // fish still at work: taken, its rows show when in (0 rows: the key goes on)
         None => return Err(!(ctx.before.is_empty() && ctx.word.is_empty()) && shell.fish),
     })
@@ -26,21 +26,21 @@ fn open_forced_completion(
 
 fn key_shell_comp(
     shell: &mut ShellComp,
-    key_value: KeyEvent,
+    key: KeyEvent,
     ta: &mut TextArea,
     dir: &Path,
-    thread: &[String],
+    thread_commands: &[String],
 ) -> bool {
-    if !key_value.modifiers.is_empty() && key_value.modifiers != KeyModifiers::SHIFT {
+    if !key.modifiers.is_empty() && key.modifiers != KeyModifiers::SHIFT {
         return false;
     }
 
-    let open = match shell.open(ta, dir, thread) {
-        Some(output) => Some(output),
+    let open = match shell.open(ta, dir, thread_commands) {
+        Some(rows) => Some(rows),
         // tab: open for this word
-        None if key_value.code == KeyCode::Tab => match open_forced_completion(ta, dir, thread, shell) {
-            Ok(value) => value,
-            Err(value) => return value,
+        None if key.code == KeyCode::Tab => match open_forced_completion(ta, dir, thread_commands, shell) {
+            Ok(rows) => rows,
+            Err(taken) => return taken,
         },
         None => None,
     };
@@ -48,13 +48,13 @@ fn key_shell_comp(
     let Some((ctx, entries)) = open else { return false };
     let count = entries.len();
 
-    let show = |me: &mut ShellComp, ta: &mut TextArea| {
-        let text = entries[me.cursor].text.trim_end().to_string();
+    let show = |completion: &mut ShellComp, ta: &mut TextArea| {
+        let text = entries[completion.cursor].text.trim_end().to_string();
 
-        me.preview.show(ta, ctx.at, &ctx.word, &text);
+        completion.preview.show(ta, ctx.at, &ctx.word, &text);
     };
 
-    match (key_value.code, shell.active) {
+    match (key.code, shell.active) {
         // passive: tab takes the 1 row, else makes the dropdown active on its 1st row
         (KeyCode::Tab, false) if count == 1 => shell.pick(ta, &ctx, &entries[0]),
         (KeyCode::Tab, false) => {
@@ -76,7 +76,7 @@ fn key_shell_comp(
             shell.closed = Some(ctx.at);
         }
         // a name char: the typed word again (the filter), the char after it
-        (KeyCode::Char(character), true) if !character.is_whitespace() && shell.preview.revert(ta) => {
+        (KeyCode::Char(typed), true) if !typed.is_whitespace() && shell.preview.revert(ta) => {
             return false;
         }
         _ => return false,

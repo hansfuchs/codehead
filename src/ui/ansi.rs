@@ -13,7 +13,7 @@ pub(crate) fn to_lines(input: &str) -> Vec<Line<'static>> {
 
     while lines
         .last()
-        .is_some_and(|line| line.spans.iter().all(|text| text.content.trim().is_empty()))
+        .is_some_and(|line| line.spans.iter().all(|span| span.content.trim().is_empty()))
     {
         lines.pop();
     }
@@ -81,15 +81,15 @@ pub(crate) fn apply_sgr(mut style: Style, params: &str) -> Style {
     let nums: Vec<u16> = if params.is_empty() {
         vec![0]
     } else {
-        params.split(';').map(|path| path.parse().unwrap_or(0)).collect()
+        params.split(';').map(|param| param.parse().unwrap_or(0)).collect()
     };
 
     let mut i = 0;
 
     while i < nums.len() {
-        let count = nums[i];
+        let code = nums[i];
 
-        match count {
+        match code {
             0 => style = Style::default(),
             1 => style = style.add_modifier(Modifier::BOLD),
             2 => style = style.add_modifier(Modifier::DIM),
@@ -102,14 +102,14 @@ pub(crate) fn apply_sgr(mut style: Style, params: &str) -> Style {
             24 => style = style.remove_modifier(Modifier::UNDERLINED),
             27 => style = style.remove_modifier(Modifier::REVERSED),
             29 => style = style.remove_modifier(Modifier::CROSSED_OUT),
-            30..=37 => style = style.fg(Color::Indexed((count - 30) as u8)),
+            30..=37 => style = style.fg(Color::Indexed((code - 30) as u8)),
             39 => style.fg = None,
-            40..=47 => style = style.bg(Color::Indexed((count - 40) as u8)),
+            40..=47 => style = style.bg(Color::Indexed((code - 40) as u8)),
             49 => style.bg = None,
-            90..=97 => style = style.fg(Color::Indexed((count - 90 + 8) as u8)),
-            100..=107 => style = style.bg(Color::Indexed((count - 100 + 8) as u8)),
+            90..=97 => style = style.fg(Color::Indexed((code - 90 + 8) as u8)),
+            100..=107 => style = style.bg(Color::Indexed((code - 100 + 8) as u8)),
             38 | 48 => {
-                apply_sgr_color(&mut style, &nums, &mut i, count);
+                apply_sgr_color(&mut style, &nums, &mut i, code);
             }
             _ => {}
         }
@@ -120,30 +120,26 @@ pub(crate) fn apply_sgr(mut style: Style, params: &str) -> Style {
     style
 }
 
-fn apply_sgr_color(style: &mut Style, nums: &[u16], i: &mut usize, count: u16) {
+fn apply_sgr_color(style: &mut Style, nums: &[u16], i: &mut usize, code: u16) {
     let color = match nums.get(*i + 1) {
         Some(5) => {
-            let character = nums.get(*i + 2).copied().unwrap_or(0) as u8;
+            let index = nums.get(*i + 2).copied().unwrap_or(0) as u8;
 
             *i += 2;
-            Some(Color::Indexed(character))
+            Some(Color::Indexed(index))
         }
         Some(2) => {
-            let group = |key: usize| nums.get(*i + key).copied().unwrap_or(0) as u8;
-            let color_value = Color::Rgb(group(2), group(3), group(4));
+            let channel = |key: usize| nums.get(*i + key).copied().unwrap_or(0) as u8;
+            let rgb = Color::Rgb(channel(2), channel(3), channel(4));
 
             *i += 4;
-            Some(color_value)
+            Some(rgb)
         }
         _ => None,
     };
 
-    if let Some(character_value) = color {
-        *style = if count == 38 {
-            style.fg(character_value)
-        } else {
-            style.bg(character_value)
-        };
+    if let Some(color) = color {
+        *style = if code == 38 { style.fg(color) } else { style.bg(color) };
     }
 }
 
@@ -151,13 +147,13 @@ fn read_csi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> (String, ch
     let mut params = String::new();
     let mut end = ' ';
 
-    for path in chars.by_ref() {
-        if ('\x40'..='\x7e').contains(&path) {
-            end = path;
+    for ch in chars.by_ref() {
+        if ('\x40'..='\x7e').contains(&ch) {
+            end = ch;
             break;
         }
 
-        params.push(path);
+        params.push(ch);
     }
 
     (params, end)
@@ -170,12 +166,12 @@ fn flush_span(buf: &mut String, spans: &mut Vec<Span<'static>>, style: Style) {
 }
 
 fn skip_osc(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    while let Some(path_value) = chars.next() {
-        if path_value == '\x07' {
+    while let Some(ch) = chars.next() {
+        if ch == '\x07' {
             break;
         }
 
-        if path_value == '\x1b' {
+        if ch == '\x1b' {
             chars.next();
             break;
         }

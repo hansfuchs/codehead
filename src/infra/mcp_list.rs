@@ -61,14 +61,14 @@ fn run(cmd: &str, args: &[&str], limit: Duration) -> Result<String, String> {
                 return Err(format!("{cmd} {}: 0 answer in {}s", args.join(" "), limit.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(error_value) => return Err(error_value.to_string()),
+            Err(error) => return Err(error.to_string()),
         }
     }
 
     let mut err = String::new();
 
-    if let Some(mut error_2) = child.stderr.take() {
-        let _ = error_2.read_to_string(&mut err);
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_string(&mut err);
     }
 
     let out = reader.join().unwrap_or_default();
@@ -85,37 +85,37 @@ pub(crate) fn refresh() -> Found {
     let mut found = Found::default();
     let mut jobs = Vec::new();
 
-    for height in ["claude", "codex", "opencode"] {
-        let Some(hr) = harnesses::get(height) else { continue };
+    for harness in ["claude", "codex", "opencode"] {
+        let Some(hr) = harnesses::get(harness) else { continue };
 
         if !harnesses::on_path(hr.bin) {
             continue;
         }
 
         jobs.push(std::thread::spawn(move || {
-            let result = refresh_harness(height);
+            let result = refresh_harness(harness);
 
-            (height, result)
+            (harness, result)
         }));
     }
 
     for j in jobs {
-        let Ok((height_value, result_value)) = j.join() else {
+        let Ok((harness, result)) = j.join() else {
             continue;
         };
 
-        match result_value {
-            Ok(value) => {
+        match result {
+            Ok(natives) => {
                 servers::record(
-                    height_value,
-                    value
+                    harness,
+                    natives
                         .iter()
-                        .map(|count| (count.name.clone(), count.status.clone()))
+                        .map(|native| (native.name.clone(), native.status.clone()))
                         .collect(),
                 );
-                found.natives.extend(value);
+                found.natives.extend(natives);
             }
-            Err(error) => found.errors.push((height_value.to_string(), error)),
+            Err(error) => found.errors.push((harness.to_string(), error)),
         }
     }
 
@@ -197,24 +197,24 @@ pub(crate) fn parse_codex(text: &str) -> Vec<Native> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|text_value| {
-            let name = text_value["name"].as_str()?.to_string();
+        .filter_map(|server| {
+            let name = server["name"].as_str()?.to_string();
 
-            let thread = if text_value["transport"].is_object() {
-                &text_value["transport"]
+            let fields = if server["transport"].is_object() {
+                &server["transport"]
             } else {
-                text_value
+                server
             };
 
-            let target = thread["url"].as_str().map_or_else(
+            let target = fields["url"].as_str().map_or_else(
                 || {
-                    std::iter::once(thread["command"].as_str().unwrap_or_default().to_string())
+                    std::iter::once(fields["command"].as_str().unwrap_or_default().to_string())
                         .chain(
-                            thread["args"]
+                            fields["args"]
                                 .as_array()
                                 .into_iter()
                                 .flatten()
-                                .filter_map(|agent| agent.as_str().map(String::from)),
+                                .filter_map(|arg| arg.as_str().map(String::from)),
                         )
                         .collect::<Vec<_>>()
                         .join(" ")
@@ -222,10 +222,10 @@ pub(crate) fn parse_codex(text: &str) -> Vec<Native> {
                 String::from,
             );
 
-            let state = if text_value["enabled"] == false {
+            let state = if server["enabled"] == false {
                 "off"
             } else {
-                match text_value["auth_status"].as_str().unwrap_or_default() {
+                match server["auth_status"].as_str().unwrap_or_default() {
                     "not_logged_in" | "notLoggedIn" => "needs-auth",
                     _ => "unknown",
                 }
@@ -256,14 +256,14 @@ pub(crate) fn parse_opencode(text: &str) -> Vec<Native> {
             line.trim_start_matches(|character: char| !character.is_alphanumeric())
                 .trim()
         })
-        .filter(|line_value| {
-            !line_value.is_empty()
-                && !line_value.to_lowercase().starts_with("no mcp")
-                && !line_value.to_lowercase().contains("mcp servers")
+        .filter(|line| {
+            !line.is_empty()
+                && !line.to_lowercase().starts_with("no mcp")
+                && !line.to_lowercase().contains("mcp servers")
         })
-        .filter_map(|line_2| {
-            let name = line_2.split_whitespace().next()?.trim_end_matches(':').to_string();
-            let state = state_of(line_2);
+        .filter_map(|line| {
+            let name = line.split_whitespace().next()?.trim_end_matches(':').to_string();
+            let state = state_of(line);
 
             Some(Native {
                 harness: "opencode".into(),
@@ -286,14 +286,14 @@ pub(crate) fn parse_opencode(text: &str) -> Vec<Native> {
 /// The CLI call that signs in to server NAME of HARNESS (it opens the browser), None: the
 /// harness has none.
 pub(crate) fn login_command(harness: &str, name: &str) -> Option<Vec<String>> {
-    let value: Vec<&str> = match harness {
+    let argv: Vec<&str> = match harness {
         "claude" => vec!["claude", "mcp", "login", name],
         "codex" => vec!["codex", "mcp", "login", name],
         "opencode" => vec!["opencode", "mcp", "auth", name],
         _ => return None,
     };
 
-    Some(value.into_iter().map(String::from).collect())
+    Some(argv.into_iter().map(String::from).collect())
 }
 
 /// Sign in to NAME of HARNESS: its CLI, up to 5 min. (the browser flow).
@@ -327,27 +327,27 @@ pub(crate) fn import(harness: &str, name: &str) -> Result<Server, String> {
             let path = crate::infra::config::home().join(".claude.json");
             let value: Value = std::fs::read(&path)
                 .ok()
-                .and_then(|thread| serde_json::from_slice(&thread).ok())
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
                 .ok_or_else(|| format!("{}: unreadable", path.display()))?;
-            let user = value["mcpServers"][name].clone();
+            let user_entry = value["mcpServers"][name].clone();
 
-            claude_entry(&value, user, name)?
+            claude_entry(&value, user_entry, name)?
         }
         "codex" => {
-            let thread_value = run("codex", &["mcp", "list", "--json"], Duration::from_secs(30))?;
-            let value_value: Value = serde_json::from_str(&thread_value).map_err(|error| error.to_string())?;
-            let text_value = value_value
+            let listed = run("codex", &["mcp", "list", "--json"], Duration::from_secs(30))?;
+            let servers: Value = serde_json::from_str(&listed).map_err(|error| error.to_string())?;
+            let server = servers
                 .as_array()
                 .into_iter()
                 .flatten()
-                .find(|text| text["name"] == name)
+                .find(|server| server["name"] == name)
                 .cloned()
                 .ok_or_else(|| format!("{name}: not in codex"))?;
 
-            if text_value["transport"].is_object() {
-                text_value["transport"].clone()
+            if server["transport"].is_object() {
+                server["transport"].clone()
             } else {
-                text_value
+                server
             }
         }
         height => return Err(format!("{height}: import not supported")),
@@ -357,19 +357,19 @@ pub(crate) fn import(harness: &str, name: &str) -> Result<Server, String> {
 }
 
 /// An MCP server entry (Claude Code / codex JSON shape) as a codehead server.
-pub(crate) fn from_json(name: &str, error: &Value) -> Server {
+pub(crate) fn from_json(name: &str, entry: &Value) -> Server {
     let strs = |value: &Value| -> std::collections::BTreeMap<String, String> {
         value
             .as_object()
             .into_iter()
             .flatten()
-            .filter_map(|(key, value_value)| Some((key.clone(), value_value.as_str()?.to_string())))
+            .filter_map(|(key, text)| Some((key.clone(), text.as_str()?.to_string())))
             .collect()
     };
 
-    let url = error["url"].as_str().map(String::from);
+    let url = entry["url"].as_str().map(String::from);
 
-    let kind = match error["type"].as_str().unwrap_or_default() {
+    let kind = match entry["type"].as_str().unwrap_or_default() {
         "sse" => "sse",
         "http" | "streamable_http" | "streamable-http" => "http",
         _ if url.is_some() => "http",
@@ -379,18 +379,18 @@ pub(crate) fn from_json(name: &str, error: &Value) -> Server {
     Server {
         name: name.to_string(),
         kind: kind.into(),
-        command: error["command"].as_str().map(String::from),
-        args: error["args"]
+        command: entry["command"].as_str().map(String::from),
+        args: entry["args"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|agent| agent.as_str().map(String::from))
+            .filter_map(|arg| arg.as_str().map(String::from))
             .collect(),
-        env: strs(&error["env"]),
+        env: strs(&entry["env"]),
         url,
-        headers: strs(&error["headers"])
+        headers: strs(&entry["headers"])
             .into_iter()
-            .chain(strs(&error["http_headers"]))
+            .chain(strs(&entry["http_headers"]))
             .collect(),
         auto_allow: true,
     }
@@ -436,27 +436,23 @@ pub(crate) use probe::probe_all;
 #[cfg(test)]
 use probe::{probe, reply_of};
 
-fn refresh_harness(height: &str) -> Result<Vec<Native>, String> {
-    match height {
-        "claude" => {
-            run("claude", &["mcp", "list"], Duration::from_secs(90)).map(|thread_value| parse_claude(&thread_value))
-        }
-        "codex" => {
-            run("codex", &["mcp", "list", "--json"], Duration::from_secs(30)).map(|thread_2| parse_codex(&thread_2))
-        }
-        _ => run("opencode", &["mcp", "list"], Duration::from_secs(30)).map(|thread_3| parse_opencode(&thread_3)),
+fn refresh_harness(harness: &str) -> Result<Vec<Native>, String> {
+    match harness {
+        "claude" => run("claude", &["mcp", "list"], Duration::from_secs(90)).map(|out| parse_claude(&out)),
+        "codex" => run("codex", &["mcp", "list", "--json"], Duration::from_secs(30)).map(|out| parse_codex(&out)),
+        _ => run("opencode", &["mcp", "list"], Duration::from_secs(30)).map(|out| parse_opencode(&out)),
     }
 }
 
-fn claude_entry(value: &Value, user: Value, name: &str) -> Result<Value, String> {
-    Ok(if user.is_object() {
-        user
+fn claude_entry(config: &Value, user_entry: Value, name: &str) -> Result<Value, String> {
+    Ok(if user_entry.is_object() {
+        user_entry
     } else {
-        value["projects"]
+        config["projects"]
             .as_object()
             .into_iter()
             .flatten()
-            .map(|(_, path_value)| path_value["mcpServers"][name].clone())
+            .map(|(_, project)| project["mcpServers"][name].clone())
             .find(Value::is_object)
             .ok_or_else(|| format!("{name}: not in ~/.claude.json (connectors and plugins stay with Claude Code)"))?
     })

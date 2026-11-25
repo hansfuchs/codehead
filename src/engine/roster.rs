@@ -78,11 +78,11 @@ pub(crate) fn agents_dir() -> PathBuf {
 
 /// Agent names: a letter, then letters, digits, `-` or `_`; max. 32 chars.
 pub(crate) fn valid_name(name: &str) -> bool {
-    let mut character = name.chars();
+    let mut chars = name.chars();
 
-    character.next().is_some_and(|file| file.is_ascii_alphabetic())
+    chars.next().is_some_and(|first| first.is_ascii_alphabetic())
         && name.len() <= 32
-        && character.all(|x| x.is_ascii_alphanumeric() || x == '-' || x == '_')
+        && chars.all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
 }
 
 /// Agent NAME (archived too).
@@ -100,25 +100,25 @@ pub(crate) fn get(name: &str) -> Option<Agent> {
 
 /// Every agent, archived too, by name.
 pub(crate) fn all() -> Vec<Agent> {
-    let Ok(rd) = std::fs::read_dir(agents_dir()) else {
+    let Ok(entries) = std::fs::read_dir(agents_dir()) else {
         return Vec::new();
     };
 
-    let mut value: Vec<Agent> = rd
+    let mut agents: Vec<Agent> = entries
         .flatten()
-        .filter_map(|error| {
-            let path_value = error.path();
+        .filter_map(|entry| {
+            let path = entry.path();
 
-            if path_value.extension()? != "toml" {
+            if path.extension()? != "toml" {
                 return None;
             }
 
-            get(&path_value.file_stem()?.to_string_lossy())
+            get(&path.file_stem()?.to_string_lossy())
         })
         .collect();
 
-    value.sort_by(|agent, bytes| agent.name.cmp(&bytes.name));
-    value
+    agents.sort_by(|left, right| left.name.cmp(&right.name));
+    agents
 }
 
 /// Active agents, by name.
@@ -126,7 +126,7 @@ pub(crate) fn active() -> Vec<Agent> {
     all().into_iter().filter(|agent| !agent.archived).collect()
 }
 
-/// Write agent A (create or replace).
+/// Write AGENT (create or replace).
 pub(crate) fn save(agent: &Agent) -> Result<(), String> {
     if !valid_name(&agent.name) {
         return Err(format!(
@@ -138,7 +138,7 @@ pub(crate) fn save(agent: &Agent) -> Result<(), String> {
     let text = toml::to_string_pretty(agent).map_err(|error| error.to_string())?;
     let path = agents_dir().join(format!("{}.toml", agent.name));
 
-    super::write_atomic(&path, text.as_bytes()).map_err(|error_value| format!("{}: {error_value}", path.display()))
+    super::write_atomic(&path, text.as_bytes()).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// Rename agent OLD to NEW: the file, and the agent's place on every thread.
@@ -158,12 +158,12 @@ pub(crate) fn rename(old: &str, new: &str) -> Result<(), String> {
     std::fs::rename(dir.join(format!("{old}.toml")), dir.join(format!("{new}.toml")))
         .map_err(|error| error.to_string())?;
 
-    for thread_value in super::store::all().into_iter().filter(|thread| {
+    for thread in super::store::all().into_iter().filter(|thread| {
         thread.agents.iter().any(|agent| agent == old)
             || thread.sessions.contains_key(old)
             || thread.flows.contains_key(old)
     }) {
-        let _ = super::store::update(&thread_value.id, |thread_2| thread_2.rename_agent(old, new));
+        let _ = super::store::update(&thread.id, |stored| stored.rename_agent(old, new));
     }
 
     Ok(())

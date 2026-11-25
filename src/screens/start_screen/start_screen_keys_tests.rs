@@ -2,8 +2,8 @@ use super::start_screen_tests::app_with;
 use super::*;
 use ratatui::backend::TestBackend;
 
-fn key(app: &mut App, code: KeyCode, message: KeyModifiers) {
-    app.key(KeyEvent::new(code, message));
+fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    app.key(KeyEvent::new(code, modifiers));
 }
 
 #[test]
@@ -59,10 +59,10 @@ fn a_click_on_no_brings_the_agent_form_back() {
         yes: false,
         action: ConfirmAction::DiscardAgent(Box::new(form)),
     });
-    let mut thread = ratatui::Terminal::new(TestBackend::new(110, 40)).unwrap();
+    let mut terminal = ratatui::Terminal::new(TestBackend::new(110, 40)).unwrap();
 
-    thread.draw(|file| app.draw(file)).unwrap();
-    let (result, _) = *app
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let (button, _) = *app
         .preview
         .regions
         .buttons
@@ -72,8 +72,8 @@ fn a_click_on_no_brings_the_agent_form_back() {
 
     app.mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: result.x + 1,
-        row: result.y,
+        column: button.x + 1,
+        row: button.y,
         modifiers: KeyModifiers::NONE,
     });
 

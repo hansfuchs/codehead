@@ -1,89 +1,86 @@
 use super::{Kind, Out, State, Value, tool_of};
 
 impl State {
-    pub(crate) fn update(&mut self, user: &Value) {
+    pub(crate) fn update(&mut self, update: &Value) {
         if self.loading {
             return;
         }
 
-        match user["sessionUpdate"].as_str().unwrap_or_default() {
+        match update["sessionUpdate"].as_str().unwrap_or_default() {
             "agent_message_chunk" => {
-                handle_agent_message_chunk(user, self);
+                handle_agent_message_chunk(update, self);
             }
             "agent_thought_chunk" => {
-                handle_agent_thought_chunk(user, self);
+                handle_agent_thought_chunk(update, self);
             }
             "tool_call" => {
                 self.flush_text();
-                let (name, input) = tool_of(user);
+                let (name, input) = tool_of(update);
 
                 self.out(Out::Event(Kind::Tool {
-                    id: user["toolCallId"].as_str().unwrap_or_default().into(),
+                    id: update["toolCallId"].as_str().unwrap_or_default().into(),
                     name,
                     input,
                 }));
-                result_of(user, self);
+                result_of(update, self);
             }
-            "tool_call_update" => result_of(user, self),
+            "tool_call_update" => result_of(update, self),
             // the context so far (ACP `usage_update`: used / size)
             "usage_update" => {
-                handle_usage_update(user, self);
+                handle_usage_update(update, self);
             }
             _ => {}
         }
     }
 }
 
-fn result_of_while_text_is_char_boundary_end(text: &str, end: &mut usize) {
+fn floor_char_boundary(text: &str, end: &mut usize) {
     while !text.is_char_boundary(*end) {
         *end -= 1;
     }
 }
 
-fn handle_usage_update(user: &Value, model_state: &mut State) {
-    if let Some(used) = user["used"].as_u64().filter(|count| *count > 0) {
-        model_state.out(Out::Usage(crate::engine::harness::TurnUse {
+fn handle_usage_update(update: &Value, state: &mut State) {
+    if let Some(used) = update["used"].as_u64().filter(|count| *count > 0) {
+        state.out(Out::Usage(crate::engine::harness::TurnUse {
             ctx: used,
             ..Default::default()
         }));
     }
 }
 
-fn handle_agent_message_chunk(user: &Value, model_state: &mut State) {
-    if let Some(thread) = user["content"]["text"].as_str() {
+fn handle_agent_message_chunk(update: &Value, state: &mut State) {
+    if let Some(chunk) = update["content"]["text"].as_str() {
         // a thought before it: its own event, before the text
-        model_state.flush_thought();
-        model_state.text.push_str(thread);
+        state.flush_thought();
+        state.text.push_str(chunk);
 
         // live in the view now; the log gets the whole text at the next tool call or turn end
-        skip_empty_message(thread, model_state);
+        emit_delta(chunk, state);
     }
 }
 
-fn skip_empty_message(thread: &str, model_state: &mut State) {
-    if !thread.is_empty() {
-        model_state.out(Out::Delta(thread.into()));
+fn emit_delta(chunk: &str, state: &mut State) {
+    if !chunk.is_empty() {
+        state.out(Out::Delta(chunk.into()));
     }
 }
 
-fn handle_agent_thought_chunk(user: &Value, model_state: &mut State) {
-    if let Some(thread_2) = user["content"]["text"]
-        .as_str()
-        .filter(|thread_value| !thread_value.is_empty())
-    {
-        if !model_state.text.trim().is_empty() {
-            let text = std::mem::take(&mut model_state.text);
+fn handle_agent_thought_chunk(update: &Value, state: &mut State) {
+    if let Some(thought) = update["content"]["text"].as_str().filter(|chunk| !chunk.is_empty()) {
+        if !state.text.trim().is_empty() {
+            let text = std::mem::take(&mut state.text);
 
-            model_state.out(Out::Event(Kind::Text { text }));
+            state.out(Out::Event(Kind::Text { text }));
         }
 
-        model_state.thought.push_str(thread_2);
+        state.thought.push_str(thought);
     }
 }
 
 /// A finished tool call: its result event.
-fn result_of(user: &Value, model_state: &mut State) {
-    let status = user["status"].as_str().unwrap_or_default();
+fn result_of(update: &Value, state: &mut State) {
+    let status = update["status"].as_str().unwrap_or_default();
 
     if status != "completed" && status != "failed" {
         return;
@@ -91,22 +88,18 @@ fn result_of(user: &Value, model_state: &mut State) {
 
     let mut out: Vec<String> = Vec::new();
 
-    for character in user["content"].as_array().into_iter().flatten() {
-        match character["type"].as_str() {
-            Some("content") => out.extend(character["content"]["text"].as_str().map(String::from)),
-            Some("diff") => out.push(format!("diff {}", character["path"].as_str().unwrap_or_default())),
+    for item in update["content"].as_array().into_iter().flatten() {
+        match item["type"].as_str() {
+            Some("content") => out.extend(item["content"]["text"].as_str().map(String::from)),
+            Some("diff") => out.push(format!("diff {}", item["path"].as_str().unwrap_or_default())),
             _ => {}
         }
     }
 
     if out.is_empty()
-        && let Some(result_value) = user.get("rawOutput").filter(|result| !result.is_null())
+        && let Some(raw) = update.get("rawOutput").filter(|raw| !raw.is_null())
     {
-        out.push(
-            result_value
-                .as_str()
-                .map_or_else(|| result_value.to_string(), String::from),
-        );
+        out.push(raw.as_str().map_or_else(|| raw.to_string(), String::from));
     }
 
     let mut text = out.join("\n");
@@ -114,14 +107,14 @@ fn result_of(user: &Value, model_state: &mut State) {
     if text.len() > 4096 {
         let mut end = 4096;
 
-        result_of_while_text_is_char_boundary_end(&text, &mut end);
+        floor_char_boundary(&text, &mut end);
 
         text.truncate(end);
         text.push_str("\n…");
     }
 
-    model_state.out(Out::Event(Kind::ToolResult {
-        id: user["toolCallId"].as_str().unwrap_or_default().into(),
+    state.out(Out::Event(Kind::ToolResult {
+        id: update["toolCallId"].as_str().unwrap_or_default().into(),
         ok: status == "completed",
         output: text,
     }));

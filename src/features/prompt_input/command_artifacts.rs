@@ -9,15 +9,15 @@ pub(crate) fn artifact_urls(text: &[u8]) -> Vec<String> {
         regex::bytes::Regex::new(r"https://claude\.ai/(?:[a-z]+/)?artifact/[A-Za-z0-9_-]{8,}").expect("valid regex")
     });
 
-    let mut value: Vec<String> = re
+    let mut urls: Vec<String> = re
         .find_iter(text)
-        .map(|message| String::from_utf8_lossy(message.as_bytes()).into_owned())
+        .map(|found| String::from_utf8_lossy(found.as_bytes()).into_owned())
         .collect();
 
-    value.sort();
-    value.dedup();
+    urls.sort();
+    urls.dedup();
 
-    value
+    urls
 }
 
 /// Titles explicitly attached to artifact links in decoded transcript text.
@@ -29,11 +29,11 @@ pub(super) fn artifact_titles(text: &str, titles: &mut HashMap<String, String>) 
             .unwrap()
     });
 
-    for character in re.captures_iter(text) {
-        let title = character[1].trim();
+    for captures in re.captures_iter(text) {
+        let title = captures[1].trim();
 
         if !title.is_empty() && !title.contains("claude.ai/") && !title.starts_with("http") {
-            titles.insert(character[2].to_string(), title.to_string());
+            titles.insert(captures[2].to_string(), title.to_string());
         }
     }
 }
@@ -57,13 +57,13 @@ pub(super) fn transcript_titles(value: &serde_json::Value, titles: &mut HashMap<
             }
         }
         serde_json::Value::Object(values) => {
-            transcript_titles_serde_json_value_object(titles, depth, values);
+            object_titles(titles, depth, values);
         }
         _ => {}
     }
 }
 
-fn transcript_titles_serde_json_value_object(
+fn object_titles(
     titles: &mut HashMap<String, String>,
     depth: usize,
     values: &serde_json::Map<String, serde_json::Value>,
@@ -72,8 +72,8 @@ fn transcript_titles_serde_json_value_object(
     if let Some(title) = values
         .get("title")
         .or_else(|| values.get("name"))
-        .and_then(|value_value| value_value.as_str())
-        .filter(|text_value| !text_value.trim().is_empty())
+        .and_then(|value| value.as_str())
+        .filter(|text| !text.trim().is_empty())
     {
         for key in ["url", "uri", "href", "artifact_url", "artifactUrl"] {
             record_transcript_titles(titles, values, key, title);
@@ -91,7 +91,7 @@ fn record_transcript_titles(
     key: &str,
     title: &str,
 ) {
-    if let Some(link) = values.get(key).and_then(|value_2| value_2.as_str()) {
+    if let Some(link) = values.get(key).and_then(|value| value.as_str()) {
         for url in artifact_urls(link.as_bytes()) {
             titles.insert(url, title.trim().to_string());
         }
@@ -164,8 +164,8 @@ pub(super) fn remote_artifact_title(url: &str) -> Option<String> {
         .stderr(std::process::Stdio::null())
         .output()
         .ok()
-        .filter(|output_value| output_value.status.success())
-        .and_then(|output_2| page_title(&String::from_utf8_lossy(&output_2.stdout)));
+        .filter(|output| output.status.success())
+        .and_then(|output| page_title(&String::from_utf8_lossy(&output.stdout)));
 
     crate::infra::background::save(&name, &(now, &title));
 
@@ -186,7 +186,7 @@ pub(crate) fn scan_artifacts(root: &Path) -> Vec<Item> {
 
     let ArtifactScan { found, mut titles, .. } = scan;
 
-    let mut value_value: Vec<Item> = found
+    let mut items: Vec<Item> = found
         .into_iter()
         .map(|(url, (time, place))| {
             let name = format!("artifact-title-{}", crate::infra::background::scope(Path::new(&url)));
@@ -197,7 +197,7 @@ pub(crate) fn scan_artifacts(root: &Path) -> Vec<Item> {
                 .unwrap_or_else(|| format!("untitled artifact · {}", url.rsplit('/').next().unwrap_or_default()));
             let detail = [place, age(time)]
                 .into_iter()
-                .filter(|text| !text.is_empty())
+                .filter(|part| !part.is_empty())
                 .collect::<Vec<_>>()
                 .join(" · ");
 
@@ -211,9 +211,9 @@ pub(crate) fn scan_artifacts(root: &Path) -> Vec<Item> {
         })
         .collect();
 
-    value_value.sort_by(|agent, bytes_2| (agent.time, &agent.label).cmp(&(bytes_2.time, &bytes_2.label)));
+    items.sort_by(|left, right| (left.time, &left.label).cmp(&(right.time, &right.label)));
 
-    value_value
+    items
 }
 
 struct ArtifactScan<'root> {
@@ -260,7 +260,7 @@ fn scan_entry(scan: &mut ArtifactScan<'_>, entry: &std::fs::DirEntry, depth: usi
     let project = path
         .strip_prefix(scan.root)
         .ok()
-        .and_then(|path| path.components().next())
+        .and_then(|relative| relative.components().next())
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .unwrap_or_default();
     let place = project.rsplit('-').next().unwrap_or_default().to_string();

@@ -34,8 +34,8 @@ pub(super) fn key_inner(key: KeyEvent, form: &mut Form) -> Action {
         // esc: the field's edit undone, 0 commit
         KeyCode::Esc => super::revert(form),
         KeyCode::Up if key.modifiers.is_empty() => {
-            if let Some(value) = previous_field(form) {
-                return value;
+            if let Some(action) = previous_field(form) {
+                return action;
             }
         }
         KeyCode::Down if key.modifiers.is_empty() => {
@@ -86,7 +86,7 @@ fn next_section(form: &mut Form) {
     form.commit();
     form.focus = super::starts(form)
         .into_iter()
-        .find(|&text_value| text_value > form.focus)
+        .find(|&start| start > form.focus)
         .unwrap_or(super::add_item(form));
 }
 
@@ -95,7 +95,7 @@ fn previous_section(form: &mut Form) {
     form.focus = super::starts(form)
         .into_iter()
         .rev()
-        .find(|&text| text < form.focus)
+        .find(|&start| start < form.focus)
         .unwrap_or(0);
 }
 

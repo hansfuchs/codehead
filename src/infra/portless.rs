@@ -27,7 +27,7 @@ impl Mode {
 /// portless on PATH.
 pub(crate) fn on_path() -> bool {
     std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|directory| directory.join("portless").is_file()))
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join("portless").is_file()))
 }
 
 /// Agents start dev servers through portless (setting `ports`, portless on PATH).
@@ -40,7 +40,7 @@ pub(crate) fn active() -> bool {
 pub(crate) fn prefix(branch: &str) -> String {
     let last = branch.rsplit('/').next().unwrap_or(branch).to_lowercase();
 
-    let text: String = last
+    let label: String = last
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() {
@@ -51,7 +51,7 @@ pub(crate) fn prefix(branch: &str) -> String {
         })
         .collect();
 
-    text.trim_matches('-').chars().take(63).collect()
+    label.trim_matches('-').chars().take(63).collect()
 }
 
 /// URLs of the live routes (`portless list --json`): (hostname, url).
@@ -69,16 +69,16 @@ pub(crate) fn routes() -> Vec<(String, String)> {
 }
 
 fn parse_routes(json: &str) -> Vec<(String, String)> {
-    let value: serde_json::Value = serde_json::from_str(json.trim()).unwrap_or_default();
+    let root: serde_json::Value = serde_json::from_str(json.trim()).unwrap_or_default();
 
-    value["routes"]
+    root["routes"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|result| {
+        .filter_map(|route| {
             Some((
-                result["hostname"].as_str()?.to_string(),
-                result["url"].as_str()?.to_string(),
+                route["hostname"].as_str()?.to_string(),
+                route["url"].as_str()?.to_string(),
             ))
         })
         .collect()
@@ -92,17 +92,17 @@ pub(crate) fn urls_of(routes: &[(String, String)], prefix: &str) -> Vec<String> 
 
     routes
         .iter()
-        .filter(|(height, _)| height.starts_with(&format!("{prefix}.")))
-        .map(|(_, user)| user.clone())
+        .filter(|(hostname, _)| hostname.starts_with(&format!("{prefix}.")))
+        .map(|(_, url)| url.clone())
         .collect()
 }
 
 /// The system prompt lines for an agent in a worktree on BRANCH.
 pub(crate) fn prompt(branch: Option<&str>) -> String {
-    let path_value = branch.map(prefix).filter(|path| !path.is_empty());
+    let label = branch.map(prefix).filter(|label| !label.is_empty());
 
-    let host = path_value.as_deref().map_or("<app>.localhost".to_string(), |path_2| {
-        format!("{path_2}.<app>.localhost")
+    let host = label.as_deref().map_or("<app>.localhost".to_string(), |label| {
+        format!("{label}.<app>.localhost")
     });
 
     format!(

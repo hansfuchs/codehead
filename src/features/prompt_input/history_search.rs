@@ -65,17 +65,17 @@ impl HistSearch {
         self.open
     }
 
-    /// Open with the thread's commands THREAD (oldest first) and QUERY (the input after `!`).
-    pub(crate) fn open(&mut self, thread: Vec<String>, query: &str) {
+    /// Open with the thread's commands COMMANDS (oldest first) and QUERY (the input after `!`).
+    pub(crate) fn open(&mut self, commands: Vec<String>, query: &str) {
         self.open = true;
         self.cursor = 0;
         self.offset = 0;
-        let mut all: Vec<String> = thread.into_iter().rev().collect();
+        let mut all: Vec<String> = commands.into_iter().rev().collect();
 
         all.extend(shell_history());
         let mut seen = std::collections::HashSet::new();
 
-        all.retain(|character| !character.trim().is_empty() && seen.insert(character.clone()));
+        all.retain(|entry| !entry.trim().is_empty() && seen.insert(entry.clone()));
         self.all = Some(Arc::new(all));
         self.search(query);
     }
@@ -95,17 +95,17 @@ impl HistSearch {
     pub(crate) fn poll(&mut self) -> bool {
         let mut any = false;
 
-        while let Ok((run, query_value, message)) = self.rx.try_recv() {
-            self.poll_if_run_self_run_self_open(&mut any, run, query_value, message);
+        while let Ok((run, query, matches)) = self.rx.try_recv() {
+            self.apply_result(&mut any, run, query, matches);
         }
 
         any
     }
 
-    fn poll_if_run_self_run_self_open(&mut self, any: &mut bool, run: u64, query_value: String, message: Vec<String>) {
+    fn apply_result(&mut self, any: &mut bool, run: u64, query: String, matches: Vec<String>) {
         if run == self.run && self.open {
-            self.query = query_value;
-            self.matches = message;
+            self.query = query;
+            self.matches = matches;
             self.cursor = self.cursor.min(self.matches.len().saturating_sub(1));
             *any = true;
         }
@@ -113,8 +113,8 @@ impl HistSearch {
 
     /// Key K while open. INPUT: the input text after the key went to the input (the query).
     /// True: the key is taken (the input does not get it).
-    pub(crate) fn key(&mut self, key_value: KeyEvent) -> bool {
-        key_hist_search(self, key_value)
+    pub(crate) fn key(&mut self, key: KeyEvent) -> bool {
+        key_hist_search(self, key)
     }
 
     /// The input changed to TEXT: a new search (out of shell mode: closed).
@@ -124,8 +124,8 @@ impl HistSearch {
         }
 
         match text.strip_prefix('!') {
-            Some(query_value) if !query_value.contains('\n') => {
-                refresh_history_query(query_value, self);
+            Some(query) if !query.contains('\n') => {
+                refresh_history_query(query, self);
             }
             _ => self.close(),
         }
@@ -154,12 +154,12 @@ fn fzf_filter(all: &[String], query: &str) -> Option<Vec<String>> {
     let mut stdin = child.stdin.take()?;
     let input = all.join("\0");
 
-    let width = std::thread::spawn(move || {
+    let writer = std::thread::spawn(move || {
         let _ = stdin.write_all(input.as_bytes());
     });
 
     let out = child.wait_with_output().ok()?;
-    let _ = width.join();
+    let _ = writer.join();
 
     // exit 1: 0 matches
     if !matches!(out.status.code(), Some(0 | 1)) {
@@ -169,7 +169,7 @@ fn fzf_filter(all: &[String], query: &str) -> Option<Vec<String>> {
     Some(
         String::from_utf8_lossy(&out.stdout)
             .split('\0')
-            .filter(|text| !text.is_empty())
+            .filter(|record| !record.is_empty())
             .take(MAX)
             .map(String::from)
             .collect(),
@@ -197,22 +197,22 @@ pub(crate) fn shell_history() -> Vec<String> {
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
     };
 
-    if let Some(thread) = read(&data.join("fish/fish_history")) {
-        out.extend(fish(&thread).into_iter().rev());
+    if let Some(history) = read(&data.join("fish/fish_history")) {
+        out.extend(fish(&history).into_iter().rev());
     }
 
     let zsh = std::env::var_os("HISTFILE")
         .map(PathBuf::from)
-        .filter(|path_value| path_value.to_string_lossy().contains("zsh"))
+        .filter(|path| path.to_string_lossy().contains("zsh"))
         .unwrap_or_else(|| home.join(".zsh_history"));
 
-    if let Some(thread_value) = read(&zsh) {
-        out.extend(zsh_lines(&thread_value).into_iter().rev());
+    if let Some(history) = read(&zsh) {
+        out.extend(zsh_lines(&history).into_iter().rev());
     }
 
-    if let Some(thread_2) = read(&home.join(".bash_history")) {
+    if let Some(history) = read(&home.join(".bash_history")) {
         out.extend(
-            thread_2
+            history
                 .lines()
                 .filter(|line| !line.starts_with('#'))
                 .map(String::from)
@@ -226,31 +226,31 @@ pub(crate) fn shell_history() -> Vec<String> {
 }
 
 /// Commands of a fish history file (oldest first): `- cmd: …`, `\n` and `\\` escaped.
-fn fish(thread: &str) -> Vec<String> {
-    thread
+fn fish(history: &str) -> Vec<String> {
+    history
         .lines()
         .filter_map(|line| line.strip_prefix("- cmd: "))
-        .map(|character| character.replace("\\n", "\n").replace("\\\\", "\\"))
+        .map(|command| command.replace("\\n", "\n").replace("\\\\", "\\"))
         .collect()
 }
 
 /// Commands of a zsh history file (oldest first): plain or extended (`: 1700000000:0;cmd`),
 /// a line ending in `\` goes on in the next.
-fn zsh_lines(thread: &str) -> Vec<String> {
+fn zsh_lines(history: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut cont = false;
 
-    for line in thread.lines() {
+    for line in history.lines() {
         let body = if cont {
             line
         } else if let Some(rest) = line.strip_prefix(": ") {
-            rest.split_once(';').map_or(line, |(_, character)| character)
+            rest.split_once(';').map_or(line, |(_, command)| command)
         } else {
             line
         };
 
         let (body, more) = match body.strip_suffix('\\') {
-            Some(bytes) => (bytes, true),
+            Some(stripped) => (stripped, true),
             None => (body, false),
         };
 
@@ -277,18 +277,18 @@ fn append_history_continuation(out: &mut [String], body: &str) {
 #[path = "prompt_input_history_search_tests.rs"]
 mod tests;
 
-fn refresh_history_query(query_value: &str, history: &mut HistSearch) {
-    let query_2 = query_value.trim_start();
+fn refresh_history_query(input: &str, history: &mut HistSearch) {
+    let query = input.trim_start();
 
-    if query_2 != history.query {
+    if query != history.query {
         history.cursor = 0;
-        history.search(query_2);
+        history.search(query);
     }
 }
 
 fn select_history_match(history: &mut HistSearch) {
-    if let Some(message) = history.matches.get(history.cursor) {
-        history.picked = Some(format!("! {message}"));
+    if let Some(command) = history.matches.get(history.cursor) {
+        history.picked = Some(format!("! {command}"));
     }
 }
 
@@ -296,16 +296,16 @@ fn search_hist_search(history: &mut HistSearch, query: &str) {
     let Some(all) = history.all.clone() else { return };
 
     history.run += 1;
-    let (run, tx, query_value, fzf) = (history.run, history.tx.clone(), query.to_string(), history.fzf);
+    let (run, tx, query, fzf) = (history.run, history.tx.clone(), query.to_string(), history.fzf);
 
     let work = move || {
-        let message = if fzf {
-            fzf_filter(&all, &query_value).unwrap_or_else(|| builtin(&all, &query_value))
+        let matches = if fzf {
+            fzf_filter(&all, &query).unwrap_or_else(|| builtin(&all, &query))
         } else {
-            builtin(&all, &query_value)
+            builtin(&all, &query)
         };
 
-        let _ = tx.send((run, query_value, message));
+        let _ = tx.send((run, query, matches));
     };
 
     if cfg!(test) {
@@ -315,14 +315,14 @@ fn search_hist_search(history: &mut HistSearch, query: &str) {
     }
 }
 
-fn key_hist_search(history: &mut HistSearch, key_value: KeyEvent) -> bool {
+fn key_hist_search(history: &mut HistSearch, key: KeyEvent) -> bool {
     if !history.open {
         return false;
     }
 
-    let ctrl = key_value.modifiers.contains(KeyModifiers::CONTROL);
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-    match key_value.code {
+    match key.code {
         KeyCode::Esc => history.close(),
         // the best match sits at the bottom (right above the input): ↑ goes to worse ones
         KeyCode::Down => history.cursor = history.cursor.saturating_sub(1),
@@ -354,15 +354,15 @@ fn render_hist_search(history: &mut HistSearch, frame: &mut Frame, bounds: Rect,
         return;
     }
 
-    let width_value = input.width.max(30);
+    let width = input.width.max(30);
     let anchor = Rect {
         x: input.x,
         y: input.y,
-        width: width_value,
+        width,
         height: 1,
     };
 
-    let Some(result) = dropdown::place(anchor, width_value, history.matches.len(), bounds, true) else {
+    let Some(area) = dropdown::place(anchor, width, history.matches.len(), bounds, true) else {
         return;
     };
 
@@ -374,19 +374,19 @@ fn render_hist_search(history: &mut HistSearch, frame: &mut Frame, bounds: Rect,
         if history.fzf { "fzf" } else { "fuzzy" }
     );
     let count = rows.len();
-    let cur = count.saturating_sub(1).saturating_sub(history.cursor);
+    let cursor = count.saturating_sub(1).saturating_sub(history.cursor);
 
     // a new list: scrolled to its bottom (fit keeps the cursor in view)
     let offset = if history.cursor == 0 { count } else { history.offset };
 
     let (off, _) = dropdown::list(
         frame,
-        result,
+        area,
         dropdown::List {
             label: "history · ctrl+r",
             note: &note,
             rows: &rows,
-            cursor: cur,
+            cursor,
             offset,
             empty: "0 matches",
         },
@@ -403,12 +403,12 @@ fn history_rows(history: &mut HistSearch) -> Vec<dropdown::Row> {
         .matches
         .iter()
         .rev()
-        .map(|message| {
-            let text = message.replace('\n', " ⏎ ");
+        .map(|command| {
+            let text = command.replace('\n', " ⏎ ");
             let mut marks: Vec<usize> = words
                 .iter()
-                .filter_map(|query_value| crate::domain::matcher::word(query_value, &text))
-                .flat_map(|(_, path)| path)
+                .filter_map(|word| crate::domain::matcher::word(word, &text))
+                .flat_map(|(_, positions)| positions)
                 .collect();
 
             marks.sort_unstable();

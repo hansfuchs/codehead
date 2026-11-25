@@ -8,10 +8,10 @@ pub(crate) fn git(cwd: &Path, args: &[&str]) -> (bool, String, String) {
         .stdin(Stdio::null())
         .output()
     {
-        Ok(output_value) => (
-            output_value.status.success(),
-            String::from_utf8_lossy(&output_value.stdout).into_owned(),
-            String::from_utf8_lossy(&output_value.stderr).trim().to_string(),
+        Ok(output) => (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ),
         Err(error) => (false, String::new(), error.to_string()),
     }
@@ -37,58 +37,52 @@ pub(crate) fn linked_worktree(dir: &Path) -> bool {
     let Some(gitdir) = text
         .trim()
         .strip_prefix("gitdir:")
-        .map(|path| PathBuf::from(path.trim()))
+        .map(|rest| PathBuf::from(rest.trim()))
     else {
         return false;
     };
 
     let names: Vec<String> = gitdir
         .components()
-        .map(|character| character.as_os_str().to_string_lossy().into_owned())
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .collect();
 
-    names
-        .windows(2)
-        .any(|width| width[0] == ".git" && width[1] == "worktrees")
+    names.windows(2).any(|pair| pair[0] == ".git" && pair[1] == "worktrees")
 }
 /// Main checkout of the git repo that holds PATH, by the file system only (0 git runs: the threads
 /// tabs call it per row): the nearest `.git` dir, or for a linked worktree the repo its `.git`
 /// file points to (`gitdir: <repo>/.git/worktrees/<name>`).
 pub(crate) fn repo_root(path: &Path) -> Option<PathBuf> {
-    for directory_value in path.ancestors().filter(|directory| !directory.as_os_str().is_empty()) {
-        let group = directory_value.join(".git");
+    for dir in path.ancestors().filter(|dir| !dir.as_os_str().is_empty()) {
+        let marker = dir.join(".git");
 
-        if group.is_dir() {
-            return Some(directory_value.to_path_buf());
+        if marker.is_dir() {
+            return Some(dir.to_path_buf());
         }
 
-        if group.is_file() {
-            let text = std::fs::read_to_string(&group).ok()?;
+        if marker.is_file() {
+            let text = std::fs::read_to_string(&marker).ok()?;
             let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
-            let gitdir = resolve_git_directory(directory_value, gitdir);
+            let gitdir = resolve_git_directory(dir, gitdir);
             let main = gitdir
                 .ancestors()
-                .find(|agent| agent.file_name().is_some_and(|count| count == ".git"))
+                .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".git"))
                 .and_then(Path::parent);
 
-            return Some(main.map_or_else(|| directory_value.to_path_buf(), Path::to_path_buf));
+            return Some(main.map_or_else(|| dir.to_path_buf(), Path::to_path_buf));
         }
     }
 
     None
 }
 
-fn resolve_git_directory(directory_value: &Path, gitdir: PathBuf) -> PathBuf {
-    if gitdir.is_relative() {
-        directory_value.join(gitdir)
-    } else {
-        gitdir
-    }
+fn resolve_git_directory(dir: &Path, gitdir: PathBuf) -> PathBuf {
+    if gitdir.is_relative() { dir.join(gitdir) } else { gitdir }
 }
 /// Repo of a thread: the owner's pick, else its project dir's, else its worktree's.
 pub(crate) fn repo_of_thread(thread: &Thread) -> Option<PathBuf> {
-    if let Some(result_value) = thread.repo.as_deref().filter(|result| !result.is_empty()) {
-        return Some(PathBuf::from(result_value));
+    if let Some(repo) = thread.repo.as_deref().filter(|repo| !repo.is_empty()) {
+        return Some(PathBuf::from(repo));
     }
 
     [thread.dir.as_deref(), thread.worktree.as_deref()]
@@ -98,8 +92,8 @@ pub(crate) fn repo_of_thread(thread: &Thread) -> Option<PathBuf> {
 }
 /// `repo_of_thread` of a thread record.
 pub(crate) fn repo_of_thread_store(thread: &store::Thread) -> Option<PathBuf> {
-    if let Some(result_value) = thread.repo.as_deref().filter(|result| !result.is_empty()) {
-        return Some(PathBuf::from(result_value));
+    if let Some(repo) = thread.repo.as_deref().filter(|repo| !repo.is_empty()) {
+        return Some(PathBuf::from(repo));
     }
 
     [Some(thread.dir.as_str()), thread.worktree.as_deref()]
@@ -108,10 +102,7 @@ pub(crate) fn repo_of_thread_store(thread: &store::Thread) -> Option<PathBuf> {
         .find_map(|path| repo_root(Path::new(path)))
 }
 pub(crate) fn real(path: &str) -> String {
-    std::fs::canonicalize(path).map_or_else(
-        |_| path.to_string(),
-        |path_value| path_value.to_string_lossy().into_owned(),
-    )
+    std::fs::canonicalize(path).map_or_else(|_| path.to_string(), |resolved| resolved.to_string_lossy().into_owned())
 }
 /// (path, branch) of every worktree except the main checkout and tool caches.
 pub(crate) fn worktrees(repo: &Path) -> Vec<(String, String)> {
@@ -129,10 +120,10 @@ pub(crate) fn worktrees(repo: &Path) -> Vec<(String, String)> {
             append_worktree_path(&main, &cache, &mut items, &mut path, &mut branch);
 
             branch = None;
-        } else if let Some(path_2) = line.strip_prefix("worktree ") {
-            path = Some(path_2.to_string());
-        } else if let Some(bytes) = line.strip_prefix("branch ") {
-            branch = Some(bytes.trim_start_matches("refs/heads/").to_string());
+        } else if let Some(worktree) = line.strip_prefix("worktree ") {
+            path = Some(worktree.to_string());
+        } else if let Some(name) = line.strip_prefix("branch ") {
+            branch = Some(name.trim_start_matches("refs/heads/").to_string());
         }
     }
 
@@ -146,11 +137,11 @@ fn append_worktree_path(
     path: &mut Option<String>,
     branch: &mut Option<String>,
 ) {
-    if let Some(path_value) = path.take() {
-        let result = real(&path_value);
+    if let Some(worktree) = path.take() {
+        let resolved = real(&worktree);
 
-        if result != *main && !result.starts_with(cache) {
-            items.push((path_value, branch.take().unwrap_or_else(|| "(detached)".into())));
+        if resolved != *main && !resolved.starts_with(cache) {
+            items.push((worktree, branch.take().unwrap_or_else(|| "(detached)".into())));
         }
     }
 }
@@ -179,12 +170,12 @@ pub(crate) fn current_branch(path: &Path) -> String {
         return String::new();
     };
 
-    let group = top.join(".git");
+    let marker = top.join(".git");
 
-    let head = if group.is_dir() {
-        group.join("HEAD")
+    let head = if marker.is_dir() {
+        marker.join("HEAD")
     } else {
-        let Ok(text) = std::fs::read_to_string(&group) else {
+        let Ok(text) = std::fs::read_to_string(&marker) else {
             return String::new();
         };
 
@@ -199,23 +190,23 @@ pub(crate) fn current_branch(path: &Path) -> String {
 
     std::fs::read_to_string(head)
         .ok()
-        .and_then(|height| height.trim().strip_prefix("ref: refs/heads/").map(String::from))
+        .and_then(|content| content.trim().strip_prefix("ref: refs/heads/").map(String::from))
         .unwrap_or_default()
 }
 /// Top dir of the checkout (main or linked worktree) that holds PATH, by the file system only:
 /// the nearest dir with a `.git` dir or file.
 pub(crate) fn toplevel(path: &Path) -> Option<PathBuf> {
     path.ancestors()
-        .filter(|directory| !directory.as_os_str().is_empty())
-        .find(|directory_value| directory_value.join(".git").exists())
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .find(|dir| dir.join(".git").exists())
         .map(Path::to_path_buf)
 }
 /// DIR on the default branch (main, else master) with an upstream: `git pull --ff-only` first
 /// (30 s max, 0 prompt). None: another branch or 0 upstream (0 pull). Err: git's last line.
 pub(crate) fn update_default(dir: &Path) -> Option<Result<String, String>> {
-    let bytes = current_branch(dir);
+    let branch = current_branch(dir);
 
-    if bytes != "main" && bytes != "master" {
+    if branch != "main" && branch != "master" {
         return None;
     }
 
@@ -234,7 +225,7 @@ pub(crate) fn update_default(dir: &Path) -> Option<Result<String, String>> {
         .unwrap_or("git pull failed")
         .to_string();
 
-    Some(if ok { Ok(bytes) } else { Err(last) })
+    Some(if ok { Ok(branch) } else { Err(last) })
 }
 /// Checkouts (main checkout included) by branch: branch → path. The file system first (the
 /// repo's `HEAD`, `worktrees/*/{HEAD,gitdir}`: 0 git spawn on the UI thread), else `git
@@ -246,13 +237,13 @@ pub(crate) fn checkouts(repo: &Path) -> std::collections::HashMap<String, String
 /// repo there, or a layout the file system read does not know.
 pub(crate) fn common_dir(repo: &Path) -> Option<PathBuf> {
     let top = toplevel(repo)?;
-    let group = top.join(".git");
+    let marker = top.join(".git");
 
-    if group.is_dir() {
-        return Some(group);
+    if marker.is_dir() {
+        return Some(marker);
     }
 
-    let text = std::fs::read_to_string(&group).ok()?;
+    let text = std::fs::read_to_string(&marker).ok()?;
     let dir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
     let dir = if dir.is_relative() { top.join(dir) } else { dir };
     let common = std::fs::read_to_string(dir.join("commondir")).ok()?;
@@ -271,13 +262,13 @@ pub(crate) fn checkouts_fs(repo: &Path) -> Option<std::collections::HashMap<Stri
     let branch = |head: &Path| {
         std::fs::read_to_string(head)
             .ok()
-            .and_then(|height| height.trim().strip_prefix("ref: refs/heads/").map(String::from))
+            .and_then(|content| content.trim().strip_prefix("ref: refs/heads/").map(String::from))
     };
 
     let mut map = std::collections::HashMap::new();
 
-    if let Some(bytes) = branch(&common.join("HEAD")) {
-        map.insert(bytes, common.parent()?.display().to_string());
+    if let Some(name) = branch(&common.join("HEAD")) {
+        map.insert(name, common.parent()?.display().to_string());
     }
 
     if let Ok(rd) = std::fs::read_dir(common.join("worktrees")) {
@@ -292,14 +283,14 @@ fn scan_checkout_directories(
     map: &mut std::collections::HashMap<String, String>,
     rd: std::fs::ReadDir,
 ) {
-    for error in rd.flatten() {
-        let directory = error.path();
+    for entry in rd.flatten() {
+        let admin = entry.path();
 
-        let Some(bytes_value) = branch(&directory.join("HEAD")) else {
+        let Some(name) = branch(&admin.join("HEAD")) else {
             continue;
         };
 
-        let Ok(gitdir) = std::fs::read_to_string(directory.join("gitdir")) else {
+        let Ok(gitdir) = std::fs::read_to_string(admin.join("gitdir")) else {
             continue;
         };
 
@@ -307,7 +298,7 @@ fn scan_checkout_directories(
             continue;
         };
 
-        map.insert(bytes_value, wt.display().to_string());
+        map.insert(name, wt.display().to_string());
     }
 }
 pub(crate) fn checkouts_git(repo: &Path) -> std::collections::HashMap<String, String> {
@@ -316,12 +307,12 @@ pub(crate) fn checkouts_git(repo: &Path) -> std::collections::HashMap<String, St
     let mut path = None;
 
     for line in out.lines() {
-        if let Some(path_value) = line.strip_prefix("worktree ") {
-            path = Some(path_value.to_string());
-        } else if let Some(bytes) = line.strip_prefix("branch ")
-            && let Some(path_2) = &path
+        if let Some(worktree) = line.strip_prefix("worktree ") {
+            path = Some(worktree.to_string());
+        } else if let Some(name) = line.strip_prefix("branch ")
+            && let Some(worktree) = &path
         {
-            map.insert(bytes.trim_start_matches("refs/heads/").to_string(), path_2.clone());
+            map.insert(name.trim_start_matches("refs/heads/").to_string(), worktree.clone());
         }
     }
 
@@ -331,7 +322,7 @@ pub(crate) fn checkouts_git(repo: &Path) -> std::collections::HashMap<String, St
 pub(crate) fn worktree_path(repo: &Path, branch: &str) -> PathBuf {
     let name = repo
         .file_name()
-        .map_or_else(|| "repo".into(), |count| count.to_string_lossy().into_owned());
+        .map_or_else(|| "repo".into(), |name| name.to_string_lossy().into_owned());
 
     crate::engine::data_dir()
         .join("worktrees")
@@ -347,7 +338,7 @@ pub(crate) fn add_worktree(repo: &Path, branch: &str) -> Result<PathBuf, String>
         return Err(format!("{} exists", path.display()));
     }
 
-    let path_value = path.display().to_string();
+    let path_text = path.display().to_string();
     let exists = git(
         repo,
         &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")],
@@ -362,9 +353,9 @@ pub(crate) fn add_worktree(repo: &Path, branch: &str) -> Result<PathBuf, String>
     };
 
     let args: Vec<&str> = if exists {
-        vec!["worktree", "add", &path_value, branch]
+        vec!["worktree", "add", &path_text, branch]
     } else {
-        vec!["worktree", "add", "--no-track", "-b", branch, &path_value, &base]
+        vec!["worktree", "add", "--no-track", "-b", branch, &path_text, &base]
     };
 
     let (ok, _, err) = git(repo, &args);
@@ -376,8 +367,8 @@ pub(crate) fn add_worktree(repo: &Path, branch: &str) -> Result<PathBuf, String>
     }
 }
 pub(crate) fn unpushed(branch: &str, path: &Path) -> usize {
-    let result = if branch == "(detached)" { "HEAD" } else { branch };
-    let (ok, out, _) = git(path, &["rev-list", "--count", result, "--not", "--remotes"]);
+    let rev = if branch == "(detached)" { "HEAD" } else { branch };
+    let (ok, out, _) = git(path, &["rev-list", "--count", rev, "--not", "--remotes"]);
 
     if ok { out.trim().parse().unwrap_or(0) } else { 0 }
 }
@@ -388,20 +379,20 @@ pub(crate) fn unpushed(branch: &str, path: &Path) -> usize {
 pub(crate) fn drop_worktree(main: &Path, wt: &Path) -> Result<(), String> {
     let admin = std::fs::read_to_string(wt.join(".git"))
         .ok()
-        .and_then(|text| text.strip_prefix("gitdir:").map(|path| wt.join(path.trim())))
-        .filter(|agent| {
-            agent
+        .and_then(|text| text.strip_prefix("gitdir:").map(|rel| wt.join(rel.trim())))
+        .filter(|admin| {
+            admin
                 .parent()
                 .and_then(Path::file_name)
-                .is_some_and(|count| count == "worktrees")
-                && agent.is_dir()
+                .is_some_and(|name| name == "worktrees")
+                && admin.is_dir()
         });
 
     let trash = trash_dir();
     let _ = std::fs::create_dir_all(&trash);
     let name = wt
         .file_name()
-        .map(|count_value| count_value.to_string_lossy().into_owned())
+        .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

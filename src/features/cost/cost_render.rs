@@ -13,14 +13,14 @@ pub(crate) fn human(value: u64) -> String {
     }
 }
 
-/// Short name of plan window W: `five_hour` → `5h`, `seven_day` → `7d`, `seven_day_opus` → `7d opus`.
-pub(super) fn window(width: &str) -> String {
-    match width {
+/// Short name of plan window LABEL: `five_hour` → `5h`, `seven_day` → `7d`, `seven_day_opus` → `7d opus`.
+pub(super) fn window(label: &str) -> String {
+    match label {
         "five_hour" => "5h".into(),
         "seven_day" | "week" => "7d".into(),
-        output => match output.strip_prefix("seven_day_") {
+        other => match other.strip_prefix("seven_day_") {
             Some(rest) => format!("7d {}", rest.replace('_', " ")),
-            None => output.replace('_', " "),
+            None => other.replace('_', " "),
         },
     }
 }
@@ -49,10 +49,10 @@ pub(super) fn next_cost(snapshot: &Snap, next_message: &Next) -> Option<(u64, f6
         return None;
     }
 
-    let tok = rows.iter().map(|agent_value| agent_value.ctx_tokens + msg).sum();
+    let tok = rows.iter().map(|agent| agent.ctx_tokens + msg).sum();
     let usd = rows
         .iter()
-        .map(|agent_2| (agent_2.ctx_tokens + msg) as f64 * agent_2.usd_per_token)
+        .map(|agent| (agent.ctx_tokens + msg) as f64 * agent.usd_per_token)
         .sum();
 
     Some((tok, usd))
@@ -61,7 +61,7 @@ pub(super) fn next_cost(snapshot: &Snap, next_message: &Next) -> Option<(u64, f6
 /// Window L as a line bar of WIDTH cells: the used % `━` in text, caution / error near the limit,
 /// the share of the next message `━` in info.
 pub(super) fn bar(pct: f64, next: f64, width: usize) -> Vec<Span<'static>> {
-    let col = if pct >= 90.0 {
+    let color = if pct >= 90.0 {
         theme::pal().error()
     } else if pct >= 70.0 {
         theme::pal().caution()
@@ -69,12 +69,12 @@ pub(super) fn bar(pct: f64, next: f64, width: usize) -> Vec<Span<'static>> {
         theme::pal().text
     };
 
-    line_bar(pct, next, width, theme::fg(col))
+    line_bar(pct, next, width, theme::fg(color))
 }
 
 /// A line bar of WIDTH cells: PCT % `━` in USED, the next SHARE % `━` in info, the rest `─`.
 pub(super) fn line_bar(pct: f64, share: f64, width: usize, used_style: Style) -> Vec<Span<'static>> {
-    let cells = |path: f64| ((path.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
+    let cells = |percent: f64| ((percent.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
     let used = cells(pct).min(width);
 
     // a share > 0: 1 cell at least (visible)
@@ -101,33 +101,33 @@ pub(crate) fn draw_in(frame: &mut Frame, area: Rect, snapshot: &Snap, age: Durat
     let mut fresh = Buffer::empty(at0);
 
     draw_at(&mut fresh, at0, snapshot, age, now(), next_message);
-    let mut message = MORPH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut morph = MORPH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    match message.as_mut() {
+    match morph.as_mut() {
         None => {
-            *message = Some(Morph {
+            *morph = Some(Morph {
                 from: fresh.clone(),
                 to: fresh,
                 start: Instant::now().checked_sub(MORPH_TIME).unwrap(),
             });
         }
-        Some(mo) if mo.to != fresh => {
-            mo.from = mo.shown();
-            mo.to = fresh;
-            mo.start = Instant::now();
+        Some(current) if current.to != fresh => {
+            current.from = current.shown();
+            current.to = fresh;
+            current.start = Instant::now();
         }
         Some(_) => {}
     }
 
-    blit(frame, area, &message.as_ref().expect("set above").shown());
+    blit(frame, area, &morph.as_ref().expect("set above").shown());
 }
 
 /// The last cost box, in AREA (a new thread: its 1st snapshot not in yet). 0 box yet: nothing.
 pub(crate) fn draw_last(frame: &mut Frame, area: Rect) {
-    let message = MORPH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let morph = MORPH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    if let Some(mo) = message.as_ref() {
-        blit(frame, area, &mo.shown());
+    if let Some(current) = morph.as_ref() {
+        blit(frame, area, &current.shown());
     }
 }
 
@@ -137,22 +137,22 @@ pub(crate) fn morphing() -> bool {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
-        .is_some_and(|message| message.start.elapsed() < MORPH_TIME)
+        .is_some_and(|morph| morph.start.elapsed() < MORPH_TIME)
 }
 
-/// BOX (at 0, 0) into the frame at AREA.
-pub(super) fn blit(frame: &mut Frame, area: Rect, bytes: &Buffer) {
+/// SHOWN (at 0, 0) into the frame at AREA.
+pub(super) fn blit(frame: &mut Frame, area: Rect, shown: &Buffer) {
     let buf = frame.buffer_mut();
 
-    for y in 0..area.height.min(bytes.area.height) {
-        blit_row(area, bytes, buf, y);
+    for y in 0..area.height.min(shown.area.height) {
+        blit_row(area, shown, buf, y);
     }
 }
 
-fn blit_row(area: Rect, bytes: &Buffer, buf: &mut Buffer, y: u16) {
-    for x in 0..area.width.min(bytes.area.width) {
-        if let Some(character) = buf.cell_mut((area.x + x, area.y + y)) {
-            *character = bytes[(x, y)].clone();
+fn blit_row(area: Rect, shown: &Buffer, buf: &mut Buffer, y: u16) {
+    for x in 0..area.width.min(shown.area.width) {
+        if let Some(cell) = buf.cell_mut((area.x + x, area.y + y)) {
+            *cell = shown[(x, y)].clone();
         }
     }
 }
@@ -170,18 +170,18 @@ pub(super) fn draw_at(buf: &mut Buffer, area: Rect, snapshot: &Snap, age: Durati
         width: area.width.saturating_sub(2),
         ..area
     };
-    let width_value = inner.width as usize;
+    let width = inner.width as usize;
     let mut lines = Vec::new();
     let cost = format!("${:.2} thread", snapshot.cost);
 
     let compact = area.height < 12;
 
     // agent sprites side by side (live first), thread cost right of the 1st row. no title: the numbers speak
-    append_sprites(snapshot, width_value, &mut lines, &cost, compact);
+    append_sprites(snapshot, width, &mut lines, &cost, compact);
 
     if !snapshot.found {
         if compact {
-            lines.push(Line::styled(format!("{cost:>width_value$}"), theme::muted()));
+            lines.push(Line::styled(format!("{cost:>width$}"), theme::muted()));
         }
 
         lines.push(Line::styled("thread not found (yet)", theme::muted()));
@@ -189,11 +189,11 @@ pub(super) fn draw_at(buf: &mut Buffer, area: Rect, snapshot: &Snap, age: Durati
         return;
     }
 
-    let name_w = append_cost_columns(snapshot, width_value, &mut lines, &cost, compact);
+    let name_w = append_cost_columns(snapshot, width, &mut lines, &cost, compact);
 
     let cost_next = next_cost(snapshot, next_message);
 
-    append_plan_limits(snapshot, now, width_value, &mut lines, compact, name_w, cost_next);
+    append_plan_limits(snapshot, now, width, &mut lines, compact, name_w, cost_next);
 
     // the next message (thread view only): tokens, $, its share of each window
     append_next_cost(snapshot, next_message, &mut lines, name_w, cost_next);
@@ -219,11 +219,11 @@ pub(super) fn draw_at(buf: &mut Buffer, area: Rect, snapshot: &Snap, age: Durati
     }
 }
 
-fn append_sprites(snapshot: &Snap, width_value: usize, lines: &mut Vec<Line<'_>>, cost: &str, compact: bool) {
-    let fit = (width_value.saturating_sub(cost.len() + 1) + 2) / (crate::ui::sprites::WIDTH + 2);
+fn append_sprites(snapshot: &Snap, width: usize, lines: &mut Vec<Line<'_>>, cost: &str, compact: bool) {
+    let fit = (width.saturating_sub(cost.len() + 1) + 2) / (crate::ui::sprites::WIDTH + 2);
     let mut by_live: Vec<&AgentRow> = snapshot.agents.iter().filter(|agent| agent.sprite.is_some()).collect();
 
-    by_live.sort_by_key(|agent_value| !agent_value.live);
+    by_live.sort_by_key(|agent| !agent.live);
 
     // compact (< 12 rows, the thread view's header): 0 sprites, the cost on the column row, 0 footer
 
@@ -243,8 +243,8 @@ fn append_sprites(snapshot: &Snap, width_value: usize, lines: &mut Vec<Line<'_>>
 
     let frames: Vec<[String; crate::ui::sprites::HEIGHT]> = shown
         .iter()
-        .map(|agent_2| {
-            agent_2
+        .map(|agent| {
+            agent
                 .sprite
                 .as_ref()
                 .expect("filtered above")
@@ -252,17 +252,17 @@ fn append_sprites(snapshot: &Snap, width_value: usize, lines: &mut Vec<Line<'_>>
         })
         .collect();
 
-    for row_value in 0..rows {
+    for row in 0..rows {
         let mut spans = Vec::new();
 
-        for (i, agent_3) in shown.iter().enumerate() {
-            sprite_spans(&frames, row_value, &mut spans, i, agent_3);
+        for (i, agent) in shown.iter().enumerate() {
+            sprite_spans(&frames, row, &mut spans, i, agent);
         }
 
-        if row_value == 0 {
+        if row == 0 {
             let used: usize = spans.iter().map(ratatui::prelude::Span::width).sum();
 
-            spans.push(Span::raw(" ".repeat(width_value.saturating_sub(used + cost.len()))));
+            spans.push(Span::raw(" ".repeat(width.saturating_sub(used + cost.len()))));
             spans.push(Span::styled(cost.to_owned(), theme::muted()));
         }
 
@@ -283,24 +283,18 @@ fn sprite_spans(frames: &[[String; 4]], row_index: usize, spans: &mut Vec<Span<'
     ));
 }
 
-fn append_cost_columns(
-    snapshot: &Snap,
-    width_value: usize,
-    lines: &mut Vec<Line<'_>>,
-    cost: &str,
-    compact: bool,
-) -> usize {
+fn append_cost_columns(snapshot: &Snap, width: usize, lines: &mut Vec<Line<'_>>, cost: &str, compact: bool) -> usize {
     let name_width = snapshot
         .agents
         .iter()
-        .map(|agent_4| agent_4.name.chars().count())
+        .map(|agent| agent.name.chars().count())
         .max()
         .unwrap_or(3)
         .max(3)
         + 1;
 
     // name, tok 7, $ 9, 2, ctx line rest, 1, ctx % 4 (the last-hour sparkline: the ctrl+p tokens tab)
-    let context_width = width_value.saturating_sub(name_width + 7 + 9 + 2 + 1 + 4);
+    let context_width = width.saturating_sub(name_width + 7 + 9 + 2 + 1 + 4);
     let head = format!(
         "{:name_width$}{:>7}{:>9}  {}",
         "",
@@ -311,7 +305,7 @@ fn append_cost_columns(
 
     if compact {
         // the thread cost right of the column names
-        let room = width_value.saturating_sub(head.trim_end().chars().count());
+        let room = width.saturating_sub(head.trim_end().chars().count());
         let head = head.trim_end().to_string();
 
         let tail = if room > cost.len() {
@@ -391,10 +385,7 @@ fn append_agent_costs(snapshot: &Snap, lines: &mut Vec<Line<'_>>, name_width: us
 
         spans.extend(line_bar(pct, 0.0, context_width, fill));
         spans.push(Span::styled(
-            format!(
-                " {:>4}",
-                agent.ctx.map_or("·".into(), |character| format!("{character}%"))
-            ),
+            format!(" {:>4}", agent.ctx.map_or("·".into(), |pct| format!("{pct}%"))),
             theme::muted(),
         ));
         lines.push(Line::from(spans));
@@ -418,13 +409,13 @@ fn append_next_cost(
             spans.push(Span::styled(format!("≥{} tok", human(tok)), theme::text()));
             spans.push(Span::styled(format!(" ~${usd:.2}"), theme::muted()));
 
-            for line_6 in &snapshot.limits {
-                let share = line_6
+            for limit in &snapshot.limits {
+                let share = limit
                     .usd_per_pct
-                    .filter(|result_2| *result_2 > 0.0)
-                    .map_or("?".into(), |result_3| format!("+{:.1}%", usd / result_3));
+                    .filter(|rate| *rate > 0.0)
+                    .map_or("?".into(), |rate| format!("+{:.1}%", usd / rate));
 
-                spans.push(Span::styled(format!(" · {} ", window(&line_6.label)), theme::muted()));
+                spans.push(Span::styled(format!(" · {} ", window(&limit.label)), theme::muted()));
                 spans.push(Span::styled(share, theme::fg(theme::pal().info())));
             }
         }

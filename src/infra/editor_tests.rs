@@ -4,25 +4,27 @@ use super::*;
 fn args_per_editor_kind() {
     let wt = Path::new("/w");
 
-    let text = |value: Vec<OsString>| {
-        value
-            .iter()
-            .map(|x| x.to_string_lossy().into_owned())
+    let strings = |args: Vec<OsString>| {
+        args.iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
     };
 
     assert_eq!(
-        text(args_at(Kind::VsCode, wt, "src/a.rs", 12)),
+        strings(args_at(Kind::VsCode, wt, "src/a.rs", 12)),
         ["/w", "-g", "/w/src/a.rs:12"]
     );
-    assert_eq!(text(args_at(Kind::Zed, wt, "src/a.rs", 12)), ["/w", "/w/src/a.rs:12"]);
     assert_eq!(
-        text(args_at(Kind::JetBrains, wt, "src/a.rs", 12)),
+        strings(args_at(Kind::Zed, wt, "src/a.rs", 12)),
+        ["/w", "/w/src/a.rs:12"]
+    );
+    assert_eq!(
+        strings(args_at(Kind::JetBrains, wt, "src/a.rs", 12)),
         ["--line", "12", "/w/src/a.rs"]
     );
-    assert_eq!(text(args_dir(Kind::VsCode, wt)), ["/w"]);
+    assert_eq!(strings(args_dir(Kind::VsCode, wt)), ["/w"]);
     assert_eq!(
-        text(args_at(Kind::Terminal, wt, "src/a.rs", 12)),
+        strings(args_at(Kind::Terminal, wt, "src/a.rs", 12)),
         ["+12", "/w/src/a.rs"]
     );
     assert_eq!(kind_of(Path::new("/usr/local/bin/cursor")), Kind::VsCode);
@@ -30,7 +32,7 @@ fn args_per_editor_kind() {
     assert_eq!(kind_of(Path::new("hx")), Kind::Other);
     assert_eq!(kind_of(Path::new("/usr/local/bin/flow")), Kind::Flow);
     assert_eq!(
-        text(args_at(Kind::Flow, wt, "src/a.rs", 12)),
+        strings(args_at(Kind::Flow, wt, "src/a.rs", 12)),
         ["--gui", "--project", "/w", "/w/src/a.rs:12"]
     );
     assert!(!Kind::Flow.in_terminal() && Kind::Terminal.in_terminal());

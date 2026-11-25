@@ -35,20 +35,20 @@ pub(super) fn new_thread(
             wh = size();
             (view, side) = layout(wh.0, wh.1);
             wipe(top);
-            let _ = top.draw(|file| chrome(file, coach, spec.dry, view, side));
+            let _ = top.draw(|frame| chrome(frame, coach, spec.dry, view, side));
 
             term = fixed(view)?;
         }
 
-        let _ = term.draw(|file_value| app.draw(file_value));
+        let _ = term.draw(|frame| app.draw(frame));
         let (_, flow) = app.flow_peek();
 
         if flow.is_some() && coach.tick(Task::Flow) {
-            let _ = top.draw(|file_2| chrome(file_2, coach, spec.dry, view, side));
+            let _ = top.draw(|frame| chrome(frame, coach, spec.dry, view, side));
         }
 
-        if let Some(output) = app.outcome.take() {
-            return Some(match output {
+        if let Some(outcome) = app.outcome.take() {
+            return Some(match outcome {
                 crate::screens::start_screen::Outcome::New {
                     message, agents, flows, ..
                 } => start_thread(coach, repo, &message, agents, flows, &spec.crew[0].name)
@@ -65,52 +65,47 @@ pub(super) fn new_thread(
             return Some(Form::Quit);
         };
 
-        if let Some(value) = batch
+        if let Some(form) = batch
             .into_iter()
-            .find_map(|(event, _)| new_thread_twice(&mut app, &mut last_esc, &mut last_ctrl_c, event))
+            .find_map(|(event, _)| form_event(&mut app, &mut last_esc, &mut last_ctrl_c, event))
         {
-            return Some(value);
+            return Some(form);
         }
 
         app.tick();
     }
 }
 
-fn new_thread_twice(
+fn form_event(
     app: &mut crate::screens::start_screen::App,
     last_esc: &mut Option<std::time::Instant>,
     last_ctrl_c: &mut Option<std::time::Instant>,
     ev: ratatui::crossterm::event::Event,
 ) -> Option<Form> {
     match ev {
-        ratatui::crossterm::event::Event::Key(key_value)
-            if key_value.kind != ratatui::crossterm::event::KeyEventKind::Release =>
-        {
-            // esc esc: back to the thread before (the real form goes to the start
-            // screen); ctrl+c ctrl+c: the tutorial ends, as in a thread
+        ratatui::crossterm::event::Event::Key(key) if key.kind != ratatui::crossterm::event::KeyEventKind::Release => {
+            // esc esc: back to the at before (the real form goes to the start
+            // screen); ctrl+c ctrl+c: the tutorial ends, as in a at
             use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
             let twice = |last: &mut Option<std::time::Instant>| {
-                let hit = last.is_some_and(|thread| thread.elapsed() < Duration::from_millis(500));
+                let hit = last.is_some_and(|at| at.elapsed() < Duration::from_millis(500));
 
                 *last = Some(std::time::Instant::now());
                 hit
             };
 
-            if key_value.code == KeyCode::Esc && twice(last_esc) {
+            if key.code == KeyCode::Esc && twice(last_esc) {
                 return Some(Form::Back);
             }
 
-            if key_value.code == KeyCode::Char('c')
-                && key_value.modifiers.contains(KeyModifiers::CONTROL)
-                && twice(last_ctrl_c)
-            {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) && twice(last_ctrl_c) {
                 return Some(Form::Quit);
             }
 
-            app.key(key_value);
+            app.key(key);
         }
-        ratatui::crossterm::event::Event::Mouse(message_value) => app.mouse(message_value),
+        ratatui::crossterm::event::Event::Mouse(mouse) => app.mouse(mouse),
         ratatui::crossterm::event::Event::Paste(text) => app.paste(&text),
         _ => {}
     }
@@ -140,7 +135,7 @@ pub(super) fn start_thread(
     let flows = if flows.is_empty() {
         thread
             .lead()
-            .map(|line| vec![(line.to_string(), "chore".to_string(), 0)])
+            .map(|lead| vec![(lead.to_string(), "chore".to_string(), 0)])
             .unwrap_or_default()
     } else {
         flows

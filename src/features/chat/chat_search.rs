@@ -96,7 +96,7 @@ impl ChatSearch {
 
     /// The shown match (item index).
     pub(crate) fn current(&self) -> Option<usize> {
-        self.cur.and_then(|character| self.hits.get(character).copied())
+        self.cur.and_then(|cur| self.hits.get(cur).copied())
     }
 
     pub(crate) fn is_hit(&self, item: usize) -> bool {
@@ -118,12 +118,12 @@ impl ChatSearch {
             return None;
         }
 
-        let character = self.cur.unwrap_or(count - 1);
+        let cur = self.cur.unwrap_or(count - 1);
 
         self.cur = Some(if older {
-            (character + count - 1) % count
+            (cur + count - 1) % count
         } else {
-            (character + 1) % count
+            (cur + 1) % count
         });
         self.current()
     }
@@ -135,13 +135,13 @@ impl ChatSearch {
         }
 
         match self.cur {
-            Some(character) if !self.hits.is_empty() => format!("{}/{}", character + 1, self.hits.len()),
+            Some(cur) if !self.hits.is_empty() => format!("{}/{}", cur + 1, self.hits.len()),
             _ => "0 matches".into(),
         }
     }
 
-    pub(crate) fn key(&mut self, key_value: KeyEvent, thread: &chat::Thread) -> Act {
-        key_chat_search(self, key_value, thread)
+    pub(crate) fn key(&mut self, key: KeyEvent, thread: &chat::Thread) -> Act {
+        key_chat_search(self, key, thread)
     }
 
     /// The bar in R (1 row): ` find ` pill, the query, the count, the keys.
@@ -150,15 +150,15 @@ impl ChatSearch {
     }
 }
 
-/// The searched text of item IT of T.
-fn item_text(thread: &chat::Thread, it: &Item) -> String {
-    match it {
+/// The searched text of ITEM of THREAD.
+fn item_text(thread: &chat::Thread, item: &Item) -> String {
+    match item {
         Item::Prompt { text, .. } | Item::Text { text, .. } | Item::Note { text, .. } | Item::Edits { text, .. } => {
             text.clone()
         }
         Item::Run { calls, .. } => calls
             .iter()
-            .map(|character| chat::call_summary(&character.name, &character.input))
+            .map(|call| chat::call_summary(&call.name, &call.input))
             .collect::<Vec<_>>()
             .join("\n"),
         Item::Shell { command, output, .. } => format!("{command}\n{output}"),
@@ -167,26 +167,22 @@ fn item_text(thread: &chat::Thread, it: &Item) -> String {
         Item::Sub { sub, .. } => thread
             .subs
             .get(*sub)
-            .map(|text_value| format!("{}\n{}", text_value.description, text_value.result))
+            .map(|sub| format!("{}\n{}", sub.description, sub.result))
             .unwrap_or_default(),
     }
 }
 
 /// LINE with the substring hits of WORDS (lowercased) marked (accent background).
 pub(crate) fn mark(line: &Line<'static>, words: &[String]) -> Line<'static> {
-    let text: String = line
-        .spans
-        .iter()
-        .map(|text_value| text_value.content.as_ref())
-        .collect();
+    let text: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
     let low: Vec<char> = text
         .chars()
         .map(|character| character.to_lowercase().next().unwrap_or(character))
         .collect();
     let mut on = vec![false; low.len()];
 
-    for width in words {
-        mark_width_value(&low, &mut on, width);
+    for word in words {
+        mark_word(&low, &mut on, word);
     }
 
     if !on.contains(&true) {
@@ -200,16 +196,16 @@ pub(crate) fn mark(line: &Line<'static>, words: &[String]) -> Line<'static> {
     finish_mark(line, &on, hl, out, at)
 }
 
-fn mark_width_value(low: &[char], on: &mut [bool], width: &str) {
-    let width_value: Vec<char> = width.chars().collect();
+fn mark_word(low: &[char], on: &mut [bool], word: &str) {
+    let word: Vec<char> = word.chars().collect();
 
-    if width_value.is_empty() || width_value.len() > low.len() {
+    if word.is_empty() || word.len() > low.len() {
         return;
     }
 
-    for i in 0..=low.len() - width_value.len() {
-        if low[i..i + width_value.len()] == width_value[..] {
-            on[i..i + width_value.len()].iter_mut().for_each(|bytes| *bytes = true);
+    for i in 0..=low.len() - word.len() {
+        if low[i..i + word.len()] == word[..] {
+            on[i..i + word.len()].iter_mut().for_each(|marked| *marked = true);
         }
     }
 }
@@ -221,8 +217,8 @@ fn finish_mark(
     mut out: Vec<Span<'static>>,
     mut at: usize,
 ) -> Line<'static> {
-    for text_2 in &line.spans {
-        finish_mark_chars(on, hl, &mut out, &mut at, text_2);
+    for span in &line.spans {
+        mark_span(on, hl, &mut out, &mut at, span);
     }
 
     Line {
@@ -231,19 +227,13 @@ fn finish_mark(
     }
 }
 
-fn finish_mark_chars(
-    on: &[bool],
-    hl: ratatui::prelude::Style,
-    out: &mut Vec<Span<'static>>,
-    at: &mut usize,
-    text_2: &Span<'_>,
-) {
-    let chars: Vec<char> = text_2.content.chars().collect();
+fn mark_span(on: &[bool], hl: ratatui::prelude::Style, out: &mut Vec<Span<'static>>, at: &mut usize, span: &Span<'_>) {
+    let chars: Vec<char> = span.content.chars().collect();
     let mut buf = String::new();
     let mut cur: Option<bool> = None;
 
-    for (j, character_value) in chars.iter().enumerate() {
-        finish_mark_chars_message(
+    for (j, character) in chars.iter().enumerate() {
+        push_char(
             SearchRunState {
                 on,
                 hl,
@@ -252,9 +242,9 @@ fn finish_mark_chars(
                 buf: &mut buf,
                 cur: &mut cur,
             },
-            text_2,
+            span,
             j,
-            *character_value,
+            *character,
         );
     }
 
@@ -262,9 +252,9 @@ fn finish_mark_chars(
         out.push(Span::styled(
             buf,
             if cur == Some(true) {
-                text_2.style.patch(hl)
+                span.style.patch(hl)
             } else {
-                text_2.style
+                span.style
             },
         ));
     }
@@ -272,7 +262,7 @@ fn finish_mark_chars(
     *at += chars.len();
 }
 
-fn finish_mark_chars_message(context: SearchRunState<'_>, text_2: &Span<'_>, j: usize, character_value: char) {
+fn push_char(context: SearchRunState<'_>, span: &Span<'_>, j: usize, character: char) {
     let SearchRunState {
         on,
         hl,
@@ -282,112 +272,111 @@ fn finish_mark_chars_message(context: SearchRunState<'_>, text_2: &Span<'_>, j: 
         cur,
     } = context;
 
-    let message = on.get(*at + j).copied().unwrap_or(false);
+    let marked = on.get(*at + j).copied().unwrap_or(false);
 
-    if cur.is_some_and(|x| x != message) {
+    if cur.is_some_and(|was| was != marked) {
         out.push(Span::styled(
             std::mem::take(buf),
             if *cur == Some(true) {
-                text_2.style.patch(hl)
+                span.style.patch(hl)
             } else {
-                text_2.style
+                span.style
             },
         ));
     }
 
-    *cur = Some(message);
-    buf.push(character_value);
+    *cur = Some(marked);
+    buf.push(character);
 }
 
 #[cfg(test)]
 #[path = "chat_chat_search_tests.rs"]
 mod tests;
 
-fn refresh_chat_search(state: &mut ChatSearch, thread: &chat::Thread) -> Option<usize> {
-    if !state.open {
+fn refresh_chat_search(bar: &mut ChatSearch, thread: &chat::Thread) -> Option<usize> {
+    if !bar.open {
         return None;
     }
 
-    let query = state.ta.text();
+    let query = bar.ta.text();
     let count = thread.items.len();
     let mut grown = false;
     let mut grow: Vec<usize> = (count.saturating_sub(TAIL)..count).chain(thread.open_runs()).collect();
 
     grow.sort_unstable();
     grow.dedup();
-    let have = count.min(state.msgs.len());
+    let have = count.min(bar.msgs.len());
 
     for i in grow.into_iter().filter(|&i| i < have) {
         let text = item_text(thread, &thread.items[i]);
 
-        if state.msgs[i].text != text {
-            state.msgs[i] = Msg::new("", "", "", 0, &text);
+        if bar.msgs[i].text != text {
+            bar.msgs[i] = Msg::new("", "", "", 0, &text);
             grown = true;
         }
     }
 
-    if query == state.seen.0 && count == state.seen.1 && !grown {
+    if query == bar.seen.0 && count == bar.seen.1 && !grown {
         return None;
     }
 
-    let new_query = query != state.seen.0;
+    let new_query = query != bar.seen.0;
 
     // a rebuilt stream (the log's head came in): the texts again
-    if state.msgs.len() > count || state.seen.1 > count {
-        state.msgs.clear();
+    if bar.msgs.len() > count || bar.seen.1 > count {
+        bar.msgs.clear();
     }
 
-    while state.msgs.len() < count {
-        let i = state.msgs.len();
+    while bar.msgs.len() < count {
+        let i = bar.msgs.len();
 
-        state
-            .msgs
+        bar.msgs
             .push(Msg::new("", "", "", 0, &item_text(thread, &thread.items[i])));
     }
 
-    let shown = state.keep.take().or_else(|| state.current());
+    let shown = bar.keep.take().or_else(|| bar.current());
     let words = search::words(&query);
 
-    state.hits = (0..count).filter(|&i| search::hit(&state.msgs[i], &words)).collect();
-    state.seen = (query, count);
+    bar.hits = (0..count).filter(|&i| search::hit(&bar.msgs[i], &words)).collect();
+    bar.seen = (query, count);
 
-    state.cur = match shown {
-        Some(text_value) if !new_query => state.hits.iter().position(|&height| height == text_value),
-        _ => state.hits.len().checked_sub(1),
+    bar.cur = match shown {
+        Some(item) if !new_query => bar.hits.iter().position(|&hit| hit == item),
+        _ => bar.hits.len().checked_sub(1),
     };
 
-    if new_query { state.current() } else { None }
+    if new_query { bar.current() } else { None }
 }
 
-fn key_chat_search(state: &mut ChatSearch, key_value: KeyEvent, thread: &chat::Thread) -> Act {
-    if !state.open || !state.focus {
+fn key_chat_search(bar: &mut ChatSearch, key: KeyEvent, thread: &chat::Thread) -> Act {
+    if !bar.open || !bar.focus {
         return Act::Pass;
     }
 
-    let none = key_value.modifiers.is_empty();
+    let plain = key.modifiers.is_empty();
 
-    match key_value.code {
+    match key.code {
         KeyCode::Esc => {
-            state.close();
+            bar.close();
             return Act::Close;
         }
-        KeyCode::Enter | KeyCode::Up if none => return state.step(true).map_or(Act::None, Act::Show),
-        KeyCode::Down => return state.step(false).map_or(Act::None, Act::Show),
+        KeyCode::Enter | KeyCode::Up if plain => return bar.step(true).map_or(Act::None, Act::Show),
+        KeyCode::Down => return bar.step(false).map_or(Act::None, Act::Show),
         _ => {}
     }
 
-    if matches!(state.ta.key(key_value), Outcome::Ignored) {
+    if matches!(bar.ta.key(key), Outcome::Ignored) {
         return Act::Pass;
     }
 
-    state.refresh(thread).map_or(Act::None, Act::Show)
+    bar.refresh(thread).map_or(Act::None, Act::Show)
 }
 
-fn render_chat_search(state: &mut ChatSearch, frame: &mut Frame, area: Rect) {
+fn render_chat_search(bar: &mut ChatSearch, frame: &mut Frame, area: Rect) {
     let pill = " find ";
-    let label = state.label();
+    let label = bar.label();
 
-    let keys = if state.focus {
+    let keys = if bar.focus {
         "tab ↑: older · ⇧tab ↓: newer · esc: close"
     } else {
         "ctrl+f: back to the search"
@@ -396,7 +385,7 @@ fn render_chat_search(state: &mut ChatSearch, frame: &mut Frame, area: Rect) {
     frame.render_widget(
         Paragraph::new(Span::styled(
             pill,
-            if state.focus { theme::pill() } else { theme::muted() },
+            if bar.focus { theme::pill() } else { theme::muted() },
         )),
         Rect {
             width: pill.len() as u16,
@@ -408,7 +397,7 @@ fn render_chat_search(state: &mut ChatSearch, frame: &mut Frame, area: Rect) {
     let x = area.x + pill.len() as u16 + 1;
     let qw = area.width.saturating_sub(pill.len() as u16 + 1 + rw);
 
-    state.ta.render(frame, Rect { x, width: qw, ..area }, state.focus);
+    bar.ta.render(frame, Rect { x, width: qw, ..area }, bar.focus);
 
     let style = if label == "0 matches" {
         theme::fg(theme::pal().caution())

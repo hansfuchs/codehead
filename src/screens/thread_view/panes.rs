@@ -1,10 +1,10 @@
 use super::{Duration, Instant, Pane, Path, PathBuf, Rect, SPLIT_MIN, View, json, store};
 
 impl View {
-    /// Switch to view P of the thread (the owner's pick: the view stops following the width).
-    pub(super) fn set_pane(&mut self, path: Pane) {
+    /// Switch to view PANE of the thread (the owner's pick: the view stops following the width).
+    pub(super) fn set_pane(&mut self, pane: Pane) {
         self.layout.auto_pane = false;
-        self.switch_pane(path);
+        self.switch_pane(pane);
     }
 
     /// The view follows the width of AREA: wide (and a git checkout): changes + chat, the
@@ -29,32 +29,32 @@ impl View {
         }
     }
 
-    /// Switch to view P. The changes view: git read at once, keys to the view.
-    pub(super) fn switch_pane(&mut self, path: Pane) {
-        if self.panes.pane == path {
+    /// Switch to view PANE. The changes view: git read at once, keys to the view.
+    pub(super) fn switch_pane(&mut self, pane: Pane) {
+        if self.panes.pane == pane {
             return;
         }
 
         // the search bar shows in the chat only: another view gets the keys
-        if path != Pane::Chat {
+        if pane != Pane::Chat {
             self.find.focus = false;
         }
 
-        self.panes.pane = path;
+        self.panes.pane = pane;
         self.panes.prompt_focus = false;
         self.checkout_state.repo_focus = false;
         self.stream.dirty = true;
 
-        if path == Pane::Files {
+        if pane == Pane::Files {
             self.panes.files.refresh(true);
         }
 
-        if path == Pane::Changes {
+        if pane == Pane::Changes {
             self.load_checkouts();
             self.panes.changes.refresh(true);
         }
 
-        if path == Pane::Merge {
+        if pane == Pane::Merge {
             self.merge_sources(true);
         }
     }
@@ -66,7 +66,7 @@ impl View {
             && self
                 .merge_state
                 .merge_sources_at
-                .is_some_and(|thread| thread.elapsed() < Duration::from_secs(60))
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
         {
             return;
         }
@@ -74,13 +74,13 @@ impl View {
         self.merge_state.merge_sources_at = Some(Instant::now());
         let id = self.id.clone();
 
-        let read = move || merge_sources_thread(&(id));
+        let read = move || read_merge_sources(&id);
 
         // tests: at once
         if cfg!(test) {
-            let result = read();
+            let sources = read();
 
-            self.apply_merge_sources(result);
+            self.apply_merge_sources(sources);
             return;
         }
 
@@ -105,8 +105,8 @@ impl View {
         let reads = self.merge_state.merge_reads.poll();
         let any = !reads.is_empty();
 
-        for ((), result) in reads {
-            self.apply_merge_sources(result);
+        for ((), sources) in reads {
+            self.apply_merge_sources(sources);
         }
 
         any
@@ -115,7 +115,7 @@ impl View {
     /// The thread's checkouts (more of them: an agent edited in another repo / worktree).
     pub(super) fn load_checkouts(&mut self) {
         if let Some(thread) = store::load(&self.id) {
-            load_checkouts_thread(self, thread);
+            set_checkouts(self, thread);
         }
 
         self.checkout_state.checkout = self
@@ -130,28 +130,28 @@ impl View {
 
         // the changes view on the checkout picked (the view opened on another dir: a work dir
         // without git, the dir of the thread before)
-        if let Some(directory) = self
+        if let Some(dir) = self
             .checkout_state
             .checkouts
             .get(self.checkout_state.checkout)
-            .filter(|directory| **directory != self.panes.changes.dir())
+            .filter(|dir| **dir != self.panes.changes.dir())
             .cloned()
         {
-            self.panes.changes = crate::features::changes::View::new(&self.id, &directory);
+            self.panes.changes = crate::features::changes::View::new(&self.id, &dir);
             self.changes_agents();
             self.panes.changes.refresh(true);
             self.stream.dirty = true;
         }
     }
 
-    /// The repo D tabs right (-1: left) of the picked one, wrapping.
-    pub(super) fn step_checkout(&mut self, directory: isize) {
+    /// The repo STEP tabs right (-1: left) of the picked one, wrapping.
+    pub(super) fn step_checkout(&mut self, step: isize) {
         self.load_checkouts();
         let count = self.checkout_state.checkouts.len();
 
         self.checkout_state.checkout_tabs.i = self.checkout_state.checkout;
 
-        if self.checkout_state.checkout_tabs.step(directory, count) {
+        if self.checkout_state.checkout_tabs.step(step, count) {
             self.pick_checkout(self.checkout_state.checkout_tabs.i);
         }
     }
@@ -182,25 +182,25 @@ impl View {
         self.merge_state.merge.show(pr);
     }
 
-    pub(super) fn merge_act(&mut self, agent: crate::screens::merge::Act) {
-        match agent {
+    pub(super) fn merge_act(&mut self, act: crate::screens::merge::Act) {
+        match act {
             crate::screens::merge::Act::None => {}
-            crate::screens::merge::Act::Toast(thread) => self.toast(thread),
+            crate::screens::merge::Act::Toast(toast) => self.toast(toast),
             crate::screens::merge::Act::Open(file, line) => self.open_at(&file, line),
             crate::screens::merge::Act::Prompt(text) => {
                 self.stream.back = 0;
                 let to = self.default_to().join(", ");
 
-                self.send_prompt(&(text));
+                self.send_prompt(&text);
                 self.toast(format!("sent to {to}"));
             }
         }
     }
 
-    pub(super) fn changes_act(&mut self, agent: crate::features::changes::Act) {
-        match agent {
+    pub(super) fn changes_act(&mut self, act: crate::features::changes::Act) {
+        match act {
             crate::features::changes::Act::None => {}
-            crate::features::changes::Act::Toast(thread) => self.toast(thread),
+            crate::features::changes::Act::Toast(toast) => self.toast(toast),
             crate::features::changes::Act::Open(file, line) => self.open_at(&file, line),
             crate::features::changes::Act::ToggleChat => {
                 self.mini_chat_state.mini_chat = !self.mini_chat_state.mini_chat;
@@ -215,7 +215,7 @@ impl View {
                 self.stream.back = 0;
                 let to = self.default_to().join(", ");
 
-                self.send_prompt(&(text));
+                self.send_prompt(&text);
                 self.toast(format!("review comments sent to {to}"));
             }
             // an @agent in a comment / reply: to that agent now, the comment's thread along
@@ -236,7 +236,7 @@ impl View {
                     .checkout_state
                     .checkouts
                     .iter()
-                    .position(|directory| crate::features::changes::same_dir(directory, &root))
+                    .position(|dir| crate::features::changes::same_dir(dir, &root))
                 {
                     Some(i) => self.pick_checkout(i),
                     None => self.toast(format!("{}: 0 checkout of this thread", root.display())),
@@ -245,14 +245,15 @@ impl View {
         }
     }
 
-    pub(super) fn files_act(&mut self, agent: crate::features::files::Act) {
-        match agent {
+    pub(super) fn files_act(&mut self, act: crate::features::files::Act) {
+        match act {
             crate::features::files::Act::None => {}
-            crate::features::files::Act::Toast(thread) => self.toast(thread),
+            crate::features::files::Act::Toast(toast) => self.toast(toast),
             crate::features::files::Act::Open(path) => {
-                let file = path
-                    .strip_prefix(&self.cwd)
-                    .map_or_else(|_| path.display().to_string(), |result| result.display().to_string());
+                let file = path.strip_prefix(&self.cwd).map_or_else(
+                    |_| path.display().to_string(),
+                    |relative| relative.display().to_string(),
+                );
 
                 self.open_at(&file, 1);
             }
@@ -271,7 +272,7 @@ impl View {
             .map(|path| {
                 Path::new(path)
                     .strip_prefix(&self.cwd)
-                    .map_or_else(|_| path.clone(), |result| result.display().to_string())
+                    .map_or_else(|_| path.clone(), |relative| relative.display().to_string())
             })
             .collect();
 
@@ -293,10 +294,10 @@ impl View {
     /// portless: read this thread's live URLs every 5 s (on a thread). 0 portless, 0 worktree: 0.
     pub(super) fn poll_urls(&mut self) {
         if let Some(rx) = &self.urls_state.urls_read
-            && let Ok(user) = rx.try_recv()
+            && let Ok(urls) = rx.try_recv()
         {
             self.urls_state.urls_read = None;
-            self.urls_state.urls = user;
+            self.urls_state.urls = urls;
         }
 
         if cfg!(test)
@@ -304,7 +305,7 @@ impl View {
             || self
                 .urls_state
                 .urls_at
-                .is_some_and(|thread| thread.elapsed() < Duration::from_secs(5))
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
         {
             return;
         }
@@ -314,7 +315,7 @@ impl View {
         let Some(prefix) = store::load(&self.id)
             .filter(|thread| thread.worktree.is_some())
             .and_then(|thread| thread.branch)
-            .map(|bytes| crate::infra::portless::prefix(&bytes))
+            .map(|branch| crate::infra::portless::prefix(&branch))
         else {
             return;
         };
@@ -336,7 +337,7 @@ impl View {
     }
 }
 
-fn merge_sources_thread(id: &str) -> (Vec<(String, PathBuf)>, crate::screens::merge::Sources) {
+fn read_merge_sources(id: &str) -> (Vec<(String, PathBuf)>, crate::screens::merge::Sources) {
     let Some(thread) = store::load(id) else {
         return (Vec::new(), crate::screens::merge::Sources::default());
     };
@@ -344,11 +345,11 @@ fn merge_sources_thread(id: &str) -> (Vec<(String, PathBuf)>, crate::screens::me
     let checkouts: Vec<(PathBuf, Option<String>)> = thread
         .all_checkouts()
         .into_iter()
-        .map(|path| (PathBuf::from(path.dir), path.branch))
+        .map(|checkout| (PathBuf::from(checkout.dir), checkout.branch))
         .collect();
     let dirs = checkouts
         .iter()
-        .filter_map(|(dir, _)| crate::infra::gh::repo_of_dir(dir).map(|result| (result, dir.clone())))
+        .filter_map(|(dir, _)| crate::infra::gh::repo_of_dir(dir).map(|repo| (repo, dir.clone())))
         .collect();
     let log = std::fs::read_to_string(store::events_path(id)).unwrap_or_default();
 
@@ -361,29 +362,31 @@ fn merge_sources_thread(id: &str) -> (Vec<(String, PathBuf)>, crate::screens::me
     )
 }
 
-fn load_checkouts_thread(view: &mut View, thread: store::Thread) {
+fn set_checkouts(view: &mut View, thread: store::Thread) {
     let thread = crate::engine::checkouts::prune(&thread).unwrap_or(thread);
     let mut all: Vec<store::Checkout> = thread
         .all_checkouts()
         .into_iter()
-        .filter(|character| Path::new(&character.dir).is_dir())
+        .filter(|checkout| Path::new(&checkout.dir).is_dir())
         .collect();
 
     // a work dir without git (codehead started outside of a repo), agents in a repo: the
     // changes of the repos only
     if all
         .iter()
-        .any(|character| crate::domain::threads::repo_root(Path::new(&character.dir)).is_some())
+        .any(|checkout| crate::domain::threads::repo_root(Path::new(&checkout.dir)).is_some())
     {
-        all.retain(|character| crate::domain::threads::repo_root(Path::new(&character.dir)).is_some());
+        all.retain(|checkout| crate::domain::threads::repo_root(Path::new(&checkout.dir)).is_some());
     }
 
-    let name = |character: &store::Checkout| {
-        let directory = Path::new(&character.dir);
-        let root = crate::domain::threads::repo_root(directory).unwrap_or_else(|| directory.to_path_buf());
+    let name = |checkout: &store::Checkout| {
+        let dir = Path::new(&checkout.dir);
+        let root = crate::domain::threads::repo_root(dir).unwrap_or_else(|| dir.to_path_buf());
 
-        root.file_name()
-            .map_or_else(|| character.dir.clone(), |count| count.to_string_lossy().into_owned())
+        root.file_name().map_or_else(
+            || checkout.dir.clone(),
+            |file_name| file_name.to_string_lossy().into_owned(),
+        )
     };
 
     let names: Vec<String> = all.iter().map(name).collect();
@@ -392,11 +395,11 @@ fn load_checkouts_thread(view: &mut View, thread: store::Thread) {
     view.checkout_state.checkout_labels = all
         .iter()
         .zip(&names)
-        .map(|(character, count)| match &character.branch {
-            Some(bytes) if names.iter().filter(|message| *message == count).count() > 1 => {
-                format!("{count} · {bytes}")
+        .map(|(checkout, name)| match &checkout.branch {
+            Some(branch) if names.iter().filter(|other| *other == name).count() > 1 => {
+                format!("{name} · {branch}")
             }
-            _ => count.clone(),
+            _ => name.clone(),
         })
         .collect();
 
@@ -407,16 +410,16 @@ fn load_checkouts_thread(view: &mut View, thread: store::Thread) {
     // real path: /var → /private/var on macOS)
     let work = thread.work_dir();
     let canon = |path: &Path| std::fs::canonicalize(path).ok();
-    let real = |path: &Path| crate::domain::threads::repo_root(path).and_then(|result| canon(&result));
-    let main = |path: &Path| real(path).is_some_and(|result| Some(result) == canon(path));
+    let real = |path: &Path| crate::domain::threads::repo_root(path).and_then(|root| canon(&root));
+    let main = |path: &Path| real(path).is_some_and(|root| Some(root) == canon(path));
     let repo = real(&work);
 
     // (a submodule's root follows to the superproject too: linked worktrees only)
     let moved = main(&work)
         .then(|| {
-            all.iter().rposition(|character| {
-                crate::domain::threads::linked_worktree(Path::new(&character.dir))
-                    && real(Path::new(&character.dir)) == repo
+            all.iter().rposition(|checkout| {
+                crate::domain::threads::linked_worktree(Path::new(&checkout.dir))
+                    && real(Path::new(&checkout.dir)) == repo
             })
         })
         .flatten();
@@ -425,5 +428,5 @@ fn load_checkouts_thread(view: &mut View, thread: store::Thread) {
         view.checkout_state.checkout = moved.unwrap_or(0);
     }
 
-    view.checkout_state.checkouts = all.into_iter().map(|path| PathBuf::from(path.dir)).collect();
+    view.checkout_state.checkouts = all.into_iter().map(|checkout| PathBuf::from(checkout.dir)).collect();
 }

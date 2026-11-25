@@ -6,34 +6,33 @@ impl App {
         let cards = matches!(self.tab, Tab::Agents | Tab::New);
 
         if area.width < THIN {
-            split_list_state(area, cards)
+            split_stacked(area, cards)
         } else {
-            split_list(area, cards)
+            split_side_by_side(area, cards)
         }
     }
 }
 
-pub(super) fn split_list_state(area: Rect, cards: bool) -> (Rect, Rect, bool) {
+pub(super) fn split_stacked(area: Rect, cards: bool) -> (Rect, Rect, bool) {
     let list = if cards {
         Constraint::Ratio(1, 2)
     } else {
         Constraint::Ratio(1, 3)
     };
 
-    let [agent, _, bytes] = Layout::vertical([list, Constraint::Length(1), Constraint::Fill(1)]).areas(area);
+    let [list, _, preview] = Layout::vertical([list, Constraint::Length(1), Constraint::Fill(1)]).areas(area);
 
-    (agent, bytes, true)
+    (list, preview, true)
 }
 
-pub(super) fn split_list(area: Rect, cards: bool) -> (Rect, Rect, bool) {
+pub(super) fn split_side_by_side(area: Rect, cards: bool) -> (Rect, Rect, bool) {
     let list = if cards {
         Constraint::Percentage(60)
     } else {
         Constraint::Percentage(40)
     };
 
-    let [agent_value, _, bytes_value] =
-        Layout::horizontal([list, Constraint::Length(1), Constraint::Fill(1)]).areas(area);
+    let [list, _, preview] = Layout::horizontal([list, Constraint::Length(1), Constraint::Fill(1)]).areas(area);
 
-    (agent_value, bytes_value, false)
+    (list, preview, false)
 }

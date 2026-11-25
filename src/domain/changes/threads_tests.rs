@@ -21,27 +21,23 @@ fn replies_reopen_on_the_owner_and_stay_unseen_from_an_agent() {
     super::super::set_comment_state(&id, "REV", &["c1".into()], "resolved", "fixed").unwrap();
 
     // the owner's reply: open again, in the next batch
-    let character = reply(&id, "", "c1", "why 1? @REV", false).unwrap();
+    let reopened = reply(&id, "", "c1", "why 1? @REV", false).unwrap();
 
-    assert!(character.open() && !character.sent && character.resolved_by.is_empty() && character.note.is_empty());
-    assert!(waits_on_agent(&character));
+    assert!(reopened.open() && !reopened.sent && reopened.resolved_by.is_empty() && reopened.note.is_empty());
+    assert!(waits_on_agent(&reopened));
 
     // the agent's reply: unseen until the owner looks
-    let character_value = reply(&id, "REV", "c1", "the loop starts at 0", false).unwrap();
+    let answered = reply(&id, "REV", "c1", "the loop starts at 0", false).unwrap();
 
     assert_eq!(
-        (
-            character_value.replies.len(),
-            unseen(&character_value),
-            waits_on_agent(&character_value)
-        ),
+        (answered.replies.len(), unseen(&answered), waits_on_agent(&answered)),
         (2, 1, false)
     );
     assert_eq!(
         unseen_replies(&id),
         vec![(
             "c1".to_string(),
-            character_value.replies[1].at,
+            answered.replies[1].at,
             "REV".to_string(),
             "c1 a.rs: the loop starts at 0".to_string()
         )]

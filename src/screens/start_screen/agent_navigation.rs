@@ -17,7 +17,7 @@ impl App {
         let query = self.agent_list.afilter_ta.text();
 
         if self.agent_list.afilter.as_deref() != Some(query.as_str()) {
-            sync_afilter_body(self, query);
+            set_agent_filter(self, query);
         }
     }
 
@@ -53,13 +53,13 @@ impl App {
 
         let rows = places
             .iter()
-            .map(|&(_, _, result)| result)
-            .filter(|&result_value| if dy < 0 { result_value < y } else { result_value > y });
+            .map(|&(_, _, row)| row)
+            .filter(|&row| if dy < 0 { row < y } else { row > y });
         let row = if dy < 0 { rows.max()? } else { rows.min()? };
 
         places
             .iter()
-            .filter(|&&(_, _, row_value)| row_value == row)
+            .filter(|&&(_, _, card_row)| card_row == row)
             .min_by_key(|&&(_, cx, _)| cx.abs_diff(x))
             .map(|&(i, _, _)| i)
     }
@@ -82,11 +82,11 @@ impl App {
     }
 
     /// A paste for the prompt: text in, a file → its marker in, the file listed in the message.
-    pub(super) fn paste_prompt(&mut self, path_value: Pasted) {
+    pub(super) fn paste_prompt(&mut self, pasted: Pasted) {
         self.compose.field = Field::Prompt;
 
-        match path_value {
-            Pasted::Text(thread) => self.compose.prompt.paste(&thread),
+        match pasted {
+            Pasted::Text(text) => self.compose.prompt.paste(&text),
             Pasted::File { path, marker } => {
                 self.compose.prompt.insert(&marker.clone());
                 self.toast(format!("{marker}: {}", tilde(&path.display().to_string())), false);
@@ -97,12 +97,12 @@ impl App {
     }
 }
 
-fn sync_afilter_body(app_state: &mut App, query: String) {
-    app_state.agent_list.afilter = Some(query);
+fn set_agent_filter(app: &mut App, query: String) {
+    app.agent_list.afilter = Some(query);
 
-    if let Some(&first) = app_state.avisible().first().and_then(|(_, group)| group.first()) {
-        app_state.agent_list.acursor = first;
+    if let Some(&first) = app.avisible().first().and_then(|(_, group)| group.first()) {
+        app.agent_list.acursor = first;
     }
 
-    app_state.agent_list.aoffset = 0;
+    app.agent_list.aoffset = 0;
 }

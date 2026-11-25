@@ -204,16 +204,16 @@ fn register_nested(entry: Metadata, agent: &str, tracker: &mut Tracker, logs: &m
 /// The `subagents` dir of Claude Code session SID under ROOT (`~/.claude/projects`).
 /// A session resumed in another dir (the thread moved repo): the newest transcript copy, found
 /// again after REDIR.
-fn dir_of(root: &Path, sid: &str, model_state: &mut Tracker) -> Option<PathBuf> {
-    if let Some((directory, _)) = model_state.dirs.get(sid).filter(|(_, at)| at.elapsed() < REDIR) {
-        return Some(directory.clone());
+fn dir_of(root: &Path, sid: &str, tracker: &mut Tracker) -> Option<PathBuf> {
+    if let Some((cached, _)) = tracker.dirs.get(sid).filter(|(_, at)| at.elapsed() < REDIR) {
+        return Some(cached.clone());
     }
 
     let file = crate::infra::claude::session_file(root, sid)?;
-    let directory_value = file.parent()?.join(sid).join("subagents");
+    let dir = file.parent()?.join(sid).join("subagents");
 
-    model_state
+    tracker
         .dirs
-        .insert(sid.to_string(), (directory_value.clone(), std::time::Instant::now()));
-    Some(directory_value)
+        .insert(sid.to_string(), (dir.clone(), std::time::Instant::now()));
+    Some(dir)
 }

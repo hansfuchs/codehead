@@ -90,7 +90,7 @@ fn fields_sit_in_groups_under_a_heading() {
     let (directory, mut form) = fixture("groups");
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 130)).unwrap();
 
-    terminal.draw(|file| form.draw(file, file.area(), true)).unwrap();
+    terminal.draw(|frame| form.draw(frame, frame.area(), true)).unwrap();
     let buffer = terminal.backend().buffer().clone();
     let lines: Vec<String> = (0..130)
         .map(|y| (0..90).map(|x| buffer[(x, y)].symbol()).collect::<String>())
@@ -113,10 +113,10 @@ fn fields_sit_in_groups_under_a_heading() {
         "path aliases ─",
     ]
     .iter()
-    .map(|height| at(height))
+    .map(|head| at(head))
     .collect();
 
-    assert!(heads.windows(2).all(|width| width[0] < width[1]), "{heads:?}");
+    assert!(heads.windows(2).all(|pair| pair[0] < pair[1]), "{heads:?}");
 
     for (field, group) in [("notes", 0), ("agent", 1), ("thoughts", 2), ("menu", 3), ("scheme", 4)] {
         let y = at(field);
@@ -155,24 +155,22 @@ fn ctrl_d_and_the_reset_mark_set_a_field_back_to_its_default() {
     // a click on ↺ of the scheme field
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 100)).unwrap();
 
-    terminal
-        .draw(|file_value| form.draw(file_value, file_value.area(), true))
-        .unwrap();
-    let (row_value, _) = *form
+    terminal.draw(|frame| form.draw(frame, frame.area(), true)).unwrap();
+    let (reset_row, _) = *form
         .rows
         .iter()
-        .find(|(_, height)| *height == Hit::Reset(17))
+        .find(|(_, hit)| *hit == Hit::Reset(17))
         .expect("↺ on the set scheme field");
 
     form.mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: row_value.x,
-        row: row_value.y,
+        column: reset_row.x,
+        row: reset_row.y,
         modifiers: KeyModifiers::NONE,
     });
 
     assert_eq!(config::read_file(&file).unwrap().1.scheme, None);
-    assert!(!form.rows.iter().any(|(_, height_value)| *height_value == Hit::Reset(7)));
+    assert!(!form.rows.iter().any(|(_, hit)| *hit == Hit::Reset(7)));
 
     // an invalid value: 0 write, the error shows
     form.focus = 18;
@@ -280,7 +278,7 @@ fn form_scrolls_to_controls_and_handles_invalid_reload() {
     form.focus = super::add_item(&form);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 12)).unwrap();
 
-    terminal.draw(|file| form.draw(file, file.area(), true)).unwrap();
+    terminal.draw(|frame| form.draw(frame, frame.area(), true)).unwrap();
 
     assert!(form.rows.iter().any(|(_, hit)| *hit == Hit::Add));
     assert!(form.offset > 0);
@@ -293,9 +291,7 @@ fn form_scrolls_to_controls_and_handles_invalid_reload() {
 
     let mut invalid = Form::new(directory.join("codehead.toml"));
 
-    terminal
-        .draw(|file_value| invalid.draw(file_value, file_value.area(), true))
-        .unwrap();
+    terminal.draw(|frame| invalid.draw(frame, frame.area(), true)).unwrap();
 
     assert!(invalid.error);
 
@@ -323,7 +319,7 @@ fn alias_box_draws_a_border_and_highlights_when_locked() {
     key(&mut form, KeyCode::Enter);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 140)).unwrap();
 
-    terminal.draw(|file| form.draw(file, file.area(), true)).unwrap();
+    terminal.draw(|frame| form.draw(frame, frame.area(), true)).unwrap();
     let buffer = terminal.backend().buffer().clone();
     let line = |y: u16| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>();
     let top = (0..140)
@@ -344,9 +340,7 @@ fn alias_box_draws_a_border_and_highlights_when_locked() {
 
     // another item focused: gray border, plain title
     key(&mut form, KeyCode::Down);
-    terminal
-        .draw(|file_value| form.draw(file_value, file_value.area(), true))
-        .unwrap();
+    terminal.draw(|frame| form.draw(frame, frame.area(), true)).unwrap();
     let buffer = terminal.backend().buffer().clone();
     let x = (0..80).find(|&x| buffer[(x, top)].symbol() == "┌").unwrap();
 
@@ -368,7 +362,7 @@ fn alias_targets_share_prompt_path_completion() {
     form.paste(&format!("{}/browse/", directory.display()));
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 100)).unwrap();
 
-    terminal.draw(|file| form.draw(file, file.area(), true)).unwrap();
+    terminal.draw(|frame| form.draw(frame, frame.area(), true)).unwrap();
     let buffer = terminal.backend().buffer();
     let line = |y| (0..90).map(|x| buffer[(x, y)].symbol()).collect::<String>();
 
@@ -433,9 +427,7 @@ fn complete_alias_target(
 
     form.fields[PLAIN + 1].set_text(target);
     form.fields[PLAIN + 1].move_end();
-    terminal
-        .draw(|file_value| form.draw(file_value, file_value.area(), true))
-        .unwrap();
+    terminal.draw(|frame| form.draw(frame, frame.area(), true)).unwrap();
     let buffer = terminal.backend().buffer();
 
     let (x, y) = (0..100)

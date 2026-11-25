@@ -39,12 +39,12 @@ impl View {
         }
 
         self.comment_state.comments_at = at;
-        let comment = read_comments(&self.id);
+        let comments = read_comments(&self.id);
 
-        self.comment_state.comments_base.clone_from(&comment);
+        self.comment_state.comments_base.clone_from(&comments);
 
-        if comment != self.comment_state.comments {
-            self.comment_state.comments = comment;
+        if comments != self.comment_state.comments {
+            self.comment_state.comments = comments;
             self.layout.built = None;
         }
     }
@@ -94,32 +94,29 @@ impl View {
     }
 }
 
-fn poll_branch(mut character: Changes, view: &mut View) -> bool {
-    if resolve_committed(
-        &mut view.comment_state.comments,
-        &std::mem::take(&mut character.committed),
-    ) {
+fn apply_read(mut read: Changes, view: &mut View) -> bool {
+    if resolve_committed(&mut view.comment_state.comments, &std::mem::take(&mut read.committed)) {
         view.save_comments();
         view.layout.built = None;
     }
 
     // the same diffs (the view's order is the agent's, the read's the path rules'):
     // 0 new rows; the git state (staged, ahead, a stopped rebase) still applies
-    let hashes = |fs: &[FileDiff]| {
-        let mut value: Vec<u64> = fs.iter().map(|file| file.hash).collect();
+    let hashes = |files: &[FileDiff]| {
+        let mut sorted: Vec<u64> = files.iter().map(|file| file.hash).collect();
 
-        value.sort_unstable();
-        value
+        sorted.sort_unstable();
+        sorted
     };
 
-    if hashes(&character.files) == hashes(&view.changes.files) && view.error.is_none() {
+    if hashes(&read.files) == hashes(&view.changes.files) && view.error.is_none() {
         let git = (
-            &character.base,
-            &character.staged,
-            &character.stopped,
-            character.ahead,
-            character.behind,
-            &character.commits,
+            &read.base,
+            &read.staged,
+            &read.stopped,
+            read.ahead,
+            read.behind,
+            &read.commits,
         );
         let changed = git
             != (
@@ -135,10 +132,10 @@ fn poll_branch(mut character: Changes, view: &mut View) -> bool {
             view.layout.built = view
                 .layout
                 .built
-                .filter(|_| character.stopped.is_some() == view.changes.stopped.is_some());
+                .filter(|_| read.stopped.is_some() == view.changes.stopped.is_some());
             let files = std::mem::take(&mut view.changes.files);
 
-            view.changes = Changes { files, ..character };
+            view.changes = Changes { files, ..read };
             view.sync_commits();
         }
 
@@ -149,13 +146,13 @@ fn poll_branch(mut character: Changes, view: &mut View) -> bool {
     let cur = view.cursor_spot();
 
     // a selection holds on files whose diff stayed
-    retain_selected_files(&character, view);
+    retain_selected_files(&read, view);
 
     if view.layout.paints.borrow().len() > 4096 {
         view.layout.paints.borrow_mut().clear();
     }
 
-    view.changes = character;
+    view.changes = read;
     view.sync_commits();
     view.error = None;
     view.layout.built = None;
@@ -165,12 +162,8 @@ fn poll_branch(mut character: Changes, view: &mut View) -> bool {
     true
 }
 
-fn retain_selected_files(changes_value: &Changes, view: &mut View) {
-    let kept: HashSet<(&str, u64)> = changes_value
-        .files
-        .iter()
-        .map(|file| (file.path.as_str(), file.hash))
-        .collect();
+fn retain_selected_files(read: &Changes, view: &mut View) {
+    let kept: HashSet<(&str, u64)> = read.files.iter().map(|file| (file.path.as_str(), file.hash)).collect();
     let old: HashMap<&str, u64> = view
         .changes
         .files
@@ -180,7 +173,7 @@ fn retain_selected_files(changes_value: &Changes, view: &mut View) {
 
     view.selection_state.sel.retain(|path, _| {
         old.get(path.as_str())
-            .is_some_and(|height| kept.contains(&(path.as_str(), *height)))
+            .is_some_and(|hash| kept.contains(&(path.as_str(), *hash)))
     });
 }
 
@@ -195,15 +188,15 @@ fn sync_stash_view(view: &mut View, now: bool) -> bool {
     view.stash_state.stash = stash::read(&view.id);
     let mut asked = false;
 
-    for error in view
+    for entry in view
         .stash_state
         .stash
         .iter_mut()
-        .filter(|error| !error.asked && error.name.is_empty())
+        .filter(|entry| !entry.asked && entry.name.is_empty())
     {
-        error.asked = true;
+        entry.asked = true;
         asked = true;
-        view.operation_state.outbox.push(stash::name_ask(error));
+        view.operation_state.outbox.push(stash::name_ask(entry));
     }
 
     if asked {
@@ -217,33 +210,33 @@ fn sync_stash_view(view: &mut View, now: bool) -> bool {
 fn git_changed_view(view: &mut View) -> bool {
     let mut hit = false;
 
-    for thread in view.topics.try_iter() {
+    for topic in view.topics.try_iter() {
         let Some((top, common, own)) = &view.git else { continue };
 
-        hit |= topic_hits_repository(&thread, top, common, own);
+        hit |= topic_hits_repository(&topic, top, common, own);
     }
 
     hit
 }
 
 fn topic_hits_repository(
-    thread: &crate::infra::bus::Topic,
+    topic: &crate::infra::bus::Topic,
     top: &std::path::PathBuf,
     common: &std::path::PathBuf,
     own: &std::path::PathBuf,
 ) -> bool {
-    match &thread {
-        Topic::Work(width) => width == top,
-        Topic::Git(group, Git::Worktree(count)) => {
-            group == common
-                && (if count.is_empty() {
+    match &topic {
+        Topic::Work(dir) => dir == top,
+        Topic::Git(repo, Git::Worktree(name)) => {
+            repo == common
+                && (if name.is_empty() {
                     own == common
                 } else {
-                    own.file_name().is_some_and(|file| file == count.as_str())
+                    own.file_name().is_some_and(|file| file == name.as_str())
                 })
         }
-        Topic::Git(group, _) => group == common,
-        Topic::Rescan(result) => top.starts_with(result) || common.starts_with(result),
+        Topic::Git(repo, _) => repo == common,
+        Topic::Rescan(root) => top.starts_with(root) || common.starts_with(root),
         Topic::Thread(..) => false,
     }
 }
@@ -265,11 +258,11 @@ fn refresh_view(view: &mut View, now: bool) {
 
     let (tx, rx) = crate::infra::bus::channel();
 
-    if let Some(character) = view.commit_src.clone() {
+    if let Some(commit) = view.commit_src.clone() {
         let dir = view.dir.clone();
 
         std::thread::spawn(move || {
-            let _ = tx.send(load_commit(&dir, &character));
+            let _ = tx.send(load_commit(&dir, &commit));
         });
 
         view.loading = Some(rx);
@@ -291,7 +284,7 @@ fn refresh_view(view: &mut View, now: bool) {
         view.comment_state
             .comments
             .iter()
-            .filter(|character| character.open())
+            .filter(|comment| comment.open())
             .cloned()
             .collect(),
     );
@@ -300,12 +293,12 @@ fn refresh_view(view: &mut View, now: bool) {
         let mut result = load_from(&dir, all);
 
         // open comments on files with 0 uncommitted changes (in their checkouts): resolved
-        if let Ok(character) = &mut result
+        if let Ok(changes) = &mut result
             && !open.is_empty()
         {
             let work = crate::engine::store::load(&id).map_or_else(|| dir.clone(), |thread| thread.work_dir());
 
-            character.committed = committed(&open, &work);
+            changes.committed = committed(&open, &work);
         }
 
         let _ = tx.send(result);
@@ -332,7 +325,7 @@ fn poll_view(view: &mut View) -> bool {
     }
 
     match result {
-        Ok(character) => poll_branch(character, view),
+        Ok(read) => apply_read(read, view),
         Err(error) => {
             let changed = view.error.as_deref() != Some(error.as_str());
 

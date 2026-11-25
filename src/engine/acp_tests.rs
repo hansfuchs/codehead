@@ -27,21 +27,22 @@ fn codex_acp_016_config_options_and_api_errors() {
 }
 #[test]
 fn tool_calls_map_to_familiar_names() {
-    let (count, i) = tool_of(&json!({"kind": "execute", "title": "Run tests", "rawInput": {"command": "cargo test"}}));
+    let (name, input) =
+        tool_of(&json!({"kind": "execute", "title": "Run tests", "rawInput": {"command": "cargo test"}}));
 
-    assert_eq!(count, "Bash");
-    assert_eq!(i["command"], "cargo test");
-    assert_eq!(i["description"], "Run tests");
+    assert_eq!(name, "Bash");
+    assert_eq!(input["command"], "cargo test");
+    assert_eq!(input["description"], "Run tests");
 
-    let (count_value, _) = tool_of(&json!({"kind": "other", "title": "codehead_send"}));
+    let (untyped_name, _) = tool_of(&json!({"kind": "other", "title": "codehead_send"}));
 
-    assert_eq!(count_value, "codehead_send");
+    assert_eq!(untyped_name, "codehead_send");
 }
 
 #[test]
 fn thought_chunks_become_1_thought_before_the_next_text_or_tool() {
     let (tx, rx) = std::sync::mpsc::channel();
-    let (stdin, _lines) = std::sync::mpsc::channel::<String>();
+    let (stdin, written) = std::sync::mpsc::channel::<String>();
     let setup = Setup {
         cwd: "/".into(),
         resume: None,
@@ -51,7 +52,7 @@ fn thought_chunks_become_1_thought_before_the_next_text_or_tool() {
         harness: "x".into(),
         servers: Vec::new(),
     };
-    let mut text_value = State {
+    let mut state = State {
         stdin,
         next: 0,
         pending: HashMap::new(),
@@ -69,22 +70,22 @@ fn thought_chunks_become_1_thought_before_the_next_text_or_tool() {
         name: "ada".into(),
         dead: false,
     };
-    let chunk = |kind: &str, thread: &str| json!({"sessionUpdate": kind, "content": {"type": "text", "text": thread}});
+    let chunk = |kind: &str, text: &str| json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}});
 
     // empty chunks: 0 events
-    text_value.update(&chunk("agent_thought_chunk", ""));
+    state.update(&chunk("agent_thought_chunk", ""));
 
-    for thread_value in ["Cause", " found,", " fixing."] {
-        text_value.update(&chunk("agent_thought_chunk", thread_value));
+    for piece in ["Cause", " found,", " fixing."] {
+        state.update(&chunk("agent_thought_chunk", piece));
     }
 
-    text_value.update(&json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "kind": "execute", "title": "Run", "rawInput": {"command": "ls"}}));
-    text_value.update(&chunk("agent_thought_chunk", "Then the text."));
-    text_value.update(&chunk("agent_message_chunk", "Done."));
-    text_value.flush_text();
+    state.update(&json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "kind": "execute", "title": "Run", "rawInput": {"command": "ls"}}));
+    state.update(&chunk("agent_thought_chunk", "Then the text."));
+    state.update(&chunk("agent_message_chunk", "Done."));
+    state.flush_text();
     let kinds: Vec<Kind> = rx
         .try_iter()
-        .filter_map(|(_, output)| if let Out::Event(key) = output { Some(key) } else { None })
+        .filter_map(|(_, out)| if let Out::Event(kind) = out { Some(kind) } else { None })
         .collect();
 
     assert_eq!(
@@ -102,4 +103,6 @@ fn thought_chunks_become_1_thought_before_the_next_text_or_tool() {
     );
     assert_eq!(kinds[3], Kind::Text { text: "Done.".into() });
     assert_eq!(kinds.len(), 4);
+
+    drop(written);
 }

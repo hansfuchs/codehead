@@ -24,7 +24,7 @@ fn thread_return_keeps_cached_state_and_queues_background_refresh() {
         app.agent_list
             .agents
             .iter()
-            .map(|agent_value| agent_value.name.clone())
+            .map(|agent| agent.name.clone())
             .collect::<Vec<_>>(),
         agents
     );
@@ -39,14 +39,14 @@ fn the_repo_setting_starts_the_where_rows_on_its_repo() {
     let base = std::env::temp_dir().join(format!("ch-default-repo-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
 
-    let mk = |count: &str| {
-        let directory = base.join(count);
+    let mk = |name: &str| {
+        let repo = base.join(name);
 
-        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
 
-        assert!(std::process::Command::new("sh").arg("-c").arg("git init -q -b main && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m i && mkdir sub").current_dir(&directory).status().unwrap().success());
+        assert!(std::process::Command::new("sh").arg("-c").arg("git init -q -b main && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m i && mkdir sub").current_dir(&repo).status().unwrap().success());
 
-        directory
+        repo
     };
 
     let (start, other) = (mk("start"), mk("other"));
@@ -78,16 +78,16 @@ fn the_repo_setting_starts_the_where_rows_on_its_repo() {
     );
 
     // codehead started outside of a git repo: the setting's repo all the same
-    let mut app_value = test_app();
+    let mut fresh = test_app();
 
-    app_value.repository.start_cwd = base.clone();
-    app_value.cfg.repo = None;
-    app_value.use_default_repo(&other);
+    fresh.repository.start_cwd = base.clone();
+    fresh.cfg.repo = None;
+    fresh.use_default_repo(&other);
 
     assert_eq!(
         (
-            app_value.repository.here_branch.as_str(),
-            app_value.repository.wheres.get(app_value.repository.where_i)
+            fresh.repository.here_branch.as_str(),
+            fresh.repository.wheres.get(fresh.repository.where_i)
         ),
         ("main", Some(&Where::NewWorktree))
     );
@@ -105,14 +105,14 @@ fn repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first() {
     let base = std::env::temp_dir().join(format!("ch-repos-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
 
-    let mk = |count: &str| {
-        let directory = base.join(count);
+    let mk = |name: &str| {
+        let repo = base.join(name);
 
-        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
 
-        assert!(std::process::Command::new("sh").arg("-c").arg("git init -q -b main && git config user.email t@t && git config user.name t && echo x > a && git add -A && git commit -qm i && git branch feat && mkdir -p sub/deep").current_dir(&directory).status().unwrap().success());
+        assert!(std::process::Command::new("sh").arg("-c").arg("git init -q -b main && git config user.email t@t && git config user.name t && echo x > a && git add -A && git commit -qm i && git branch feat && mkdir -p sub/deep").current_dir(&repo).status().unwrap().success());
 
-        directory
+        repo
     };
 
     let (start, other) = (mk("start"), mk("other"));
@@ -163,8 +163,8 @@ fn repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first() {
         app.repository
             .repo_pick
             .as_ref()
-            .and_then(|path| path.current())
-            .map(|error| error.path.clone()),
+            .and_then(|picker| picker.current())
+            .map(|entry| entry.path.clone()),
         Some(start.clone()),
         "{out}"
     );
@@ -174,7 +174,7 @@ fn repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first() {
     );
     assert!(
         out.lines()
-            .any(|line_value| line_value.contains("gone/") && line_value.contains("│ sub/")),
+            .any(|line| line.contains("gone/") && line.contains("│ sub/")),
         "{out}"
     );
 
@@ -191,8 +191,7 @@ fn repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first_verify
     out: &str,
 ) {
     assert!(
-        out.lines()
-            .any(|line_2| line_2.contains("gone/") && line_2.contains("clone")),
+        out.lines().any(|line| line.contains("gone/") && line.contains("clone")),
         "{out}"
     );
 
@@ -220,8 +219,8 @@ fn repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first_verify
         app.repository
             .repo_pick
             .as_ref()
-            .and_then(|path_value| path_value.current())
-            .map(|error_value| error_value.name.clone())
+            .and_then(|picker| picker.current())
+            .map(|entry| entry.name.clone())
             .as_deref(),
         Some("sub")
     );
@@ -237,8 +236,8 @@ fn repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first_verify
         app.repository
             .repo_pick
             .as_ref()
-            .and_then(|path_2| path_2.current())
-            .map(|error_2| error_2.name.clone())
+            .and_then(|picker| picker.current())
+            .map(|entry| entry.name.clone())
             .as_deref(),
         Some("other")
     );
@@ -251,10 +250,10 @@ fn repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first_verify
         app.clone_first(),
         Some(("git@x:y/gone.git".to_string(), base.join("gone")))
     );
-    repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first_verify_text(base, start, app);
+    repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first_verify_layout(base, start, app);
 }
 
-fn repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first_verify_text(
+fn repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first_verify_layout(
     base: PathBuf,
     start: &std::path::Path,
     mut app: App,
@@ -295,17 +294,17 @@ fn repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first_verify
 
     let at = |pat: &str| {
         text.lines()
-            .position(|line_3| line_3.contains(pat))
+            .position(|line| line.contains(pat))
             .unwrap_or_else(|| panic!("{pat}\n{text}"))
     };
 
     let col = |pat: &str| {
         text.lines()
-            .find_map(|line_4| line_4.find(pat).map(|bytes| line_4[..bytes].chars().count()))
+            .find_map(|line| line.find(pat).map(|byte| line[..byte].chars().count()))
             .unwrap()
     };
 
-    assert!(text.lines().any(|line_5| line_5.trim() == "where"), "{text}");
+    assert!(text.lines().any(|line| line.trim() == "where"), "{text}");
     assert_eq!(
         (at(" repo "), at(" project "), at(" branch ")),
         (at("where") + 1, at("where") + 2, at("where") + 3),
@@ -313,7 +312,7 @@ fn repo_field_picks_a_repo_in_2_panes_and_a_missing_one_gets_cloned_first_verify
     );
     assert!(
         text.lines()
-            .any(|line_6| line_6.contains(" repo ") && line_6.contains(" start ")),
+            .any(|line| line.contains(" repo ") && line.contains(" start ")),
         "{text}"
     );
     assert_eq!(col("repo"), col("branch"), "{text}");

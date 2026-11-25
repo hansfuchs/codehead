@@ -40,13 +40,13 @@ fn call(thread: &str, agent: &str, name: &str, args: &Value) -> Result<String, S
 
 /// The `flow_step` reply for the agent: the next step's text, a handoff, a wait, the end.
 fn flow_reply(result: &Value) -> String {
-    if let Some(thread) = result["text"].as_str() {
-        return format!("Step done. Your next step:\n\n{thread}");
+    if let Some(next) = result["text"].as_str() {
+        return format!("Step done. Your next step:\n\n{next}");
     }
 
-    if let Some(agent) = result["handed"].as_str() {
+    if let Some(handed) = result["handed"].as_str() {
         return format!(
-            "Step done. The next step went to @{agent}. End your turn; codehead brings the flow back to you."
+            "Step done. The next step went to @{handed}. End your turn; codehead brings the flow back to you."
         );
     }
 
@@ -70,21 +70,21 @@ fn handle(thread: &str, agent: &str, req: &Value) -> Option<Value> {
         "ping" => json!({}),
         "tools/list" => json!({"tools": tools()}),
         "tools/call" => {
-            let path = &req["params"];
+            let params = &req["params"];
 
             match call(
                 thread,
                 agent,
-                path["name"].as_str().unwrap_or_default(),
-                &path["arguments"],
+                params["name"].as_str().unwrap_or_default(),
+                &params["arguments"],
             ) {
                 Ok(text) => json!({"content": [{"type": "text", "text": text}]}),
                 Err(error) => json!({"content": [{"type": "text", "text": error}], "isError": true}),
             }
         }
-        message => {
+        method => {
             return Some(
-                json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("method {message} not found")}}),
+                json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("method {method} not found")}}),
             );
         }
     };
@@ -118,14 +118,14 @@ pub(crate) fn run() -> ! {
 mod tests;
 
 fn send_message(thread: &str, agent: &str, args: &Value) -> Result<String, String> {
-    let result = client::send(
+    let reply = client::send(
         thread,
         &json!({"op": "send", "from": agent, "to": args["to"], "text": args["message"]}),
     )?;
 
     Ok(format!(
         "sent to {}",
-        result["to"]
+        reply["to"]
             .as_array()
             .into_iter()
             .flatten()
@@ -142,7 +142,7 @@ fn set_agent_status(thread: &str, agent: &str, args: &Value) -> Result<String, S
     Ok("status set".into())
 }
 fn add_review_comments(thread: &str, agent: &str, args: &Value) -> Result<String, String> {
-    let root = super::store::load(thread).map(|thread_value| thread_value.work_dir());
+    let root = super::store::load(thread).map(|loaded| loaded.work_dir());
     let ids = crate::domain::changes::agent_comments(thread, agent, root.as_deref(), &args["comments"])?;
 
     Ok(format!(
@@ -153,8 +153,8 @@ fn add_review_comments(thread: &str, agent: &str, args: &Value) -> Result<String
 }
 fn list_review_comments(thread: &str, args: &Value) -> std::string::String {
     // comments on files with 0 uncommitted changes: resolved first
-    if let Some(thread_2) = super::store::load(thread) {
-        crate::domain::changes::settle_comments(thread, &thread_2.work_dir());
+    if let Some(loaded) = super::store::load(thread) {
+        crate::domain::changes::settle_comments(thread, &loaded.work_dir());
     }
 
     crate::domain::changes::list_comments(thread, args["state"].as_str().unwrap_or("open"))
@@ -183,37 +183,34 @@ fn set_review_comment_status(thread: &str, agent: &str, args: &Value) -> Result<
 fn reply_to_review_comment(thread: &str, agent: &str, args: &Value) -> Result<String, String> {
     let id = args["id"].as_str().unwrap_or_default();
     let text = args["text"].as_str().unwrap_or_default();
-    let character = crate::domain::changes::threads::reply(thread, agent, id, text, false)?;
+    let comment = crate::domain::changes::threads::reply(thread, agent, id, text, false)?;
 
     // `@name`: that agent gets the thread at once (as a message of this agent)
-    let names: Vec<String> = roster::active()
-        .into_iter()
-        .map(|agent_value| agent_value.name)
-        .collect();
+    let names: Vec<String> = roster::active().into_iter().map(|member| member.name).collect();
     let to = crate::domain::changes::threads::mentioned(text, &names, agent);
 
     if to.is_empty() {
         return Ok(format!("reply added to {id}"));
     }
 
-    let msg = format!(
+    let message = format!(
         "on comment {id} `{}`: {}\n\n{}",
-        character.path,
+        comment.path,
         text.trim(),
-        crate::domain::changes::threads::context(&character)
+        crate::domain::changes::threads::context(&comment)
     );
 
-    client::send(thread, &json!({"op": "send", "from": agent, "to": to, "text": msg}))?;
+    client::send(thread, &json!({"op": "send", "from": agent, "to": to, "text": message}))?;
 
     Ok(format!("reply added to {id}, sent to {}", to.join(", ")))
 }
 fn advance_flow(thread: &str, agent: &str, args: &Value) -> Result<String, String> {
-    let result_value = client::send(
+    let reply = client::send(
         thread,
         &json!({"op": "flow_step", "agent": agent, "again": args["again"], "pass_gate": args["pass_gate"], "note": args["note"]}),
     )?;
 
-    Ok(flow_reply(&result_value))
+    Ok(flow_reply(&reply))
 }
 fn suggest_flow(thread: &str, agent: &str, args: &Value) -> Result<String, String> {
     client::send(
@@ -223,7 +220,7 @@ fn suggest_flow(thread: &str, agent: &str, args: &Value) -> Result<String, Strin
     Ok("suggestion shown to the owner. Go on with the current step until the owner switches.".into())
 }
 fn set_thread_projects(thread: &str, args: &Value) -> Result<String, String> {
-    let value: Vec<String> = args["projects"]
+    let projects: Vec<String> = args["projects"]
         .as_array()
         .into_iter()
         .flatten()
@@ -231,15 +228,15 @@ fn set_thread_projects(thread: &str, args: &Value) -> Result<String, String> {
         .map(str::to_string)
         .collect();
 
-    crate::domain::projects::set_projects(thread, &value)
+    crate::domain::projects::set_projects(thread, &projects)
 }
 fn list_thread_agents(thread: &str, agent: &str) -> std::string::String {
     let on = super::store::load(thread)
-        .map(|thread_3| thread_3.agents)
+        .map(|loaded| loaded.agents)
         .unwrap_or_default();
     let rows: Vec<Value> = roster::active()
                 .iter()
-                .map(|agent_2| json!({"name": agent_2.name, "harness": super::harness::harness_label(agent_2), "mode": agent_2.mode, "on_thread": on.contains(&agent_2.name), "you": agent_2.name == agent}))
+                .map(|member| json!({"name": member.name, "harness": super::harness::harness_label(member), "mode": member.mode, "on_thread": on.contains(&member.name), "you": member.name == agent}))
                 .collect();
 
     serde_json::to_string_pretty(&rows).unwrap_or_default()

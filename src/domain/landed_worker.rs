@@ -25,12 +25,12 @@ impl Worker {
             .filter(|thread| thread.state != "deleted")
             .collect();
 
-        all.sort_by_key(|thread_value| thread_value.state == "archived");
+        all.sort_by_key(|thread| thread.state == "archived");
 
-        for thread_2 in all {
-            let id = thread_2.id.clone();
+        for thread in all {
+            let id = thread.id.clone();
 
-            self.threads.insert(id.clone(), thread_2);
+            self.threads.insert(id.clone(), thread);
             read_thread(&id, self);
             self.publish(&[id]);
         }
@@ -78,8 +78,8 @@ impl Worker {
             BATCHES.fetch_add(1, Ordering::Relaxed);
         }
 
-        for directory_3 in &full {
-            read_co(directory_3, true, self);
+        for dir in &full {
+            read_co(dir, true, self);
         }
 
         read_batch_changes(&full, &dirty, ids, &gits, self)
@@ -91,7 +91,7 @@ impl Worker {
 
         for id in ids {
             match land(id, self) {
-                Some(line) => any |= set(id, line),
+                Some(state) => any |= set(id, state),
                 None => any |= unset(id),
             }
         }
@@ -103,9 +103,9 @@ impl Worker {
         any
     }
     pub(crate) fn save() {
-        let message = LANDS.lock().ok().and_then(|line| line.clone()).unwrap_or_default();
+        let lands = LANDS.lock().ok().and_then(|lands| lands.clone()).unwrap_or_default();
 
-        if let Ok(bytes) = serde_json::to_vec(&message) {
+        if let Ok(bytes) = serde_json::to_vec(&lands) {
             let _ = crate::engine::write_atomic(&cache_path(), &bytes);
         }
     }
@@ -117,106 +117,106 @@ fn append_changed_thread(out: &mut Vec<String>, id: &String, hit: bool) {
     }
 }
 
-fn archive_due_threads(model_state: &mut Worker) {
-    if Instant::now() >= model_state.archive_at {
-        auto_archive(model_state);
+fn archive_due_threads(worker: &mut Worker) {
+    if Instant::now() >= worker.archive_at {
+        auto_archive(worker);
     }
 }
 
-fn publish_changed_threads(ids: &[String], model_state: &mut Worker) {
-    if model_state.publish(ids) {
+fn publish_changed_threads(ids: &[String], worker: &mut Worker) {
+    if worker.publish(ids) {
         Worker::save();
     }
 }
 
-fn apply_in_refresh_id(full: &mut HashSet<String>, ids: &mut HashSet<String>, id: String, model_state: &mut Worker) {
-    if let Some(thread_5) = model_state.threads.get(&id) {
-        full.extend(dirs(thread_5));
+fn refresh_thread_checkouts(full: &mut HashSet<String>, ids: &mut HashSet<String>, id: String, worker: &mut Worker) {
+    if let Some(thread) = worker.threads.get(&id) {
+        full.extend(dirs(thread));
     }
 
     ids.insert(id);
 }
 
-fn mark_work_directory_dirty(dirty: &mut HashSet<String>, width: &PathBuf, model_state: &mut Worker) {
+fn mark_work_directory_dirty(dirty: &mut HashSet<String>, top: &PathBuf, worker: &mut Worker) {
     dirty.extend(
-        model_state
+        worker
             .cos
             .iter()
-            .filter(|(_, character_2)| character_2.top == *width)
-            .map(|(directory_value, _)| directory_value.clone()),
+            .filter(|(_, co)| co.top == *top)
+            .map(|(dir, _)| dir.clone()),
     );
 }
 
-fn mark_git_directory_dirty(
+fn mark_repo_checkouts_full(
     full: &mut HashSet<String>,
     gits: &mut HashSet<PathBuf>,
-    group: PathBuf,
-    key_value: &bus::Git,
-    model_state: &mut Worker,
+    common: PathBuf,
+    part: &bus::Git,
+    worker: &mut Worker,
 ) {
     full.extend(
-        model_state
+        worker
             .cos
             .iter()
-            .filter(|(_, character_value)| character_value.common == group && character_value.hit(key_value))
-            .map(|(directory, _)| directory.clone()),
+            .filter(|(_, co)| co.common == common && co.hit(part))
+            .map(|(dir, _)| dir.clone()),
     );
-    gits.insert(group);
+    gits.insert(common);
 }
 
 fn rescan_thread_records(
     full: &mut HashSet<String>,
     ids: &mut HashSet<String>,
     gits: &mut HashSet<PathBuf>,
-    result: PathBuf,
-    model_state: &mut Worker,
+    root: PathBuf,
+    worker: &mut Worker,
 ) {
-    if result == canon(&model_state.threads_dir) {
+    if root == canon(&worker.threads_dir) {
         // lost thread events: every thread again
-        for thread_4 in store::all_in(&model_state.threads_dir)
+        for thread in store::all_in(&worker.threads_dir)
             .into_iter()
-            .filter(|thread_3| thread_3.state != "deleted")
+            .filter(|thread| thread.state != "deleted")
         {
-            ids.insert(thread_4.id.clone());
-            model_state.threads.insert(thread_4.id.clone(), thread_4);
+            ids.insert(thread.id.clone());
+            worker.threads.insert(thread.id.clone(), thread);
         }
     }
 
     full.extend(
-        model_state
+        worker
             .cos
             .iter()
-            .filter(|(_, character_3)| character_3.top.starts_with(&result) || character_3.common.starts_with(&result))
-            .map(|(directory_2, _)| directory_2.clone()),
+            .filter(|(_, co)| co.top.starts_with(&root) || co.common.starts_with(&root))
+            .map(|(dir, _)| dir.clone()),
     );
-    gits.insert(result);
+    gits.insert(root);
 }
 
-fn reload_thread_record(full: &mut HashSet<String>, ids: &mut HashSet<String>, id: String, model_state: &mut Worker) {
-    let new = store::load_in(&model_state.threads_dir, &id).filter(|thread| thread.state != "deleted");
-    let old = model_state.threads.get(&id);
+fn reload_thread_record(full: &mut HashSet<String>, ids: &mut HashSet<String>, id: String, worker: &mut Worker) {
+    let new = store::load_in(&worker.threads_dir, &id).filter(|thread| thread.state != "deleted");
+    let old = worker.threads.get(&id);
 
-    let key = |thread_value: &store::Thread| {
+    let key = |thread: &store::Thread| {
         (
-            thread_value.state.clone(),
-            thread_value
+            thread.state.clone(),
+            thread
                 .all_checkouts()
                 .into_iter()
-                .map(|character| character.dir)
+                .map(|checkout| checkout.dir)
                 .collect::<Vec<_>>(),
-            thread_value.worktree_pending.clone(),
-            thread_value.repo.clone(),
+            thread.worktree_pending.clone(),
+            thread.repo.clone(),
         )
     };
 
     if new.as_ref().map(key) != old.map(key) {
         match new {
-            Some(thread_2) => {
-                full.extend(dirs(&thread_2));
-                model_state.threads.insert(id.clone(), thread_2);
+            Some(thread) => {
+                full.extend(dirs(&thread));
+                worker.threads.insert(id.clone(), thread);
             }
             None => {
-                model_state.threads.remove(&id);
+                worker.threads.remove(&id);
             }
         }
 
@@ -233,60 +233,57 @@ fn dirs(thread: &store::Thread) -> Vec<String> {
     thread
         .all_checkouts()
         .into_iter()
-        .map(|character| character.dir)
+        .map(|checkout| checkout.dir)
         .collect()
 }
 
 /// Read thread ID: its checkouts 0 read yet (open), its kept branch (archived).
-fn read_thread(id: &str, model_state: &mut Worker) {
-    let Some(thread_value) = model_state.threads.get(id).cloned() else {
+fn read_thread(id: &str, worker: &mut Worker) {
+    let Some(record) = worker.threads.get(id).cloned() else {
         return;
     };
 
-    if thread_value.state == "archived" {
-        let land = thread(&thread_value, &prs_of(id), &mut model_state.seen);
+    if record.state == "archived" {
+        let land = thread(&record, &prs_of(id), &mut worker.seen);
 
-        model_state.kept.insert(id.to_string(), land);
+        worker.kept.insert(id.to_string(), land);
         return;
     }
 
-    for directory in dirs(&thread_value) {
-        if !model_state.cos.contains_key(&directory) {
-            read_co(&directory, true, model_state);
+    for dir in dirs(&record) {
+        if !worker.cos.contains_key(&dir) {
+            read_co(&dir, true, worker);
         }
     }
 }
 
 /// Read checkout DIR: FULL: branch, refs, dirty; else dirty only.
-fn read_co(dir: &str, full: bool, model_state: &mut Worker) {
+fn read_co(dir: &str, full: bool, worker: &mut Worker) {
     let path = Path::new(dir);
 
-    if !full && let Some(character) = model_state.cos.get_mut(dir) {
-        if character.branch.is_some() {
-            character.dirty = dirty_count(path);
+    if !full && let Some(co) = worker.cos.get_mut(dir) {
+        if co.branch.is_some() {
+            co.dirty = dirty_count(path);
         }
 
         return;
     }
 
     let (top, common, own) = crate::infra::watch::git_dirs(path)
-        .map(|(thread, character_value, output)| (canon(&thread), canon(&character_value), canon(&output)))
+        .map(|(top, common, own)| (canon(&top), canon(&common), canon(&own)))
         .unwrap_or_default();
 
     let (branch, def, plain) = match task_branch(path, None) {
-        Ok((bytes, directory)) => (Some(bytes), directory, Land::NoCode),
-        Err(line) => (None, None, line),
+        Ok((branch, def)) => (Some(branch), def, Land::NoCode),
+        Err(state) => (None, None, state),
     };
 
     let (dirty, refs) = match &branch {
-        Some(bytes_value) => (
-            dirty_count(path),
-            refs(path, bytes_value, def.as_deref(), &mut model_state.seen),
-        ),
+        Some(branch) => (dirty_count(path), refs(path, branch, def.as_deref(), &mut worker.seen)),
         None => (0, Refs::NoCode),
     };
 
-    model_state.cos.insert(
+    worker.cos.insert(
         dir.to_string(),
         Co {
             top,
@@ -301,27 +298,27 @@ fn read_co(dir: &str, full: bool, model_state: &mut Worker) {
     );
 
     // oids fix the answers: only the size needs a cap
-    if model_state.seen.len() > 4096 {
-        model_state.seen.clear();
+    if worker.seen.len() > 4096 {
+        worker.seen.clear();
     }
 }
 
 /// The state of thread ID from the last reads (0 git).
-fn land(id: &str, model_state: &Worker) -> Option<Land> {
-    let thread = model_state.threads.get(id)?;
+fn land(id: &str, worker: &Worker) -> Option<Land> {
+    let thread = worker.threads.get(id)?;
 
     if thread.state == "archived" {
-        return model_state.kept.get(id).cloned();
+        return worker.kept.get(id).cloned();
     }
 
     let prs = prs_of(id);
     let lands = dirs(thread)
         .into_iter()
-        .filter_map(|directory| model_state.cos.get(&directory).cloned())
-        .map(|character| match &character.branch {
-            None => character.plain.clone(),
-            Some(_) if character.dirty > 0 => Land::Dirty(character.dirty),
-            Some(bytes) => with_prs(&character.refs, bytes, &prs),
+        .filter_map(|dir| worker.cos.get(&dir).cloned())
+        .map(|co| match &co.branch {
+            None => co.plain.clone(),
+            Some(_) if co.dirty > 0 => Land::Dirty(co.dirty),
+            Some(branch) => with_prs(&co.refs, branch, &prs),
         });
 
     Some(lands.min_by_key(Land::rank).unwrap_or(Land::NoCode))
@@ -329,64 +326,64 @@ fn land(id: &str, model_state: &Worker) -> Option<Land> {
 
 /// Fetch each repo of the threads whose last fetch is older than `FETCH_EVERY` (1 at a time per
 /// repo, off this thread). New remote refs come back as `Git` topics.
-fn fetch_due(model_state: &mut Worker) {
-    let repos: HashSet<PathBuf> = model_state
+fn fetch_due(worker: &mut Worker) {
+    let repos: HashSet<PathBuf> = worker
         .threads
         .values()
         .filter_map(crate::domain::threads::repo_of_thread_store)
         .collect();
 
-    fetch_repositories(model_state, repos);
+    fetch_repositories(worker, repos);
 }
 
-fn fetch_repositories(model_state: &mut Worker, repos: HashSet<PathBuf>) {
-    for result in repos {
-        if model_state
+fn fetch_repositories(worker: &mut Worker, repos: HashSet<PathBuf>) {
+    for repo in repos {
+        if worker
             .fetched
-            .get(&result)
-            .is_some_and(|thread_value| thread_value.elapsed() < FETCH_EVERY)
+            .get(&repo)
+            .is_some_and(|fetched_at| fetched_at.elapsed() < FETCH_EVERY)
         {
             continue;
         }
 
-        model_state.fetched.insert(result.clone(), Instant::now());
-        let busy = model_state.fetching.clone();
+        worker.fetched.insert(repo.clone(), Instant::now());
+        let busy = worker.fetching.clone();
 
-        if !busy.lock().is_ok_and(|mut bytes| bytes.insert(result.clone())) {
+        if !busy.lock().is_ok_and(|mut fetching| fetching.insert(repo.clone())) {
             continue;
         }
 
         std::thread::spawn(move || {
-            fetch_origin(&result);
+            fetch_origin(&repo);
 
-            finish_repository_fetch(&result, &busy);
+            finish_repository_fetch(&repo, &busy);
         });
     }
 }
 
-fn finish_repository_fetch(result: &PathBuf, busy: &Arc<std::sync::Mutex<HashSet<PathBuf>>>) {
-    if let Ok(mut bytes_value) = busy.lock() {
-        bytes_value.remove(result);
+fn finish_repository_fetch(repo: &PathBuf, busy: &Arc<std::sync::Mutex<HashSet<PathBuf>>>) {
+    if let Ok(mut fetching) = busy.lock() {
+        fetching.remove(repo);
     }
 }
 
-fn fetch_origin(result: &Path) {
-    if git(result, &["remote", "get-url", "origin"]).0 {
-        fetch(result);
+fn fetch_origin(repo: &Path) {
+    if git(repo, &["remote", "get-url", "origin"]).0 {
+        fetch(repo);
     }
 }
 
 /// Archive each open thread stale for `ARCHIVE_MS`; the next check at the next deadline.
-fn auto_archive(model_state: &mut Worker) {
+fn auto_archive(worker: &mut Worker) {
     let now = crate::engine::now_ms();
     let mut next = u64::MAX;
 
-    for (id, thread) in &model_state.threads {
+    for (id, thread) in &worker.threads {
         // 0 code, agents not done / on main: archived at ACTIVITY + ARCHIVE_MS (stale since
         // STALE_MS)
         if thread.state == "archived"
             || !idle_kind(
-                land(id, model_state).as_ref(),
+                land(id, worker).as_ref(),
                 crate::domain::notifications::reported_done(id),
             )
         {
@@ -409,7 +406,7 @@ fn auto_archive(model_state: &mut Worker) {
     // thread can turn 0 code later; a state change does not wake this timer)
     let wait = Duration::from_millis(next.saturating_sub(now)).min(Duration::from_millis(DAY_MS));
 
-    model_state.archive_at = Instant::now() + wait;
+    worker.archive_at = Instant::now() + wait;
 }
 
 fn read_batch_changes(
@@ -417,21 +414,21 @@ fn read_batch_changes(
     dirty: &HashSet<String>,
     ids: HashSet<String>,
     gits: &HashSet<PathBuf>,
-    model_state: &mut Worker,
+    worker: &mut Worker,
 ) -> Vec<String> {
-    for directory_4 in dirty.difference(full) {
-        read_co(directory_4, false, model_state);
+    for dir in dirty.difference(full) {
+        read_co(dir, false, worker);
     }
 
     let touched: HashSet<&String> = full.iter().chain(dirty).collect();
     let mut out: Vec<String> = ids.into_iter().collect();
 
-    for (id, thread_6) in &model_state.threads {
-        let hit = if thread_6.state == "archived" {
+    for (id, thread) in &worker.threads {
+        let hit = if thread.state == "archived" {
             // its kept branch: a ref change in its repo
-            archived_refs_changed(thread_6, gits)
+            archived_refs_changed(thread, gits)
         } else {
-            dirs(thread_6).iter().any(|directory_5| touched.contains(directory_5))
+            dirs(thread).iter().any(|dir| touched.contains(dir))
         };
 
         append_changed_thread(&mut out, id, hit);
@@ -439,16 +436,11 @@ fn read_batch_changes(
 
     for id in out
         .iter()
-        .filter(|id| {
-            model_state
-                .threads
-                .get(*id)
-                .is_some_and(|thread_7| thread_7.state == "archived")
-        })
+        .filter(|id| worker.threads.get(*id).is_some_and(|thread| thread.state == "archived"))
         .cloned()
         .collect::<Vec<_>>()
     {
-        read_thread(&id, model_state);
+        read_thread(&id, worker);
     }
 
     out
@@ -460,39 +452,36 @@ fn collect_batch_changes(
     dirty: &mut HashSet<String>,
     ids: &mut HashSet<String>,
     gits: &mut HashSet<PathBuf>,
-    model_state: &mut Worker,
+    worker: &mut Worker,
 ) {
     for message in batch {
         match message {
             In::Bus(Topic::Thread(id, bus::Part::Meta)) => {
-                reload_thread_record(full, ids, id, model_state);
+                reload_thread_record(full, ids, id, worker);
             }
             In::Bus(Topic::Thread(..)) => {}
-            In::Bus(Topic::Git(group, key_value)) => {
-                mark_git_directory_dirty(full, gits, group, &key_value, model_state);
+            In::Bus(Topic::Git(common, part)) => {
+                mark_repo_checkouts_full(full, gits, common, &part, worker);
             }
-            In::Bus(Topic::Work(width)) => {
-                mark_work_directory_dirty(dirty, &width, model_state);
+            In::Bus(Topic::Work(top)) => {
+                mark_work_directory_dirty(dirty, &top, worker);
             }
-            In::Bus(Topic::Rescan(result)) => {
-                rescan_thread_records(full, ids, gits, result, model_state);
+            In::Bus(Topic::Rescan(root)) => {
+                rescan_thread_records(full, ids, gits, root, worker);
             }
             In::Prs(id) => {
                 ids.insert(id);
             }
             In::Refresh(id) => {
-                apply_in_refresh_id(full, ids, id, model_state);
+                refresh_thread_checkouts(full, ids, id, worker);
             }
-            In::Visible => fetch_due(model_state),
+            In::Visible => fetch_due(worker),
         }
     }
 }
 
-fn archived_refs_changed(thread_6: &store::Thread, gits: &HashSet<PathBuf>) -> bool {
-    crate::domain::threads::repo_of_thread_store(thread_6)
-        .and_then(|result_value| crate::infra::watch::git_dirs(&result_value))
-        .is_some_and(|(_, character_4, _)| {
-            gits.iter()
-                .any(|group_value| canon(&character_4).starts_with(group_value))
-        })
+fn archived_refs_changed(thread: &store::Thread, gits: &HashSet<PathBuf>) -> bool {
+    crate::domain::threads::repo_of_thread_store(thread)
+        .and_then(|repo| crate::infra::watch::git_dirs(&repo))
+        .is_some_and(|(_, common, _)| gits.iter().any(|git_dir| canon(&common).starts_with(git_dir)))
 }

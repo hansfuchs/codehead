@@ -42,7 +42,7 @@ impl App {
         ])
         .split(inner);
 
-        let lab = |thread: &str, on: bool| draw_agent_form_body(thread, on);
+        let lab = |text: &str, on: bool| form_label(text, on);
 
         // single-line rows: label left, value right
         draw_form_fields(frame, form, &rows, lab);
@@ -65,22 +65,22 @@ impl App {
 
         // the avatar picker over the form
         if let Some(Modal::Agent(form)) = &mut self.overlays.modal {
-            draw_agent_form_color(frame, inner, form);
+            draw_avatar_picker(frame, inner, form);
         }
     }
 }
 
-fn draw_agent_form_color(frame: &mut Frame<'_>, inner: Rect, form: &mut Box<super::AgentForm>) {
+fn draw_avatar_picker(frame: &mut Frame<'_>, inner: Rect, form: &mut Box<super::AgentForm>) {
     let color = agents::color(Some(agents::COLORS[form.color]));
 
-    if let Some(path) = form.picker.as_mut() {
-        path.render(frame, inner, color);
+    if let Some(picker) = form.picker.as_mut() {
+        picker.render(frame, inner, color);
     }
 }
 
-fn draw_agent_form_body(thread: &str, on: bool) -> Span<'static> {
+fn form_label(text: &str, on: bool) -> Span<'static> {
     Span::styled(
-        format!("{thread:<10}"),
+        format!("{text:<10}"),
         if on { theme::accent_bold() } else { theme::muted() },
     )
 }
@@ -161,67 +161,45 @@ fn draw_form_field_list_row(
             );
         }
         _ => {
-            draw_form_field_list_row_labels(frame, form, i, on, vr);
+            draw_form_choices(frame, form, i, on, vr);
         }
     }
 }
 
-fn draw_form_field_list_row_labels(
-    frame: &mut Frame<'_>,
-    form: &mut Box<super::AgentForm>,
-    i: usize,
-    on: bool,
-    vr: Rect,
-) {
+fn draw_form_choices(frame: &mut Frame<'_>, form: &mut Box<super::AgentForm>, i: usize, on: bool, vr: Rect) {
     let labels: Vec<(String, Style)> = match i {
-        F_MODEL => form
-            .models
-            .iter()
-            .map(|message_value| (message_value.clone(), theme::text()))
-            .collect(),
+        F_MODEL => form.models.iter().map(|model| (model.clone(), theme::text())).collect(),
         F_EFFORT => agents::EFFORTS
             .iter()
-            .map(|error| (error.to_string(), theme::text()))
+            .map(|effort| (effort.to_string(), theme::text()))
             .collect(),
         F_COLOR => agents::COLORS
             .iter()
-            .map(|style_value| {
-                (
-                    style_value.to_string(),
-                    Style::default().fg(agents::color(Some(style_value))),
-                )
-            })
+            .map(|color| (color.to_string(), Style::default().fg(agents::color(Some(color)))))
             .collect(),
         F_MODE => agents::MODES
             .iter()
-            .map(|message_2| (message_2.to_string(), theme::text()))
+            .map(|mode| (mode.to_string(), theme::text()))
             .collect(),
         _ => form
             .styles
             .iter()
-            .map(|(_, count)| (count.clone(), theme::text()))
+            .map(|(_, name)| (name.clone(), theme::text()))
             .collect(),
     };
 
     let cur = [form.model, form.effort, form.color, form.mode, form.style][i - F_MODEL];
     let mut spans = vec![Span::styled(if on { "‹" } else { " " }, theme::accent())];
 
-    for (j, (line_value, st)) in labels.into_iter().enumerate() {
-        draw_form_field_list_row_labels_body(on, cur, &mut spans, j, &line_value, st);
+    for (j, (label, st)) in labels.into_iter().enumerate() {
+        push_choice(on, cur, &mut spans, j, &label, st);
     }
 
     spans.push(Span::styled(if on { "›" } else { "" }, theme::accent()));
     frame.render_widget(Paragraph::new(Line::from(spans)), vr);
 }
 
-fn draw_form_field_list_row_labels_body(
-    on: bool,
-    cur: usize,
-    spans: &mut Vec<Span<'_>>,
-    j: usize,
-    line_value: &str,
-    st: Style,
-) {
+fn push_choice(on: bool, cur: usize, spans: &mut Vec<Span<'_>>, j: usize, label: &str, st: Style) {
     let st = if j == cur {
         let st = st.add_modifier(Modifier::BOLD);
 
@@ -230,7 +208,7 @@ fn draw_form_field_list_row_labels_body(
         theme::muted()
     };
 
-    spans.push(Span::styled(format!(" {line_value} "), st));
+    spans.push(Span::styled(format!(" {label} "), st));
 }
 
 fn draw_form_note(
@@ -317,8 +295,8 @@ fn draw_form_categories(
     let cat = form.sprite.avatar.cat;
     let mut spans = vec![lab("avatars", on), Span::raw(" ")];
 
-    for character in crate::domain::avatar::CATS {
-        draw_form_categories_body(on, cat, &mut spans, character);
+    for category in crate::domain::avatar::CATS {
+        push_category(on, cat, &mut spans, category);
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), tr);
@@ -326,13 +304,13 @@ fn draw_form_categories(
     cat
 }
 
-fn draw_form_categories_body(
+fn push_category(
     on: bool,
     cat: crate::domain::avatar::Cat,
     spans: &mut Vec<Span<'_>>,
-    character: crate::domain::avatar::Cat,
+    category: crate::domain::avatar::Cat,
 ) {
-    let st = if character == cat {
+    let st = if category == cat {
         if on {
             theme::bold().bg(theme::pal().surface0)
         } else {
@@ -342,7 +320,7 @@ fn draw_form_categories_body(
         theme::muted()
     };
 
-    spans.push(Span::styled(format!(" {} ", character.name()), st));
+    spans.push(Span::styled(format!(" {} ", category.name()), st));
 }
 
 fn draw_form_avatar(
@@ -358,19 +336,19 @@ fn draw_form_avatar(
     form.areas[F_SPRITE] = sr;
     frame.render_widget(Paragraph::new(Line::from(lab("avatar", on))), sr);
     let color = agents::color(Some(agents::COLORS[form.color]));
-    let agent = form.sprite.avatar;
+    let avatar = form.sprite.avatar;
     let side = vec![
         vec![Span::styled(
-            format!("   {}", agent.name()),
+            format!("   {}", avatar.name()),
             if on { theme::bold() } else { theme::muted() },
         )],
         vec![Span::styled(
             format!(
                 "   {} {}/{} · float {}x",
                 cat.name(),
-                agent.idx + 1,
+                avatar.idx + 1,
                 cat.count(),
-                agent.speed
+                avatar.speed
             ),
             theme::muted(),
         )],
@@ -429,19 +407,16 @@ fn draw_form_text(frame: &mut Frame<'_>, form: &mut Box<super::AgentForm>, rows:
         );
     }
 
-    if let Some(error_value) = &form.error {
+    if let Some(error) = &form.error {
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                error_value.clone(),
-                Style::default().fg(theme::pal().error()),
-            )),
+            Paragraph::new(Line::styled(error.clone(), Style::default().fg(theme::pal().error()))),
             rows[19],
         );
     }
 }
 
 fn draw_form_buttons(frame: &mut Frame<'_>, form: &mut Box<super::AgentForm>, rows: &[Rect]) -> Vec<(Rect, bool)> {
-    let bytes = rows[20];
+    let row = rows[20];
     let labels = [
         (
             true,
@@ -453,12 +428,12 @@ fn draw_form_buttons(frame: &mut Frame<'_>, form: &mut Box<super::AgentForm>, ro
         ),
         (false, "  cancel (esc)  "),
     ];
-    let total: u16 = labels.iter().map(|(_, line_2)| line_2.width() as u16).sum::<u16>() + 2;
-    let mut x = bytes.x + bytes.width.saturating_sub(total) / 2;
+    let total: u16 = labels.iter().map(|(_, label)| label.width() as u16).sum::<u16>() + 2;
+    let mut x = row.x + row.width.saturating_sub(total) / 2;
     let mut buttons = Vec::new();
 
-    for (value, line_3) in labels {
-        let focused = form.field == F_BUTTONS && value == form.save;
+    for (save, label) in labels {
+        let focused = form.field == F_BUTTONS && save == form.save;
 
         let style = if focused {
             theme::pill().add_modifier(Modifier::BOLD)
@@ -466,16 +441,16 @@ fn draw_form_buttons(frame: &mut Frame<'_>, form: &mut Box<super::AgentForm>, ro
             Style::default().bg(theme::pal().surface0).fg(theme::pal().text)
         };
 
-        let area_value = Rect {
+        let area = Rect {
             x,
-            y: bytes.y,
-            width: line_3.width() as u16,
+            y: row.y,
+            width: label.width() as u16,
             height: 1,
         };
 
-        frame.render_widget(Paragraph::new(line_3).style(style), area_value);
-        buttons.push((area_value, value));
-        x += area_value.width + 2;
+        frame.render_widget(Paragraph::new(label).style(style), area);
+        buttons.push((area, save));
+        x += area.width + 2;
     }
 
     buttons

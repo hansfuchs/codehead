@@ -33,7 +33,7 @@ pub(crate) struct Editor {
 pub(crate) fn kind_of(bin: &Path) -> Kind {
     let name = bin
         .file_stem()
-        .map(|count| count.to_string_lossy().to_lowercase())
+        .map(|stem| stem.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
     match name.as_str() {
@@ -49,16 +49,16 @@ pub(crate) fn kind_of(bin: &Path) -> Kind {
 }
 
 fn on_path(name: &str) -> Option<PathBuf> {
-    let path_value = Path::new(name);
+    let paths = Path::new(name);
 
-    if path_value.is_absolute() {
-        return path_value.is_file().then(|| path_value.to_path_buf());
+    if paths.is_absolute() {
+        return paths.is_file().then(|| paths.to_path_buf());
     }
 
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|directory| directory.join(name))
-            .find(|path_2| path_2.is_file())
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
     })
 }
 
@@ -78,7 +78,7 @@ fn in_apps() -> Option<PathBuf> {
 
     [PathBuf::from("/Applications"), home.join("Applications")]
         .iter()
-        .flat_map(|directory| bundles.map(|(app, bin)| directory.join(app).join(bin)))
+        .flat_map(|dir| bundles.map(|(app, bin)| dir.join(app).join(bin)))
         .find(|path| path.is_file())
 }
 
@@ -86,19 +86,19 @@ fn in_apps() -> Option<PathBuf> {
 pub(crate) fn find() -> Option<Editor> {
     let want = std::env::var("CODEHEAD_EDITOR")
         .ok()
-        .filter(|text| !text.is_empty())
+        .filter(|value| !value.is_empty())
         .or_else(crate::infra::config::editor)
         .unwrap_or_else(|| "auto".into());
 
     // $CODEHEAD_VSCODE: the older override
     if want == "auto"
-        && let Some(path_value) = std::env::var_os("CODEHEAD_VSCODE")
+        && let Some(bin) = std::env::var_os("CODEHEAD_VSCODE")
             .map(PathBuf::from)
-            .filter(|path| path.is_file())
+            .filter(|bin| bin.is_file())
     {
         return Some(Editor {
             kind: Kind::VsCode,
-            bin: path_value,
+            bin,
         });
     }
 
@@ -106,11 +106,11 @@ pub(crate) fn find() -> Option<Editor> {
     if want == "terminal" {
         let ed = std::env::var("VISUAL")
             .ok()
-            .filter(|text_value| !text_value.trim().is_empty())
-            .or_else(|| std::env::var("EDITOR").ok().filter(|text_2| !text_2.trim().is_empty()));
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| std::env::var("EDITOR").ok().filter(|value| !value.trim().is_empty()));
         let name = ed
             .as_deref()
-            .and_then(|error| error.split_whitespace().next())
+            .and_then(|command| command.split_whitespace().next())
             .map(str::to_string)
             .or_else(|| on_path("nvim").map(|_| "nvim".into()))
             .unwrap_or_else(|| "vi".into());
@@ -134,7 +134,7 @@ pub(crate) fn find() -> Option<Editor> {
             "rustrover",
         ]
         .iter()
-        .find_map(|count| on_path(count))
+        .find_map(|name| on_path(name))
         .or_else(in_apps)
     } else {
         on_path(&want)
@@ -189,7 +189,7 @@ pub(crate) fn args_dir(kind: Kind, wt: &Path) -> Vec<OsString> {
 /// socket. None: 0 instance, or a Flow without remote control.
 pub(crate) fn flow_instance(bin: &Path, wt: &Path) -> Option<String> {
     use std::io::Read;
-    let mut character = std::process::Command::new(bin)
+    let mut child = std::process::Command::new(bin)
         .args(["--list-servers", "--json"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -199,12 +199,12 @@ pub(crate) fn flow_instance(bin: &Path, wt: &Path) -> Option<String> {
     let start = std::time::Instant::now();
 
     loop {
-        match character.try_wait().ok()? {
+        match child.try_wait().ok()? {
             Some(st) if st.success() => break,
             Some(_) => return None,
             None if start.elapsed() > std::time::Duration::from_millis(1500) => {
-                let _ = character.kill();
-                let _ = character.wait();
+                let _ = child.kill();
+                let _ = child.wait();
 
                 return None;
             }
@@ -214,7 +214,7 @@ pub(crate) fn flow_instance(bin: &Path, wt: &Path) -> Option<String> {
 
     let mut out = String::new();
 
-    character.stdout.take()?.read_to_string(&mut out).ok()?;
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
 
     flow_pick(&out, wt)
 }
@@ -225,65 +225,66 @@ fn flow_pick(out: &str, wt: &Path) -> Option<String> {
     let want = std::fs::canonicalize(wt).unwrap_or_else(|_| wt.to_path_buf());
 
     let all: Vec<serde_json::Value> = match serde_json::from_str::<serde_json::Value>(out.trim()) {
-        Ok(serde_json::Value::Array(agent)) => agent,
+        Ok(serde_json::Value::Array(instances)) => instances,
         Ok(value) => vec![value],
         Err(_) => out.lines().filter_map(|line| serde_json::from_str(line).ok()).collect(),
     };
 
     all.iter()
-        .find(|text| flow_pick_path_(&want, text))
-        .and_then(|text_value| {
-            text_value["socket"]
+        .find(|instance| has_project(&want, instance))
+        .and_then(|instance| {
+            instance["socket"]
                 .as_str()
-                .or_else(|| text_value["name"].as_str())
+                .or_else(|| instance["name"].as_str())
                 .map(str::to_string)
         })
 }
 
-fn flow_pick_path_(want: &Path, text: &serde_json::Value) -> bool {
-    text["projects"].as_array().is_some_and(|ps| {
+fn has_project(want: &Path, instance: &serde_json::Value) -> bool {
+    instance["projects"].as_array().is_some_and(|ps| {
         ps.iter()
-            .filter_map(|path| {
-                path.as_str()
-                    .or_else(|| path["path"].as_str())
-                    .or_else(|| path["name"].as_str())
+            .filter_map(|project| {
+                project
+                    .as_str()
+                    .or_else(|| project["path"].as_str())
+                    .or_else(|| project["name"].as_str())
             })
-            .any(|path_value| {
-                let path_2 = Path::new(path_value);
+            .any(|project| {
+                let path = Path::new(project);
 
-                path_2 == want || std::fs::canonicalize(path_2).is_ok_and(|character| character == want)
+                path == want || std::fs::canonicalize(path).is_ok_and(|real| real == want)
             })
     })
 }
 
 /// E's arguments for a window that has WT open already, with FILE at LINE (None: the worktree
 /// alone). None: 0 such window known (the usual arguments apply).
-pub(crate) fn reuse_args(error: &Editor, wt: &Path, target: Option<(&str, u32)>) -> Option<Vec<OsString>> {
-    if error.kind != Kind::Flow {
+pub(crate) fn reuse_args(editor: &Editor, wt: &Path, target: Option<(&str, u32)>) -> Option<Vec<OsString>> {
+    if editor.kind != Kind::Flow {
         return None;
     }
 
-    let sock = flow_instance(&error.bin, wt)?;
-    let mut value: Vec<OsString> = vec!["--connect".into(), sock.into(), "--no-wait".into()];
+    let sock = flow_instance(&editor.bin, wt)?;
+    let mut args: Vec<OsString> = vec!["--connect".into(), sock.into(), "--no-wait".into()];
 
     match target {
-        Some((file, line)) => value.push(format!("{}:{line}", wt.join(file).display()).into()),
-        None => value.push(wt.into()),
+        Some((file, line)) => args.push(format!("{}:{line}", wt.join(file).display()).into()),
+        None => args.push(wt.into()),
     }
 
-    Some(value)
+    Some(args)
 }
 
 /// Start E with ARGS, detached. Err: why not.
-pub(crate) fn spawn(error: &Editor, args: &[OsString]) -> Result<(), String> {
-    std::process::Command::new(&error.bin)
+pub(crate) fn spawn(editor: &Editor, args: &[OsString]) -> Result<(), String> {
+    std::process::Command::new(&editor.bin)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|err| format!("{}: {err}", error.bin.display()))
+        .map_err(|err| format!("{}: {err}", editor.bin.display()))
 }
 
 /// Once per machine, for a worktree under codehead's worktrees dir: how to stop the trust
@@ -301,8 +302,8 @@ pub(crate) fn trust_hint(wt: &Path) -> Option<String> {
         return None;
     }
 
-    if let Some(directory) = mark.parent() {
-        let _ = std::fs::create_dir_all(directory);
+    if let Some(dir) = mark.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
 
     let _ = std::fs::write(&mark, "");
@@ -318,15 +319,14 @@ pub(crate) fn trust_hint(wt: &Path) -> Option<String> {
 mod tests;
 
 fn env_program_exists(bin: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|directory| directory.join(bin).is_file()))
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
 }
 
 pub(crate) fn edit_env(path: &Path) {
     let ed = std::env::var("VISUAL")
         .ok()
-        .filter(|text| !text.is_empty())
-        .or_else(|| std::env::var("EDITOR").ok().filter(|text_value| !text_value.is_empty()))
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var("EDITOR").ok().filter(|value| !value.is_empty()))
         .unwrap_or_else(|| {
             if env_program_exists("nvim") {
                 "nvim".into()

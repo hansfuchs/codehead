@@ -3,20 +3,20 @@ use crate::ui::theme;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use std::path::Path;
-pub(crate) fn preview_header(width: &Worktree) -> Vec<Line<'static>> {
-    let title = width
+pub(crate) fn preview_header(worktree: &Worktree) -> Vec<Line<'static>> {
+    let title = worktree
         .thread
         .as_ref()
-        .map_or_else(|| width.branch.clone(), |thread_value| thread_value.title.clone());
+        .map_or_else(|| worktree.branch.clone(), |thread| thread.title.clone());
     let mut out = vec![
         Line::styled(title, theme::accent_bold()),
-        Line::styled(width.path.clone(), theme::muted()),
+        Line::styled(worktree.path.clone(), theme::muted()),
         Line::raw(""),
     ];
 
-    match &width.thread {
-        Some(thread_2) => {
-            preview_thread(thread_2, &mut out);
+    match &worktree.thread {
+        Some(thread) => {
+            preview_thread(thread, &mut out);
         }
         None => out.push(Line::styled("thread: none", theme::muted())),
     }
@@ -25,19 +25,19 @@ pub(crate) fn preview_header(width: &Worktree) -> Vec<Line<'static>> {
     out
 }
 
-pub(crate) fn preview(width: &Worktree) -> Vec<Line<'static>> {
-    let path_value = Path::new(&width.path);
-    let mut out = preview_header(width);
+pub(crate) fn preview(worktree: &Worktree) -> Vec<Line<'static>> {
+    let dir = Path::new(&worktree.path);
+    let mut out = preview_header(worktree);
 
-    if !width.linked {
+    if !worktree.linked {
         out.push(Line::styled("works in place: 0 worktree of its own", theme::muted()));
 
-        if !path_value.join(".git").exists() && repo_of(path_value).is_none() {
+        if !dir.join(".git").exists() && repo_of(dir).is_none() {
             return out;
         }
     }
 
-    let (_, st, _) = git(path_value, &["status", "--porcelain"]);
+    let (_, st, _) = git(dir, &["status", "--porcelain"]);
     let st: Vec<&str> = st.lines().collect();
 
     let col = |bad: bool| {
@@ -54,13 +54,13 @@ pub(crate) fn preview(width: &Worktree) -> Vec<Line<'static>> {
     ));
     out.extend(st.iter().take(15).map(|line| Line::raw(format!("  {line}"))));
 
-    let result = if !width.linked || width.branch == "(detached)" {
+    let rev = if !worktree.linked || worktree.branch == "(detached)" {
         "HEAD".to_string()
     } else {
-        width.branch.clone()
+        worktree.branch.clone()
     };
 
-    let (_, log, _) = git(path_value, &["log", "--oneline", "-15", &result, "--not", "--remotes"]);
+    let (_, log, _) = git(dir, &["log", "--oneline", "-15", &rev, "--not", "--remotes"]);
     let log: Vec<&str> = log.lines().collect();
 
     out.push(Line::raw(""));
@@ -68,8 +68,8 @@ pub(crate) fn preview(width: &Worktree) -> Vec<Line<'static>> {
         format!("unpushed commits: {}", log.len()),
         col(!log.is_empty()),
     ));
-    out.extend(log.iter().map(|line_value| Line::raw(format!("  {line_value}"))));
-    let (_, last, _) = git(path_value, &["log", "-1", "--format=%cr · %s"]);
+    out.extend(log.iter().map(|line| Line::raw(format!("  {line}"))));
+    let (_, last, _) = git(dir, &["log", "-1", "--format=%cr · %s"]);
 
     out.push(Line::raw(""));
     out.push(Line::from(vec![
@@ -86,63 +86,63 @@ pub(crate) fn remove(repo: &Path, items: &[Worktree], logs: &Path) -> Vec<Line<'
     let danger = Style::default().fg(theme::pal().error());
     let warn = theme::fg(theme::pal().caution());
 
-    for width in items {
-        remove_path_value(repo, logs, &mut out, danger, warn, width);
+    for worktree in items {
+        remove_worktree(repo, logs, &mut out, danger, warn, worktree);
     }
 
     out
 }
 
-fn remove_path_value(
+fn remove_worktree(
     repo: &Path,
     logs: &Path,
     out: &mut Vec<Line<'static>>,
     danger: Style,
     warn: Style,
-    width: &Worktree,
+    worktree: &Worktree,
 ) {
-    let path_value = Path::new(&width.path);
+    let dir = Path::new(&worktree.path);
 
     out.push(Line::from(vec![
-        Span::styled(width.label(), theme::bold()),
-        Span::styled(format!("  {}", width.path), theme::muted()),
+        Span::styled(worktree.label(), theme::bold()),
+        Span::styled(format!("  {}", worktree.path), theme::muted()),
     ]));
 
-    if !width.linked {
+    if !worktree.linked {
         // in place: the dir is not ours. Delete the thread only.
-        delete_in_place(width, out);
+        delete_in_place(worktree, out);
 
         return;
     }
 
-    if !path_value.exists() {
+    if !dir.exists() {
         out.push(Line::styled("  skip: worktree gone", theme::muted()));
         return;
     }
 
-    let repo = repo_of(path_value).unwrap_or_else(|| repo.to_path_buf());
+    let repo = repo_of(dir).unwrap_or_else(|| repo.to_path_buf());
     let repo = repo.as_path();
 
-    teardown(width, out, warn);
+    teardown(worktree, out, warn);
 
-    if !stash_changes(width, out, warn, danger) {
+    if !stash_changes(worktree, out, warn, danger) {
         return;
     }
 
-    if let Some(thread_3) = &width.thread {
-        let ok = delete_thread(&thread_3.id);
-        let short: String = thread_3.id.chars().take(12).collect();
+    if let Some(thread) = &worktree.thread {
+        let ok = delete_thread(&thread.id);
+        let short: String = thread.id.chars().take(12).collect();
 
         out.push(Line::raw(format!(
             "  thread {short}: {}",
             if ok { "deleted" } else { "delete failed" }
         )));
-        let _ = std::fs::remove_file(logs.join(format!("host-{}.log", thread_3.id)));
+        let _ = std::fs::remove_file(logs.join(format!("host-{}.log", thread.id)));
     }
 
-    let up = unpushed(&width.branch, path_value);
+    let up = unpushed(&worktree.branch, dir);
 
-    if width.branch == "(detached)" && up > 0 {
+    if worktree.branch == "(detached)" && up > 0 {
         out.push(Line::styled(
             format!("  skip: detached HEAD with {up} unpushed commits. commits would be lost."),
             danger,
@@ -150,14 +150,14 @@ fn remove_path_value(
         return;
     }
 
-    if let Err(error_value) = drop_worktree(repo, path_value) {
-        out.push(Line::styled(format!("  worktree: {error_value}"), danger));
+    if let Err(error) = drop_worktree(repo, dir) {
+        out.push(Line::styled(format!("  worktree: {error}"), danger));
         return;
     }
 
     out.push(Line::raw("  worktree removed"));
 
-    if width.branch == "(detached)" {
+    if worktree.branch == "(detached)" {
         return;
     }
 
@@ -165,62 +165,62 @@ fn remove_path_value(
 
     // the teardown script (docker down, test DB …) before the worktree goes
 
-    remove_branch(repo, &width.branch, up, out, warn, danger);
+    remove_branch(repo, &worktree.branch, up, out, warn, danger);
 }
 
 use crate::engine::store;
 
-fn preview_thread(thread_2: &crate::domain::threads::Thread, out: &mut Vec<Line<'static>>) {
+fn preview_thread(thread: &crate::domain::threads::Thread, out: &mut Vec<Line<'static>>) {
     out.push(Line::from(vec![
         Span::styled("thread ", theme::muted()),
-        Span::raw(thread_2.id.chars().take(12).collect::<String>()),
+        Span::raw(thread.id.chars().take(12).collect::<String>()),
         Span::styled(" · state ", theme::muted()),
-        Span::raw(thread_2.state.clone()),
+        Span::raw(thread.state.clone()),
         Span::styled(" · live sessions ", theme::muted()),
-        Span::raw(thread_2.live.to_string()),
+        Span::raw(thread.live.to_string()),
     ]));
 
-    for line in thread_2.title.lines() {
+    for line in thread.title.lines() {
         out.push(Line::raw(line.to_string()));
     }
 
-    if let Some(count) = &thread_2.needs {
+    if let Some(needs) = &thread.needs {
         out.push(Line::styled(
-            format!("needs you: {count}"),
+            format!("needs you: {needs}"),
             theme::fg(theme::pal().attention()),
         ));
     }
 
-    preview_agents(thread_2, out);
-    preview_facts(thread_2, out);
-    preview_task(thread_2, out);
+    preview_agents(thread, out);
+    preview_facts(thread, out);
+    preview_task(thread, out);
 }
 
-fn preview_agents(thread_2: &crate::domain::threads::Thread, out: &mut Vec<Line<'static>>) {
+fn preview_agents(thread: &crate::domain::threads::Thread, out: &mut Vec<Line<'static>>) {
     // agents: the last status each reported
-    if !thread_2.agents.is_empty() {
-        preview_agents_note(thread_2, out);
+    if !thread.agents.is_empty() {
+        preview_agent_notes(thread, out);
     }
 }
 
-fn preview_agents_note(thread_2: &crate::domain::threads::Thread, out: &mut Vec<Line<'static>>) {
+fn preview_agent_notes(thread: &crate::domain::threads::Thread, out: &mut Vec<Line<'static>>) {
     out.push(Line::raw(""));
 
-    for agent in &thread_2.agents {
-        preview_agents_note_note(thread_2, out, agent);
+    for agent in &thread.agents {
+        preview_agent_note(thread, out, agent);
     }
 }
 
-fn preview_agents_note_note(thread_2: &crate::domain::threads::Thread, out: &mut Vec<Line<'static>>, agent: &String) {
-    let note = thread_2
+fn preview_agent_note(thread: &crate::domain::threads::Thread, out: &mut Vec<Line<'static>>, agent: &String) {
+    let note = thread
         .notes
         .iter()
-        .find(|x| x.0 == *agent)
-        .map(|x| {
-            if x.2.is_empty() {
-                x.1.clone()
+        .find(|note| note.0 == *agent)
+        .map(|note| {
+            if note.2.is_empty() {
+                note.1.clone()
             } else {
-                format!("{} · {}", x.1, x.2)
+                format!("{} · {}", note.1, note.2)
             }
         })
         .unwrap_or_default();
@@ -231,30 +231,30 @@ fn preview_agents_note_note(thread_2: &crate::domain::threads::Thread, out: &mut
     ]));
 }
 
-fn preview_facts(thread_2: &crate::domain::threads::Thread, out: &mut Vec<Line<'static>>) {
+fn preview_facts(thread: &crate::domain::threads::Thread, out: &mut Vec<Line<'static>>) {
     let mut facts: Vec<String> = Vec::new();
 
-    if let Some((files, add, del)) = thread_2.stat.filter(|text| text.0 > 0) {
+    if let Some((files, add, del)) = thread.stat.filter(|stat| stat.0 > 0) {
         facts.push(format!("changes {files} files +{add} −{del}"));
     }
 
-    if let Some(path_value) = thread_2.port {
+    if let Some(port) = thread.port {
         facts.push(format!(
-            "ports {path_value}-{}",
-            path_value + crate::infra::worktree_setup::PORTS - 1
+            "ports {port}-{}",
+            port + crate::infra::worktree_setup::PORTS - 1
         ));
     }
 
-    if let Some(text_value) = &thread_2.setup {
-        facts.push(format!("setup {text_value}"));
+    if let Some(setup) = &thread.setup {
+        facts.push(format!("setup {setup}"));
     }
 
-    for user in &thread_2.urls {
-        facts.push(format!("↗ {}", user.trim_start_matches("https://")));
+    for url in &thread.urls {
+        facts.push(format!("↗ {}", url.trim_start_matches("https://")));
     }
 
-    if let Some(path_2) = &thread_2.parent {
-        facts.push(format!("continues {}", path_2.chars().take(12).collect::<String>()));
+    if let Some(parent) = &thread.parent {
+        facts.push(format!("continues {}", parent.chars().take(12).collect::<String>()));
     }
 
     if !facts.is_empty() {
@@ -263,12 +263,12 @@ fn preview_facts(thread_2: &crate::domain::threads::Thread, out: &mut Vec<Line<'
     }
 }
 
-fn preview_task(thread_2: &crate::domain::threads::Thread, out: &mut Vec<Line<'static>>) {
+fn preview_task(thread: &crate::domain::threads::Thread, out: &mut Vec<Line<'static>>) {
     // the task: its 1st lines
-    let task: Vec<&str> = thread_2
+    let task: Vec<&str> = thread
         .task
         .lines()
-        .filter(|line_value| !line_value.trim().is_empty())
+        .filter(|line| !line.trim().is_empty())
         .take(5)
         .collect();
 
@@ -277,14 +277,14 @@ fn preview_task(thread_2: &crate::domain::threads::Thread, out: &mut Vec<Line<'s
         out.push(Line::styled("task", theme::muted()));
         out.extend(
             task.iter()
-                .map(|line_2| Line::raw(line_2.chars().take(200).collect::<String>())),
+                .map(|line| Line::raw(line.chars().take(200).collect::<String>())),
         );
     }
 }
 
-fn teardown(width: &Worktree, out: &mut Vec<Line<'static>>, warn: Style) {
-    if let Some(thread_2) = &width.thread
-        && let Some(st) = store::load(&thread_2.id)
+fn teardown(worktree: &Worktree, out: &mut Vec<Line<'static>>, warn: Style) {
+    if let Some(thread) = &worktree.thread
+        && let Some(st) = store::load(&thread.id)
         && let Some((label, ok, output)) = crate::infra::worktree_setup::run_teardown(&st)
     {
         let st = if ok { theme::muted() } else { warn };
@@ -309,14 +309,14 @@ fn teardown(width: &Worktree, out: &mut Vec<Line<'static>>, warn: Style) {
     }
 }
 
-fn stash_changes(width: &Worktree, out: &mut Vec<Line<'static>>, warn: Style, danger: Style) -> bool {
-    let path_value = Path::new(&width.path);
-    let (_, dirty, _) = git(path_value, &["status", "--porcelain"]);
+fn stash_changes(worktree: &Worktree, out: &mut Vec<Line<'static>>, warn: Style, danger: Style) -> bool {
+    let dir = Path::new(&worktree.path);
+    let (_, dirty, _) = git(dir, &["status", "--porcelain"]);
     let n_dirty = dirty.lines().count();
 
     if n_dirty > 0 {
-        let msg = format!("codehead: {} before worktree removal", width.branch);
-        let (ok, _, err) = git(path_value, &["stash", "push", "--include-untracked", "-m", &msg]);
+        let msg = format!("codehead: {} before worktree removal", worktree.branch);
+        let (ok, _, err) = git(dir, &["stash", "push", "--include-untracked", "-m", &msg]);
 
         if !ok {
             out.push(Line::styled(format!("  skip: stash failed: {err}"), danger));
@@ -332,13 +332,13 @@ fn stash_changes(width: &Worktree, out: &mut Vec<Line<'static>>, warn: Style, da
     true
 }
 
-fn delete_in_place(width: &Worktree, out: &mut Vec<Line<'static>>) {
-    if let Some(thread_value) = &width.thread {
-        let ok = delete_thread(&thread_value.id);
+fn delete_in_place(worktree: &Worktree, out: &mut Vec<Line<'static>>) {
+    if let Some(thread) = &worktree.thread {
+        let ok = delete_thread(&thread.id);
 
         out.push(Line::raw(format!(
             "  thread {}: {} · dir kept (in place)",
-            thread_value.id.chars().take(12).collect::<String>(),
+            thread.id.chars().take(12).collect::<String>(),
             if ok { "deleted" } else { "delete failed" }
         )));
     }

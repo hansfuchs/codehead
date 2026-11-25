@@ -53,14 +53,10 @@ impl App {
 
         let (cmds, _) = self.commands();
 
-        items.extend(
-            cmds.into_iter()
-                .filter(|character| character.act != Act::Quit)
-                .map(open_ctx_body),
-        );
+        items.extend(cmds.into_iter().filter(|cmd| cmd.act != Act::Quit).map(ctx_item));
 
-        if let Some(message) = crate::ui::context_menu::Menu::new(title, items) {
-            self.overlays.ctx = Some(message);
+        if let Some(menu) = crate::ui::context_menu::Menu::new(title, items) {
+            self.overlays.ctx = Some(menu);
         }
     }
 
@@ -70,10 +66,10 @@ impl App {
         match out {
             Out::None => {}
             Out::Close => self.overlays.ctx = None,
-            Out::Run(agent) => {
+            Out::Run(action) => {
                 self.overlays.ctx = None;
 
-                match agent {
+                match action {
                     StartCtx::Flow => self.open_flow_menu(),
                     StartCtx::Run(act) => self.run(act),
                 }
@@ -86,9 +82,9 @@ impl App {
         let mut items: Vec<crate::screens::quick_menu::Item> = cmds
             .iter()
             .enumerate()
-            .map(|(i, character)| crate::screens::quick_menu::Item {
-                label: character.label.to_string(),
-                key: character.key.to_string(),
+            .map(|(i, cmd)| crate::screens::quick_menu::Item {
+                label: cmd.label.to_string(),
+                key: cmd.key.to_string(),
                 id: i,
                 section: "this screen",
             })
@@ -111,15 +107,11 @@ impl App {
     }
 }
 
-fn open_ctx_body(character_value: Cmd) -> crate::ui::context_menu::Item<StartCtx> {
+fn ctx_item(cmd: Cmd) -> crate::ui::context_menu::Item<StartCtx> {
     crate::ui::context_menu::Item::new(
-        character_value.label,
-        if character_value.key == "menu" {
-            ""
-        } else {
-            character_value.key
-        },
-        StartCtx::Run(character_value.act),
+        cmd.label,
+        if cmd.key == "menu" { "" } else { cmd.key },
+        StartCtx::Run(cmd.act),
     )
 }
 

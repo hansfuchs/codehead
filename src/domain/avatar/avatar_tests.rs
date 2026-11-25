@@ -2,34 +2,34 @@ use super::*;
 
 #[test]
 fn ids_round_trip() {
-    let agent = Avatar {
+    let geo = Avatar {
         cat: Cat::Geo,
         idx: 40,
         eyes: None,
         speed: 2.0,
     };
 
-    assert_eq!(agent.id(), "geo:40 speed=2");
-    assert_eq!(Avatar::parse(&agent.id()), Some(agent));
+    assert_eq!(geo.id(), "geo:40 speed=2");
+    assert_eq!(Avatar::parse(&geo.id()), Some(geo));
 
-    let group = Avatar {
+    let outline = Avatar {
         cat: Cat::GeoB,
         idx: 7,
         eyes: None,
         speed: 1.0,
     };
 
-    assert_eq!(group.id(), "geob:7");
-    assert_eq!(Avatar::parse(&group.id()), Some(group));
+    assert_eq!(outline.id(), "geob:7");
+    assert_eq!(Avatar::parse(&outline.id()), Some(outline));
 
-    let bytes = Avatar {
+    let regi = Avatar {
         cat: Cat::Regi,
         idx: 3,
         eyes: Some(5),
         speed: 0.5,
     };
 
-    assert_eq!(Avatar::parse(&bytes.id()), Some(bytes));
+    assert_eq!(Avatar::parse(&regi.id()), Some(regi));
     assert_eq!(Avatar::parse("pcb-042"), None);
     assert_eq!(Avatar::parse("regi:99999"), None);
 }
@@ -46,10 +46,7 @@ fn every_avatar_draws_7x4() {
             }
             .rows(Status::Working, 1.3);
 
-            assert!(
-                rows.iter().all(|result| result.chars().count() == WIDTH),
-                "{cat:?} {idx}"
-            );
+            assert!(rows.iter().all(|row| row.chars().count() == WIDTH), "{cat:?} {idx}");
         }
     }
 }
@@ -59,18 +56,18 @@ fn spawns_at_once_differ() {
     let mut taken = Vec::new();
 
     for _ in 0..spawn::count() {
-        let text = Spawn::random_except(&taken);
+        let spawn = Spawn::random_except(&taken);
 
-        assert!(!taken.contains(&text.anim));
+        assert!(!taken.contains(&spawn.anim));
 
-        taken.push(text.anim);
+        taken.push(spawn.anim);
     }
 }
 
 #[test]
 fn a_spawn_ends_on_the_first_frame_of_the_status() {
     // the goo's last frame before the snap = the status animation's frame at the snap: 0 jump
-    let blank = |character: char| character == ' ' || character == '\u{2800}';
+    let blank = |ch: char| ch == ' ' || ch == '\u{2800}';
 
     for (cat, idx, eyes) in [
         (Cat::Regi, 0, None),
@@ -78,52 +75,55 @@ fn a_spawn_ends_on_the_first_frame_of_the_status() {
         (Cat::Regi, 21, None),
         (Cat::Geo, 2, None),
     ] {
-        let agent = Avatar {
+        let avatar = Avatar {
             cat,
             idx,
             eyes,
             speed: 1.0,
         };
 
-        for text in [
+        for status in [
             Status::Idle,
             Status::Working,
             Status::Thinking,
             Status::Blocked,
             Status::Done,
         ] {
-            a_spawn_ends_on_the_first_frame_of_the_status_for_anim_in_0_spawn_count(blank, cat, idx, agent, text);
+            assert_spawns_end_on_status_frame(blank, cat, idx, avatar, status);
         }
     }
 }
 
-fn a_spawn_ends_on_the_first_frame_of_the_status_for_anim_in_0_spawn_count(
+fn assert_spawns_end_on_status_frame(
     blank: impl Fn(char) -> bool,
     cat: Cat,
     idx: usize,
-    agent: Avatar,
-    text: Status,
+    avatar: Avatar,
+    status: Status,
 ) {
     for anim in 0..spawn::count() {
         let sp = Spawn { anim, start: 3.7 };
         let end = spawn::timing(anim).2;
-        let target = sp.target(&agent, text);
+        let target = sp.target(&avatar, status);
 
-        assert_eq!(target, agent.cells(text, sp.start + end));
+        assert_eq!(target, avatar.cells(status, sp.start + end));
 
-        let goo = spawn::render(anim, &target, &|_| agent.cells(text, sp.start + end), end - 0.01);
+        let goo = spawn::render(anim, &target, &|_| avatar.cells(status, sp.start + end), end - 0.01);
         let (ax, ay) = SPAWN_AT;
 
-        let off = (0..WIDTH * HEIGHT).filter(|&key| {
-            let (group, thread) = (goo[(ay + key / WIDTH) * SPAWN_W + ax + key % WIDTH].ch, target[key].ch);
+        let off = (0..WIDTH * HEIGHT).filter(|&cell| {
+            let (formed, expected) = (
+                goo[(ay + cell / WIDTH) * SPAWN_W + ax + cell % WIDTH].ch,
+                target[cell].ch,
+            );
 
-            blank(group) != blank(thread)
+            blank(formed) != blank(expected)
         });
 
         assert_eq!(
             off.count(),
             0,
-            "{cat:?} {idx} {text:?} anim {anim} ({})",
+            "{cat:?} {idx} {status:?} anim {anim} ({})",
             spawn::name(anim)
         );
     }
@@ -131,15 +131,15 @@ fn a_spawn_ends_on_the_first_frame_of_the_status_for_anim_in_0_spawn_count(
 
 #[test]
 fn a_spawn_ends() {
-    let text = Spawn {
+    let ended = Spawn {
         anim: 7,
         start: now() - 10.0,
     };
 
-    assert!(text.done() && text.rows(&Avatar::default(), Status::Idle).is_none());
+    assert!(ended.done() && ended.rows(&Avatar::default(), Status::Idle).is_none());
 
-    let text_value = Spawn { anim: 7, start: now() };
+    let started = Spawn { anim: 7, start: now() };
 
-    assert!(text_value.rows(&Avatar::default(), Status::Idle).is_some());
-    assert_eq!(text_value.reveal(), 0.0);
+    assert!(started.rows(&Avatar::default(), Status::Idle).is_some());
+    assert_eq!(started.reveal(), 0.0);
 }

@@ -4,29 +4,28 @@ use super::*;
 fn a_leading_bang_runs_a_shell_command_its_output_goes_along_with_the_next_message() {
     let (tx, rx) = crate::infra::bus::channel();
     let mut view = View::new("shelltest-0000", Path::new("/tmp"), "t", tx);
-    let mut thread = Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
+    let mut term = Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
 
-    thread.draw(|file| view.draw(file)).unwrap();
+    term.draw(|frame| view.draw(frame)).unwrap();
 
-    let shown = |thread: &Terminal<ratatui::backend::TestBackend>| {
-        thread
-            .backend()
+    let shown = |term: &Terminal<ratatui::backend::TestBackend>| {
+        term.backend()
             .buffer()
             .content()
             .iter()
-            .map(|character| character.symbol().to_string())
+            .map(|cell| cell.symbol().to_string())
             .collect::<String>()
     };
 
-    assert!(shown(&thread).contains("! for shell mode"));
+    assert!(shown(&term).contains("! for shell mode"));
 
     for character in "!echo hi; echo oops >&2; exit 3".chars() {
         view.key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }
 
-    thread.draw(|file| view.draw(file)).unwrap();
+    term.draw(|frame| view.draw(frame)).unwrap();
 
-    assert!(shown(&thread).contains("! shell mode"), "{}", shown(&thread));
+    assert!(shown(&term).contains("! shell mode"), "{}", shown(&term));
 
     // enter runs it: 0 message to the agents
     view.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -41,12 +40,12 @@ fn a_leading_bang_runs_a_shell_command_its_output_goes_along_with_the_next_messa
     assert!(out.contains("hi") && out.contains("oops"), "{out}");
 
     view.shell_done(cmd, out, code, &dir);
-    thread.draw(|file| view.draw(file)).unwrap();
+    term.draw(|frame| view.draw(frame)).unwrap();
 
     assert!(
-        shown(&thread).contains("exit 3") && shown(&thread).contains("⎿ hi") && shown(&thread).contains("in /tmp"),
+        shown(&term).contains("exit 3") && shown(&term).contains("⎿ hi") && shown(&term).contains("in /tmp"),
         "{}",
-        shown(&thread)
+        shown(&term)
     );
 
     // the next message takes the output along (for the agents only), once
@@ -87,20 +86,19 @@ fn shell_mode_completes_project_tasks_and_suggests_from_the_history() {
 
     view.shell_state.shell_cwd = dir.clone();
     view.prompt.comp.catalog.history = Some(std::sync::Arc::new(Vec::new()));
-    let mut thread = Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
+    let mut term = Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
 
-    let shown = |thread: &Terminal<ratatui::backend::TestBackend>| {
-        thread
-            .backend()
+    let shown = |term: &Terminal<ratatui::backend::TestBackend>| {
+        term.backend()
             .buffer()
             .content()
             .iter()
-            .map(|character| character.symbol().to_string())
+            .map(|cell| cell.symbol().to_string())
             .collect::<String>()
     };
 
-    let key = |view: &mut View, character: KeyCode| {
-        view.key(KeyEvent::new(character, KeyModifiers::NONE));
+    let key = |view: &mut View, code: KeyCode| {
+        view.key(KeyEvent::new(code, KeyModifiers::NONE));
     };
 
     // `just `: its recipes at once, with their docs; tab: the 1st in the prompt, enter takes it
@@ -108,12 +106,12 @@ fn shell_mode_completes_project_tasks_and_suggests_from_the_history() {
         key(&mut view, KeyCode::Char(character));
     }
 
-    thread.draw(|file| view.draw(file)).unwrap();
+    term.draw(|frame| view.draw(frame)).unwrap();
 
     assert!(
-        shown(&thread).contains("build the app") && shown(&thread).contains("run the tests"),
+        shown(&term).contains("build the app") && shown(&term).contains("run the tests"),
         "{}",
-        shown(&thread)
+        shown(&term)
     );
 
     key(&mut view, KeyCode::Tab);
@@ -134,9 +132,9 @@ fn shell_mode_completes_project_tasks_and_suggests_from_the_history() {
         ts: 0,
         dir: None,
     });
-    thread.draw(|file| view.draw(file)).unwrap();
+    term.draw(|frame| view.draw(frame)).unwrap();
 
-    assert!(shown(&thread).contains("! just test --nocapture"), "{}", shown(&thread));
+    assert!(shown(&term).contains("! just test --nocapture"), "{}", shown(&term));
 
     key(&mut view, KeyCode::Right);
 
@@ -157,8 +155,8 @@ fn shell_mode_cycles_its_commands_and_down_below_them_edits_the_dir() {
     let (tx, _rx) = crate::infra::bus::channel();
     let mut view = View::new("shelltest-0001", Path::new("/tmp"), "t", tx);
 
-    let key = |view: &mut View, character: KeyCode| {
-        view.key(KeyEvent::new(character, KeyModifiers::NONE));
+    let key = |view: &mut View, code: KeyCode| {
+        view.key(KeyEvent::new(code, KeyModifiers::NONE));
     };
 
     // `!` on an empty prompt: a space after it
@@ -179,9 +177,9 @@ fn shell_mode_cycles_its_commands_and_down_below_them_edits_the_dir() {
 
     assert_eq!(view.prompt.input.text(), "! ");
 
-    for character in ["ls", "pwd", "ls"] {
+    for command in ["ls", "pwd", "ls"] {
         view.thread.items.push(chat::Item::Shell {
-            command: character.into(),
+            command: command.into(),
             output: String::new(),
             code: 0,
             ts: 0,
@@ -246,10 +244,10 @@ fn assert_shell_directory(mut view: View, key: impl Fn(&mut View, KeyCode)) {
     assert_eq!(view.shell_state.shell_running, 0);
 
     let (tx, _rx) = crate::infra::bus::channel();
-    let width = View::new("shelltest-0001", Path::new("/"), "t", tx);
+    let reopened = View::new("shelltest-0001", Path::new("/"), "t", tx);
 
     assert_eq!(
-        width.shell_state.shell_cwd,
+        reopened.shell_state.shell_cwd,
         std::fs::canonicalize(std::env::temp_dir()).unwrap(),
         "the pick stays"
     );
@@ -279,9 +277,9 @@ fn a_comment_opens_a_modal_and_the_prompt_keeps_its_draft() {
         "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n x\n-a\n+b\n y\n",
     ));
     view.prompt.input.set_text("half a message");
-    let mut thread = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    let mut term = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
 
-    thread.draw(|file| view.draw(file)).unwrap();
+    term.draw(|frame| view.draw(frame)).unwrap();
     view.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
 
     assert!(
@@ -344,9 +342,9 @@ fn a_message_from_the_changes_view_takes_the_selection_along() {
     view.panes.changes.set_files(crate::features::changes::parse(
         "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n x\n-a\n+b\n y\n",
     ));
-    let mut thread = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    let mut term = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
 
-    thread.draw(|file| view.draw(file)).unwrap();
+    term.draw(|frame| view.draw(frame)).unwrap();
 
     // ↓ ↓ ↓ ↓: `+ b`; space: selected
     for _ in 0..4 {
@@ -366,13 +364,13 @@ fn a_message_from_the_changes_view_takes_the_selection_along() {
     );
 
     // the chat above the prompt shows (narrow: 0 split)
-    let text_value = {
-        thread.draw(|file| view.draw(file)).unwrap();
-        thread.backend().buffer().clone()
+    let buf = {
+        term.draw(|frame| view.draw(frame)).unwrap();
+        term.backend().buffer().clone()
     };
 
     let rows: Vec<String> = (0..30)
-        .map(|y| (0..100).map(|x| text_value[(x, y)].symbol().to_string()).collect())
+        .map(|y| (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect())
         .collect();
 
     assert!(rows.iter().any(|line| line.contains("▾ chat · t: fold")), "{rows:#?}");
@@ -393,9 +391,9 @@ fn an_agent_named_in_a_comment_gets_it_at_once_with_its_thread() {
     view.panes.changes.set_files(crate::features::changes::parse(
         "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n x\n-a\n+b\n y\n",
     ));
-    let mut thread = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    let mut term = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
 
-    thread.draw(|file| view.draw(file)).unwrap();
+    term.draw(|frame| view.draw(frame)).unwrap();
 
     // ↓ ↓ ↓ ↓: `+ b`; c: the comment modal; a draft in the prompt stays
     view.prompt.input.set_text("my draft");

@@ -4,8 +4,8 @@ impl View {
     pub(super) fn draw_footer(&mut self, frame: &mut Frame, foot: Rect) {
         // footer: keys or toast right
         let right = match &self.toast {
-            Some((message, at)) if at.elapsed() < Duration::from_secs(3) => {
-                Line::from(Span::styled(format!("{message} "), theme::fg(theme::pal().info())))
+            Some((toast, at)) if at.elapsed() < Duration::from_secs(3) => {
+                Line::from(Span::styled(format!("{toast} "), theme::fg(theme::pal().info())))
             }
             _ if self.agents.agents_focus.is_some() => {
                 Line::from(theme::hints("←→ agent · ↑↓ · enter · 1-3 · tab: next · esc: prompt "))
@@ -36,14 +36,14 @@ impl View {
             .mode()
             .map(|(label, risky)| theme::mode_badge(label, risky))
             .unwrap_or_default();
-        let bw = (badge.iter().map(|text| text.content.chars().count()).sum::<usize>() as u16).min(foot.width);
+        let badge_w = (badge.iter().map(|span| span.content.chars().count()).sum::<usize>() as u16).min(foot.width);
 
-        frame.render_widget(Paragraph::new(Line::from(badge)), Rect { width: bw, ..foot });
+        frame.render_widget(Paragraph::new(Line::from(badge)), Rect { width: badge_w, ..foot });
         frame.render_widget(
             Paragraph::new(right).right_aligned(),
             Rect {
-                x: foot.x + bw,
-                width: foot.width - bw,
+                x: foot.x + badge_w,
+                width: foot.width - badge_w,
                 ..foot
             },
         );

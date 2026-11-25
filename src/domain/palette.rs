@@ -141,14 +141,14 @@ impl Palette {
     pub(crate) fn preset(name: &str) -> Option<Palette> {
         PRESETS
             .iter()
-            .find(|(count, _)| *count == name.trim())
-            .map(|(_, path)| *path)
+            .find(|(preset, _)| *preset == name.trim())
+            .map(|(_, palette)| *palette)
     }
 
     pub(crate) fn get(&self, name: &str) -> Option<Color> {
-        let mut path = *self;
+        let mut palette = *self;
 
-        path.slot(name).map(|character| *character)
+        palette.slot(name).map(|color| *color)
     }
 
     fn slot(&mut self, name: &str) -> Option<&mut Color> {
@@ -175,13 +175,13 @@ impl Palette {
 
     /// Preset SCHEME (unknown / None: the default) with OVERRIDES (name → `#RRGGBB`).
     pub(crate) fn build<'a>(scheme: Option<&str>, overrides: impl IntoIterator<Item = (&'a str, &'a str)>) -> Palette {
-        let mut path = scheme.and_then(Palette::preset).unwrap_or(PRESETS[0].1);
+        let mut palette = scheme.and_then(Palette::preset).unwrap_or(PRESETS[0].1);
 
         for (name, hex) in overrides {
-            set_palette_slot(&mut path, name, hex);
+            set_palette_slot(&mut palette, name, hex);
         }
 
-        path
+        palette
     }
 
     // Roles: what a color means. 1 role, 1 hue; a hue may serve 2 roles of 1 family.
@@ -223,43 +223,43 @@ impl Palette {
     }
 }
 
-fn set_palette_slot(path: &mut Palette, name: &str, hex: &str) {
-    if let (Some(slot), Some(character)) = (path.slot(name), parse_hex(hex)) {
-        *slot = character;
+fn set_palette_slot(palette: &mut Palette, name: &str, hex: &str) {
+    if let (Some(slot), Some(color)) = (palette.slot(name), parse_hex(hex)) {
+        *slot = color;
     }
 }
 
 /// `#RRGGBB` (or `RRGGBB`) → the color.
 pub(crate) fn parse_hex(text: &str) -> Option<Color> {
-    let height = text.trim().trim_start_matches('#');
+    let hex = text.trim().trim_start_matches('#');
 
-    if height.len() != 6 || !height.chars().all(|character| character.is_ascii_hexdigit()) {
+    if hex.len() != 6 || !hex.chars().all(|character| character.is_ascii_hexdigit()) {
         return None;
     }
 
-    let value = |i: usize| u8::from_str_radix(&height[i..i + 2], 16).ok();
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
 
-    Some(Color::Rgb(value(0)?, value(2)?, value(4)?))
+    Some(Color::Rgb(byte(0)?, byte(2)?, byte(4)?))
 }
 
 /// C as `#RRGGBB`.
 pub(crate) fn hex(color: Color) -> String {
-    let (result, group, bytes) = rgb(color);
+    let (red, green, blue) = rgb(color);
 
-    format!("#{result:02X}{group:02X}{bytes:02X}")
+    format!("#{red:02X}{green:02X}{blue:02X}")
 }
 
 static PAL: std::sync::RwLock<Palette> = std::sync::RwLock::new(LAVENDER);
 
 /// The palette in use.
 pub(crate) fn pal() -> Palette {
-    PAL.read().map_or(LAVENDER, |path| *path)
+    PAL.read().map_or(LAVENDER, |palette| *palette)
 }
 
 /// Use P from now on (start, settings).
-pub(crate) fn set_palette(path: Palette) {
+pub(crate) fn set_palette(palette: Palette) {
     if let Ok(mut cur) = PAL.write() {
-        *cur = path;
+        *cur = palette;
     }
 }
 
@@ -308,22 +308,22 @@ pub(crate) fn rgb(color: Color) -> (u8, u8, u8) {
     ];
 
     match color {
-        Color::Rgb(color_value, color_2, color_3) => (color_value, color_2, color_3),
+        Color::Rgb(red, green, blue) => (red, green, blue),
         Color::Indexed(i) if i < 16 => term[usize::from(i)],
         Color::Indexed(i) if i < 232 => {
-            let value = |count: u8| if count == 0 { 0 } else { 55 + count * 40 };
+            let level = |step: u8| if step == 0 { 0 } else { 55 + step * 40 };
             let i = i - 16;
 
-            (value(i / 36), value(i / 6 % 6), value(i % 6))
+            (level(i / 36), level(i / 6 % 6), level(i % 6))
         }
         Color::Indexed(i) => {
-            let group = 8 + (i - 232) * 10;
+            let gray = 8 + (i - 232) * 10;
 
-            (group, group, group)
+            (gray, gray, gray)
         }
-        character => named
+        other => named
             .iter()
-            .position(|count_value| *count_value == character)
+            .position(|named_color| *named_color == other)
             .map_or(rgb(pal().accent), |i| term[i]),
     }
 }
@@ -331,90 +331,83 @@ pub(crate) fn rgb(color: Color) -> (u8, u8, u8) {
 /// C with its HSL saturation times KEEP (0.4: 60% less; 1.4: 40% more, at most full), same hue
 /// and lightness.
 pub(crate) fn desaturate(color: Color, keep: f32) -> Color {
-    let (result, group, bytes) = rgb(color);
-    let (result_value, group_value, bytes_value) = (
-        f32::from(result) / 255.0,
-        f32::from(group) / 255.0,
-        f32::from(bytes) / 255.0,
+    let (red, green, blue) = rgb(color);
+    let (red, green, blue) = (
+        f32::from(red) / 255.0,
+        f32::from(green) / 255.0,
+        f32::from(blue) / 255.0,
     );
-    let (max, min) = (
-        result_value.max(group_value).max(bytes_value),
-        result_value.min(group_value).min(bytes_value),
-    );
-    let line = f32::midpoint(max, min);
+    let (max, min) = (red.max(green).max(blue), red.min(green).min(blue));
+    let lightness = f32::midpoint(max, min);
 
     if max.total_cmp(&min).is_eq() {
-        return Color::Rgb(
-            (result_value * 255.0) as u8,
-            (group_value * 255.0) as u8,
-            (bytes_value * 255.0) as u8,
-        );
+        return Color::Rgb((red * 255.0) as u8, (green * 255.0) as u8, (blue * 255.0) as u8);
     }
 
-    let directory = max - min;
+    let chroma = max - min;
 
-    let text = if line > 0.5 {
-        directory / (2.0 - max - min)
+    let saturation = if lightness > 0.5 {
+        chroma / (2.0 - max - min)
     } else {
-        directory / (max + min)
+        chroma / (max + min)
     };
 
-    let sector = if max.total_cmp(&result_value).is_eq() {
-        (group_value - bytes_value) / directory + if group_value < bytes_value { 6.0 } else { 0.0 }
-    } else if max.total_cmp(&group_value).is_eq() {
-        (bytes_value - result_value) / directory + 2.0
+    let sector = if max.total_cmp(&red).is_eq() {
+        (green - blue) / chroma + if green < blue { 6.0 } else { 0.0 }
+    } else if max.total_cmp(&green).is_eq() {
+        (blue - red) / chroma + 2.0
     } else {
-        (result_value - group_value) / directory + 4.0
+        (red - green) / chroma + 4.0
     };
 
-    hsl_to_rgb(keep, line, text, sector)
+    hsl_to_rgb(keep, lightness, saturation, sector)
 }
 
-fn hsl_to_rgb(keep: f32, line: f32, text: f32, sector: f32) -> Color {
-    let height = sector / 6.0;
-    let text_value = (text * keep).min(1.0);
+fn hsl_to_rgb(keep: f32, lightness: f32, saturation: f32, sector: f32) -> Color {
+    let hue = sector / 6.0;
+    let kept = (saturation * keep).min(1.0);
 
-    let query = if line < 0.5 {
-        line * (1.0 + text_value)
+    let upper = if lightness < 0.5 {
+        lightness * (1.0 + kept)
     } else {
-        line + text_value - line * text_value
+        lightness + kept - lightness * kept
     };
 
-    let path = 2.0 * line - query;
+    let lower = 2.0 * lightness - upper;
 
-    let hue = |mut thread: f32| {
-        if thread < 0.0 {
-            thread += 1.0;
+    let channel = |mut offset: f32| {
+        if offset < 0.0 {
+            offset += 1.0;
         }
 
-        if thread > 1.0 {
-            thread -= 1.0;
+        if offset > 1.0 {
+            offset -= 1.0;
         }
 
-        if thread < 1.0 / 6.0 {
-            path + (query - path) * 6.0 * thread
-        } else if thread < 0.5 {
-            query
-        } else if thread < 2.0 / 3.0 {
-            path + (query - path) * (2.0 / 3.0 - thread) * 6.0
+        if offset < 1.0 / 6.0 {
+            lower + (upper - lower) * 6.0 * offset
+        } else if offset < 0.5 {
+            upper
+        } else if offset < 2.0 / 3.0 {
+            lower + (upper - lower) * (2.0 / 3.0 - offset) * 6.0
         } else {
-            path
+            lower
         }
     };
 
-    let to = |value: f32| (value * 255.0).round().clamp(0.0, 255.0) as u8;
+    let to = |level: f32| (level * 255.0).round().clamp(0.0, 255.0) as u8;
 
     Color::Rgb(
-        to(hue(height + 1.0 / 3.0)),
-        to(hue(height)),
-        to(hue(height - 1.0 / 3.0)),
+        to(channel(hue + 1.0 / 3.0)),
+        to(channel(hue)),
+        to(channel(hue - 1.0 / 3.0)),
     )
 }
 
-/// C mixed into BASE: A of C (0: BASE, 1: C).
-pub(crate) fn tint(color: Color, base: Color, agent: f32) -> Color {
-    let ((result, group, bytes), (r0, g0, b0)) = (rgb(color), rgb(base));
-    let message = |x: u8, y: u8| (f32::from(y) + (f32::from(x) - f32::from(y)) * agent).round() as u8;
+/// C mixed into BASE: AMOUNT of C (0: BASE, 1: C).
+pub(crate) fn tint(color: Color, base: Color, amount: f32) -> Color {
+    let ((red, green, blue), (base_red, base_green, base_blue)) = (rgb(color), rgb(base));
+    let mix = |x: u8, y: u8| (f32::from(y) + (f32::from(x) - f32::from(y)) * amount).round() as u8;
 
-    Color::Rgb(message(result, r0), message(group, g0), message(bytes, b0))
+    Color::Rgb(mix(red, base_red), mix(green, base_green), mix(blue, base_blue))
 }

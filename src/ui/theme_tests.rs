@@ -13,24 +13,24 @@ fn hint_keys_stand_out() {
     let spans = hints("tab: menu · ctrl+f filter · enter");
     let keys: Vec<&str> = spans
         .iter()
-        .filter(|text_value| text_value.style == text())
-        .map(|text_2| text_2.content.as_ref())
+        .filter(|span| span.style == text())
+        .map(|span| span.content.as_ref())
         .collect();
 
     assert_eq!(keys, ["tab", "ctrl+f", "enter"]);
     assert_eq!(
-        spans.iter().map(|text_3| text_3.content.as_ref()).collect::<String>(),
+        spans.iter().map(|span| span.content.as_ref()).collect::<String>(),
         "tab: menu · ctrl+f filter · enter"
     );
 }
 
 #[test]
 fn mode_badges() {
-    let bytes = mode_badge("shell", true);
+    let badge = mode_badge("shell", true);
 
-    assert_eq!(bytes[0].content, " SHELL ");
+    assert_eq!(badge[0].content, " SHELL ");
     assert_eq!(
-        (bytes[0].style.bg, bytes[0].style.fg),
+        (badge[0].style.bg, badge[0].style.fg),
         (Some(pal().caution()), Some(pal().on_accent))
     );
     assert_eq!(mode_badge("search", false)[0].style.bg, Some(pal().surface1));
@@ -38,10 +38,10 @@ fn mode_badges() {
 
 #[test]
 fn old_color_names_still_set_a_slot() {
-    let path = Palette::build(Some("coral"), [("danger", "#112233"), ("panel", "#445566")]);
+    let palette = Palette::build(Some("coral"), [("danger", "#112233"), ("panel", "#445566")]);
 
     assert_eq!(
-        (path.red, path.surface0),
+        (palette.red, palette.surface0),
         (Color::Rgb(0x11, 0x22, 0x33), Color::Rgb(0x44, 0x55, 0x66))
     );
     assert_eq!(Palette::build(None, []), LAVENDER);
@@ -51,39 +51,36 @@ fn old_color_names_still_set_a_slot() {
 fn lavender_accent_is_no_status_hue() {
     // the default's accent stays apart from every status hue (hue distance ≥ 40°)
     let hue = |color: Color| {
-        let (result, group, bytes) = rgb(color);
-        let (result_value, group_value, bytes_value) = (f32::from(result), f32::from(group), f32::from(bytes));
-        let (max, min) = (
-            result_value.max(group_value).max(bytes_value),
-            result_value.min(group_value).min(bytes_value),
-        );
-        let directory = max - min;
+        let (red, green, blue) = rgb(color);
+        let (red, green, blue) = (f32::from(red), f32::from(green), f32::from(blue));
+        let (max, min) = (red.max(green).max(blue), red.min(green).min(blue));
+        let chroma = max - min;
 
-        let height = if max.partial_cmp(&result_value) == Some(std::cmp::Ordering::Equal) {
-            (group_value - bytes_value) / directory % 6.0
-        } else if max.partial_cmp(&group_value) == Some(std::cmp::Ordering::Equal) {
-            (bytes_value - result_value) / directory + 2.0
+        let sector = if max.partial_cmp(&red) == Some(std::cmp::Ordering::Equal) {
+            (green - blue) / chroma % 6.0
+        } else if max.partial_cmp(&green) == Some(std::cmp::Ordering::Equal) {
+            (blue - red) / chroma + 2.0
         } else {
-            (result_value - group_value) / directory + 4.0
+            (red - green) / chroma + 4.0
         };
 
-        (height * 60.0 + 360.0) % 360.0
+        (sector * 60.0 + 360.0) % 360.0
     };
 
-    let path = LAVENDER;
+    let palette = LAVENDER;
 
-    for character in [
-        path.red,
-        path.peach,
-        path.yellow,
-        path.green,
-        path.teal,
-        path.sky,
-        path.mauve,
+    for color in [
+        palette.red,
+        palette.peach,
+        palette.yellow,
+        palette.green,
+        palette.teal,
+        palette.sky,
+        palette.mauve,
     ] {
-        let directory_value = (hue(path.accent) - hue(character)).abs();
+        let distance = (hue(palette.accent) - hue(color)).abs();
 
-        assert!(directory_value.min(360.0 - directory_value) >= 40.0, "{character:?}");
+        assert!(distance.min(360.0 - distance) >= 40.0, "{color:?}");
     }
 }
 
@@ -105,19 +102,19 @@ fn lavender_accent_contrast() {
 }
 
 fn lavender_accent_contrast_lin(color: Color) -> f32 {
-    let (result, group, bytes) = rgb(color);
+    let (red, green, blue) = rgb(color);
 
     let lin = |value: u8| {
-        let value_value = f32::from(value) / 255.0;
+        let channel = f32::from(value) / 255.0;
 
-        if value_value <= 0.040_45 {
-            value_value / 12.92
+        if channel <= 0.040_45 {
+            channel / 12.92
         } else {
-            ((value_value + 0.055) / 1.055).powf(2.4)
+            ((channel + 0.055) / 1.055).powf(2.4)
         }
     };
 
-    0.2126 * lin(result) + 0.7152 * lin(group) + 0.0722 * lin(bytes)
+    0.2126 * lin(red) + 0.7152 * lin(green) + 0.0722 * lin(blue)
 }
 
 #[test]
@@ -125,9 +122,9 @@ fn desaturation_keeps_hue() {
     // gray stays gray; red keeps its hue, 40% of its saturation
     assert_eq!(desaturate(Color::Rgb(128, 128, 128), 0.4), Color::Rgb(128, 128, 128));
 
-    let Color::Rgb(color, color_value, color_2) = desaturate(Color::Rgb(255, 0, 0), 0.4) else {
+    let Color::Rgb(red, green, blue) = desaturate(Color::Rgb(255, 0, 0), 0.4) else {
         panic!()
     };
 
-    assert_eq!((color, color_value, color_2), (179, 77, 77));
+    assert_eq!((red, green, blue), (179, 77, 77));
 }

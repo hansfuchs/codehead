@@ -29,13 +29,13 @@ impl TextArea {
             (&mut self.redo, &mut self.undo)
         };
 
-        if let Some(text) = src.pop() {
+        if let Some(snapshot) = src.pop() {
             dst.push(Snapshot {
                 lines: self.lines.clone(),
                 cur: self.cur,
             });
-            self.lines = text.lines;
-            self.cur = text.cur;
+            self.lines = snapshot.lines;
+            self.cur = snapshot.cur;
             self.anchor = None;
             self.last_op = None;
             self.follow = true;
@@ -45,7 +45,7 @@ impl TextArea {
 
     /// After an edit: 0 change → drop the step SNAPSHOT pushed (if it pushed 1).
     pub(super) fn drop_noop(&mut self, pushed: bool) {
-        if pushed && self.undo.last().is_some_and(|text| text.lines == self.lines) {
+        if pushed && self.undo.last().is_some_and(|snapshot| snapshot.lines == self.lines) {
             self.undo.pop();
             self.last_op = None;
         }

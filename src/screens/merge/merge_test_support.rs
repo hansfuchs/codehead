@@ -26,27 +26,27 @@ pub(crate) fn pr() -> Pr {
     }
 }
 
-pub(crate) fn with(path: Pr) -> Merge {
-    let mut message = Merge::one(path.pr.clone());
-    let key = path.pr.clone();
+pub(crate) fn with(pr: Pr) -> Merge {
+    let mut merge = Merge::one(pr.pr.clone());
+    let key = pr.pr.clone();
 
-    message.tabs.entry(key).or_default().pr = Some(path);
-    message
+    merge.tabs.entry(key).or_default().pr = Some(pr);
+    merge
 }
 
-pub(super) fn key(message: &mut Merge, character: KeyCode) -> Act {
-    message.key(KeyEvent::new(character, KeyModifiers::NONE))
+pub(super) fn key(merge: &mut Merge, code: KeyCode) -> Act {
+    merge.key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
-pub(super) fn focus(message: &Merge) -> Option<Stop> {
-    message.tab_ref().and_then(|thread| thread.focus)
+pub(super) fn focus(merge: &Merge) -> Option<Stop> {
+    merge.tab_ref().and_then(|tab| tab.focus)
 }
 
-pub(super) fn draw(message: &mut Merge, width: u16, height: u16) -> String {
+pub(super) fn draw(merge: &mut Merge, width: u16, height: u16) -> String {
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut term = ratatui::Terminal::new(backend).unwrap();
 
-    term.draw(|file| message.draw(file, file.area(), true)).unwrap();
+    term.draw(|frame| merge.draw(frame, frame.area(), true)).unwrap();
     let buf = term.backend().buffer().clone();
 
     (0..height)
@@ -55,19 +55,19 @@ pub(super) fn draw(message: &mut Merge, width: u16, height: u16) -> String {
         .join("\n")
 }
 
-pub(super) fn buffer(message: &mut Merge, width: u16, height: u16) -> ratatui::buffer::Buffer {
+pub(super) fn buffer(merge: &mut Merge, width: u16, height: u16) -> ratatui::buffer::Buffer {
     let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
 
-    term.draw(|file| message.draw(file, file.area(), true)).unwrap();
+    term.draw(|frame| merge.draw(frame, frame.area(), true)).unwrap();
     term.backend().buffer().clone()
 }
 
 /// The bg of the 1st cell of TEXT on screen.
 pub(super) fn bg_of(buf: &ratatui::buffer::Buffer, text: &str) -> Color {
-    let agent = buf.area;
+    let area = buf.area;
 
-    for y in 0..agent.height {
-        let row: Vec<String> = (0..agent.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
+    for y in 0..area.height {
+        let row: Vec<String> = (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
         let line = row.concat();
 
         if let Some(i) = line.find(text) {
@@ -81,11 +81,11 @@ pub(super) fn bg_of(buf: &ratatui::buffer::Buffer, text: &str) -> Color {
 }
 
 /// A gh result as the background thread sends it.
-pub(super) fn done(message: &mut Merge, op: Op) {
-    message.poll(false);
-    let _ = message.tx.send(Res::Op(pr().pr, op, Ok(())));
+pub(super) fn done(merge: &mut Merge, op: Op) {
+    merge.poll(false);
+    let _ = merge.tx.send(Res::Op(pr().pr, op, Ok(())));
 
-    message.poll(false);
+    merge.poll(false);
 }
 
 fn fixture_checks() -> Vec<gh::Check> {

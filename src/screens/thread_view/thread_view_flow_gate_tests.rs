@@ -2,15 +2,15 @@ use super::*;
 use ratatui::backend::TestBackend;
 
 fn press(view: &mut View, codes: &[KeyCode]) {
-    for &character in codes {
-        view.key(KeyEvent::new(character, KeyModifiers::NONE));
+    for &code in codes {
+        view.key(KeyEvent::new(code, KeyModifiers::NONE));
     }
 }
 
 fn screen(view: &mut View) -> Vec<String> {
     let mut term = Terminal::new(TestBackend::new(90, 40)).unwrap();
 
-    term.draw(|file| view.draw(file)).unwrap();
+    term.draw(|frame| view.draw(frame)).unwrap();
     let buf = term.backend().buffer().clone();
 
     (0..buf.area.height)
@@ -46,7 +46,7 @@ fn a_gate_never_blocks_the_owners_message() {
         view.ops
             .borrow()
             .iter()
-            .filter(|output| output["op"] == "prompt")
+            .filter(|recorded| recorded["op"] == "prompt")
             .count()
     };
 
@@ -54,7 +54,7 @@ fn a_gate_never_blocks_the_owners_message() {
         view.ops
             .borrow()
             .iter()
-            .filter(|output| output["op"] == "flow_answer")
+            .filter(|recorded| recorded["op"] == "flow_answer")
             .count()
     };
 
@@ -66,7 +66,7 @@ fn a_gate_never_blocks_the_owners_message() {
         "{text}"
     );
 
-    assert_owner_gate(&(thread), view, sends, answers);
+    assert_owner_gate(&thread, view, sends, answers);
 }
 
 fn assert_owner_gate(
@@ -94,7 +94,7 @@ fn assert_owner_gate(
         view.thread
             .asks
             .iter()
-            .any(|agent| agent.tool == crate::engine::flows::run::WAIT_TOOL),
+            .any(|ask| ask.tool == crate::engine::flows::run::WAIT_TOOL),
         "the gate stays"
     );
 
@@ -117,7 +117,7 @@ fn assert_owner_gate(
         view.thread
             .asks
             .iter()
-            .any(|agent| agent.tool == crate::engine::flows::run::WAIT_TOOL)
+            .any(|ask| ask.tool == crate::engine::flows::run::WAIT_TOOL)
     );
 
     let _ = store::delete(&thread.id);
@@ -189,7 +189,7 @@ fn the_flow_row_shows_a_gate_and_its_box_answers_and_switches() {
 
     assert!(!view.ask.focus, "an empty prompt, 0 keys: the gate still waits for tab");
 
-    assert_flow_gate_completion(&(thread), view);
+    assert_flow_gate_completion(&thread, view);
 }
 
 fn assert_flow_gate_completion(thread: &store::Thread, mut view: View) {
@@ -214,7 +214,7 @@ fn assert_flow_gate_completion(thread: &store::Thread, mut view: View) {
         .ops
         .borrow()
         .iter()
-        .find(|output| output["op"] == "flow_answer")
+        .find(|recorded| recorded["op"] == "flow_answer")
         .cloned()
         .unwrap();
 
@@ -225,7 +225,7 @@ fn assert_flow_gate_completion(thread: &store::Thread, mut view: View) {
     assert_eq!(view.prompt.input.text(), "");
     assert!(view.thread.asks.is_empty(), "answered: the flow's ask goes");
     assert!(
-        !view.ops.borrow().iter().any(|output| output["op"] == "answer"),
+        !view.ops.borrow().iter().any(|recorded| recorded["op"] == "answer"),
         "0 host ask answer"
     );
 
@@ -266,7 +266,7 @@ fn assert_flow_gate(thread: &store::Thread, mut view: View, text: &String) {
         .ops
         .borrow()
         .iter()
-        .find(|output| output["op"] == "flow_set")
+        .find(|recorded| recorded["op"] == "flow_set")
         .cloned()
         .unwrap();
 

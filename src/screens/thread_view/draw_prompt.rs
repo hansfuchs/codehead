@@ -64,15 +64,15 @@ impl View {
 
 fn draw_ask_hint_label(frame: &mut Frame<'_>, bubble: Rect) {
     let label = " ↑↓ · 1-9: pick · enter: answer ";
-    let lw = label.chars().count() as u16;
+    let label_w = label.chars().count() as u16;
 
-    if bubble.width > lw + 6 {
+    if bubble.width > label_w + 6 {
         frame.render_widget(
             Paragraph::new(Span::styled(label, theme::accent())),
             Rect {
-                x: bubble.right() - 3 - lw,
+                x: bubble.right() - 3 - label_w,
                 y: bubble.bottom().saturating_sub(1),
-                width: lw,
+                width: label_w,
                 height: 1,
             },
         );
@@ -86,14 +86,14 @@ fn draw_bubble_border(frame: &mut Frame, bubble: Rect, edge: Style) {
     for x in left..=right {
         let top = buf[(x, bubble.y)].symbol().to_string();
 
-        let sym = match top.as_str() {
+        let symbol = match top.as_str() {
             _ if x == left => "┌",
             _ if x == right => "┐",
             _ => "─",
         };
 
         buf[(x, bubble.y)].reset();
-        buf[(x, bubble.y)].set_symbol(sym).set_style(edge);
+        buf[(x, bubble.y)].set_symbol(symbol).set_style(edge);
         buf[(x, bubble.bottom().saturating_sub(1))].reset();
         buf[(x, bubble.bottom().saturating_sub(1))]
             .set_symbol(if x == left {

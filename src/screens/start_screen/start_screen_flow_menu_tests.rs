@@ -7,13 +7,17 @@ fn press(app: &mut App, code: KeyCode) {
 }
 
 fn screen(app: &mut App) -> String {
-    let mut thread = ratatui::Terminal::new(TestBackend::new(140, 50)).unwrap();
+    let mut terminal = ratatui::Terminal::new(TestBackend::new(140, 50)).unwrap();
 
-    thread.draw(|file| app.draw(file)).unwrap();
-    let bytes = thread.backend().buffer().clone();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
 
     (0..50)
-        .map(|y| (0..140).map(|x| bytes[(x, y)].symbol().to_string()).collect::<String>())
+        .map(|y| {
+            (0..140)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -40,10 +44,10 @@ fn the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps() {
     let _ = screen(&mut app);
 
     app.compose.pick_cursor = 1;
-    the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_text(app);
+    the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_steps(app);
 }
 
-fn the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_text(mut app: App) {
+fn the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_steps(mut app: App) {
     let (agent, other) = (
         app.agent_list.agents[1].name.clone(),
         app.agent_list.agents[0].name.clone(),
@@ -61,7 +65,7 @@ fn the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_text(m
         app.flow_selection
             .flow_menu
             .as_ref()
-            .is_some_and(|message| message.sub.is_none() && message.cursor == 0 && message.agent == agent)
+            .is_some_and(|menu| menu.sub.is_none() && menu.cursor == 0 && menu.agent == agent)
     );
 
     let text = screen(&mut app);
@@ -75,11 +79,11 @@ fn the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_text(m
     // ↓ to the 1st flow: its preview beside the flows at once
     press(&mut app, KeyCode::Down);
     let steps = app.flow_steps(1);
-    let text_value = screen(&mut app);
+    let preview = screen(&mut app);
 
     assert!(
-        text_value.contains("preview") && text_value.contains(&format!("{first} · {} steps", steps.len())),
-        "{text_value}"
+        preview.contains("preview") && preview.contains(&format!("{first} · {} steps", steps.len())),
+        "{preview}"
     );
 
     // enter: the rail takes the keys; ← back, → in, ↓ enter: flow 1 from step 2
@@ -89,8 +93,8 @@ fn the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_text(m
         app.flow_selection
             .flow_menu
             .as_ref()
-            .and_then(|message_value| message_value.sub)
-            .map(|text_2| text_2.0),
+            .and_then(|menu| menu.sub)
+            .map(|sub| sub.0),
         Some(0)
     );
 
@@ -100,7 +104,7 @@ fn the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_text(m
         app.flow_selection
             .flow_menu
             .as_ref()
-            .is_some_and(|message_2| message_2.sub.is_none())
+            .is_some_and(|menu| menu.sub.is_none())
     );
 
     press(&mut app, KeyCode::Right);
@@ -108,10 +112,10 @@ fn the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_text(m
     press(&mut app, KeyCode::Enter);
 
     assert!(app.flow_selection.flow_menu.is_none());
-    the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_text_(app, &agent, &other, &first);
+    the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_cards(app, &agent, &other, &first);
 }
 
-fn the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_text_(
+fn the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_cards(
     mut app: App,
     agent: &str,
     other: &str,
@@ -124,13 +128,13 @@ fn the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_text_(
     );
     assert_eq!(app.flow_at(other), (0, 0), "the other card keeps 0 flow");
 
-    let text_3 = screen(&mut app);
+    let cards = screen(&mut app);
 
-    println!("--- cards with flows\n{text_3}");
+    println!("--- cards with flows\n{cards}");
 
     assert!(
-        text_3.contains(&format!("◆ {first} › 2")) && text_3.contains("0 flow"),
-        "{text_3}"
+        cards.contains(&format!("◆ {first} › 2")) && cards.contains("0 flow"),
+        "{cards}"
     );
 
     // esc in the dropdown closes it only
@@ -157,7 +161,7 @@ fn the_context_menu_on_a_card_opens_its_flows_and_a_flow_its_steps_verify_text_(
         app.flow_selection
             .flow_menu
             .as_ref()
-            .is_some_and(|message_3| message_3.cursor == 2 && message_3.sub.is_some())
+            .is_some_and(|menu| menu.cursor == 2 && menu.sub.is_some())
     );
 
     let _ = screen(&mut app);

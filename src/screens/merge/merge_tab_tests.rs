@@ -2,26 +2,26 @@ use super::*;
 
 #[test]
 fn the_prompt_and_update_open_a_new_thread() {
-    let mut thread = MergeTab {
+    let mut tab = MergeTab {
         detail: Some(crate::screens::merge::tests::with(crate::screens::merge::tests::pr())),
         ..Default::default()
     };
 
     // tab (the start screen's focus ring): the PR's prompt
-    thread.input_focus = true;
+    tab.input_focus = true;
 
     for character in "fix it".chars() {
-        thread.key(KeyEvent::from(KeyCode::Char(character)));
+        tab.key(KeyEvent::from(KeyCode::Char(character)));
     }
 
-    let key_value = thread.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+    let out = tab.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
 
     assert!(
-        matches!(key_value, Out::Compose(ref text) if text.starts_with("fix it\n\n[codehead: context from the merge tab]")),
-        "{key_value:?}"
+        matches!(out, Out::Compose(ref text) if text.starts_with("fix it\n\n[codehead: context from the merge tab]")),
+        "{out:?}"
     );
 
     // esc: back to the list
-    assert_eq!(thread.key(KeyEvent::from(KeyCode::Esc)), Out::Back);
-    assert!(!thread.is_detail());
+    assert_eq!(tab.key(KeyEvent::from(KeyCode::Esc)), Out::Back);
+    assert!(!tab.is_detail());
 }

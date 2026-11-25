@@ -5,15 +5,15 @@ use super::{
 
 impl FlowsTab {
     pub(super) fn draw_list(&mut self, frame: &mut Frame, list: Rect, active: bool) {
-        let idx = self.list();
+        let indices = self.list();
         let shown = usize::from(list.height);
-        let off = crate::ui::dropdown::fit(0, self.at, idx.len(), shown);
+        let offset = crate::ui::dropdown::fit(0, self.at, indices.len(), shown);
 
-        for (key, &i) in idx.iter().enumerate().skip(off).take(shown) {
-            draw_list_area(frame, list, active, off, key, i, self);
+        for (row, &i) in indices.iter().enumerate().skip(offset).take(shown) {
+            draw_list_row(frame, list, active, offset, row, i, self);
         }
 
-        if idx.is_empty() {
+        if indices.is_empty() {
             frame.render_widget(
                 Paragraph::new(Line::styled(" 0 match · n: new", theme::muted())),
                 Rect { height: 1, ..list },
@@ -30,21 +30,21 @@ impl FlowsTab {
     }
 }
 
-fn finish_draw_step(frame: &mut Frame<'_>, area: Rect, text_value: &Step, users: &[String], mut lines: Vec<Line<'_>>) {
-    let kv = |key: &str, value: String| {
+fn draw_step_details(frame: &mut Frame<'_>, area: Rect, step: &Step, users: &[String], mut lines: Vec<Line<'_>>) {
+    let field_line = |key: &str, value: String| {
         Line::from(vec![
             Span::styled(format!("{key:<10}"), theme::muted()),
             Span::styled(value, theme::text()),
         ])
     };
 
-    lines.push(kv("done when", text_value.done.clone()));
+    lines.push(field_line("done when", step.done.clone()));
 
-    if !text_value.needs.is_empty() {
-        lines.push(kv("needs", text_value.needs.join(", ")));
+    if !step.needs.is_empty() {
+        lines.push(field_line("needs", step.needs.join(", ")));
     }
 
-    lines.push(kv(
+    lines.push(field_line(
         "used in",
         if users.is_empty() {
             "0 flows".into()
@@ -54,100 +54,98 @@ fn finish_draw_step(frame: &mut Frame<'_>, area: Rect, text_value: &Step, users:
     ));
     lines.push(Line::raw(""));
 
-    for line in text_value.text.lines() {
+    for line in step.text.lines() {
         lines.push(Line::styled(line.to_string(), theme::text()));
     }
 
     frame.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }), area);
 }
 
-fn draw_list_area(
+fn draw_list_row(
     frame: &mut Frame<'_>,
     list: Rect,
     active: bool,
-    off: usize,
-    key: usize,
+    offset: usize,
+    row: usize,
     i: usize,
-    view_state: &mut FlowsTab,
+    tab: &mut FlowsTab,
 ) {
     let area = Rect {
-        y: list.y + (key - off) as u16,
+        y: list.y + (row - offset) as u16,
         height: 1,
         ..list
     };
-    let on = key == view_state.at;
+    let on = row == tab.at;
 
-    let (label, detail) = match view_state.sub {
+    let (label, detail) = match tab.sub {
         Sub::Flows => {
-            let fl = &view_state.lib.flows[i];
+            let flow = &tab.lib.flows[i];
 
-            let tag = match (fl.layer, fl.edited) {
+            let tag = match (flow.layer, flow.edited) {
                 (Layer::Repo, _) => "repo",
                 (_, true) => "✎",
                 (Layer::User, _) => "★",
                 _ => "",
             };
 
-            (fl.name.clone(), format!("{tag} {}", fl.steps.len()))
+            (flow.name.clone(), format!("{tag} {}", flow.steps.len()))
         }
         Sub::Steps => {
-            let text_value = &view_state.lib.steps[i];
-            let count = view_state.lib.users_of(&text_value.name).len();
+            let step = &tab.lib.steps[i];
+            let used_in = tab.lib.users_of(&step.name).len();
 
-            let tag = match (text_value.layer, text_value.edited) {
+            let tag = match (step.layer, step.edited) {
                 (Layer::Repo, _) => "repo ",
                 (_, true) => "✎ ",
                 _ => "",
             };
 
-            (text_value.name.clone(), format!("{tag}{count}"))
+            (step.name.clone(), format!("{tag}{used_in}"))
         }
     };
 
-    let st = match (on, active && view_state.focus == Focus::List && !view_state.filtering) {
+    let style = match (on, active && tab.focus == Focus::List && !tab.filtering) {
         (true, true) => theme::pill().add_modifier(Modifier::BOLD),
         (true, false) => theme::panel().add_modifier(Modifier::BOLD),
         _ => theme::text(),
     };
 
-    let dw = detail.width() + 1;
-    let label = crate::ui::thread_card::fit(&format!(" {label}"), usize::from(area.width).saturating_sub(dw + 1));
-    let pad = usize::from(area.width).saturating_sub(label.width() + dw);
+    let detail_w = detail.width() + 1;
+    let label = crate::ui::thread_card::fit(
+        &format!(" {label}"),
+        usize::from(area.width).saturating_sub(detail_w + 1),
+    );
+    let pad = usize::from(area.width).saturating_sub(label.width() + detail_w);
     let line = Line::from(vec![
-        Span::styled(format!("{label}{}", " ".repeat(pad)), st),
-        Span::styled(format!("{detail} "), if on { st } else { theme::muted() }),
+        Span::styled(format!("{label}{}", " ".repeat(pad)), style),
+        Span::styled(format!("{detail} "), if on { style } else { theme::muted() }),
     ]);
 
     frame.render_widget(Paragraph::new(line), area);
-    view_state.hit_regions.rows.push((area, key));
+    tab.hit_regions.rows.push((area, row));
 }
 
-struct EditorLayout<'reference_0, 'reference_1, 'reference_2, 'reference_3, 'reference_4> {
-    frame: &'reference_0 mut Frame<'reference_1>,
+struct EditorLayout<'frame, 'buffer, 'rects, 'y, 'cur> {
+    frame: &'frame mut Frame<'buffer>,
     active: bool,
     focus: Focus,
-    field_rects: &'reference_2 mut Vec<(Rect, usize)>,
+    field_rects: &'rects mut Vec<(Rect, usize)>,
     field: usize,
     inner: Rect,
-    y: &'reference_3 mut u16,
+    y: &'y mut u16,
     multi_h: u16,
-    cur_rect: &'reference_4 mut Rect,
+    cur_rect: &'cur mut Rect,
 }
 
 #[path = "flows_editor_draw.rs"]
 mod editor_draw;
 
-fn draw_flow_branch(
-    errs: &[(usize, String)],
-    i: usize,
-    mut row: flow_rail::Row,
-    view_state: &mut FlowsTab,
-) -> flow_rail::Row {
+fn mark_rail_row(errs: &[(usize, String)], i: usize, mut row: flow_rail::Row, tab: &mut FlowsTab) -> flow_rail::Row {
     if errs.iter().any(|(j, _)| *j == i) {
         row.tags.push(("!".into(), Style::default().fg(theme::pal().error())));
     }
 
-    if view_state.target.is_some() && i == view_state.node {
+    if tab.target.is_some() && i == tab.node {
         row.title_style = theme::accent_bold();
     }
 
@@ -155,7 +153,7 @@ fn draw_flow_branch(
 }
 
 fn draw_flow_flows_tab(state: &mut FlowsTab, frame: &mut Frame, area: Rect, active: bool) {
-    let Some(fl) = state.flow.clone() else {
+    let Some(flow) = state.flow.clone() else {
         frame.render_widget(
             Paragraph::new(Line::styled("n: a new flow", theme::muted())),
             Rect { height: 1, ..area },
@@ -163,11 +161,11 @@ fn draw_flow_flows_tab(state: &mut FlowsTab, frame: &mut Frame, area: Rect, acti
         return;
     };
 
-    let nodes = flows::resolve(&fl, &state.lib);
+    let nodes = flows::resolve(&flow, &state.lib);
 
-    draw_flow_header(frame, area, &fl, nodes.len());
+    draw_flow_header(frame, area, &flow, nodes.len());
 
-    let ed_h = if state.editor.is_some() {
+    let editor_h = if state.editor.is_some() {
         (area.height / 2).max(10).min(area.height.saturating_sub(6))
     } else {
         0
@@ -175,17 +173,19 @@ fn draw_flow_flows_tab(state: &mut FlowsTab, frame: &mut Frame, area: Rect, acti
 
     let errs = flow_errors(&nodes);
 
-    let err_h = errs.len().min(3) as u16;
+    let errors_h = errs.len().min(3) as u16;
     let rail = Rect {
         y: area.y + 3,
-        height: area.height.saturating_sub(3 + ed_h + err_h + u16::from(ed_h > 0)),
+        height: area
+            .height
+            .saturating_sub(3 + editor_h + errors_h + u16::from(editor_h > 0)),
         ..area
     };
 
     let rows: Vec<flow_rail::Row> = rail_rows(&nodes)
         .into_iter()
         .enumerate()
-        .map(|(i, row)| draw_flow_branch(&errs, i, row, state))
+        .map(|(i, row)| mark_rail_row(&errs, i, row, state))
         .collect();
 
     let arcs = flow_rail::arcs(&nodes, |_| 0);
@@ -203,20 +203,20 @@ fn draw_flow_flows_tab(state: &mut FlowsTab, frame: &mut Frame, area: Rect, acti
 
     state.hit_regions.rail_rows = flow_rail::draw(frame.buffer_mut(), rail, &rows, &arcs, cur, focus, state.rail_off);
 
-    if let Some(thread) = state.target {
-        draw_target_hint(frame, area, thread, &nodes);
+    if let Some(target) = state.target {
+        draw_target_hint(frame, area, target, &nodes);
     }
 
     let y = draw_flow_errors(frame, area, rail.bottom(), &errs);
 
-    if ed_h > 0 {
-        let area_value = Rect {
+    if editor_h > 0 {
+        let editor_area = Rect {
             y: y + 1,
-            height: ed_h,
+            height: editor_h,
             ..area
         };
 
-        state.draw_editor(frame, area_value, active);
+        state.draw_editor(frame, editor_area, active);
     }
 }
 
@@ -226,7 +226,7 @@ fn draw_step_flows_tab(state: &mut FlowsTab, frame: &mut Frame, area: Rect, acti
         return;
     }
 
-    let Some(text_value) = state.cur_step().cloned() else {
+    let Some(step) = state.cur_step().cloned() else {
         frame.render_widget(
             Paragraph::new(Line::styled("n: a new step", theme::muted())),
             Rect { height: 1, ..area },
@@ -236,50 +236,50 @@ fn draw_step_flows_tab(state: &mut FlowsTab, frame: &mut Frame, area: Rect, acti
 
     let users: Vec<String> = state
         .lib
-        .users_of(&text_value.name)
+        .users_of(&step.name)
         .iter()
-        .map(|file| file.name.clone())
+        .map(|flow| flow.name.clone())
         .collect();
     let lines = vec![
         Line::from(vec![
-            Span::styled(text_value.name.clone(), theme::bold()),
+            Span::styled(step.name.clone(), theme::bold()),
             Span::styled(
                 format!(
                     " · {}{}",
-                    if text_value.edited {
+                    if step.edited {
                         "edited built-in"
                     } else {
-                        text_value.layer.label()
+                        step.layer.label()
                     },
-                    if text_value.gate { " · gate" } else { "" }
+                    if step.gate { " · gate" } else { "" }
                 ),
                 theme::muted(),
             ),
         ]),
-        Line::styled(text_value.description.clone(), theme::muted()),
+        Line::styled(step.description.clone(), theme::muted()),
         Line::raw(""),
     ];
 
-    finish_draw_step(frame, area, &text_value, &users, lines);
+    draw_step_details(frame, area, &step, &users, lines);
 }
 
-fn draw_flow_header(frame: &mut Frame, area: Rect, fl: &crate::engine::flows::Flow, node_count: usize) {
-    let layer = match (fl.layer, fl.edited) {
+fn draw_flow_header(frame: &mut Frame, area: Rect, flow: &crate::engine::flows::Flow, node_count: usize) {
+    let layer = match (flow.layer, flow.edited) {
         (_, true) => "edited built-in · ctrl+d: reset".to_string(),
-        (line, _) => line.label().to_string(),
+        (layer, _) => layer.label().to_string(),
     };
 
     let head = Line::from(vec![
-        Span::styled(fl.name.clone(), theme::bold()),
+        Span::styled(flow.name.clone(), theme::bold()),
         Span::styled(format!(" · {node_count} steps · {layer}"), theme::muted()),
     ]);
 
     frame.render_widget(Paragraph::new(head), Rect { height: 1, ..area });
 
-    if !fl.description.is_empty() {
+    if !flow.description.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::styled(
-                crate::ui::thread_card::fit(&fl.description, usize::from(area.width)),
+                crate::ui::thread_card::fit(&flow.description, usize::from(area.width)),
                 theme::muted(),
             )),
             Rect {
@@ -295,24 +295,24 @@ fn flow_errors(nodes: &[crate::engine::flows::Resolved]) -> Vec<(usize, String)>
     nodes
         .iter()
         .enumerate()
-        .flat_map(|(i, count)| count.errors.iter().map(move |error_value| (i, error_value.clone())))
-        .chain(nodes.iter().enumerate().flat_map(|(i, count_value)| {
-            flows::unknown_shortcuts(&count_value.text)
+        .flat_map(|(i, node)| node.errors.iter().map(move |error| (i, error.clone())))
+        .chain(nodes.iter().enumerate().flat_map(|(i, node)| {
+            flows::unknown_shortcuts(&node.text)
                 .into_iter()
-                .map(move |text_value| (i, format!("#{text_value}: 0 shortcut")))
+                .map(move |shortcut| (i, format!("#{shortcut}: 0 shortcut")))
         }))
         .collect()
 }
 
-fn draw_target_hint(frame: &mut Frame, area: Rect, thread: Target, nodes: &[crate::engine::flows::Resolved]) {
-    let what = match thread {
+fn draw_target_hint(frame: &mut Frame, area: Rect, target: Target, nodes: &[crate::engine::flows::Resolved]) {
+    let what = match target {
         Target::Loop(i) => format!(
             "loop of {}: back to which step? ↑↓ enter",
-            nodes.get(i).map_or("", |count_2| count_2.title.as_str())
+            nodes.get(i).map_or("", |node| node.title.as_str())
         ),
         Target::Outcome(i) => format!(
             "gate outcome of {}: to which step? ↑↓ enter",
-            nodes.get(i).map_or("", |count_3| count_3.title.as_str())
+            nodes.get(i).map_or("", |node| node.title.as_str())
         ),
     };
 
@@ -327,10 +327,10 @@ fn draw_target_hint(frame: &mut Frame, area: Rect, thread: Target, nodes: &[crat
 }
 
 fn draw_flow_errors(frame: &mut Frame, area: Rect, mut y: u16, errs: &[(usize, String)]) -> u16 {
-    for (i, error_2) in errs.iter().take(3) {
+    for (i, error) in errs.iter().take(3) {
         frame.render_widget(
             Paragraph::new(Line::styled(
-                crate::ui::thread_card::fit(&format!("! {}: {error_2}", i + 1), usize::from(area.width)),
+                crate::ui::thread_card::fit(&format!("! {}: {error}", i + 1), usize::from(area.width)),
                 Style::default().fg(theme::pal().error()),
             )),
             Rect { y, height: 1, ..area },

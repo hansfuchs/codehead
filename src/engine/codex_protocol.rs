@@ -41,13 +41,13 @@ impl State {
         self.busy = true;
         self.base = self.total;
 
-        let mut path = json!({"threadId": tid, "input": [{"type": "text", "text": text, "text_elements": []}]});
+        let mut params = json!({"threadId": tid, "input": [{"type": "text", "text": text, "text_elements": []}]});
 
-        if let Some(error) = &self.setup.effort {
-            path["effort"] = json!(error);
+        if let Some(effort) = &self.setup.effort {
+            params["effort"] = json!(effort);
         }
 
-        self.request("turn/start", &path, Pending::Turn)
+        self.request("turn/start", &params, Pending::Turn)
     }
     pub(crate) fn reply(&mut self, why: Pending, value: &Value) -> Result<(), String> {
         let err = value.get("error").map(error_text);
@@ -94,7 +94,7 @@ impl State {
             Ask::Command | Ask::FileChange => json!({"decision": if allow { "accept" } else { "decline" }}),
             Ask::Elicitation if allow => json!({"action": "accept", "content": {}}),
             Ask::Elicitation => json!({"action": "decline"}),
-            Ask::Questions(ids) => answer_ask_questions_ids(allow, input, ids),
+            Ask::Questions(ids) => question_answers(allow, input, ids),
         };
 
         self.send(&json!({"id": rpc, "result": result}))
@@ -105,7 +105,7 @@ impl State {
             return;
         }
 
-        let mut err = stderr.lock().map(|thread| thread.join("\n")).unwrap_or_default();
+        let mut err = stderr.lock().map(|lines| lines.join("\n")).unwrap_or_default();
 
         if !why.is_empty() {
             separate_stderr(&mut err);
@@ -117,12 +117,12 @@ impl State {
     }
 }
 
-fn answer_ask_questions_ids(allow: bool, input: &Value, ids: Vec<(String, String)>) -> Value {
+fn question_answers(allow: bool, input: &Value, ids: Vec<(String, String)>) -> Value {
     let mut answers = serde_json::Map::new();
 
     for (text, qid) in ids {
-        if let Some(agent) = input["answers"][&text].as_str().filter(|_| allow) {
-            answers.insert(qid, json!({"answers": [agent]}));
+        if let Some(answer) = input["answers"][&text].as_str().filter(|_| allow) {
+            answers.insert(qid, json!({"answers": [answer]}));
         }
     }
 
@@ -136,97 +136,97 @@ fn separate_stderr(err: &mut String) {
 }
 
 /// Params of `thread/start`, `thread/resume`, `thread/fork`.
-fn thread_params(model_state: &State) -> Value {
-    let mut path = json!({
-        "cwd": model_state.setup.cwd,
+fn thread_params(state: &State) -> Value {
+    let mut params = json!({
+        "cwd": state.setup.cwd,
         "approvalPolicy": "untrusted",
-        "sandbox": model_state.setup.sandbox,
-        "developerInstructions": model_state.setup.instructions,
-        "config": model_state.setup.config,
+        "sandbox": state.setup.sandbox,
+        "developerInstructions": state.setup.instructions,
+        "config": state.setup.config,
     });
 
-    if let Some(message) = &model_state.setup.model {
-        path["model"] = json!(message);
+    if let Some(model) = &state.setup.model {
+        params["model"] = json!(model);
     }
 
-    path
+    params
 }
 
-fn report_interrupt_error(err: Option<String>, model_state: &mut State) {
-    if let Some(error_4) = err {
-        model_state.out(Out::Event(Kind::Error {
-            message: format!("interrupt: {error_4}"),
+fn report_interrupt_error(err: Option<String>, state: &mut State) {
+    if let Some(error) = err {
+        state.out(Out::Event(Kind::Error {
+            message: format!("interrupt: {error}"),
         }));
     }
 }
 
-fn handle_turn(err: Option<&str>, result: &Value, model_state: &mut State) -> Result<(), String> {
-    if let Some(error_3) = err {
+fn handle_turn(err: Option<&str>, result: &Value, state: &mut State) -> Result<(), String> {
+    if let Some(error) = err {
         // 0 turn: the turn end comes from here
-        model_state.busy = false;
-        model_state.turn = None;
-        model_state.out(Out::Event(Kind::TurnEnd {
+        state.busy = false;
+        state.turn = None;
+        state.out(Out::Event(Kind::TurnEnd {
             cost: 0.0,
             input: 0,
             output: 0,
             cache_read: 0,
             cache_write: 0,
-            ctx: model_state.ctx,
-            window: model_state.window,
+            ctx: state.ctx,
+            window: state.window,
             ms: 0,
-            error: Some(error_3.to_string()),
+            error: Some(error.to_string()),
         }));
 
-        model_state.pump()?;
+        state.pump()?;
     } else if let Some(id) = result["turn"]["id"].as_str() {
-        model_state.turn = Some(id.to_string());
+        state.turn = Some(id.to_string());
     }
 
     Ok(())
 }
 
-fn request_thread_resume(mut path: Value, tid: &str, model_state: &mut State) -> Result<(), String> {
-    path["threadId"] = json!(tid);
+fn request_thread_resume(mut params: Value, tid: &str, state: &mut State) -> Result<(), String> {
+    params["threadId"] = json!(tid);
 
-    let method = if model_state.setup.fork {
+    let method = if state.setup.fork {
         "thread/fork"
     } else {
         "thread/resume"
     };
 
-    model_state.request(method, &path, Pending::Resume)?;
+    state.request(method, &params, Pending::Resume)?;
     Ok(())
 }
 
 fn initialize_thread(err: Option<&str>, state: &mut State) -> Result<(), String> {
-    if let Some(error_value) = err {
-        return Err(format!("initialize: {error_value}"));
+    if let Some(error) = err {
+        return Err(format!("initialize: {error}"));
     }
 
     state.send(&json!({"method": "initialized", "params": {}}))?;
-    let path = thread_params(state);
+    let params = thread_params(state);
 
     match state.setup.resume.clone() {
         Some(tid) => {
-            request_thread_resume(path, &tid, state)?;
+            request_thread_resume(params, &tid, state)?;
         }
-        None => state.request("thread/start", &path, Pending::Start)?,
+        None => state.request("thread/start", &params, Pending::Start)?,
     }
 
     Ok(())
 }
 
 fn establish_thread(why: Pending, err: Option<&str>, result: &Value, state: &mut State) -> Result<(), String> {
-    if let Some(error_2) = err {
+    if let Some(error) = err {
         // the old thread is gone: a new one
         if why == Pending::Resume {
             state.setup.resume = None;
-            let path_value = thread_params(state);
+            let params = thread_params(state);
 
-            return state.request("thread/start", &path_value, Pending::Start);
+            return state.request("thread/start", &params, Pending::Start);
         }
 
-        return Err(format!("thread/start: {error_2}"));
+        return Err(format!("thread/start: {error}"));
     }
 
     let Some(tid) = result["thread"]["id"].as_str().map(String::from) else {

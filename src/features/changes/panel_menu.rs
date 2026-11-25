@@ -12,13 +12,13 @@ impl View {
 
 fn panel_ctx_items_stash(
     enter: crate::ui::context_menu::Act,
-    value: &mut Vec<crate::ui::context_menu::Item<crate::ui::context_menu::Act>>,
+    items: &mut Vec<crate::ui::context_menu::Item<crate::ui::context_menu::Act>>,
     si: usize,
     view: &mut View,
 ) -> String {
-    value.push(Item::new("restore (its agent)", "enter", enter));
-    value.push(Item::new("remove", "d d", key('d')));
-    value.push(Item::new(
+    items.push(Item::new("restore (its agent)", "enter", enter));
+    items.push(Item::new("remove", "d d", key('d')));
+    items.push(Item::new(
         "clear the stash (asks first)",
         "",
         MenuAction::Cmd("clear stash"),
@@ -31,25 +31,25 @@ fn panel_ctx_items_stash(
 
 fn panel_ctx_items_commit(
     enter: &crate::ui::context_menu::Act,
-    value: &mut Vec<crate::ui::context_menu::Item<crate::ui::context_menu::Act>>,
+    items: &mut Vec<crate::ui::context_menu::Item<crate::ui::context_menu::Act>>,
     ci: usize,
     view: &mut View,
 ) -> String {
-    let character_value = view.changes.commits.list.get(ci);
+    let commit = view.changes.commits.list.get(ci);
 
-    value.push(Item::new("its files in the review", "enter", *enter));
+    items.push(Item::new("its files in the review", "enter", *enter));
 
-    if character_value.is_some_and(|character_2| !character_2.pushed) {
-        value.push(Item::new("pick", "space", key(' ')));
-        value.push(Item::new("uncommit (asks first)", "", MenuAction::Cmd("uncommit")));
+    if commit.is_some_and(|commit| !commit.pushed) {
+        items.push(Item::new("pick", "space", key(' ')));
+        items.push(Item::new("uncommit (asks first)", "", MenuAction::Cmd("uncommit")));
     }
 
-    character_value.map_or_else(String::new, |character_3| character_3.short.clone())
+    commit.map_or_else(String::new, |commit| commit.short.clone())
 }
 
 fn panel_ctx_items_comment(
     enter: &crate::ui::context_menu::Act,
-    value: &mut Vec<crate::ui::context_menu::Item<crate::ui::context_menu::Act>>,
+    items: &mut Vec<crate::ui::context_menu::Item<crate::ui::context_menu::Act>>,
     ci: usize,
     view: &mut View,
 ) -> String {
@@ -59,29 +59,29 @@ fn panel_ctx_items_comment(
         .get(ci)
         .is_some_and(crate::features::changes::Comment::open);
 
-    value.push(Item::new("edit at its line", "enter", *enter));
-    value.push(Item::new(if open { "resolve" } else { "open again" }, "v", key('v')));
-    value.push(Item::new("pick for the next prompt", "space", key(' ')));
-    value.push(Item::new("open in the IDE", "e", key('e')));
-    value.push(Item::new("delete", "d d", key('d')));
+    items.push(Item::new("edit at its line", "enter", *enter));
+    items.push(Item::new(if open { "resolve" } else { "open again" }, "v", key('v')));
+    items.push(Item::new("pick for the next prompt", "space", key(' ')));
+    items.push(Item::new("open in the IDE", "e", key('e')));
+    items.push(Item::new("delete", "d d", key('d')));
 
     view.comment_state
         .comments
         .get(ci)
-        .map_or_else(String::new, |character| character.id.clone())
+        .map_or_else(String::new, |comment| comment.id.clone())
 }
 
 fn panel_ctx_items_file(
     enter: &crate::ui::context_menu::Act,
-    value: &mut Vec<crate::ui::context_menu::Item<crate::ui::context_menu::Act>>,
+    items: &mut Vec<crate::ui::context_menu::Item<crate::ui::context_menu::Act>>,
     i: usize,
     view: &mut View,
 ) -> String {
-    value.push(Item::new("jump to it in the review", "enter", *enter));
-    value.push(Item::new("open in the IDE", "e", key('e')));
-    value.push(Item::new("pick", "space", key(' ')));
-    value.push(Item::new("stage the picked files (staged: unstage)", "s", key('s')));
-    value.push(Item::new("stash the picked files", "p", key('p')));
+    items.push(Item::new("jump to it in the review", "enter", *enter));
+    items.push(Item::new("open in the IDE", "e", key('e')));
+    items.push(Item::new("pick", "space", key(' ')));
+    items.push(Item::new("stage the picked files (staged: unstage)", "s", key('s')));
+    items.push(Item::new("stash the picked files", "p", key('p')));
 
     view.changes
         .files
@@ -93,36 +93,36 @@ fn panel_ctx_items_view(view: &mut View) -> (String, Vec<crate::ui::context_menu
     view.sync_rows();
     let enter = MenuAction::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let row = view.scm.rows.get(view.scm.at).cloned();
-    let mut value = Vec::new();
+    let mut items = Vec::new();
 
     let title = match row {
-        Some(PRow::File(i, _)) => panel_ctx_items_file(&enter, &mut value, i, view),
-        Some(PRow::Comment(ci)) => panel_ctx_items_comment(&enter, &mut value, ci, view),
-        Some(PRow::Commit(ci)) => panel_ctx_items_commit(&enter, &mut value, ci, view),
-        Some(PRow::Stash(si)) => panel_ctx_items_stash(enter, &mut value, si, view),
+        Some(PRow::File(i, _)) => panel_ctx_items_file(&enter, &mut items, i, view),
+        Some(PRow::Comment(ci)) => panel_ctx_items_comment(&enter, &mut items, ci, view),
+        Some(PRow::Commit(ci)) => panel_ctx_items_commit(&enter, &mut items, ci, view),
+        Some(PRow::Stash(si)) => panel_ctx_items_stash(enter, &mut items, si, view),
         _ => "panel".to_string(),
     };
 
-    value.extend([
+    items.extend([
         Item::new("commit message", "m", key('m')),
         Item::new("read git again", "r", key('r')),
     ]);
 
     // the ship steps valid now (a stopped rebase: only its steps), as the ship menu had them
-    for (i, row_value) in view.ship_rows().into_iter().enumerate() {
-        let mut it = Item::new(row_value.label, "", MenuAction::Step(i)).in_section(match row_value.group {
+    for (i, step) in view.ship_rows().into_iter().enumerate() {
+        let mut it = Item::new(step.label, "", MenuAction::Step(i)).in_section(match step.group {
             crate::features::changes::ShipGroup::Ship => "ship/ship",
             crate::features::changes::ShipGroup::Git => "ship/git",
             crate::features::changes::ShipGroup::Pr => "ship/pr",
             crate::features::changes::ShipGroup::Rebase => "ship/rebase",
         });
 
-        it.state = row_value.state;
-        it.agent = row_value.agent;
-        it.off = row_value.off;
-        it.asks = row_value.asks;
-        value.push(it);
+        it.state = step.state;
+        it.agent = step.agent;
+        it.off = step.off;
+        it.asks = step.asks;
+        items.push(it);
     }
 
-    (title, value)
+    (title, items)
 }

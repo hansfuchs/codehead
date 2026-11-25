@@ -17,18 +17,18 @@ impl ModalDraw<'_> {
     }
 }
 
-fn quote_line(frame: &mut Frame<'_>, bg: ratatui::prelude::Color, cw: u16, line: &QLine, row: Rect) {
+fn quote_line(frame: &mut Frame<'_>, bg: ratatui::prelude::Color, width: u16, line: &QLine, row: Rect) {
     match line {
         QLine::Gap => {}
         QLine::Path(path) => frame.render_widget(
             Paragraph::new(Line::styled(
-                crate::ui::thread_card::fit(path, usize::from(cw)),
+                crate::ui::thread_card::fit(path, usize::from(width)),
                 theme::bold(),
             )),
             row,
         ),
-        QLine::Code(character) => {
-            let st = match character.chars().next() {
+        QLine::Code(code) => {
+            let style = match code.chars().next() {
                 Some('+') => Style::default().fg(theme::pal().success()),
                 Some('-') => Style::default().fg(theme::pal().error()),
                 _ => theme::muted(),
@@ -36,16 +36,16 @@ fn quote_line(frame: &mut Frame<'_>, bg: ratatui::prelude::Color, cw: u16, line:
 
             frame.render_widget(
                 Paragraph::new(Line::styled(
-                    crate::ui::thread_card::fit(character, usize::from(cw)),
-                    st,
+                    crate::ui::thread_card::fit(code, usize::from(width)),
+                    style,
                 ))
                 .style(Style::default().bg(bg)),
                 row,
             );
         }
-        QLine::Note(head, thread) => frame.render_widget(
+        QLine::Note(head, note) => frame.render_widget(
             Paragraph::new(Line::styled(
-                crate::ui::thread_card::fit(thread, usize::from(cw)),
+                crate::ui::thread_card::fit(note, usize::from(width)),
                 if *head { theme::bold() } else { theme::text() },
             )),
             row,
@@ -53,11 +53,11 @@ fn quote_line(frame: &mut Frame<'_>, bg: ratatui::prelude::Color, cw: u16, line:
     }
 }
 
-fn comment_frame(frame: &mut Frame<'_>, title: &mut String, target: &mut Target, width: u16, area_value: Rect) {
+fn comment_frame(frame: &mut Frame<'_>, title: &mut String, target: &mut Target, width: u16, rect: Rect) {
     let head = match target {
         Target::New => format!(" comment on {title} "),
         Target::Edit(id) => format!(" edit comment {id} · {title} "),
-        Target::EditReply(id, result) => format!(" edit reply {} on {id} · {title} ", *result + 1),
+        Target::EditReply(id, reply) => format!(" edit reply {} on {id} · {title} ", *reply + 1),
         Target::Reply(id) => format!(" reply on {id} · {title} "),
     };
 
@@ -69,7 +69,7 @@ fn comment_frame(frame: &mut Frame<'_>, title: &mut String, target: &mut Target,
                 theme::accent_bold(),
             ))
             .style(theme::text()),
-        area_value,
+        rect,
     );
 }
 
@@ -79,7 +79,7 @@ fn comment_severity(
     level: &mut super::rank::Level,
     on_level: &mut bool,
     inner: Rect,
-    yy: &mut u16,
+    row_y: &mut u16,
 ) {
     let mut spans = vec![Span::styled(
         "severity ",
@@ -90,10 +90,10 @@ fn comment_severity(
         },
     )];
 
-    for line in crate::domain::changes::rank::Level::ALL {
-        let st = severity_style(line, *level, *on_level);
+    for candidate in crate::domain::changes::rank::Level::ALL {
+        let style = severity_style(candidate, *level, *on_level);
 
-        spans.push(Span::styled(format!(" {} ", line.label()), st));
+        spans.push(Span::styled(format!(" {} ", candidate.label()), style));
         spans.push(Span::raw(" "));
     }
 
@@ -117,12 +117,12 @@ fn comment_severity(
     frame.render_widget(
         Paragraph::new(Line::from(spans)),
         Rect {
-            y: *yy,
+            y: *row_y,
             height: 1,
             ..inner
         },
     );
-    *yy += 2;
+    *row_y += 2;
 }
 
 fn severity_style(
@@ -150,7 +150,7 @@ fn severity_style(
         .add_modifier(Modifier::BOLD)
 }
 
-fn comment(frame: &mut Frame, area: Rect, modal: &mut Modal, view_state: &mut ModalDraw<'_>) {
+fn comment(frame: &mut Frame, area: Rect, modal: &mut Modal, modal_draw: &mut ModalDraw<'_>) {
     let Modal::Comment {
         title,
         quote,
@@ -168,99 +168,106 @@ fn comment(frame: &mut Frame, area: Rect, modal: &mut Modal, view_state: &mut Mo
     let width = area.width.saturating_sub(4).clamp(20, 110);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
 
-    let tw = width.saturating_sub(4);
-    let th = (text.rows_for(tw) as u16).clamp(3, 8);
+    let text_width = width.saturating_sub(4);
+    let text_height = (text.rows_for(text_width) as u16).clamp(3, 8);
 
     // the selected lines: at most half the screen (and 24 rows); more: they scroll
-    let room = (area.height.saturating_sub(th + 8) as usize)
+    let room = (area.height.saturating_sub(text_height + 8) as usize)
         .min(usize::from(area.height / 2).max(3))
         .min(24);
-    let qh = quote.len().min(room);
+    let quote_height = quote.len().min(room);
 
-    *scroll = (*scroll).min(quote.len() - qh);
-    let height = (qh as u16 + th + 7 + u16::from(qh > 0)).min(area.height);
+    *scroll = (*scroll).min(quote.len() - quote_height);
+    let height = (quote_height as u16 + text_height + 7 + u16::from(quote_height > 0)).min(area.height);
     let y = area.y + (area.height.saturating_sub(height)) / 3;
-    let area_value = Rect { x, y, width, height };
+    let rect = Rect { x, y, width, height };
 
     // a modal: the screen behind it fades
     theme::dim(frame.buffer_mut(), area);
-    frame.render_widget(Clear, area_value);
+    frame.render_widget(Clear, rect);
 
-    comment_frame(frame, title, target, width, area_value);
+    comment_frame(frame, title, target, width, rect);
     let inner = Rect {
-        x: area_value.x + 2,
-        y: area_value.y + 1,
+        x: rect.x + 2,
+        y: rect.y + 1,
         width: width.saturating_sub(4),
         height: height.saturating_sub(2),
     };
-    let mut yy = comment_quote(frame, quote, scroll, qh, inner, view_state);
+    let mut row_y = comment_quote(frame, quote, scroll, quote_height, inner, modal_draw);
 
     // the severity row: the 4 levels, the picked one a pill (accent: the row has the keys)
-    comment_severity(frame, target, level, on_level, inner, &mut yy);
-    let tr = Rect {
-        y: yy,
-        height: th.min(inner.bottom().saturating_sub(yy + 1)),
+    comment_severity(frame, target, level, on_level, inner, &mut row_y);
+    let text_rect = Rect {
+        y: row_y,
+        height: text_height.min(inner.bottom().saturating_sub(row_y + 1)),
         ..inner
     };
 
-    text.render(frame, tr, !*on_level);
-    view_state.mention.render(frame, text, view_state.agents, area);
-    comment_buttons(frame, target, inner, view_state);
+    text.render(frame, text_rect, !*on_level);
+    modal_draw.mention.render(frame, text, modal_draw.agents, area);
+    comment_buttons(frame, target, inner, modal_draw);
 }
 
 fn comment_quote(
     frame: &mut Frame<'_>,
     quote: &mut [QLine],
     scroll: &mut usize,
-    qh: usize,
+    quote_height: usize,
     inner: Rect,
-    view_state: &mut ModalDraw<'_>,
+    modal_draw: &mut ModalDraw<'_>,
 ) -> u16 {
     let bg = code_bg();
-    let mut yy = inner.y;
+    let mut row_y = inner.y;
 
     // 1 column for the scrollbar when the lines scroll
-    let bar = quote.len() > qh;
-    let cw = inner.width.saturating_sub(u16::from(bar));
+    let bar = quote.len() > quote_height;
+    let width = inner.width.saturating_sub(u16::from(bar));
 
-    *view_state.quote_rect = Rect {
-        y: yy,
-        height: qh as u16,
+    *modal_draw.quote_rect = Rect {
+        y: row_y,
+        height: quote_height as u16,
         ..inner
     };
 
-    for line in quote.iter().skip(*scroll).take(qh) {
+    for line in quote.iter().skip(*scroll).take(quote_height) {
         let row = Rect {
-            y: yy,
+            y: row_y,
             height: 1,
-            width: cw,
+            width,
             ..inner
         };
 
-        quote_line(frame, bg, cw, line, row);
+        quote_line(frame, bg, width, line, row);
 
-        yy += 1;
+        row_y += 1;
     }
 
     if bar {
         // the thumb: the visible part of the lines
-        let count = quote.len();
-        let len = (qh * qh).div_ceil(count).max(1);
-        let at = (*scroll * qh) / count;
+        let total = quote.len();
+        let thumb = (quote_height * quote_height).div_ceil(total).max(1);
+        let thumb_at = (*scroll * quote_height) / total;
 
-        draw_quote_scrollbar(frame, qh, inner, cw, len, at);
+        draw_quote_scrollbar(frame, quote_height, inner, width, thumb, thumb_at);
     }
 
-    if qh > 0 {
-        yy += 1;
+    if quote_height > 0 {
+        row_y += 1;
     }
 
-    yy
+    row_y
 }
 
-fn draw_quote_scrollbar(frame: &mut Frame<'_>, qh: usize, inner: Rect, cw: u16, len: usize, at: usize) {
-    for key in 0..qh {
-        let on = key >= at && key < at + len;
+fn draw_quote_scrollbar(
+    frame: &mut Frame<'_>,
+    quote_height: usize,
+    inner: Rect,
+    width: u16,
+    thumb: usize,
+    thumb_at: usize,
+) {
+    for row in 0..quote_height {
+        let on = row >= thumb_at && row < thumb_at + thumb;
         let cell = Span::styled(
             if on { "┃" } else { "│" },
             if on { theme::accent() } else { theme::line() },
@@ -269,8 +276,8 @@ fn draw_quote_scrollbar(frame: &mut Frame<'_>, qh: usize, inner: Rect, cw: u16, 
         frame.render_widget(
             Paragraph::new(cell),
             Rect {
-                x: inner.x + cw,
-                y: inner.y + key as u16,
+                x: inner.x + width,
+                y: inner.y + row as u16,
                 width: 1,
                 height: 1,
             },
@@ -278,7 +285,7 @@ fn draw_quote_scrollbar(frame: &mut Frame<'_>, qh: usize, inner: Rect, cw: u16, 
     }
 }
 
-fn comment_buttons(frame: &mut Frame<'_>, target: &mut Target, inner: Rect, view_state: &mut ModalDraw<'_>) {
+fn comment_buttons(frame: &mut Frame<'_>, target: &mut Target, inner: Rect, modal_draw: &mut ModalDraw<'_>) {
     let hint = Rect {
         y: inner.bottom().saturating_sub(1),
         height: 1,
@@ -302,14 +309,14 @@ fn comment_buttons(frame: &mut Frame<'_>, target: &mut Target, inner: Rect, view
         ])),
         hint,
     );
-    view_state.buttons.push((
+    modal_draw.buttons.push((
         Rect {
             width: save.len() as u16,
             ..hint
         },
         true,
     ));
-    view_state.buttons.push((
+    modal_draw.buttons.push((
         Rect {
             x: hint.x + save.len() as u16 + 1,
             width: cancel.len() as u16,
@@ -319,7 +326,7 @@ fn comment_buttons(frame: &mut Frame<'_>, target: &mut Target, inner: Rect, view
     ));
 }
 
-fn confirm(frame: &mut Frame, area: Rect, modal: &mut Modal, view_state: &mut ModalDraw<'_>) {
+fn confirm(frame: &mut Frame, area: Rect, modal: &mut Modal, modal_draw: &mut ModalDraw<'_>) {
     let Modal::Confirm { question, yes, .. } = modal else {
         return;
     };
@@ -328,11 +335,11 @@ fn confirm(frame: &mut Frame, area: Rect, modal: &mut Modal, view_state: &mut Mo
 
     // the question's 1st line, then its list (commits: 1 per line), muted
     let lines: Vec<&str> = question.lines().collect();
-    let count = lines.len().max(1) as u16;
+    let line_count = lines.len().max(1) as u16;
     let width = width.min(70);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let height = (count + 4).min(area.height);
-    let area_value = Rect {
+    let height = (line_count + 4).min(area.height);
+    let rect = Rect {
         x,
         y: area.y + (area.height / 3).min(area.height.saturating_sub(height)),
         width,
@@ -341,14 +348,14 @@ fn confirm(frame: &mut Frame, area: Rect, modal: &mut Modal, view_state: &mut Mo
 
     // a modal: the screen behind it fades
     theme::dim(frame.buffer_mut(), area);
-    frame.render_widget(Clear, area_value);
+    frame.render_widget(Clear, rect);
     frame.render_widget(
         Block::bordered().border_style(theme::accent()).style(theme::text()),
-        area_value,
+        rect,
     );
     let inner = Rect {
-        x: area_value.x + 2,
-        y: area_value.y + 1,
+        x: rect.x + 2,
+        y: rect.y + 1,
         width: width.saturating_sub(4),
         height: height.saturating_sub(2),
     };
@@ -358,12 +365,12 @@ fn confirm(frame: &mut Frame, area: Rect, modal: &mut Modal, view_state: &mut Mo
         .enumerate()
         .take(usize::from(inner.height.saturating_sub(2)))
     {
-        let st = if i == 0 { theme::text() } else { theme::muted() };
+        let style = if i == 0 { theme::text() } else { theme::muted() };
 
         frame.render_widget(
             Paragraph::new(Line::styled(
                 crate::ui::thread_card::fit(line, usize::from(inner.width)),
-                st,
+                style,
             )),
             Rect {
                 y: inner.y + i as u16,
@@ -373,11 +380,11 @@ fn confirm(frame: &mut Frame, area: Rect, modal: &mut Modal, view_state: &mut Mo
         );
     }
 
-    confirm_buttons(frame, yes, inner, view_state);
+    confirm_buttons(frame, yes, inner, modal_draw);
 }
 
-fn confirm_buttons(frame: &mut Frame<'_>, yes: &mut bool, inner: Rect, view_state: &mut ModalDraw<'_>) {
-    let (ys, ns) = if *yes {
+fn confirm_buttons(frame: &mut Frame<'_>, yes: &mut bool, inner: Rect, modal_draw: &mut ModalDraw<'_>) {
+    let (yes_style, no_style) = if *yes {
         (theme::pill(), theme::muted())
     } else {
         (theme::muted(), theme::pill())
@@ -391,15 +398,15 @@ fn confirm_buttons(frame: &mut Frame<'_>, yes: &mut bool, inner: Rect, view_stat
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" yes ", ys),
+            Span::styled(" yes ", yes_style),
             Span::raw("  "),
-            Span::styled(" no ", ns),
+            Span::styled(" no ", no_style),
             Span::styled("   y / n · ←→ · enter", theme::muted()),
         ])),
         row,
     );
-    view_state.buttons.push((Rect { width: 5, ..row }, true));
-    view_state.buttons.push((
+    modal_draw.buttons.push((Rect { width: 5, ..row }, true));
+    modal_draw.buttons.push((
         Rect {
             x: row.x + 7,
             width: 4,

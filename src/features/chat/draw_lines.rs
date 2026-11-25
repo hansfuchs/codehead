@@ -15,37 +15,36 @@ pub(super) fn draw_lines(
     fold: &Fold,
     ask: &Picker,
 ) -> Drawn {
-    let width_value = usize::from(width.max(10));
-    let mut directory = Drawn::default();
-    let blank = |directory_value: &mut Drawn| directory_value.rows.push(Row::plain(Line::raw("")));
+    let width = usize::from(width.max(10));
+    let mut drawn = Drawn::default();
+    let blank = |drawn: &mut Drawn| drawn.rows.push(Row::plain(Line::raw("")));
     let mut last_agent: Option<String> = None;
 
     // the minute of the last item of LAST_AGENT: a later one gets `│ ── 13:42`
     let mut minute = String::new();
 
-    let divider = |directory_2: &mut Drawn, color_value: Color, at: &str| {
-        let fill = width_value.saturating_sub(2 + at.width() + 1);
+    let divider = |drawn: &mut Drawn, color: Color, at: &str| {
+        let fill = width.saturating_sub(2 + at.width() + 1);
 
-        directory_2.rows.push(Row::plain(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(color_value)),
+        drawn.rows.push(Row::plain(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(color)),
             Span::styled("─".repeat(fill), theme::line()),
             Span::styled(format!(" {at}"), theme::muted()),
         ])));
-        directory_2.rows.push(Row::plain(Line::from(Span::styled(
-            "│",
-            Style::default().fg(color_value),
-        ))));
+        drawn
+            .rows
+            .push(Row::plain(Line::from(Span::styled("│", Style::default().fg(color)))));
     };
 
     for item in &thread.items {
-        draw_lines_character(
+        draw_line_item(
             LineRenderContext {
                 thread,
                 colors,
                 roster,
                 fold,
-                width_value,
-                directory: &mut directory,
+                width,
+                drawn: &mut drawn,
                 last_agent: &mut last_agent,
                 minute: &mut minute,
             },
@@ -56,28 +55,20 @@ pub(super) fn draw_lines(
     }
 
     // the 1st open ask: below everything, its choices clickable
-    finish_draw_lines(thread, colors, ask, width_value, directory, blank)
+    finish_draw_lines(thread, colors, ask, width, drawn, blank)
 }
 
-fn draw_lines_character(
+fn draw_line_item(
     mut context: LineRenderContext<'_>,
     blank: impl Fn(&mut Drawn),
     divider: impl Fn(&mut Drawn, Color, &str),
     item: &Item,
 ) {
-    context.directory.starts.push(context.directory.rows.len());
+    context.drawn.starts.push(context.drawn.rows.len());
 
     match item {
         Item::Prompt { from, to, text, ts } if from == "owner" => {
-            draw_lines_item_prompt_from_to(
-                context.width_value,
-                context.directory,
-                blank,
-                context.last_agent,
-                to,
-                text,
-                *ts,
-            );
+            draw_owner_prompt(context.width, context.drawn, blank, context.last_agent, to, text, *ts);
         }
         Item::Prompt { .. } => {
             render_line_prompt(&mut context, &blank, &divider, item);
@@ -112,7 +103,7 @@ fn draw_lines_character(
     }
 }
 
-fn draw_lines_character_item_prompt_from_to(
+fn draw_agent_prompt(
     context: &mut LineRenderContext<'_>,
     blank: &impl Fn(&mut Drawn),
     from: &str,
@@ -120,24 +111,22 @@ fn draw_lines_character_item_prompt_from_to(
     text: &str,
     ts: u64,
 ) {
-    blank(context.directory);
-    let character = color_of(context.colors, from);
-    let mut head = badge(from, character, ts);
+    blank(context.drawn);
+    let color = color_of(context.colors, from);
+    let mut head = badge(from, color, ts);
 
     head.push(Span::styled(format!(" → {}", to.join(", ")), theme::muted()));
-    context.directory.rows.push(Row::plain(Line::from(head)));
-    let bar = [Span::styled("┆ ", Style::default().fg(character))];
+    context.drawn.rows.push(Row::plain(Line::from(head)));
+    let bar = [Span::styled("┆ ", Style::default().fg(color))];
 
-    context.directory.rows.extend(markdown::plain(
-        text.trim_end(),
-        context.width_value,
-        theme::muted(),
-        &bar,
-    ));
+    context
+        .drawn
+        .rows
+        .extend(markdown::plain(text.trim_end(), context.width, theme::muted(), &bar));
     *context.last_agent = None;
 }
 
-fn draw_lines_character_item_sub_agent_sub(
+fn draw_subagent_end(
     context: &mut LineRenderContext<'_>,
     blank: &impl Fn(&mut Drawn),
     agent: &str,
@@ -145,63 +134,51 @@ fn draw_lines_character_item_sub_agent_sub(
     ts: u64,
     key: usize,
 ) {
-    let character_5 = color_of(context.colors, agent);
+    let color = color_of(context.colors, agent);
 
-    blank(context.directory);
-    context
-        .directory
-        .rows
-        .push(Row::plain(Line::from(badge(agent, character_5, ts))));
+    blank(context.drawn);
+    context.drawn.rows.push(Row::plain(Line::from(badge(agent, color, ts))));
 
-    if let Some(text_2) = context.thread.subs.get(sub) {
+    if let Some(subagent) = context.thread.subs.get(sub) {
         sub_rows(
-            context.directory,
-            text_2,
+            context.drawn,
+            subagent,
             sub,
             key,
             context.fold,
-            context.width_value,
-            &[Span::styled("│ ", Style::default().fg(character_5))],
+            context.width,
+            &[Span::styled("│ ", Style::default().fg(color))],
         );
     }
 
     *context.last_agent = None;
 }
 
-fn draw_lines_character_character_(
-    context: LineNoteContext<'_>,
-    item: &Item,
-    agent: &String,
-    text: &str,
-    color: Color,
-) {
+fn draw_note_line(context: LineNoteContext<'_>, item: &Item, agent: &String, text: &str, color: Color) {
     let LineNoteContext {
         thread,
         colors,
         roster,
-        width_value,
-        directory,
+        width,
+        drawn,
         last_agent,
     } = context;
 
-    let character_7 = color_of(colors, agent);
+    let agent_color = color_of(colors, agent);
     let pre = [
         Span::styled("● ", Style::default().fg(color)),
-        Span::styled(format!("{agent} "), Style::default().fg(character_7)),
+        Span::styled(format!("{agent} "), Style::default().fg(agent_color)),
     ];
 
-    directory
+    drawn
         .rows
-        .extend(markdown::plain(text, width_value, Style::default().fg(color), &pre));
+        .extend(markdown::plain(text, width, Style::default().fg(color), &pre));
 
     if color == theme::pal().error() {
-        for height_value in error_hint(agent, text, roster, resume_of(thread, item)) {
-            directory.rows.extend(markdown::plain(
-                &height_value,
-                width_value,
-                theme::muted(),
-                &[Span::raw("  ")],
-            ));
+        for hint in error_hint(agent, text, roster, resume_of(thread, item)) {
+            drawn
+                .rows
+                .extend(markdown::plain(&hint, width, theme::muted(), &[Span::raw("  ")]));
         }
     }
 
@@ -212,14 +189,14 @@ fn finish_draw_lines(
     thread: &Thread,
     colors: &HashMap<String, Color>,
     ask: &Picker,
-    width_value: usize,
-    mut directory: Drawn,
+    width: usize,
+    mut drawn: Drawn,
     blank: impl Fn(&mut Drawn),
 ) -> Drawn {
-    if let Some(agent_5) = thread.asks.first() {
-        let character_9 = color_of(colors, &agent_5.agent);
+    if let Some(open_ask) = thread.asks.first() {
+        let agent_color = color_of(colors, &open_ask.agent);
 
-        blank(&mut directory);
+        blank(&mut drawn);
         let edge = theme::fg(theme::pal().attention());
 
         let more = if thread.asks.len() > 1 {
@@ -228,29 +205,29 @@ fn finish_draw_lines(
             String::new()
         };
 
-        let what = if agent_5.tool == crate::engine::flows::run::WAIT_TOOL {
+        let what = if open_ask.tool == crate::engine::flows::run::WAIT_TOOL {
             "waits on you"
-        } else if agent_5.questions().is_empty() {
+        } else if open_ask.questions().is_empty() {
             "asks to run"
         } else {
             "asks"
         };
 
-        directory.rows.push(Row::plain(Line::from(vec![
+        drawn.rows.push(Row::plain(Line::from(vec![
             Span::styled("┃ ", edge),
             Span::styled(
-                agent_5.agent.clone(),
-                Style::default().fg(character_9).add_modifier(Modifier::BOLD),
+                open_ask.agent.clone(),
+                Style::default().fg(agent_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!(" {what}{more}"), edge),
         ])));
-        ask_rows(&mut directory, agent_5, width_value, &[Span::styled("┃ ", edge)], ask);
+        ask_rows(&mut drawn, open_ask, width, &[Span::styled("┃ ", edge)], ask);
     }
 
-    directory
+    drawn
 }
 
-fn draw_lines_item_run(
+fn draw_run_item(
     layout: &mut RunRenderContext<'_>,
     blank: impl Fn(&mut Drawn),
     divider: impl Fn(&mut Drawn, Color, &str),
@@ -265,9 +242,9 @@ fn draw_lines_item_run(
         thoughts,
     } = content;
 
-    let character_2 = begin_run(layout, &blank, &divider, agent, start);
+    let color = begin_run(layout, &blank, &divider, agent, start);
     let shown = layout.fold.run(key);
-    let running = calls.iter().any(|character_3| character_3.output.is_none()) && layout.thread.busy.contains(agent);
+    let running = calls.iter().any(|call| call.output.is_none()) && layout.thread.busy.contains(agent);
 
     let mark = if shown {
         "▾ "
@@ -280,89 +257,87 @@ fn draw_lines_item_run(
     let summary = summary_with_thoughts(calls, start, end, thoughts, layout.fold);
 
     let fold: &Fold<'_> = layout.fold;
-    let width_value: usize = layout.width_value;
-    let directory: &mut Drawn = layout.directory;
+    let width: usize = layout.width;
+    let drawn: &mut Drawn = layout.drawn;
 
     let think = fold.thoughts != Thoughts::Hidden && (shown || fold.thoughts == Thoughts::Open);
-    let tbar = [Span::styled("│   ", Style::default().fg(character_2))];
-    let row_at = directory.rows.len();
+    let tbar = [Span::styled("│   ", Style::default().fg(color))];
+    let row_at = drawn.rows.len();
     let pre = [
-        Span::styled("│ ", Style::default().fg(character_2)),
+        Span::styled("│ ", Style::default().fg(color)),
         Span::styled(mark, theme::accent()),
     ];
-    let rest = [Span::styled("│   ", Style::default().fg(character_2))];
+    let rest = [Span::styled("│   ", Style::default().fg(color))];
 
-    for (i, result_value) in markdown::plain(&summary, width_value, theme::muted(), &pre)
+    for (i, row) in markdown::plain(&summary, width, theme::muted(), &pre)
         .into_iter()
         .enumerate()
     {
-        let result_2 = if i == 0 {
-            result_value
+        let row = if i == 0 {
+            row
         } else {
             Row {
-                line: Line::from([rest.to_vec(), result_value.line.spans[2..].to_vec()].concat()),
-                ..result_value
+                line: Line::from([rest.to_vec(), row.line.spans[2..].to_vec()].concat()),
+                ..row
             }
         };
 
-        directory.hits.insert(row_at + i, Hit::Run(key));
-        directory.rows.push(result_2);
+        drawn.hits.insert(row_at + i, Hit::Run(key));
+        drawn.rows.push(row);
     }
 
     if think && !shown {
-        for count_3 in 0..=calls.len() {
-            run_thought_rows(directory, thoughts, count_3, width_value, &tbar);
+        for calls_before in 0..=calls.len() {
+            run_thought_rows(drawn, thoughts, calls_before, width, &tbar);
         }
     }
 
     if shown {
-        draw_lines_item_run_head(width_value, directory, calls, thoughts, character_2, think, &tbar);
+        draw_run_calls(width, drawn, calls, thoughts, color, think, &tbar);
     }
 }
 
-fn draw_lines_item_run_head(
-    width_value: usize,
-    directory: &mut Drawn,
+fn draw_run_calls(
+    width: usize,
+    drawn: &mut Drawn,
     calls: &[Call],
     thoughts: &[(usize, String)],
-    character_2: Color,
+    color: Color,
     think: bool,
     tbar: &[Span<'static>; 1],
 ) {
-    for (count_4, call) in calls.iter().enumerate() {
+    for (i, call) in calls.iter().enumerate() {
         if think {
-            run_thought_rows(directory, thoughts, count_4, width_value, tbar);
+            run_thought_rows(drawn, thoughts, i, width, tbar);
         }
 
         let head = format!("{} {}", tool_label(&call.name), call_summary(&call.name, &call.input));
-        let bar = [Span::styled("│   ", Style::default().fg(character_2))];
+        let bar = [Span::styled("│   ", Style::default().fg(color))];
 
-        directory
-            .rows
-            .extend(markdown::plain(&head, width_value, theme::text(), &bar));
-        directory.rows.extend(memo::call(
+        drawn.rows.extend(markdown::plain(&head, width, theme::text(), &bar));
+        drawn.rows.extend(memo::call(
             call,
-            width_value,
-            &[Span::styled("│     ", Style::default().fg(character_2))],
+            width,
+            &[Span::styled("│     ", Style::default().fg(color))],
         ));
     }
 
     if think {
-        run_thought_rows(directory, thoughts, calls.len(), width_value, tbar);
+        run_thought_rows(drawn, thoughts, calls.len(), width, tbar);
     }
 }
 
 #[path = "line_messages.rs"]
 mod messages;
-use messages::{draw_lines_item_prompt_from_to, draw_lines_item_settled, draw_lines_item_text};
+use messages::{draw_message_lines, draw_owner_prompt, draw_settled_line};
 
 pub(super) struct LineRenderContext<'render> {
     pub(super) thread: &'render Thread,
     pub(super) colors: &'render HashMap<String, Color>,
     pub(super) roster: &'render [(String, String)],
     pub(super) fold: &'render Fold<'render>,
-    pub(super) width_value: usize,
-    pub(super) directory: &'render mut Drawn,
+    pub(super) width: usize,
+    pub(super) drawn: &'render mut Drawn,
     pub(super) last_agent: &'render mut Option<String>,
     pub(super) minute: &'render mut String,
 }
@@ -371,8 +346,8 @@ pub(super) struct LineNoteContext<'render> {
     pub(super) thread: &'render Thread,
     pub(super) colors: &'render HashMap<String, Color>,
     pub(super) roster: &'render [(String, String)],
-    pub(super) width_value: usize,
-    pub(super) directory: &'render mut Drawn,
+    pub(super) width: usize,
+    pub(super) drawn: &'render mut Drawn,
     pub(super) last_agent: &'render mut Option<String>,
 }
 
@@ -380,8 +355,8 @@ pub(super) struct RunRenderContext<'render> {
     pub(super) thread: &'render Thread,
     pub(super) colors: &'render HashMap<String, Color>,
     pub(super) fold: &'render Fold<'render>,
-    pub(super) width_value: usize,
-    pub(super) directory: &'render mut Drawn,
+    pub(super) width: usize,
+    pub(super) drawn: &'render mut Drawn,
     pub(super) last_agent: &'render mut Option<String>,
     pub(super) minute: &'render mut String,
 }
@@ -403,29 +378,29 @@ fn begin_run(
     agent: &str,
     start: u64,
 ) -> Color {
-    let character_2 = color_of(layout.colors, agent);
+    let color = color_of(layout.colors, agent);
 
     if layout.last_agent.as_deref() != Some(agent) {
-        blank(layout.directory);
+        blank(layout.drawn);
         layout
-            .directory
+            .drawn
             .rows
-            .push(Row::plain(Line::from(badge(agent, character_2, start))));
+            .push(Row::plain(Line::from(badge(agent, color, start))));
         *layout.last_agent = Some(agent.to_string());
     } else if *layout.minute != clock(start) {
-        blank(layout.directory);
-        divider(layout.directory, character_2, &clock(start));
+        blank(layout.drawn);
+        divider(layout.drawn, color, &clock(start));
     }
 
     *layout.minute = clock(start);
 
-    character_2
+    color
 }
 
 fn summary_with_thoughts(calls: &[Call], start: u64, end: u64, thoughts: &[(usize, String)], fold: &Fold) -> String {
     let failed = calls
         .iter()
-        .filter(|character_4| matches!(character_4.output, Some((false, _))))
+        .filter(|call| matches!(call.output, Some((false, _))))
         .count();
     let mut summary = run_summary(calls, end.saturating_sub(start) as f64 / 1000.0);
 

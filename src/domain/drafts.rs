@@ -15,7 +15,7 @@ pub(crate) fn save_prompt_draft(id: &str, text: &str) {
 pub(crate) fn save_prompt_draft_files(id: &str, text: &str, files: &[(String, PathBuf)]) {
     let files: Vec<Value> = files
         .iter()
-        .map(|(message, path)| json!([message, path.display().to_string()]))
+        .map(|(marker, path)| json!([marker, path.display().to_string()]))
         .collect();
     let _ = crate::engine::write_atomic(
         &prompt_path(id),

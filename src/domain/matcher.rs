@@ -4,76 +4,76 @@ pub(crate) fn word(query: &str, text: &str) -> Option<(i64, Vec<usize>)> {
         return Some((0, Vec::new()));
     }
 
-    let thread: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
-    let query_value: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+    let chars: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+    let needle: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
 
-    if thread.len() != text.chars().count() {
+    if chars.len() != text.chars().count() {
         // a char that lowercases to 2+ chars: positions would shift; plain compare
-        return plain(&query_value, text);
+        return plain(&needle, text);
     }
 
     let start = |i: usize| {
         i == 0
-            || !thread[i - 1].is_alphanumeric()
+            || !chars[i - 1].is_alphanumeric()
             || (text.chars().nth(i).is_some_and(char::is_uppercase)
                 && text.chars().nth(i - 1).is_some_and(char::is_lowercase))
     };
 
     // substring: the earliest at a word start, else the earliest
-    let subs: Vec<usize> = (0..=thread.len().saturating_sub(query_value.len()))
-        .filter(|&i| thread.len() >= query_value.len() && thread[i..i + query_value.len()] == query_value[..])
+    let subs: Vec<usize> = (0..=chars.len().saturating_sub(needle.len()))
+        .filter(|&i| chars.len() >= needle.len() && chars[i..i + needle.len()] == needle[..])
         .collect();
 
     if let Some(&i) = subs.iter().find(|&&i| start(i)).or(subs.first()) {
-        let mut text_value = 1000 + 10 * query_value.len() as i64;
+        let mut score = 1000 + 10 * needle.len() as i64;
 
         if start(i) {
-            text_value += 300;
+            score += 300;
         }
 
         if i == 0 {
-            text_value += 200;
+            score += 200;
         }
 
-        if query_value.len() == thread.len() {
-            text_value += 500;
+        if needle.len() == chars.len() {
+            score += 500;
         }
 
-        text_value -= (i as i64).min(100);
-        return Some((text_value, (i..i + query_value.len()).collect()));
+        score -= (i as i64).min(100);
+        return Some((score, (i..i + needle.len()).collect()));
     }
 
     // subsequence: greedy, word starts first where they fit
-    let mut pos = Vec::with_capacity(query_value.len());
+    let mut pos = Vec::with_capacity(needle.len());
     let mut at = 0;
 
-    for &character in &query_value {
-        let next = (at..thread.len()).find(|&i| thread[i] == character)?;
+    for &character in &needle {
+        let next = (at..chars.len()).find(|&i| chars[i] == character)?;
 
         pos.push(next);
         at = next + 1;
     }
 
-    let mut text_2 = 100;
+    let mut score = 100;
 
-    for width in pos.windows(2) {
-        if width[1] == width[0] + 1 {
-            text_2 += 15;
+    for pair in pos.windows(2) {
+        if pair[1] == pair[0] + 1 {
+            score += 15;
         } else {
-            text_2 -= (width[1] - width[0]).min(20) as i64;
+            score -= (pair[1] - pair[0]).min(20) as i64;
         }
     }
 
-    text_2 += pos.iter().filter(|&&i| start(i)).count() as i64 * 20;
-    text_2 -= (pos[0] as i64).min(50);
+    score += pos.iter().filter(|&&i| start(i)).count() as i64 * 20;
+    score -= (pos[0] as i64).min(50);
 
-    Some((text_2, pos))
+    Some((score, pos))
 }
 
 fn plain(query: &[char], text: &str) -> Option<(i64, Vec<usize>)> {
-    let query_value: String = query.iter().collect();
+    let needle: String = query.iter().collect();
 
-    text.to_lowercase().contains(&query_value).then(|| (500, Vec::new()))
+    text.to_lowercase().contains(&needle).then(|| (500, Vec::new()))
 }
 
 /// Every word of QUERY must match NAME or BODY. Name hits weigh 4x. Returns the score and the
@@ -82,13 +82,13 @@ pub(crate) fn score(query: &str, name: &str, body: &str) -> Option<(i64, Vec<usi
     let mut total = 0;
     let mut marks = Vec::new();
 
-    for width in query.split_whitespace() {
-        match (word(width, name), body_hit(width, body)) {
-            (Some((text, path)), _) => {
-                total += 4 * text;
-                marks.extend(path);
+    for term in query.split_whitespace() {
+        match (word(term, name), body_hit(term, body)) {
+            (Some((points, positions)), _) => {
+                total += 4 * points;
+                marks.extend(positions);
             }
-            (None, Some(text_value)) => total += text_value,
+            (None, Some(points)) => total += points,
             (None, None) => return None,
         }
     }
@@ -101,15 +101,15 @@ pub(crate) fn score(query: &str, name: &str, body: &str) -> Option<(i64, Vec<usi
 
 /// A body (file content) matches as a substring only: fuzzy over 10k chars matches anything.
 /// More hits: more weight, up to 10.
-fn body_hit(width: &str, body: &str) -> Option<i64> {
-    if body.is_empty() || width.is_empty() {
+fn body_hit(term: &str, body: &str) -> Option<i64> {
+    if body.is_empty() || term.is_empty() {
         return None;
     }
 
-    let lw = width.to_lowercase();
-    let count_value = body.to_lowercase().matches(&lw).take(10).count();
+    let lowered = term.to_lowercase();
+    let hits = body.to_lowercase().matches(&lowered).take(10).count();
 
-    (count_value > 0).then(|| 50 + 10 * count_value as i64)
+    (hits > 0).then(|| 50 + 10 * hits as i64)
 }
 
 /// The indices of ITEMS that match QUERY, best first (stable for equal scores), with name marks.
@@ -124,12 +124,14 @@ pub(crate) fn rank<T>(
         return (0..items.len()).map(|i| (i, Vec::new())).collect();
     }
 
-    let mut value: Vec<(i64, usize, Vec<usize>)> = items
+    let mut scored: Vec<(i64, usize, Vec<usize>)> = items
         .iter()
         .enumerate()
-        .filter_map(|(i, it)| score(query, &name(it), &body(it)).map(|(text, path)| (text, i, path)))
+        .filter_map(|(i, item)| {
+            score(query, &name(item), &body(item)).map(|(points, positions)| (points, i, positions))
+        })
         .collect();
 
-    value.sort_by(|agent, bytes| bytes.0.cmp(&agent.0).then(agent.1.cmp(&bytes.1)));
-    value.into_iter().map(|(_, i, path_value)| (i, path_value)).collect()
+    scored.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    scored.into_iter().map(|(_, i, positions)| (i, positions)).collect()
 }

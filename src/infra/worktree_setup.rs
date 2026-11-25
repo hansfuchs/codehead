@@ -40,12 +40,12 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
 
 /// Paths `.worktreeinclude` of REPO lists; 0 file: the gitignored `.env*` files of the root.
 pub(crate) fn includes(repo: &Path) -> Vec<String> {
-    if let Ok(thread) = std::fs::read_to_string(repo.join(".worktreeinclude")) {
-        return thread
+    if let Ok(status) = std::fs::read_to_string(repo.join(".worktreeinclude")) {
+        return status
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(|line_value| line_value.trim_start_matches("./").trim_end_matches('/').to_string())
+            .map(|line| line.trim_start_matches("./").trim_end_matches('/').to_string())
             .collect();
     }
 
@@ -53,24 +53,24 @@ pub(crate) fn includes(repo: &Path) -> Vec<String> {
         return Vec::new();
     };
 
-    let mut value: Vec<String> = rd
+    let mut names: Vec<String> = rd
         .flatten()
-        .filter(|error| error.path().is_file())
-        .map(|error_value| error_value.file_name().to_string_lossy().into_owned())
-        .filter(|count| count.starts_with(".env"))
-        .filter(|count_value| {
+        .filter(|entry| entry.path().is_file())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".env"))
+        .filter(|name| {
             Command::new("git")
                 .arg("-C")
                 .arg(repo)
-                .args(["check-ignore", "-q", count_value])
+                .args(["check-ignore", "-q", name])
                 .stdin(Stdio::null())
                 .status()
-                .is_ok_and(|text| text.success())
+                .is_ok_and(|status| status.success())
         })
         .collect();
 
-    value.sort();
-    value
+    names.sort();
+    names
 }
 
 /// Copy PATH (relative) of REPO into WT: a clone where the file system can (APFS: `cp -c`,
@@ -82,8 +82,8 @@ fn copy_one(repo: &Path, wt: &Path, path: &str) -> Result<bool, String> {
         return Ok(false);
     }
 
-    if let Some(directory) = dst.parent() {
-        std::fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
+    if let Some(dir) = dst.parent() {
+        std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     }
 
     let clone = if cfg!(target_os = "macos") {
@@ -100,7 +100,7 @@ fn copy_one(repo: &Path, wt: &Path, path: &str) -> Result<bool, String> {
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .is_ok_and(|text| text.success())
+            .is_ok_and(|status| status.success())
     };
 
     if ok(&[clone, "-R"]) || ok(&["-R"]) {
@@ -139,10 +139,10 @@ pub(crate) fn script(wt: &Path, kind: &str) -> Option<(Vec<String>, String, bool
     }
 
     let key = if kind == "setup" { "setup" } else { "archive" };
-    let character: serde_json::Value = std::fs::read(wt.join("conductor.json"))
+    let conductor: serde_json::Value = std::fs::read(wt.join("conductor.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())?;
-    let cmd = character["scripts"][key]
+    let cmd = conductor["scripts"][key]
         .as_str()
         .filter(|text| !text.trim().is_empty())?;
 
@@ -155,7 +155,7 @@ pub(crate) fn script(wt: &Path, kind: &str) -> Option<(Vec<String>, String, bool
 
 /// The env of a script for thread ID: main checkout ROOT, worktree WT, BRANCH, PORT.
 pub(crate) fn env(root: &Path, wt: &Path, id: &str, branch: &str, port: Option<u16>) -> Vec<(String, String)> {
-    let mut value = vec![
+    let mut env = vec![
         ("CODEHEAD_ROOT".to_string(), root.display().to_string()),
         ("CODEHEAD_WORKTREE".to_string(), wt.display().to_string()),
         ("CODEHEAD_THREAD".to_string(), id.to_string()),
@@ -163,17 +163,17 @@ pub(crate) fn env(root: &Path, wt: &Path, id: &str, branch: &str, port: Option<u
         ("CONDUCTOR_ROOT_PATH".to_string(), root.display().to_string()),
     ];
 
-    if let Some(path) = port {
-        value.push(("CODEHEAD_PORT".into(), path.to_string()));
-        value.push(("CONDUCTOR_PORT".into(), path.to_string()));
+    if let Some(port) = port {
+        env.push(("CODEHEAD_PORT".into(), port.to_string()));
+        env.push(("CONDUCTOR_PORT".into(), port.to_string()));
     }
 
     // portless: the worktree's label (services the script starts get its URLs)
     if !branch.is_empty() && crate::infra::portless::active() {
-        value.push(("PORTLESS_PREFIX".into(), crate::infra::portless::prefix(branch)));
+        env.push(("PORTLESS_PREFIX".into(), crate::infra::portless::prefix(branch)));
     }
 
-    value
+    env
 }
 
 /// Run ARGV in WT with ENV (stdout + stderr together), at most MAX. (ok, last `OUTPUT_MAX` bytes).
@@ -183,9 +183,9 @@ pub(crate) fn run(argv: &[String], wt: &Path, env: &[(String, String)], max: Dur
 
     // 1 log per run: 2 runs in the same ms (tests in parallel) never share 1 file
     static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let count = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let log = std::env::temp_dir().join(format!(
-        "codehead-setup-{}-{}-{count}.log",
+        "codehead-setup-{}-{}-{run}.log",
         std::process::id(),
         crate::engine::now_ms()
     ));
@@ -209,7 +209,7 @@ pub(crate) fn run(argv: &[String], wt: &Path, env: &[(String, String)], max: Dur
         .spawn();
 
     let mut child = match child {
-        Ok(character) => character,
+        Ok(child) => child,
         Err(error) => return (false, format!("{}: {error}", argv.join(" "))),
     };
 
@@ -217,7 +217,7 @@ pub(crate) fn run(argv: &[String], wt: &Path, env: &[(String, String)], max: Dur
 
     let ok = loop {
         match child.try_wait() {
-            Ok(Some(text)) => break text.success(),
+            Ok(Some(status)) => break status.success(),
             Ok(None) if start.elapsed() > max => {
                 // the whole group: the script's children too
                 unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
@@ -232,8 +232,8 @@ pub(crate) fn run(argv: &[String], wt: &Path, env: &[(String, String)], max: Dur
 
     let mut out = String::new();
 
-    if let Ok(mut file_value) = std::fs::File::open(&log) {
-        let _ = file_value.read_to_string(&mut out);
+    if let Ok(mut file) = std::fs::File::open(&log) {
+        let _ = file.read_to_string(&mut out);
     }
 
     let _ = std::fs::remove_file(&log);
@@ -285,18 +285,18 @@ pub(crate) fn free_port(threads: &[crate::engine::store::Thread]) -> u16 {
     let used: Vec<u16> = threads
         .iter()
         .filter(|thread| thread.state != "archived")
-        .filter_map(|thread_value| thread_value.port)
+        .filter_map(|thread| thread.port)
         .collect();
 
     (0..2000u16)
-        .map(|count| PORT_BASE + count * PORTS)
-        .find(|path| !used.contains(path))
+        .map(|block| PORT_BASE + block * PORTS)
+        .find(|port| !used.contains(port))
         .unwrap_or(PORT_BASE)
 }
 
 /// The base a new worktree branch starts from: `origin/<default>` after a fetch, else HEAD.
 pub(crate) fn new_branch_base(repo: &Path) -> String {
-    if git(repo, &["remote"]).is_some_and(|result| result.lines().any(|line| line == "origin")) {
+    if git(repo, &["remote"]).is_some_and(|remotes| remotes.lines().any(|line| line == "origin")) {
         let _ = Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -309,11 +309,11 @@ pub(crate) fn new_branch_base(repo: &Path) -> String {
 
     let def = git(repo, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
         .map(|text| text.trim().to_string())
-        .filter(|text_value| !text_value.is_empty())
+        .filter(|text| !text.is_empty())
         .or_else(|| {
             ["origin/main", "origin/master"]
                 .into_iter()
-                .find(|result_value| git(repo, &["rev-parse", "--verify", "--quiet", result_value]).is_some())
+                .find(|rev| git(repo, &["rev-parse", "--verify", "--quiet", rev]).is_some())
                 .map(String::from)
         });
 

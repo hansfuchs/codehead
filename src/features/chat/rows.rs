@@ -7,8 +7,8 @@ use super::{
 /// “what” · done · 2m10s`, then the report (folded to 6 lines, KEY opens it) or why it ended (lost:
 /// a `pick up` row: the master goes on from the subagent's context).
 pub(super) fn sub_rows(
-    directory: &mut Drawn,
-    text_value: &Sub,
+    drawn: &mut Drawn,
+    subagent: &Sub,
     sub: usize,
     key: usize,
     fold: &Fold,
@@ -16,7 +16,7 @@ pub(super) fn sub_rows(
     bar: &[Span<'static>],
 ) {
     let pal = theme::pal();
-    let state = text_value.state.as_deref().unwrap_or("running");
+    let state = subagent.state.as_deref().unwrap_or("running");
 
     let color = match state {
         "done" => pal.success(),
@@ -24,7 +24,7 @@ pub(super) fn sub_rows(
         _ => pal.error(),
     };
 
-    let secs = text_value.end.saturating_sub(text_value.start) / 1000;
+    let secs = subagent.end.saturating_sub(subagent.start) / 1000;
 
     let took = if secs >= 60 {
         format!("{}m{:02}s", secs / 60, secs % 60)
@@ -36,8 +36,8 @@ pub(super) fn sub_rows(
         bar.to_vec(),
         vec![
             Span::styled("↳ subagent ", theme::accent()),
-            Span::styled(format!("“{}”", text_value.description), theme::bold()),
-            Span::styled(if text_value.resumed { " · resumed · " } else { " · " }, theme::muted()),
+            Span::styled(format!("“{}”", subagent.description), theme::bold()),
+            Span::styled(if subagent.resumed { " · resumed · " } else { " · " }, theme::muted()),
             Span::styled(
                 state.to_string(),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -47,41 +47,34 @@ pub(super) fn sub_rows(
     ]
     .concat();
 
-    directory.rows.push(Row::plain(Line::from(head)));
-    directory.rows.push(Row::plain(Line::from(bar.to_vec())));
+    drawn.rows.push(Row::plain(Line::from(head)));
+    drawn.rows.push(Row::plain(Line::from(bar.to_vec())));
 
     match state {
         "lost" | "stopped" => {
-            sub_rows_lost_stopped(directory, text_value, sub, width, bar, state, color);
+            lost_rows(drawn, subagent, sub, width, bar, state, color);
         }
         _ => {
-            sub_rows_match(directory, text_value, key, fold, width, bar);
+            report_rows(drawn, subagent, key, fold, width, bar);
         }
     }
 }
 
-fn sub_rows_match(
-    directory: &mut Drawn,
-    text_value: &Sub,
-    key: usize,
-    fold: &Fold<'_>,
-    width: usize,
-    bar: &[Span<'static>],
-) {
-    let lines: Vec<&str> = text_value.result.trim_end().lines().collect();
+fn report_rows(drawn: &mut Drawn, subagent: &Sub, key: usize, fold: &Fold<'_>, width: usize, bar: &[Span<'static>]) {
+    let lines: Vec<&str> = subagent.result.trim_end().lines().collect();
     let open = fold.run(key);
     let long = lines.len() > 6;
 
     let text = if long && !open {
         lines[..6].join("\n")
     } else {
-        text_value.result.trim_end().to_string()
+        subagent.result.trim_end().to_string()
     };
 
-    directory.rows.extend(memo::markdown(&text, width, bar));
+    drawn.rows.extend(memo::markdown(&text, width, bar));
 
     if long {
-        let at = directory.rows.len();
+        let at = drawn.rows.len();
 
         let label = if open {
             "▾ fold the report".to_string()
@@ -89,16 +82,16 @@ fn sub_rows_match(
             format!("▸ {} more lines (click)", lines.len() - 6)
         };
 
-        directory.rows.push(Row::plain(Line::from(
+        drawn.rows.push(Row::plain(Line::from(
             [bar.to_vec(), vec![Span::styled(label, theme::muted())]].concat(),
         )));
-        directory.hits.insert(at, Hit::Run(key));
+        drawn.hits.insert(at, Hit::Run(key));
     }
 }
 
-fn sub_rows_lost_stopped(
-    directory: &mut Drawn,
-    text_value: &Sub,
+fn lost_rows(
+    drawn: &mut Drawn,
+    subagent: &Sub,
     sub: usize,
     width: usize,
     bar: &[Span<'static>],
@@ -108,56 +101,56 @@ fn sub_rows_lost_stopped(
     let why = if state == "stopped" {
         "stopped by the owner".to_string()
     } else {
-        format!("ended without a report: {}", text_value.result)
+        format!("ended without a report: {}", subagent.result)
     };
 
-    directory
+    drawn
         .rows
         .extend(markdown::plain(&why, width, Style::default().fg(color), bar));
 
     if state == "lost" {
-        let at = directory.rows.len();
+        let at = drawn.rows.len();
         let pre = [bar.to_vec(), vec![Span::styled("↻ ", theme::accent())]].concat();
 
-        directory.rows.extend(markdown::plain(
+        drawn.rows.extend(markdown::plain(
             &format!(
                 "pick up: {} goes on from this subagent's context (click)",
-                text_value.master
+                subagent.master
             ),
             width,
             theme::accent(),
             &pre,
         ));
 
-        for i in at..directory.rows.len() {
-            directory.hits.insert(i, Hit::PickUp(sub));
+        for i in at..drawn.rows.len() {
+            drawn.hits.insert(i, Hit::PickUp(sub));
         }
     }
 }
 /// Rows of the thoughts above a message (fold KEY), BAR before each: `▸ ∴ 1st line…` folded,
 /// `▾ ∴ text` open (each thought wrapped). Clickable.
 pub(super) fn thought_rows(
-    directory: &mut Drawn,
+    drawn: &mut Drawn,
     thoughts: &[String],
     key: usize,
     fold: &Fold,
-    width_value: usize,
+    width: usize,
     bar: &[Span<'static>],
 ) {
     if thoughts.is_empty() || fold.thoughts == Thoughts::Hidden {
         return;
     }
 
-    let st = theme::muted().add_modifier(Modifier::ITALIC);
+    let italic = theme::muted().add_modifier(Modifier::ITALIC);
     let open = fold.thought(key);
-    let at = directory.rows.len();
+    let at = drawn.rows.len();
 
     if open {
-        thought_rows_mark(directory, thoughts, fold, width_value, bar, st);
+        open_thought_rows(drawn, thoughts, fold, width, bar, italic);
     } else {
         let first = thoughts[0]
             .lines()
-            .find(|line_value| !line_value.trim().is_empty())
+            .find(|line| !line.trim().is_empty())
             .unwrap_or_default();
 
         let more = if thoughts.len() > 1 {
@@ -166,8 +159,7 @@ pub(super) fn thought_rows(
             String::new()
         };
 
-        let room =
-            width_value.saturating_sub(bar.iter().map(|text| text.content.width()).sum::<usize>() + 4 + more.width());
+        let room = width.saturating_sub(bar.iter().map(|span| span.content.width()).sum::<usize>() + 4 + more.width());
 
         let cut: String = if first.width() > room {
             first.chars().take(room.saturating_sub(1)).collect::<String>() + "…"
@@ -175,12 +167,12 @@ pub(super) fn thought_rows(
             first.to_string()
         };
 
-        directory.rows.push(Row::plain(Line::from(
+        drawn.rows.push(Row::plain(Line::from(
             [
                 bar.to_vec(),
                 vec![
                     Span::styled("▸ ∴ ", theme::muted()),
-                    Span::styled(cut, st),
+                    Span::styled(cut, italic),
                     Span::styled(more, theme::muted()),
                 ],
             ]
@@ -189,21 +181,21 @@ pub(super) fn thought_rows(
     }
 
     if fold.thoughts != Thoughts::Open {
-        for i in at..directory.rows.len() {
-            directory.hits.insert(i, Hit::Thought(key));
+        for i in at..drawn.rows.len() {
+            drawn.hits.insert(i, Hit::Thought(key));
         }
     }
 }
 
-fn thought_rows_mark(
-    directory: &mut Drawn,
+fn open_thought_rows(
+    drawn: &mut Drawn,
     thoughts: &[String],
     fold: &Fold<'_>,
-    width_value: usize,
+    width: usize,
     bar: &[Span<'static>],
-    st: Style,
+    italic: Style,
 ) {
-    for (i, thread) in thoughts.iter().enumerate() {
+    for (i, thought) in thoughts.iter().enumerate() {
         let mark = if i == 0 && fold.thoughts != Thoughts::Open {
             "▾ ∴ "
         } else {
@@ -211,74 +203,74 @@ fn thought_rows_mark(
         };
 
         let first = [bar.to_vec(), vec![Span::styled(mark, theme::muted())]].concat();
-        let mut rows = markdown::plain(thread, width_value, st, &first);
+        let mut rows = markdown::plain(thought, width, italic, &first);
 
         for row in rows.iter_mut().skip(1) {
             row.line.spans[bar.len()] = Span::raw("    ");
         }
 
-        directory.rows.extend(rows);
+        drawn.rows.extend(rows);
     }
 }
 /// The thoughts of a run (open: interleaved with its calls; Open setting: also under a folded run).
 pub(super) fn run_thought_rows(
-    directory: &mut Drawn,
+    drawn: &mut Drawn,
     thoughts: &[(usize, String)],
     before: usize,
     width: usize,
     bar: &[Span<'static>],
 ) {
-    let st = theme::muted().add_modifier(Modifier::ITALIC);
+    let italic = theme::muted().add_modifier(Modifier::ITALIC);
 
-    for (_, thread) in thoughts.iter().filter(|(count, _)| *count == before) {
+    for (_, thought) in thoughts.iter().filter(|(calls_before, _)| *calls_before == before) {
         let first = [bar.to_vec(), vec![Span::styled("∴ ", theme::muted())]].concat();
         let rest = [bar.to_vec(), vec![Span::raw("  ")]].concat();
-        let mut rows = markdown::plain(thread, width, st, &first);
+        let mut rows = markdown::plain(thought, width, italic, &first);
 
         for row in rows.iter_mut().skip(1) {
             row.line.spans.splice(..=bar.len(), rest.clone());
         }
 
-        directory.rows.extend(rows);
+        drawn.rows.extend(rows);
     }
 }
 /// The rows of open ask A (answered questions, the shown one, its rows: clickable, the hint),
 /// BAR before each. ASK: the view's picker of A.
-pub(super) fn ask_rows(directory: &mut Drawn, agent_value: &Ask, width: usize, bar: &[Span<'static>], ask: &Picker) {
+pub(super) fn ask_rows(drawn: &mut Drawn, open_ask: &Ask, width: usize, bar: &[Span<'static>], ask: &Picker) {
     // an ask of a subagent: whose it is
-    if let Some(sub) = agent_value.input["_subagent"].as_str() {
-        directory.rows.extend(markdown::plain(
-            &format!("from subagent “{sub}” of {}", agent_value.agent),
+    if let Some(sub) = open_ask.input["_subagent"].as_str() {
+        drawn.rows.extend(markdown::plain(
+            &format!("from subagent “{sub}” of {}", open_ask.agent),
             width,
             theme::accent(),
             bar,
         ));
     }
 
-    let qs = agent_value.questions();
-    let multi = qs.get(ask.question).is_some_and(|query| query.3);
+    let questions = open_ask.questions();
+    let multi = questions.get(ask.question).is_some_and(|question| question.3);
 
-    if let Some((query_value, header, _, _)) = qs.get(ask.question) {
+    if let Some((question, header, _, _)) = questions.get(ask.question) {
         // the questions before / after: answered ones with their answer
-        ask_rows_answered(
-            directory,
-            agent_value,
+        question_rows(
+            drawn,
+            open_ask,
             width,
             bar,
             ask,
             QuestionTabs {
-                qs: &qs,
-                query_value,
+                questions: &questions,
+                question,
                 header,
             },
         );
     } else {
-        directory
+        drawn
             .rows
-            .extend(markdown::plain(&agent_value.summary(), width, theme::bold(), bar));
+            .extend(markdown::plain(&open_ask.summary(), width, theme::bold(), bar));
 
-        if let Some(cmd) = agent_value.input["command"].as_str() {
-            directory.rows.extend(markdown::plain(
+        if let Some(cmd) = open_ask.input["command"].as_str() {
+            drawn.rows.extend(markdown::plain(
                 &format!("$ {cmd}"),
                 width,
                 theme::fg(theme::pal().info()),
@@ -286,68 +278,64 @@ pub(super) fn ask_rows(directory: &mut Drawn, agent_value: &Ask, width: usize, b
             ));
         }
 
-        if let Some(plan) = agent_value.input["plan"].as_str() {
-            directory.rows.extend(markdown::markdown(plan, width, bar));
+        if let Some(plan) = open_ask.input["plan"].as_str() {
+            drawn.rows.extend(markdown::markdown(plan, width, bar));
         }
     }
 
-    for (i, row) in ask.rows(agent_value).into_iter().enumerate() {
-        ask_rows_cur(directory, width, bar, ask, multi, i, &row);
+    for (i, row) in ask.rows(open_ask).into_iter().enumerate() {
+        choice_rows(drawn, width, bar, ask, multi, i, &row);
     }
 
-    directory
+    drawn
         .rows
-        .extend(markdown::plain(&ask.hint(agent_value), width, theme::muted(), bar));
+        .extend(markdown::plain(&ask.hint(open_ask), width, theme::muted(), bar));
 }
 
-fn ask_rows_answered(
-    directory: &mut Drawn,
-    agent_value: &Ask,
+fn question_rows(
+    drawn: &mut Drawn,
+    open_ask: &Ask,
     width: usize,
     bar: &[Span<'static>],
     ask: &Picker,
     context: QuestionTabs<'_>,
 ) {
     let QuestionTabs {
-        qs,
-        query_value,
+        questions,
+        question,
         header,
     } = context;
 
-    if qs.len() > 1 {
-        ask_rows_answered_answered(directory, agent_value, width, bar, ask, qs);
+    if questions.len() > 1 {
+        question_tabs_row(drawn, open_ask, width, bar, ask, questions);
     } else if !header.is_empty() {
-        directory
-            .rows
-            .extend(markdown::plain(header, width, theme::muted(), bar));
+        drawn.rows.extend(markdown::plain(header, width, theme::muted(), bar));
     }
 
-    directory
-        .rows
-        .extend(markdown::plain(query_value, width, theme::bold(), bar));
+    drawn.rows.extend(markdown::plain(question, width, theme::bold(), bar));
 }
 
-fn ask_rows_answered_answered(
-    directory: &mut Drawn,
-    agent_value: &Ask,
+fn question_tabs_row(
+    drawn: &mut Drawn,
+    open_ask: &Ask,
     width: usize,
     bar: &[Span<'static>],
     ask: &Picker,
-    qs: &[super::ask::Question],
+    questions: &[super::ask::Question],
 ) {
-    let answered = ask.answered(agent_value);
+    let answered = ask.answered(open_ask);
 
-    let tabs: Vec<String> = qs
+    let tabs: Vec<String> = questions
         .iter()
         .enumerate()
-        .map(|(i, (qq, height, ..))| {
-            let name = if height.is_empty() {
+        .map(|(i, (question, header, ..))| {
+            let name = if header.is_empty() {
                 format!("{}", i + 1)
             } else {
-                height.clone()
+                header.clone()
             };
 
-            let done = answered.iter().any(|(x, _)| x == qq);
+            let done = answered.iter().any(|(asked, _)| asked == question);
 
             match (i == ask.question, done) {
                 (true, _) => format!("[{name}]"),
@@ -357,16 +345,16 @@ fn ask_rows_answered_answered(
         })
         .collect();
 
-    directory.rows.extend(markdown::plain(
-        &format!("{} · {}/{}", tabs.join(" · "), ask.question + 1, qs.len()),
+    drawn.rows.extend(markdown::plain(
+        &format!("{} · {}/{}", tabs.join(" · "), ask.question + 1, questions.len()),
         width,
         theme::muted(),
         bar,
     ));
 }
 
-fn ask_rows_cur(
-    directory: &mut Drawn,
+fn choice_rows(
+    drawn: &mut Drawn,
     width: usize,
     bar: &[Span<'static>],
     ask: &Picker,
@@ -374,7 +362,7 @@ fn ask_rows_cur(
     i: usize,
     row: &super::ask::Row,
 ) {
-    let cur = row.cursor && ask.focus;
+    let focused = row.cursor && ask.focus;
 
     // multi: a box per row; single: a dot on the answer given before (←)
     let mark = match (multi, row.picked) {
@@ -384,31 +372,31 @@ fn ask_rows_cur(
         (false, false) => "",
     };
 
-    let st = if cur { theme::accent_bold() } else { theme::text() };
+    let label_style = if focused { theme::accent_bold() } else { theme::text() };
 
     let line = if row.other {
-        let text = if row.label.is_empty() && !cur {
+        let text = if row.label.is_empty() && !focused {
             "type an answer".to_string()
         } else {
             row.label.clone()
         };
 
-        format!("{mark}{}. Other: {text}{}", i + 1, if cur { "▏" } else { "" })
+        format!("{mark}{}. Other: {text}{}", i + 1, if focused { "▏" } else { "" })
     } else {
         format!("{mark}{}. {}", i + 1, row.label)
     };
 
-    let at = directory.rows.len();
+    let at = drawn.rows.len();
     let pre = [
         bar.to_vec(),
-        vec![Span::styled(if cur { "› " } else { "  " }, theme::accent())],
+        vec![Span::styled(if focused { "› " } else { "  " }, theme::accent())],
     ]
     .concat();
 
-    let style = if row.other && row.label.is_empty() && !cur {
+    let style = if row.other && row.label.is_empty() && !focused {
         theme::muted()
     } else {
-        st
+        label_style
     };
 
     let mut rows = markdown::plain(&line, width, style, &pre);
@@ -422,16 +410,16 @@ fn ask_rows_cur(
         ));
     }
 
-    for key in 0..rows.len() {
-        directory.hits.insert(at + key, Hit::Choice(i));
+    for offset in 0..rows.len() {
+        drawn.hits.insert(at + offset, Hit::Choice(i));
     }
 
-    directory.rows.extend(rows);
+    drawn.rows.extend(rows);
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct QuestionTabs<'render> {
-    pub(super) qs: &'render [super::ask::Question],
-    pub(super) query_value: &'render str,
+    pub(super) questions: &'render [super::ask::Question],
+    pub(super) question: &'render str,
     pub(super) header: &'render str,
 }

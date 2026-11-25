@@ -2,33 +2,27 @@ use super::*;
 use serde_json::json;
 
 /// The drawn rows on a test screen: (text per row, fg per cell).
-fn cells(directory: &Drawn, width: u16) -> Vec<(String, Vec<Option<Color>>)> {
+fn cells(drawn: &Drawn, width: u16) -> Vec<(String, Vec<Option<Color>>)> {
     use ratatui::widgets::Paragraph;
-    let height = directory.rows.len() as u16;
+    let height = drawn.rows.len() as u16;
     let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height.max(1))).unwrap();
 
-    term.draw(|file| {
-        file.render_widget(
-            Paragraph::new(
-                directory
-                    .rows
-                    .iter()
-                    .map(|result| result.line.clone())
-                    .collect::<Vec<_>>(),
-            ),
-            file.area(),
+    term.draw(|frame| {
+        frame.render_widget(
+            Paragraph::new(drawn.rows.iter().map(|row| row.line.clone()).collect::<Vec<_>>()),
+            frame.area(),
         );
     })
     .unwrap();
 
-    let bytes = term.backend().buffer().clone();
+    let buffer = term.backend().buffer().clone();
 
     (0..height)
         .map(|y| {
             (
-                (0..width).map(|x| bytes[(x, y)].symbol().to_string()).collect(),
+                (0..width).map(|x| buffer[(x, y)].symbol().to_string()).collect(),
                 (0..width)
-                    .map(|x| Some(bytes[(x, y)].fg).filter(|color| *color != Color::Reset))
+                    .map(|x| Some(buffer[(x, y)].fg).filter(|color| *color != Color::Reset))
                     .collect(),
             )
         })
@@ -47,7 +41,7 @@ fn mention_fg(rows: &[(String, Vec<Option<Color>>)], name: &str, after: usize) -
         }
     }
 
-    panic!("0 {at}: {:?}", rows.iter().map(|result| &result.0).collect::<Vec<_>>());
+    panic!("0 {at}: {:?}", rows.iter().map(|row| &row.0).collect::<Vec<_>>());
 }
 
 fn ev(agent: Option<&str>, kind: Kind) -> Event {
@@ -63,22 +57,21 @@ fn attached_file(tag: &str, name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("codehead-attached-{tag}-{}", std::process::id()));
 
     std::fs::create_dir_all(&dir).unwrap();
-    let path_value = dir.join(name);
+    let path = dir.join(name);
 
-    std::fs::write(&path_value, b"x").unwrap();
-    path_value
+    std::fs::write(&path, b"x").unwrap();
+    path
 }
 
-fn text(directory: &Drawn) -> String {
-    directory
+fn text(drawn: &Drawn) -> String {
+    drawn
         .rows
         .iter()
-        .map(|result| {
-            result
-                .line
+        .map(|row| {
+            row.line
                 .spans
                 .iter()
-                .map(|text_value| text_value.content.as_ref())
+                .map(|span| span.content.as_ref())
                 .collect::<String>()
                 .trim_end()
                 .to_string()

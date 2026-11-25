@@ -22,37 +22,37 @@ pub(crate) struct TabGroup {
 }
 
 impl TabGroup {
-    /// D steps over N tabs, wrapping. True: the pick changed.
-    pub(crate) fn step(&mut self, directory: isize, count: usize) -> bool {
+    /// DELTA steps over COUNT tabs, wrapping. True: the pick changed.
+    pub(crate) fn step(&mut self, delta: isize, count: usize) -> bool {
         if count == 0 {
             return false;
         }
 
         let before = self.i;
 
-        self.i = (self.i.min(count - 1) as isize + directory).rem_euclid(count as isize) as usize;
+        self.i = (self.i.min(count - 1) as isize + delta).rem_euclid(count as isize) as usize;
         self.i != before
     }
 
     /// Tab I's area in the last draw.
     #[cfg(test)]
     pub(crate) fn rect_of(&self, i: usize) -> Option<Rect> {
-        self.rects.iter().find(|(_, key)| *key == i).map(|(result, _)| *result)
+        self.rects.iter().find(|(_, index)| *index == i).map(|(rect, _)| *rect)
     }
 
     /// AT on a tab (last draw).
     pub(crate) fn hit(&self, at: Position) -> bool {
-        self.rects.iter().any(|(result, _)| result.contains(at))
+        self.rects.iter().any(|(rect, _)| rect.contains(at))
     }
 
     /// The x right of the last tab in view (last draw).
     pub(crate) fn end(&self) -> Option<u16> {
-        self.rects.last().map(|(result, _)| result.right())
+        self.rects.last().map(|(rect, _)| rect.right())
     }
 
     /// A click at AT on a tab: it is picked. True: a tab was hit.
     pub(crate) fn click(&mut self, at: Position) -> bool {
-        match self.rects.iter().find(|(result, _)| result.contains(at)) {
+        match self.rects.iter().find(|(rect, _)| rect.contains(at)) {
             Some(&(_, i)) => {
                 self.i = i;
                 true
@@ -78,7 +78,7 @@ impl TabGroup {
 
         // the window [first, last): holds the pick, from FIRST as far as it fits
         self.first = self.first.min(self.i);
-        let fits = |first: usize, upto: usize| (first..=upto).map(|key| width(key) + 1).sum::<u16>() <= room;
+        let fits = |first: usize, upto: usize| (first..=upto).map(|index| width(index) + 1).sum::<u16>() <= room;
 
         while self.first < self.i && !fits(self.first, self.i) {
             self.first += 1;
@@ -101,11 +101,11 @@ impl TabGroup {
         spans.push(Span::styled(if self.first > 0 { "‹ " } else { "  " }, theme::muted()));
         let mut x = row.x + lead_w + 2;
 
-        for (key_value, label) in labels.iter().enumerate().take(last).skip(self.first) {
+        for (index, label) in labels.iter().enumerate().take(last).skip(self.first) {
             let text = format!(" {label} ");
-            let width_value = width(key_value);
+            let width = width(index);
 
-            let st = match (key_value == self.i, focused) {
+            let st = match (index == self.i, focused) {
                 (true, true) => theme::pill().add_modifier(Modifier::BOLD),
                 (true, false) => theme::panel().add_modifier(Modifier::BOLD),
                 _ => theme::muted(),
@@ -115,14 +115,14 @@ impl TabGroup {
                 Rect {
                     x,
                     y: row.y,
-                    width: width_value.min(row.right().saturating_sub(x)),
+                    width: width.min(row.right().saturating_sub(x)),
                     height: 1,
                 },
-                key_value,
+                index,
             ));
             spans.push(Span::styled(text, st));
             spans.push(Span::raw(" "));
-            x += width_value + 1;
+            x += width + 1;
         }
 
         if last < labels.len() {

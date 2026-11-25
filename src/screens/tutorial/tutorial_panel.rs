@@ -16,12 +16,12 @@ pub(super) fn panel_lines(coach: &Coach, width: u16) -> Vec<Line<'static>> {
     // the dots: ✓ done quests, ◆ this one, ○ later; a gap between the basics and the advanced
     let mut dots = Vec::new();
 
-    for (i, query) in coach.quests.iter().enumerate() {
-        if i > 0 && query.advanced && !coach.quests[i - 1].advanced {
+    for (i, quest) in coach.quests.iter().enumerate() {
+        if i > 0 && quest.advanced && !coach.quests[i - 1].advanced {
             dots.push(Span::styled(" │", theme::muted()));
         }
 
-        let all = query.tasks.iter().all(|thread| coach.is_done(*thread));
+        let all = quest.tasks.iter().all(|task| coach.is_done(*task));
 
         dots.push(match (all, i == at) {
             (true, _) => Span::styled(" ✓", ok),
@@ -55,19 +55,19 @@ pub(super) fn panel_lines(coach: &Coach, width: u16) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
     }
 
-    let Some(query_value) = coach.quests.get(at) else {
+    let Some(quest) = coach.quests.get(at) else {
         return lines;
     };
 
-    let kind = if query_value.advanced { "advanced" } else { "basics" };
+    let kind = if quest.advanced { "advanced" } else { "basics" };
 
     lines.push(Line::from(vec![
         Span::styled(format!("{}/{} ", at + 1, coach.quests.len()), theme::accent_bold()),
-        Span::styled(query_value.title, theme::bold()),
+        Span::styled(quest.title, theme::bold()),
         Span::styled(format!("  {kind}"), theme::muted()),
     ]));
 
-    append_quest_details(coach, width, cur, ok, lines, query_value)
+    append_quest_details(coach, width, cur, ok, lines, quest)
 }
 
 fn append_quest_details(
@@ -76,31 +76,36 @@ fn append_quest_details(
     cur: Option<Task>,
     ok: Style,
     mut lines: Vec<Line<'static>>,
-    query_value: &Quest,
+    quest: &Quest,
 ) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
 
-    for agent in query_value.about {
-        lines.extend(wrap(&(Span::styled("│ ", theme::line())), agent, theme::text(), width));
+    for paragraph in quest.about {
+        lines.extend(wrap(
+            &(Span::styled("│ ", theme::line())),
+            paragraph,
+            theme::text(),
+            width,
+        ));
     }
 
     lines.push(Line::from(""));
 
-    for thread_value in &query_value.tasks {
-        let (what, keys) = coach.text(*thread_value);
+    for task in &quest.tasks {
+        let (what, keys) = coach.text(*task);
 
         if what.is_empty() {
             continue;
         }
 
-        if coach.is_done(*thread_value) {
+        if coach.is_done(*task) {
             lines.extend(wrap(
                 &(Span::styled("  ✓ ", ok)),
                 &what,
                 theme::muted().add_modifier(Modifier::CROSSED_OUT),
                 width,
             ));
-        } else if Some(*thread_value) == cur {
+        } else if Some(*task) == cur {
             lines.extend(wrap(
                 &(Span::styled("  › ", theme::accent())),
                 &what,
@@ -124,33 +129,33 @@ fn append_quest_details(
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("more: ", theme::muted()),
-        Span::styled(format!("{DOCS}{}", query_value.doc), theme::accent()),
+        Span::styled(format!("{DOCS}{}", quest.doc), theme::accent()),
     ]));
 
     lines
 }
 
-/// The rows around the view: header, the frame, the quest panel (or the task on the top row),
+/// The rows around the view: header, the border, the quest panel (or the task on the top row),
 /// the footer.
-pub(super) fn chrome(frame_value: &mut ratatui::Frame, coach: &Coach, dry: bool, view: Rect, side: Option<Rect>) {
-    let geometry = draw_header(frame_value, dry, view, side);
+pub(super) fn chrome(frame: &mut ratatui::Frame, coach: &Coach, dry: bool, view: Rect, side: Option<Rect>) {
+    let geometry = draw_header(frame, dry, view, side);
 
-    draw_quest_panel(frame_value, coach, side, geometry.frame);
-    draw_footer(frame_value, coach.finished(), geometry);
+    draw_quest_panel(frame, coach, side, geometry.border);
+    draw_footer(frame, coach.finished(), geometry);
 }
 
 #[derive(Clone, Copy)]
 struct ChromeLayout {
     full: Rect,
-    frame: Rect,
+    border: Rect,
     x: u16,
-    width_value: u16,
+    width: u16,
 }
-fn draw_header(frame_value: &mut ratatui::Frame, dry: bool, view: Rect, side: Option<Rect>) -> ChromeLayout {
-    let full = frame_value.area();
+fn draw_header(frame: &mut ratatui::Frame, dry: bool, view: Rect, side: Option<Rect>) -> ChromeLayout {
+    let full = frame.area();
     let x = view.x.saturating_sub(1);
     let right = side.map_or(view.right() + 1, ratatui::prelude::Rect::right);
-    let width_value = (right - x).min(full.width.saturating_sub(x));
+    let width = (right - x).min(full.width.saturating_sub(x));
     let mut head = vec![
         Span::styled("codehead", theme::bold()),
         Span::styled("  try it", theme::accent_bold()),
@@ -171,51 +176,46 @@ fn draw_header(frame_value: &mut ratatui::Frame, dry: bool, view: Rect, side: Op
         ));
     }
 
-    frame_value.render_widget(
+    frame.render_widget(
         Paragraph::new(Line::from(head)),
         Rect {
             x,
             y: 1,
-            width: width_value,
+            width,
             height: 1,
         },
     );
-    let frame = Rect {
+    let border = Rect {
         x,
         y: view.y - 1,
         width: view.width + 2,
         height: view.height + 2,
     };
 
-    frame_value.render_widget(
+    frame.render_widget(
         Block::default().borders(Borders::ALL).border_style(theme::line()),
-        frame,
+        border,
     );
 
-    ChromeLayout {
-        full,
-        frame,
-        x,
-        width_value,
-    }
+    ChromeLayout { full, border, x, width }
 }
 
-fn draw_quest_panel(frame_value: &mut ratatui::Frame, coach: &Coach, side: Option<Rect>, frame: Rect) {
-    let x = frame.x;
+fn draw_quest_panel(frame: &mut ratatui::Frame, coach: &Coach, side: Option<Rect>, border: Rect) {
+    let x = border.x;
 
-    if let Some(text_value) = side {
+    if let Some(side_area) = side {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme::accent())
             .title(Span::styled(" quests ", theme::accent_bold()));
-        let inner = block.inner(text_value);
+        let inner = block.inner(side_area);
 
-        frame_value.render_widget(block, text_value);
+        frame.render_widget(block, side_area);
 
         // the whole inner area: a shorter list leaves 0 old text
         let width = inner.width.saturating_sub(1);
 
-        frame_value.render_widget(
+        frame.render_widget(
             Paragraph::new(panel_lines(coach, width)).wrap(Wrap { trim: false }),
             Rect {
                 x: inner.x + 1,
@@ -226,29 +226,27 @@ fn draw_quest_panel(frame_value: &mut ratatui::Frame, coach: &Coach, side: Optio
     } else {
         let line = coach
             .current()
-            .map(|thread| coach.text(thread))
-            .map(|(width_2, key)| format!("› {width_2}  [{key}]"))
+            .map(|task| coach.text(task))
+            .map(|(what, keys)| format!("› {what}  [{keys}]"))
             .unwrap_or_default();
 
-        frame_value.render_widget(
+        frame.render_widget(
             Paragraph::new(Span::styled(
-                format!("{line:<width$}", width = frame.width as usize),
+                format!("{line:<width$}", width = border.width as usize),
                 theme::accent_bold(),
             )),
             Rect {
                 x,
                 y: 2,
-                width: frame.width,
+                width: border.width,
                 height: 1,
             },
         );
     }
 }
 
-fn draw_footer(frame_value: &mut ratatui::Frame, finished: bool, geometry: ChromeLayout) {
-    let ChromeLayout {
-        full, x, width_value, ..
-    } = geometry;
+fn draw_footer(frame: &mut ratatui::Frame, finished: bool, geometry: ChromeLayout) {
+    let ChromeLayout { full, x, width, .. } = geometry;
     let leave = if finished { "next" } else { "back" };
     let keys = [
         ("esc esc", leave),
@@ -259,21 +257,21 @@ fn draw_footer(frame_value: &mut ratatui::Frame, finished: bool, geometry: Chrom
     ];
     let mut spans = Vec::new();
 
-    for (i, (key_value, what)) in keys.iter().enumerate() {
+    for (i, (key, what)) in keys.iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw("  "));
         }
 
-        spans.push(Span::styled(*key_value, theme::bold()));
+        spans.push(Span::styled(*key, theme::bold()));
         spans.push(Span::styled(format!(" {what}"), theme::muted()));
     }
 
-    frame_value.render_widget(
+    frame.render_widget(
         Paragraph::new(Line::from(spans)),
         Rect {
             x,
             y: full.height.saturating_sub(2),
-            width: width_value,
+            width,
             height: 1,
         },
     );

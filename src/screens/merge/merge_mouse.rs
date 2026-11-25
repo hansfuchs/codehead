@@ -9,29 +9,25 @@ impl Merge {
     }
 }
 
-fn dispatch_mouse(widget_state: &mut Merge, event: MouseEvent) -> Act {
-    widget_state.active = Instant::now();
+fn dispatch_mouse(merge: &mut Merge, event: MouseEvent) -> Act {
+    merge.active = Instant::now();
     let at = Position {
         x: event.column,
         y: event.row,
     };
     let click = matches!(event.kind, MouseEventKind::Down(MouseButton::Left));
 
-    if click && let Some(action) = click_tabs(widget_state, at) {
+    if click && let Some(action) = click_tabs(merge, at) {
         return action;
     }
 
-    if widget_state
-        .tab_ref()
-        .is_some_and(|changes_value| changes_value.sub == Sub::Changes)
-        && widget_state.layout.body_area.contains(at)
-    {
-        let Some(character) = widget_state.changes_view() else {
+    if merge.tab_ref().is_some_and(|tab| tab.sub == Sub::Changes) && merge.layout.body_area.contains(at) {
+        let Some(view) = merge.changes_view() else {
             return Act::None;
         };
 
-        return match character.mouse(event) {
-            crate::features::changes::Act::Toast(thread) => Act::Toast(thread),
+        return match view.mouse(event) {
+            crate::features::changes::Act::Toast(toast) => Act::Toast(toast),
             crate::features::changes::Act::Open(file, line) => Act::Open(file, line),
             _ => Act::None,
         };
@@ -39,17 +35,17 @@ fn dispatch_mouse(widget_state: &mut Merge, event: MouseEvent) -> Act {
 
     match event.kind {
         MouseEventKind::ScrollDown => {
-            if let Some(thread_value) = widget_state.tab() {
-                thread_value.free = true;
-                thread_value.scroll += 3;
+            if let Some(tab) = merge.tab() {
+                tab.free = true;
+                tab.scroll += 3;
             }
 
             return Act::None;
         }
         MouseEventKind::ScrollUp => {
-            if let Some(thread_2) = widget_state.tab() {
-                thread_2.free = true;
-                thread_2.scroll = thread_2.scroll.saturating_sub(3);
+            if let Some(tab) = merge.tab() {
+                tab.free = true;
+                tab.scroll = tab.scroll.saturating_sub(3);
             }
 
             return Act::None;
@@ -62,46 +58,38 @@ fn dispatch_mouse(widget_state: &mut Merge, event: MouseEvent) -> Act {
     }
 
     // an open dropdown: a click on a row picks it, elsewhere closes it
-    if widget_state
-        .tab_ref()
-        .is_some_and(|thread_3| thread_3.input.menu.is_some())
-    {
-        return click_dropdown(widget_state, at);
+    if merge.tab_ref().is_some_and(|tab| tab.input.menu.is_some()) {
+        return click_dropdown(merge, at);
     }
 
-    if widget_state.layout.edit_rect.contains(at) {
-        if let Some((_, ta)) = widget_state.tab().and_then(|thread_6| thread_6.input.edit.as_mut()) {
-            ta.mouse(event);
+    if merge.layout.edit_rect.contains(at) {
+        if let Some((_, textarea)) = merge.tab().and_then(|tab| tab.input.edit.as_mut()) {
+            textarea.mouse(event);
         }
 
         return Act::None;
     }
 
-    click_overview(widget_state, event, at)
+    click_overview(merge, event, at)
 }
 
-fn click_overview(widget_state: &mut Merge, event: MouseEvent, at: Position) -> Act {
-    let Some(&(_, text_value)) = widget_state
-        .layout
-        .hits
-        .iter()
-        .find(|(result_3, _)| result_3.contains(at))
-    else {
+fn click_overview(merge: &mut Merge, event: MouseEvent, at: Position) -> Act {
+    let Some(&(_, stop)) = merge.layout.hits.iter().find(|(rect, _)| rect.contains(at)) else {
         return Act::None;
     };
 
-    if let Some(thread_7) = widget_state.tab() {
+    if let Some(tab) = merge.tab() {
         // a click: the view stays put
-        thread_7.free = true;
-        thread_7.focus = Some(text_value);
-        thread_7.input.edit = None;
+        tab.free = true;
+        tab.focus = Some(stop);
+        tab.input.edit = None;
     }
 
     if event.modifiers.contains(KeyModifiers::CONTROL) || event.modifiers.contains(KeyModifiers::SUPER) {
-        return widget_state.open_on_github(text_value);
+        return merge.open_on_github(stop);
     }
 
-    match text_value {
+    match stop {
         // a click on a label removes it, on the checks banner toggles them
         Stop::Label(_)
         | Stop::AddLabel
@@ -111,60 +99,38 @@ fn click_overview(widget_state: &mut Merge, event: MouseEvent, at: Position) -> 
         | Stop::Merge
         | Stop::NewComment
         | Stop::Tabs
-        | Stop::Subs => widget_state.activate(text_value),
+        | Stop::Subs => merge.activate(stop),
         _ => Act::None,
     }
 }
 
-fn click_dropdown(widget_state: &mut Merge, at: Position) -> Act {
-    if let Some(&(_, i)) = widget_state
-        .layout
-        .menu_hits
-        .iter()
-        .find(|(result_2, _)| result_2.contains(at))
-    {
-        if let Some(thread_4) = widget_state.tab()
-            && let Some(
-                Menu::Status(character_value, _)
-                | Menu::Mine {
-                    cur: character_value, ..
-                }
-                | Menu::Labels {
-                    cur: character_value, ..
-                },
-            ) = thread_4.input.menu.as_mut()
+fn click_dropdown(merge: &mut Merge, at: Position) -> Act {
+    if let Some(&(_, i)) = merge.layout.menu_hits.iter().find(|(rect, _)| rect.contains(at)) {
+        if let Some(tab) = merge.tab()
+            && let Some(Menu::Status(cur, _) | Menu::Mine { cur, .. } | Menu::Labels { cur, .. }) =
+                tab.input.menu.as_mut()
         {
-            *character_value = i;
+            *cur = i;
         }
 
-        return widget_state.menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        return merge.menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     }
 
-    if let Some(thread_5) = widget_state.tab() {
-        thread_5.input.menu = None;
+    if let Some(tab) = merge.tab() {
+        tab.input.menu = None;
     }
 
     Act::None
 }
 
-fn click_tabs(widget_state: &mut Merge, at: Position) -> Option<Act> {
-    if let Some(&(_, i)) = widget_state
-        .layout
-        .tab_hits
-        .iter()
-        .find(|(result, _)| result.contains(at))
-    {
-        widget_state.cur = i;
+fn click_tabs(merge: &mut Merge, at: Position) -> Option<Act> {
+    if let Some(&(_, i)) = merge.layout.tab_hits.iter().find(|(rect, _)| rect.contains(at)) {
+        merge.cur = i;
         return Some(Act::None);
     }
 
-    if let Some(&(_, text)) = widget_state
-        .layout
-        .sub_hits
-        .iter()
-        .find(|(result_value, _)| result_value.contains(at))
-    {
-        return Some(widget_state.set_sub(text));
+    if let Some(&(_, sub)) = merge.layout.sub_hits.iter().find(|(rect, _)| rect.contains(at)) {
+        return Some(merge.set_sub(sub));
     }
 
     None

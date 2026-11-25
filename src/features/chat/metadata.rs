@@ -4,9 +4,9 @@ use super::{
 };
 
 /// The row of AGENT's edits note TEXT (C: the agent's color): 1 row of W columns, cut with ….
-pub(super) fn edits_row(agent: &str, text: &str, color: Color, width_value: usize) -> Row {
+pub(super) fn edits_row(agent: &str, text: &str, color: Color, width: usize) -> Row {
     let muted = theme::pal().subtext0;
-    let room = width_value.saturating_sub(2 + agent.width() + 1);
+    let room = width.saturating_sub(2 + agent.width() + 1);
     let one = text.split_whitespace().collect::<Vec<_>>().join(" ");
 
     Row::plain(Line::from(vec![
@@ -34,9 +34,10 @@ pub(super) fn badge(name: &str, color: Color, ts: u64) -> Vec<Span<'static>> {
 pub(super) fn resume_of(thread: &Thread, item: &Item) -> Option<u64> {
     let Item::Note { agent, .. } = item else { return None };
     let at = *thread.resumes.get(agent)?;
-    let last = thread.items.iter().rev().find(
-        |it| matches!(it, Item::Note { agent: agent_value, text, .. } if agent_value == agent && usage_limit(text)),
-    )?;
+    let last =
+        thread.items.iter().rev().find(
+            |item| matches!(item, Item::Note { agent: owner, text, .. } if owner == agent && usage_limit(text)),
+        )?;
 
     std::ptr::eq(last, item).then_some(at)
 }
@@ -53,7 +54,7 @@ pub(crate) fn offline(msg: &str) -> bool {
         "fetch failed",
     ]
     .iter()
-    .any(|thread| msg.contains(thread))
+    .any(|sign| msg.contains(sign))
 }
 /// Agents (name, harness) other than SKIP on HARNESS (Some) / not on it (None: other harnesses).
 pub(super) fn agents_on<'a>(
@@ -64,42 +65,42 @@ pub(super) fn agents_on<'a>(
 ) -> Vec<&'a (String, String)> {
     roster
         .iter()
-        .filter(|(count, height)| count != skip && (height == harness) == same)
+        .filter(|(name, on)| name != skip && (on == harness) == same)
         .collect()
 }
 /// The hint rows of an error: what to do next, which agents can go on.
 pub(super) fn error_hint(agent: &str, text: &str, roster: &[(String, String)], resume: Option<u64>) -> Vec<String> {
     let harness = roster
         .iter()
-        .find(|(count, _)| count == agent)
-        .map(|result| result.1.clone())
+        .find(|(name, _)| name == agent)
+        .map(|(_, on)| on.clone())
         .unwrap_or_default();
 
     if usage_limit(text) {
         let alt = agents_on(roster, &harness, false, agent);
-        let mut value = vec![format!(
+        let mut hints = vec![format!(
             "{agent} stopped: {} usage limit reached.",
-            crate::engine::harnesses::get(&harness).map_or(harness.as_str(), |height| height.label)
+            crate::engine::harnesses::get(&harness).map_or(harness.as_str(), |known| known.label)
         )];
 
         if let Some(at) = resume {
-            error_hint_now(&mut value, at);
+            push_resume_hint(&mut hints, at);
         }
 
         if alt.is_empty() {
-            value.push("Agents on other harnesses: none".into());
+            hints.push("Agents on other harnesses: none".into());
         } else {
-            value.push(format!(
+            hints.push(format!(
                 "Agents on other harnesses: {}",
                 alt.iter()
-                    .map(|(count_value, height_value)| format!("@{count_value} ({height_value})"))
+                    .map(|(name, on)| format!("@{name} ({on})"))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
-            value.push("Use @agent → ⇄ replace to continue.".into());
+            hints.push("Use @agent → ⇄ replace to continue.".into());
         }
 
-        return value;
+        return hints;
     }
 
     if text.contains("plan mode") || text.contains("ExitPlanMode") {
@@ -115,11 +116,11 @@ pub(super) fn error_hint(agent: &str, text: &str, roster: &[(String, String)], r
     }]
 }
 
-fn error_hint_now(value: &mut Vec<String>, at: u64) {
+fn push_resume_hint(hints: &mut Vec<String>, at: u64) {
     let now = crate::engine::now_ms();
     let left = if at > now { countdown(at - now) } else { "now".into() };
 
-    value.push(format!(
+    hints.push(format!(
         "Resumes automatically in {left} ({}), codehead open or not · a message from you: resume off.",
         clock(at)
     ));

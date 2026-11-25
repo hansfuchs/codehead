@@ -51,16 +51,16 @@ impl Ask {
             .as_array()
             .into_iter()
             .flatten()
-            .map(|query| {
-                let text = |key: &str| query[key].as_str().unwrap_or_default().to_string();
+            .map(|question| {
+                let text = |key: &str| question[key].as_str().unwrap_or_default().to_string();
 
-                let opts = question_options(query);
+                let opts = question_options(question);
 
                 (
                     text("question"),
                     text("header"),
                     opts,
-                    query["multiSelect"].as_bool().unwrap_or(false),
+                    question["multiSelect"].as_bool().unwrap_or(false),
                 )
             })
             .collect()
@@ -72,8 +72,8 @@ impl Ask {
             .as_array()
             .into_iter()
             .flatten()
-            .map(|output| {
-                let text = |key: &str| output[key].as_str().unwrap_or_default().to_string();
+            .map(|option| {
+                let text = |key: &str| option[key].as_str().unwrap_or_default().to_string();
 
                 (text("id"), text("name"), text("kind"))
             })
@@ -153,7 +153,7 @@ pub(crate) fn clock(ts: u64) -> String {
 pub(crate) fn call_summary(name: &str, input: &Value) -> String {
     let text = |key: &str| input[key].as_str().map(String::from);
 
-    let value_2 = match name {
+    let summary = match name {
         "Bash" => text("description").or_else(|| text("command")),
         "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => text("file_path")
             .or_else(|| text("notebook_path"))
@@ -164,32 +164,28 @@ pub(crate) fn call_summary(name: &str, input: &Value) -> String {
         "Task" | "Agent" => text("description"),
         "TodoWrite" => Some("todos".into()),
         _ if name.ends_with("codehead__set_projects") => Some(match input["projects"].as_array() {
-            Some(agent) if !agent.is_empty() => agent.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "),
+            Some(projects) if !projects.is_empty() => {
+                projects.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
+            }
             _ => "0 projects".into(),
         }),
-        _ if name.ends_with("codehead__set_title") => text("title").map(|thread| match text("branch") {
-            Some(bytes) => format!("{thread} · {bytes}"),
-            None => thread,
+        _ if name.ends_with("codehead__set_title") => text("title").map(|title| match text("branch") {
+            Some(branch) => format!("{title} · {branch}"),
+            None => title,
         }),
         _ if name.starts_with("mcp__codehead__send") => Some(format!(
             "→ {}",
             match &input["to"] {
-                Value::Array(agent_value) => agent_value
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                value => value.as_str().unwrap_or_default().to_string(),
+                Value::Array(names) => names.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "),
+                recipient => recipient.as_str().unwrap_or_default().to_string(),
             }
         )),
-        _ => input.as_object().and_then(|output| {
-            output
-                .values()
-                .find_map(|value_value| value_value.as_str().map(String::from))
-        }),
+        _ => input
+            .as_object()
+            .and_then(|fields| fields.values().find_map(|field| field.as_str().map(String::from))),
     };
 
-    value_2
+    summary
         .unwrap_or_default()
         .lines()
         .next()
@@ -201,43 +197,37 @@ pub(crate) fn call_summary(name: &str, input: &Value) -> String {
 
 fn short_path(path: &str) -> String {
     let cwd = std::env::current_dir()
-        .map(|character| character.display().to_string() + "/")
+        .map(|dir| dir.display().to_string() + "/")
         .unwrap_or_default();
 
     path.strip_prefix(&cwd).unwrap_or(path).to_string()
 }
 
-/// Draw T at WIDTH. OPEN: runs shown with their calls (ALL: every run). `ASK_AT`: the choice under
-/// the cursor of the 1st open ask; PICKS: its picked choices (multi).
 /// `needs harness: claude (Artifact tool)` in an agent's text: (harness, what for). The agents'
 /// handoff rule asks for this line when 0 agent on the thread can do a step.
 pub(crate) fn needs_harness(text: &str) -> Option<(String, String)> {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
-    let character = RE
+    let captures = RE
         .get_or_init(|| {
             regex::Regex::new(r"(?i)\bneeds harness:\s*`?([a-z][a-z0-9_-]*)`?(?:\s*\(([^)]*)\))?").expect("valid regex")
         })
         .captures(text)?;
 
     Some((
-        character[1].to_ascii_lowercase(),
-        character
-            .get(2)
-            .map_or("", |message| message.as_str())
-            .trim()
-            .to_string(),
+        captures[1].to_ascii_lowercase(),
+        captures.get(2).map_or("", |reason| reason.as_str()).trim().to_string(),
     ))
 }
 
 /// MS as `1h 05m 12s`, `12m 30s`, `45s`.
 pub(crate) fn countdown(ms: u64) -> String {
-    let text = ms.div_ceil(1000);
+    let secs = ms.div_ceil(1000);
 
-    match text {
-        0..60 => format!("{text}s"),
-        60..3600 => format!("{}m {:02}s", text / 60, text % 60),
-        _ => format!("{}h {:02}m {:02}s", text / 3600, text / 60 % 60, text % 60),
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m {:02}s", secs / 60, secs % 60),
+        _ => format!("{}h {:02}m {:02}s", secs / 3600, secs / 60 % 60, secs % 60),
     }
 }
 
@@ -254,7 +244,7 @@ pub(crate) fn usage_limit(msg: &str) -> bool {
         "too many requests",
     ]
     .iter()
-    .any(|text| msg.contains(text))
+    .any(|needle| msg.contains(needle))
 }
 
 pub(crate) const ATTACHMENTS: &str = "Attachments (read these files):";
@@ -271,22 +261,22 @@ impl Attachment {
     /// messages: a clipboard image's marker from its name `image-N.png`).
     fn parse(line: &str) -> Attachment {
         if line.starts_with('[')
-            && let Some((message, path_value)) = line.split_once("]: ")
+            && let Some((marker, path)) = line.split_once("]: ")
         {
             return Attachment {
-                marker: Some(format!("{message}]")),
-                path: path_value.trim().to_string(),
+                marker: Some(format!("{marker}]")),
+                path: path.trim().to_string(),
             };
         }
 
         let name = line.rsplit('/').next().unwrap_or(line);
-        let count_2 = name
+        let number = name
             .strip_prefix("image-")
-            .and_then(|count| count.strip_suffix(".png"))
-            .filter(|count_value| count_value.parse::<usize>().is_ok());
+            .and_then(|stem| stem.strip_suffix(".png"))
+            .filter(|number| number.parse::<usize>().is_ok());
 
         Attachment {
-            marker: count_2.map(|count_3| format!("[Image #{count_3}]")),
+            marker: number.map(|number| format!("[Image #{number}]")),
             path: line.to_string(),
         }
     }
@@ -305,7 +295,7 @@ pub(crate) fn attachments(text: &str) -> (&str, Vec<Attachment>) {
             text[i + ATTACHMENTS.len()..]
                 .lines()
                 .map(|line| line.trim().trim_start_matches("- "))
-                .filter(|line_value| !line_value.is_empty())
+                .filter(|line| !line.is_empty())
                 .map(Attachment::parse)
                 .collect(),
         ),
@@ -316,15 +306,15 @@ pub(crate) fn attachments(text: &str) -> (&str, Vec<Attachment>) {
 type QuestionOption = (String, String);
 type Question = (String, String, Vec<QuestionOption>, bool);
 
-fn question_options(query: &Value) -> Vec<QuestionOption> {
-    query["options"]
+fn question_options(question: &Value) -> Vec<QuestionOption> {
+    question["options"]
         .as_array()
         .into_iter()
         .flatten()
-        .map(|output| {
+        .map(|option| {
             (
-                output["label"].as_str().unwrap_or_default().to_string(),
-                output["description"].as_str().unwrap_or_default().to_string(),
+                option["label"].as_str().unwrap_or_default().to_string(),
+                option["description"].as_str().unwrap_or_default().to_string(),
             )
         })
         .collect()

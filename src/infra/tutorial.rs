@@ -28,8 +28,8 @@ pub(crate) fn git_out(repo: &Path, args: &[&str]) -> String {
         .stderr(std::process::Stdio::null())
         .output()
         .ok()
-        .filter(|output_value| output_value.status.success())
-        .map(|output_2| String::from_utf8_lossy(&output_2.stdout).into_owned())
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .unwrap_or_default()
 }
 
@@ -43,7 +43,7 @@ pub(crate) fn root_commit(repo: &Path) -> String {
 }
 
 /// The mock PR R: the owner's commits of REPO since its 1st, checks green, the reviewer's ok.
-pub(crate) fn mock_pr(result: &crate::infra::gh::PrRef, repo: &Path) -> crate::infra::gh::Pr {
+pub(crate) fn mock_pr(pr_ref: &crate::infra::gh::PrRef, repo: &Path) -> crate::infra::gh::Pr {
     let base = root_commit(repo);
     let range = format!("{base}..HEAD");
 
@@ -64,25 +64,22 @@ pub(crate) fn mock_pr(result: &crate::infra::gh::PrRef, repo: &Path) -> crate::i
 
     let (mut adds, mut dels, mut files) = (0, 0, 0);
 
-    for line_value in git_out(repo, &["diff", "--numstat", &base, "HEAD"]).lines() {
-        let mut it = line_value.split_whitespace();
+    for line in git_out(repo, &["diff", "--numstat", &base, "HEAD"]).lines() {
+        let mut it = line.split_whitespace();
 
-        adds += it.next().and_then(|count| count.parse::<u64>().ok()).unwrap_or(0);
-        dels += it
-            .next()
-            .and_then(|count_value| count_value.parse::<u64>().ok())
-            .unwrap_or(0);
+        adds += it.next().and_then(|number| number.parse::<u64>().ok()).unwrap_or(0);
+        dels += it.next().and_then(|number| number.parse::<u64>().ok()).unwrap_or(0);
         files += 1;
     }
 
     let reviewer = std::fs::read_to_string(repo.join(".git/codehead-tutorial-reviewer"))
         .ok()
-        .map(|text| text.trim().to_lowercase())
-        .filter(|text_value| !text_value.is_empty())
+        .map(|name| name.trim().to_lowercase())
+        .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "crew".into());
     let merged = mock_merged(repo);
     let now = crate::engine::now_ms() / 1000;
-    let created = commits.last().map_or(now, |character| character.date);
+    let created = commits.last().map_or(now, |commit| commit.date);
     let check = |name: &str, secs| Check {
         name: name.into(),
         group: "CI".into(),
@@ -94,7 +91,7 @@ pub(crate) fn mock_pr(result: &crate::infra::gh::PrRef, repo: &Path) -> crate::i
     };
 
     build_mock_pr(
-        result,
+        pr_ref,
         commits,
         reviewer,
         merged,
@@ -110,7 +107,7 @@ pub(crate) fn mock_pr(result: &crate::infra::gh::PrRef, repo: &Path) -> crate::i
 }
 
 fn build_mock_pr(
-    result: &super::gh::PrRef,
+    pr_ref: &super::gh::PrRef,
     commits: Vec<super::gh::Commit>,
     reviewer: String,
     merged: bool,
@@ -126,10 +123,10 @@ fn build_mock_pr(
     } = settings;
 
     Pr {
-        pr: result.clone(),
-        title: commits.first().map_or_else(|| "make hello.md say hi to the crew".into(), |character_value| character_value.headline.clone()),
+        pr: pr_ref.clone(),
+        title: commits.first().map_or_else(|| "make hello.md say hi to the crew".into(), |commit| commit.headline.clone()),
         body: "hello.md greets the crew, in the style of the guide.\n\n- lower case, 1 line per idea\n- reviewed by the crew\n\n(the tutorial's mock PR: 0 GitHub calls)".into(),
-        url: format!("https://github.com/{}/pull/{}", result.repo, result.number),
+        url: format!("https://github.com/{}/pull/{}", pr_ref.repo, pr_ref.number),
         state: if merged { State::Merged } else { State::Open },
         author: "you".into(),
         viewer: "you".into(),
@@ -137,7 +134,7 @@ fn build_mock_pr(
         merged: merged.then_some(now),
         base: "main".into(),
         head: "task/hello".into(),
-        head_oid: commits.last().map(|character_2| character_2.oid.clone()).unwrap_or_default(),
+        head_oid: commits.last().map(|commit| commit.oid.clone()).unwrap_or_default(),
         additions: adds,
         deletions: dels,
         files,
@@ -158,7 +155,7 @@ fn build_mock_pr(
 /// The mock PR's diff: COMMIT's own, else every commit since the 1st.
 pub(crate) fn mock_diff(repo: &Path, commit: Option<&str>) -> String {
     match commit {
-        Some(character) => git_out(repo, &["show", "--format=", character]),
+        Some(sha) => git_out(repo, &["show", "--format=", sha]),
         None => git_out(repo, &["diff", &root_commit(repo), "HEAD"]),
     }
 }

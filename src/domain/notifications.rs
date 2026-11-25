@@ -75,14 +75,14 @@ impl Kind {
     }
 
     pub(crate) fn color(self) -> Color {
-        let path = theme::pal();
+        let palette = theme::pal();
 
         match self {
-            Kind::Error | Kind::Conflict | Kind::Ci => path.error(),
-            Kind::Ask | Kind::Blocked | Kind::Gate => path.attention(),
-            Kind::Limit | Kind::Context => path.caution(),
-            Kind::Review | Kind::Mention | Kind::Step | Kind::Reply => path.info(),
-            Kind::Done | Kind::Merged => path.success(),
+            Kind::Error | Kind::Conflict | Kind::Ci => palette.error(),
+            Kind::Ask | Kind::Blocked | Kind::Gate => palette.attention(),
+            Kind::Limit | Kind::Context => palette.caution(),
+            Kind::Review | Kind::Mention | Kind::Step | Kind::Reply => palette.info(),
+            Kind::Done | Kind::Merged => palette.success(),
         }
     }
 }
@@ -145,18 +145,19 @@ pub(crate) fn reported_review(id: &str) -> bool {
     has_note(id, Kind::Step)
 }
 
-fn has_note(id: &str, key: Kind) -> bool {
-    NOTES.lock().is_ok_and(|count| {
-        count
-            .iter()
-            .any(|count_value| count_value.thread == id && count_value.kind == key)
-    })
+fn has_note(id: &str, kind: Kind) -> bool {
+    NOTES
+        .lock()
+        .is_ok_and(|notes| notes.iter().any(|note| note.thread == id && note.kind == kind))
 }
 
 /// Every PR of a thread done, 1 merged at least: STATES of its PRs (several repos too).
 pub(crate) fn all_merged(states: &[crate::infra::gh::State]) -> bool {
     use crate::infra::gh::State;
-    states.contains(&State::Merged) && states.iter().all(|text| matches!(text, State::Merged | State::Closed))
+    states.contains(&State::Merged)
+        && states
+            .iter()
+            .all(|state| matches!(state, State::Merged | State::Closed))
 }
 
 static LAST: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
@@ -175,14 +176,14 @@ fn load_map(name: &str) -> HashMap<String, u64> {
         .unwrap_or_default()
 }
 
-fn save_map(name: &str, message: &HashMap<String, u64>) {
+fn save_map(name: &str, map: &HashMap<String, u64>) {
     if cfg!(test) {
         return;
     }
 
     let _ = std::fs::create_dir_all(dir());
 
-    if let Ok(bytes) = serde_json::to_vec(message) {
+    if let Ok(bytes) = serde_json::to_vec(map) {
         let _ = crate::engine::write_atomic(&dir().join(name), &bytes);
     }
 }
@@ -203,25 +204,22 @@ pub(crate) fn version() -> u64 {
 
 /// The owner saw thread THREAD up to TS (unix ms): its notes up to TS go.
 pub(crate) fn mark_seen(thread: &str, ts: u64) {
-    let Ok(mut text) = seen().lock() else { return };
+    let Ok(mut marks) = seen().lock() else { return };
 
-    if text.get(thread).is_some_and(|&x| x >= ts) {
+    if marks.get(thread).is_some_and(|&at| at >= ts) {
         return;
     }
 
-    text.insert(thread.to_string(), ts);
-    save_map("seen.json", &text);
+    marks.insert(thread.to_string(), ts);
+    save_map("seen.json", &marks);
     VERSION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// The owner saw all of thread THREAD (its stream at the bottom).
 pub(crate) fn mark_all_seen(thread: &str) {
-    let last = LAST.get().and_then(|message| {
-        message
-            .lock()
-            .ok()
-            .and_then(|message_value| message_value.get(thread).copied())
-    });
+    let last = LAST
+        .get()
+        .and_then(|latest| latest.lock().ok().and_then(|map| map.get(thread).copied()));
 
     if let Some(ts) = last {
         mark_seen(thread, ts);
@@ -230,38 +228,33 @@ pub(crate) fn mark_all_seen(thread: &str) {
 
 /// Unseen notes, most urgent first, then the newest; EXCEPT: the thread in view (0 notes of it).
 pub(crate) fn unseen(except: Option<&str>) -> Vec<Note> {
-    let text_value = seen().lock().map(|text| text.clone()).unwrap_or_default();
-    let mut value: Vec<Note> = NOTES.lock().map(|count| count.clone()).unwrap_or_default();
+    let marks = seen().lock().map(|marks| marks.clone()).unwrap_or_default();
+    let mut notes: Vec<Note> = NOTES.lock().map(|notes| notes.clone()).unwrap_or_default();
 
     // a reply note: unseen until the owner sees the reply in the changes view (0 seen mark)
-    value.retain(|count_value| {
-        Some(count_value.thread.as_str()) != except
-            && (count_value.kind == Kind::Reply
-                || text_value
-                    .get(&count_value.thread)
-                    .is_none_or(|&at| count_value.ts > at))
+    notes.retain(|note| {
+        Some(note.thread.as_str()) != except
+            && (note.kind == Kind::Reply || marks.get(&note.thread).is_none_or(|&at| note.ts > at))
     });
 
-    value.sort_by(|agent, bytes| agent.kind.cmp(&bytes.kind).then(bytes.ts.cmp(&agent.ts)));
-    value
+    notes.sort_by(|left, right| left.kind.cmp(&right.kind).then(right.ts.cmp(&left.ts)));
+    notes
 }
 
 /// Unseen notes of thread THREAD (the thread view: the marker while scrolled back).
 pub(crate) fn unseen_of(thread: &str) -> Vec<Note> {
-    let text_value = seen()
+    let seen_at = seen()
         .lock()
         .ok()
-        .and_then(|text| text.get(thread).copied())
+        .and_then(|marks| marks.get(thread).copied())
         .unwrap_or(0);
 
     NOTES
         .lock()
-        .map(|count| {
-            count
+        .map(|notes| {
+            notes
                 .iter()
-                .filter(|count_value| {
-                    count_value.thread == thread && count_value.kind != Kind::Reply && count_value.ts > text_value
-                })
+                .filter(|note| note.thread == thread && note.kind != Kind::Reply && note.ts > seen_at)
                 .cloned()
                 .collect()
         })

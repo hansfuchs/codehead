@@ -7,25 +7,25 @@ impl Merge {
     }
 }
 
-fn draw_merge(widget_state: &mut Merge, frame: &mut Frame, area: Rect, focused: bool) {
-    if let Some(pr) = widget_state.current().cloned()
+fn draw_merge(merge: &mut Merge, frame: &mut Frame, area: Rect, focused: bool) {
+    if let Some(pr) = merge.current().cloned()
         && !cfg!(test)
     {
-        load_cached_pull_request(widget_state, &(pr));
+        load_cached_pull_request(merge, &pr);
     }
 
-    widget_state.draw_now(frame, area, focused);
-    widget_state.fx.apply(frame, area, widget_state.version);
+    merge.draw_now(frame, area, focused);
+    merge.fx.apply(frame, area, merge.version);
 }
 
-fn load_cached_pull_request(widget_state: &mut Merge, pr: &PrRef) {
-    let thread = widget_state.tabs.entry(pr.clone()).or_default();
+fn load_cached_pull_request(merge: &mut Merge, pr: &PrRef) {
+    let tab = merge.tabs.entry(pr.clone()).or_default();
 
-    if !thread.reads.cached {
-        thread.reads.cached = true;
+    if !tab.reads.cached {
+        tab.reads.cached = true;
 
-        if thread.pr.is_none() {
-            thread.pr = cache_read(pr);
+        if tab.pr.is_none() {
+            tab.pr = cache_read(pr);
         }
     }
 }

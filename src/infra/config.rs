@@ -60,7 +60,7 @@ pub(crate) const HARNESS_FIELDS: [&str; 4] = ["model", "effort", "command", "arg
 
 /// Field FIELD of `[harness.NAME]`, read from the file now (a long-lived host sees edits).
 pub(crate) fn harness_opt(name: &str, field: &str) -> Option<String> {
-    let file = read_layers(&path()).map(|line| line.merged()).unwrap_or_default();
+    let file = read_layers(&path()).map(|layers| layers.merged()).unwrap_or_default();
 
     file.harness
         .get(name)?
@@ -77,7 +77,7 @@ pub(crate) fn home() -> PathBuf {
 
 pub(crate) fn path() -> PathBuf {
     std::env::var_os("CODEHEAD_CONFIG")
-        .filter(|text| !text.is_empty())
+        .filter(|value| !value.is_empty())
         .map_or_else(|| home().join(".config/codehead.toml"), PathBuf::from)
 }
 
@@ -86,18 +86,15 @@ pub(crate) fn expand(path: &str) -> PathBuf {
     let rest = path.strip_prefix("~/").or(if path == "~" { Some("") } else { None });
 
     match rest {
-        Some(result) => home().join(result),
+        Some(rest) => home().join(rest),
         None => home().join(path),
     }
 }
 
 /// Missing file → defaults. Broken file → error (codehead refuses to start on a typo).
 pub(crate) fn load() -> Result<File, String> {
-    if let Some(character) = CFG.get() {
-        return character
-            .read()
-            .map(|character_value| character_value.clone())
-            .map_err(|error| error.to_string());
+    if let Some(lock) = CFG.get() {
+        return lock.read().map(|file| file.clone()).map_err(|error| error.to_string());
     }
 
     let file = read_layers(&path())?.merged();
@@ -105,8 +102,8 @@ pub(crate) fn load() -> Result<File, String> {
     crate::domain::palette::set_palette(palette_of(&file));
     CFG.get_or_init(|| RwLock::new(file))
         .read()
-        .map(|character_2| character_2.clone())
-        .map_err(|error_value| error_value.to_string())
+        .map(|file| file.clone())
+        .map_err(|error| error.to_string())
 }
 
 fn get() -> File {
@@ -139,47 +136,47 @@ const PLAIN_KEYS: [&str; 20] = [
 
 /// Value V of setting KEY (a settings field: `messages`, `keys.menu`, `colors.accent` …): Err(why).
 pub(crate) fn validate(key: &str, value: &str) -> Result<(), String> {
-    let value_value = value.trim();
+    let trimmed = value.trim();
 
     match key {
-        "messages" if crate::domain::chat::Look::parse(value_value).is_none() => Err(format!("messages: bubbles or lines, not {value_value}")),
-        "thoughts" if crate::domain::chat::Thoughts::parse(value_value).is_none() => Err(format!("thoughts: hidden, folded or open, not {value_value}")),
-        "edits" if crate::engine::edits::Mode::parse(value_value).is_none() => Err(format!("edits: off, files or diff, not {value_value}")),
-        "ports" if crate::infra::portless::Mode::parse(value_value).is_none() => Err(format!("ports: auto, portless or block, not {value_value}")),
-        "previews" if !matches!(value_value, "auto" | "kitty" | "iterm2" | "sixel" | "off") => Err(format!("previews: auto, kitty, iterm2, sixel or off, not {value_value}")),
-        "rank" | "review" if value_value != "off" && value_value.strip_prefix("claude:").is_none_or(str::is_empty) => Err(format!("{key}: off or claude:<model>, not {value_value}")),
-        "classify" if !value_value.is_empty() && value_value != "off" && !crate::engine::roster::valid_name(value_value) => Err(format!("classify: an agent's name or off, not {value_value}")),
-        "keys.menu" => menu_bind(value_value).map(|_| ()).ok_or_else(|| format!("keys.menu: F7-F12, ctrl+<letter> or alt+<letter> codehead binds to nothing else (free: ctrl+l, ctrl+p …), not {value_value}")),
-        "keys.command" => command_char(value_value).map(|_| ()).ok_or_else(|| format!("keys.command: 1 symbol (not a letter, digit, space, @ ! # / ~), not {value_value}")),
-        "colors.scheme" if crate::domain::palette::Palette::preset(value_value).is_none() => {
-            Err(format!("colors.scheme: {}, not {value_value}", crate::domain::palette::PRESETS.iter().map(|path| path.0).collect::<Vec<_>>().join(" or ")))
+        "messages" if crate::domain::chat::Look::parse(trimmed).is_none() => Err(format!("messages: bubbles or lines, not {trimmed}")),
+        "thoughts" if crate::domain::chat::Thoughts::parse(trimmed).is_none() => Err(format!("thoughts: hidden, folded or open, not {trimmed}")),
+        "edits" if crate::engine::edits::Mode::parse(trimmed).is_none() => Err(format!("edits: off, files or diff, not {trimmed}")),
+        "ports" if crate::infra::portless::Mode::parse(trimmed).is_none() => Err(format!("ports: auto, portless or block, not {trimmed}")),
+        "previews" if !matches!(trimmed, "auto" | "kitty" | "iterm2" | "sixel" | "off") => Err(format!("previews: auto, kitty, iterm2, sixel or off, not {trimmed}")),
+        "rank" | "review" if trimmed != "off" && trimmed.strip_prefix("claude:").is_none_or(str::is_empty) => Err(format!("{key}: off or claude:<model>, not {trimmed}")),
+        "classify" if !trimmed.is_empty() && trimmed != "off" && !crate::engine::roster::valid_name(trimmed) => Err(format!("classify: an agent's name or off, not {trimmed}")),
+        "keys.menu" => menu_bind(trimmed).map(|_| ()).ok_or_else(|| format!("keys.menu: F7-F12, ctrl+<letter> or alt+<letter> codehead binds to nothing else (free: ctrl+l, ctrl+p …), not {trimmed}")),
+        "keys.command" => command_char(trimmed).map(|_| ()).ok_or_else(|| format!("keys.command: 1 symbol (not a letter, digit, space, @ ! # / ~), not {trimmed}")),
+        "colors.scheme" if crate::domain::palette::Palette::preset(trimmed).is_none() => {
+            Err(format!("colors.scheme: {}, not {trimmed}", crate::domain::palette::PRESETS.iter().map(|preset| preset.0).collect::<Vec<_>>().join(" or ")))
         }
-        key_value if key_value.starts_with("harness.") => {
-            let mut parts = key_value.splitn(3, '.').skip(1);
+        harness_key if harness_key.starts_with("harness.") => {
+            let mut parts = harness_key.splitn(3, '.').skip(1);
             let (name, field) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
 
             if crate::engine::harnesses::get(name).is_none() {
-                return Err(format!("{key_value}: unknown harness {name}"));
+                return Err(format!("{harness_key}: unknown harness {name}"));
             }
 
             if !HARNESS_FIELDS.contains(&field) {
-                return Err(format!("unknown key {key_value}"));
+                return Err(format!("unknown key {harness_key}"));
             }
 
-            if field == "effort" && !value_value.is_empty() && !["low", "medium", "high", "xhigh", "max"].contains(&value_value) {
-                return Err(format!("{key_value}: low, medium, high, xhigh or max, not {value_value}"));
+            if field == "effort" && !trimmed.is_empty() && !["low", "medium", "high", "xhigh", "max"].contains(&trimmed) {
+                return Err(format!("{harness_key}: low, medium, high, xhigh or max, not {trimmed}"));
             }
 
             Ok(())
         }
-        key_2 if key_2.starts_with("colors.") && key_2 != "colors.scheme" => {
-            let name = &key_2["colors.".len()..];
+        color_key if color_key.starts_with("colors.") && color_key != "colors.scheme" => {
+            let name = &color_key["colors.".len()..];
 
             if !crate::domain::palette::NAMES.contains(&crate::domain::palette::slot_name(name)) {
-                return Err(format!("unknown key {key_2}"));
+                return Err(format!("unknown key {color_key}"));
             }
 
-            crate::domain::palette::parse_hex(value_value).map(|_| ()).ok_or_else(|| format!("{key_2}: #RRGGBB, not {value_value}"))
+            crate::domain::palette::parse_hex(trimmed).map(|_| ()).ok_or_else(|| format!("{color_key}: #RRGGBB, not {trimmed}"))
         }
         _ => Ok(()),
     }
@@ -197,23 +194,23 @@ pub(crate) struct Bind {
 impl Bind {
     pub(crate) fn parse(text: &str) -> Option<Bind> {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-        let text_value = text.trim();
-        let lower = text_value.to_ascii_lowercase();
+        let trimmed = text.trim();
+        let lower = trimmed.to_ascii_lowercase();
 
-        if let Some(count_2) = lower
+        if let Some(number) = lower
             .strip_prefix('f')
-            .and_then(|count| count.parse::<u8>().ok())
-            .filter(|count_value| (1..=12).contains(count_value))
+            .and_then(|number_text| number_text.parse::<u8>().ok())
+            .filter(|number| (1..=12).contains(number))
         {
             return Some(Bind {
-                code: KeyCode::F(count_2),
+                code: KeyCode::F(number),
                 mods: KeyModifiers::NONE,
-                label: format!("F{count_2}"),
+                label: format!("F{number}"),
             });
         }
 
-        let (mods, rest, name) = if let Some(result) = lower.strip_prefix("ctrl+") {
-            (KeyModifiers::CONTROL, result, "ctrl")
+        let (mods, rest, name) = if let Some(after_ctrl) = lower.strip_prefix("ctrl+") {
+            (KeyModifiers::CONTROL, after_ctrl, "ctrl")
         } else {
             (KeyModifiers::ALT, lower.strip_prefix("alt+")?, "alt")
         };
@@ -244,7 +241,7 @@ impl Bind {
             (KeyCode::Char(agent), KeyCode::Char(bytes)) => {
                 agent == bytes.to_ascii_lowercase() && mods.intersection(core) == self.mods
             }
-            (agent_value, bytes_value) => agent_value == bytes_value && mods.intersection(core) == self.mods,
+            (bound, pressed) => bound == pressed && mods.intersection(core) == self.mods,
         }
     }
 }
@@ -267,8 +264,8 @@ const TAKEN: [&str; 30] = [
 
 /// The menu key of S: a valid key codehead binds to nothing else (alt+b/d/f: word keys too).
 fn menu_bind(text: &str) -> Option<Bind> {
-    Bind::parse(text).filter(|bytes| {
-        !TAKEN.contains(&bytes.label.as_str()) && !matches!(bytes.label.as_str(), "alt+b" | "alt+d" | "alt+f")
+    Bind::parse(text).filter(|candidate| {
+        !TAKEN.contains(&candidate.label.as_str()) && !matches!(candidate.label.as_str(), "alt+b" | "alt+d" | "alt+f")
     })
 }
 

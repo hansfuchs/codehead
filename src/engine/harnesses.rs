@@ -117,12 +117,11 @@ pub(crate) const ALL: [Harness; 13] = [
 
 /// Harness NAME (`claude`, `cursor`, …).
 pub(crate) fn get(name: &str) -> Option<&'static Harness> {
-    ALL.iter().find(|height| height.name == name)
+    ALL.iter().find(|harness| harness.name == name)
 }
 
 pub(crate) fn on_path(bin: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|directory| directory.join(bin).is_file()))
+    std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(bin).is_file()))
 }
 
 /// The harnesses with their CLI on PATH.
@@ -130,25 +129,25 @@ pub(crate) fn installed() -> Vec<&'static Harness> {
     ALL.iter().filter(|height| on_path(height.bin)).collect()
 }
 
-/// The ACP command of harness H for an agent: the agent's own `command`, else
+/// The ACP command of HARNESS for an agent: the agent's own `command`, else
 /// `$CODEHEAD_ACP_<NAME>`, else `[harness.<name>] command`, else the default. None: Claude Code,
 /// Codex without an ACP command of its own (the app server).
-pub(crate) fn acp_command(height: &Harness, own: Option<&str>) -> Option<Vec<String>> {
-    let default: &[&str] = match height.drive {
+pub(crate) fn acp_command(harness: &Harness, own: Option<&str>) -> Option<Vec<String>> {
+    let default: &[&str] = match harness.drive {
         Drive::Claude => return None,
         Drive::Codex => &[],
-        Drive::Acp(directory) => directory,
+        Drive::Acp(command) => command,
     };
 
-    let env = std::env::var(format!("CODEHEAD_ACP_{}", height.name.to_uppercase())).ok();
+    let env = std::env::var(format!("CODEHEAD_ACP_{}", harness.name.to_uppercase())).ok();
 
     match own
         .map(String::from)
         .or(env)
-        .or_else(|| crate::infra::config::harness_opt(height.name, "command"))
-        .filter(|character| !character.trim().is_empty())
+        .or_else(|| crate::infra::config::harness_opt(harness.name, "command"))
+        .filter(|command| !command.trim().is_empty())
     {
-        Some(character_value) => Some(split(&character_value)),
+        Some(command) => Some(split(&command)),
         None if default.is_empty() => None,
         None => Some(default.iter().map(std::string::ToString::to_string).collect()),
     }
@@ -157,38 +156,38 @@ pub(crate) fn acp_command(height: &Harness, own: Option<&str>) -> Option<Vec<Str
 /// A command line split at spaces, single and double quotes kept together.
 pub(crate) fn split(text: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut cur = String::new();
+    let mut current = String::new();
     let mut quote: Option<char> = None;
-    let mut any = false;
+    let mut quoted = false;
 
     for character in text.chars() {
         match (quote, character) {
-            (Some(query), character_value) if character_value == query => quote = None,
-            (Some(_), character_2) => cur.push(character_2),
+            (Some(open), closing) if closing == open => quote = None,
+            (Some(_), inside) => current.push(inside),
             (None, '\'' | '"') => {
                 quote = Some(character);
-                any = true;
+                quoted = true;
             }
-            (None, character_3) if character_3.is_whitespace() => {
-                push_shell_argument(&mut out, &mut cur, &mut any);
+            (None, space) if space.is_whitespace() => {
+                push_shell_argument(&mut out, &mut current, &mut quoted);
             }
-            (None, character_4) => cur.push(character_4),
+            (None, plain) => current.push(plain),
         }
     }
 
-    if !cur.is_empty() || any {
-        out.push(cur);
+    if !current.is_empty() || quoted {
+        out.push(current);
     }
 
     out
 }
 
-fn push_shell_argument(out: &mut Vec<String>, cur: &mut String, any: &mut bool) {
-    if !cur.is_empty() || *any {
-        out.push(std::mem::take(cur));
+fn push_shell_argument(out: &mut Vec<String>, current: &mut String, quoted: &mut bool) {
+    if !current.is_empty() || *quoted {
+        out.push(std::mem::take(current));
     }
 
-    *any = false;
+    *quoted = false;
 }
 
 #[cfg(test)]

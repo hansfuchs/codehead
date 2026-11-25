@@ -13,7 +13,7 @@ impl View {
                 return Some(false);
             }
             KeyCode::Esc => {
-                return Some(key_escape_branch(self));
+                return Some(press_escape(self));
             }
 
             _ => {}
@@ -23,8 +23,8 @@ impl View {
     }
 }
 
-fn key_escape_branch(view: &mut View) -> bool {
-    if view.last_esc.is_some_and(|thread| thread.elapsed() < DOUBLE_ESC) {
+fn press_escape(view: &mut View) -> bool {
+    if view.last_esc.is_some_and(|at| at.elapsed() < DOUBLE_ESC) {
         view.esc_interrupt = None;
         view.exit = Exit::Back;
         return true;

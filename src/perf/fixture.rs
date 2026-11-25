@@ -22,7 +22,7 @@ pub(super) fn markdown(blocks: usize) -> String {
 /// N turns: prompt, thought, 3 tool calls + results, text.
 pub(super) fn events(turns: usize) -> Vec<Event> {
     let base = 1_795_090_200_000u64;
-    let mut value = Vec::new();
+    let mut events = Vec::new();
     let ev = |ts: u64, agent: Option<&str>, kind: Kind| Event {
         ts,
         agent: agent.map(Into::into),
@@ -32,7 +32,7 @@ pub(super) fn events(turns: usize) -> Vec<Event> {
     for i in 0..turns {
         let ts = base + i as u64 * 60_000;
 
-        value.push(ev(
+        events.push(ev(
             ts,
             None,
             Kind::Prompt {
@@ -41,8 +41,8 @@ pub(super) fn events(turns: usize) -> Vec<Event> {
                 text: format!("turn {i}: fix the build"),
             },
         ));
-        value.push(ev(ts + 1, Some("ada"), Kind::TurnStart));
-        value.push(ev(
+        events.push(ev(ts + 1, Some("ada"), Kind::TurnStart));
+        events.push(ev(
             ts + 2,
             Some("ada"),
             Kind::Thought {
@@ -50,10 +50,10 @@ pub(super) fn events(turns: usize) -> Vec<Event> {
             },
         ));
 
-        for character in 0..3 {
-            let id = format!("t{i}-{character}");
+        for call in 0..3 {
+            let id = format!("t{i}-{call}");
 
-            value.push(ev(
+            events.push(ev(
                 ts + 3,
                 Some("ada"),
                 Kind::Tool {
@@ -62,7 +62,7 @@ pub(super) fn events(turns: usize) -> Vec<Event> {
                     input: json!({"command": "cargo test", "description": "run tests"}),
                 },
             ));
-            value.push(ev(
+            events.push(ev(
                 ts + 4,
                 Some("ada"),
                 Kind::ToolResult {
@@ -73,10 +73,10 @@ pub(super) fn events(turns: usize) -> Vec<Event> {
             ));
         }
 
-        value.push(ev(ts + 5, Some("ada"), Kind::Text { text: markdown(1) }));
+        events.push(ev(ts + 5, Some("ada"), Kind::Text { text: markdown(1) }));
     }
 
-    value
+    events
 }
 
 /// N files, each 4 hunks of 40 changed lines.
@@ -96,8 +96,8 @@ pub(super) fn diff(files: usize) -> String {
 }
 
 fn diff_hunks(text: &mut String) {
-    for height in 0..4 {
-        let _ = writeln!(text, "@@ -{0},40 +{0},40 @@ fn h{height}()", height * 100 + 1);
+    for hunk in 0..4 {
+        let _ = writeln!(text, "@@ -{0},40 +{0},40 @@ fn h{hunk}()", hunk * 100 + 1);
 
         for line in 0..20 {
             let _ = write!(
@@ -123,10 +123,10 @@ pub(super) fn repo_with_origin(root: &std::path::Path) -> std::path::PathBuf {
     std::fs::write(repo.join(".gitignore"), ".env*\n").unwrap();
     std::fs::write(repo.join(".env"), "KEY=1\n").unwrap();
 
-    let sh = |dir: &std::path::Path, character: &str| {
+    let sh = |dir: &std::path::Path, script: &str| {
         let ok = std::process::Command::new("sh")
             .arg("-c")
-            .arg(character)
+            .arg(script)
             .current_dir(dir)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -134,7 +134,7 @@ pub(super) fn repo_with_origin(root: &std::path::Path) -> std::path::PathBuf {
             .unwrap()
             .success();
 
-        assert!(ok, "{character}");
+        assert!(ok, "{script}");
     };
 
     sh(root, "git init -q --bare origin.git");

@@ -17,7 +17,7 @@ pub(super) fn window_of(model: &str) -> u64 {
 pub(crate) fn limits() -> Vec<(String, String, f64, Option<u64>)> {
     crate::engine::limits::read()
         .into_iter()
-        .map(|width| (width.harness, width.label, width.pct, width.resets))
+        .map(|limit| (limit.harness, limit.label, limit.pct, limit.resets))
         .collect()
 }
 
@@ -31,41 +31,35 @@ pub(crate) fn uses(id: &str) -> Vec<AgentUse> {
     };
 
     let live = state.live;
-    let mut usage_value: Vec<AgentUse> = Vec::new();
+    let mut usages: Vec<AgentUse> = Vec::new();
     let mut models: HashMap<String, String> = HashMap::new();
 
     for event in crate::engine::store::events(id) {
-        account_event(&live, &mut usage_value, &mut models, event);
+        account_event(&live, &mut usages, &mut models, event);
     }
 
     // 0 turn end with a $ in this thread yet: the agent's $ per token from its other threads
-    for agent_value in usage_value
-        .iter_mut()
-        .filter(|candidate| candidate.usd_per_token == 0.0)
-    {
-        agent_value.usd_per_token = past_rate(&agent_value.agent, id);
+    for usage in usages.iter_mut().filter(|candidate| candidate.usd_per_token == 0.0) {
+        usage.usd_per_token = past_rate(&usage.agent, id);
     }
 
-    for (name, user) in state.usage {
-        let Some(running_agent) = usage_value
-            .iter_mut()
-            .find(|candidate_agent| candidate_agent.agent == name)
-        else {
+    for (name, turn) in state.usage {
+        let Some(running_agent) = usages.iter_mut().find(|candidate_agent| candidate_agent.agent == name) else {
             continue;
         };
 
         add_running(
             running_agent,
-            &user,
+            &turn,
             models.get(&name).map_or("", String::as_str),
             now(),
         );
     }
 
-    usage_value.retain(|candidate_usage| candidate_usage.turns > 0 || candidate_usage.live);
-    usage_value.sort_by(|left, right| right.usd.total_cmp(&left.usd));
+    usages.retain(|candidate_usage| candidate_usage.turns > 0 || candidate_usage.live);
+    usages.sort_by(|left, right| right.usd.total_cmp(&left.usd));
 
-    usage_value
+    usages
 }
 
 fn account_event(
@@ -82,7 +76,7 @@ fn account_event(
         i
     } else {
         // the roster's harness; a removed agent: unknown
-        let harness = crate::engine::roster::get(&name).map_or_else(|| "?".into(), |result| result.harness);
+        let harness = crate::engine::roster::get(&name).map_or_else(|| "?".into(), |entry| entry.harness);
 
         usage.push(AgentUse {
             agent: name.clone(),
@@ -93,19 +87,19 @@ fn account_event(
         usage.len() - 1
     };
 
-    let agent_3 = &mut usage[i];
+    let agent_use = &mut usage[i];
 
     match event.kind {
-        crate::engine::store::Kind::Session { model: message, .. } => {
-            agent_3.sessions += 1;
-            models.insert(name, message);
+        crate::engine::store::Kind::Session { model, .. } => {
+            agent_use.sessions += 1;
+            models.insert(name, model);
         }
-        crate::engine::store::Kind::TurnEnd { .. } => account_turn(agent_3, &event, models, &name),
+        crate::engine::store::Kind::TurnEnd { .. } => account_turn(agent_use, &event, models, &name),
         _ => {}
     }
 }
 
-/// Running turn U of agent A (model MODEL) at NOW: its tokens, $ (at the last $ per token), ctx.
+/// Running turn USAGE of AGENT (model MODEL) at NOW: its tokens, $ (at the last $ per token), ctx.
 pub(super) fn add_running(agent: &mut AgentUse, usage: &crate::engine::harness::TurnUse, model: &str, now: u64) {
     agent.input += usage.input;
     agent.output += usage.output;
@@ -114,7 +108,7 @@ pub(super) fn add_running(agent: &mut AgentUse, usage: &crate::engine::harness::
     agent.usd += agent.usd_per_token * (usage.input + usage.output + usage.cache_read + usage.cache_write) as f64;
 
     if usage.ctx > 0 {
-        let size = agent.ctx.map_or_else(|| window_of(model), |character| character.1);
+        let size = agent.ctx.map_or_else(|| window_of(model), |ctx| ctx.1);
 
         agent.ctx = Some((usage.ctx, size));
     }
@@ -131,21 +125,21 @@ pub(super) fn past_rate(agent: &str, skip: &str) -> f64 {
     static SEEN: OnceLock<Mutex<HashMap<String, (f64, Instant)>>> = OnceLock::new();
     let seen = SEEN.get_or_init(Default::default);
 
-    if let Some(&(result, at)) = seen.lock().ok().as_ref().and_then(|message| message.get(agent))
-        && (result > 0.0 || at.elapsed() < Duration::from_secs(60))
+    if let Some(&(cached, at)) = seen.lock().ok().as_ref().and_then(|rates| rates.get(agent))
+        && (cached > 0.0 || at.elapsed() < Duration::from_secs(60))
     {
-        return result;
+        return cached;
     }
 
     let rate = crate::engine::store::all()
         .into_iter()
         .filter(|thread| thread.id != skip)
         .take(RATE_THREADS)
-        .find_map(|thread_value| last_rate(&crate::engine::store::events_tail(&thread_value.id, 256 * 1024), agent))
+        .find_map(|thread| last_rate(&crate::engine::store::events_tail(&thread.id, 256 * 1024), agent))
         .unwrap_or(0.0);
 
-    if let Ok(mut message_value) = seen.lock() {
-        message_value.insert(agent.to_string(), (rate, Instant::now()));
+    if let Ok(mut rates) = seen.lock() {
+        rates.insert(agent.to_string(), (rate, Instant::now()));
     }
 
     rate
@@ -156,8 +150,8 @@ pub(super) fn last_rate(events: &[crate::engine::store::Event], agent: &str) -> 
     events
         .iter()
         .rev()
-        .filter(|error| error.agent.as_deref() == Some(agent))
-        .find_map(|error_value| match error_value.kind {
+        .filter(|event| event.agent.as_deref() == Some(agent))
+        .find_map(|event| match event.kind {
             crate::engine::store::Kind::TurnEnd {
                 cost,
                 input,
@@ -200,31 +194,31 @@ pub(super) fn fetch(id: &str, names: &Names) -> Snap {
         ..Default::default()
     };
 
-    for user in uses(&thread.id) {
-        snap.cost += user.usd;
-        snap.input += user.input;
-        snap.output += user.output;
-        snap.cache_read += user.cache_read;
-        snap.cache_write += user.cache_write;
-        snap.turns += user.turns;
-        let (name, color, sprite) = names.get(&user.agent).cloned().map_or_else(
-            || (user.agent.clone(), None, None),
-            |(count, character, sp)| (count, character, Some(sp)),
+    for usage in uses(&thread.id) {
+        snap.cost += usage.usd;
+        snap.input += usage.input;
+        snap.output += usage.output;
+        snap.cache_read += usage.cache_read;
+        snap.cache_write += usage.cache_write;
+        snap.turns += usage.turns;
+        let (name, color, sprite) = names.get(&usage.agent).cloned().map_or_else(
+            || (usage.agent.clone(), None, None),
+            |(name, color, sprite)| (name, color, Some(sprite)),
         );
 
         snap.agents.push(AgentRow {
             name,
             color,
             sprite,
-            tokens: user.input + user.output,
-            usd: user.usd,
-            ctx: user
+            tokens: usage.input + usage.output,
+            usd: usage.usd,
+            ctx: usage
                 .ctx
-                .filter(|character_value| character_value.1 > 0)
+                .filter(|(_, size)| *size > 0)
                 .map(|(used, size)| used * 100 / size),
-            live: user.live,
-            ctx_tokens: user.ctx.map_or(0, |character_2| character_2.0),
-            usd_per_token: user.usd_per_token,
+            live: usage.live,
+            ctx_tokens: usage.ctx.map_or(0, |(used, _)| used),
+            usd_per_token: usage.usd_per_token,
         });
     }
 
@@ -237,9 +231,9 @@ pub(super) fn names() -> Names {
     agents::roster_only()
         .into_iter()
         .map(|agent| {
-            let sp = agents::sprite(&agent).desynced(&agent.name);
+            let sprite = agents::sprite(&agent).desynced(&agent.name);
 
-            (agent.name.clone(), (agent.name, agent.color, sp))
+            (agent.name.clone(), (agent.name, agent.color, sprite))
         })
         .collect()
 }

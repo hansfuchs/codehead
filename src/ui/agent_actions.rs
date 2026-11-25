@@ -12,15 +12,15 @@ pub(crate) fn delete(agent: &Agent, fallback: &Agent, uses: &[Use], _logs: &Path
     ])];
     let danger = Style::default().fg(theme::pal().error());
 
-    for user in uses {
-        delete_short(agent, fallback, &mut out, danger, user);
+    for usage in uses {
+        leave_thread(agent, fallback, &mut out, danger, usage);
     }
 
     let archived = roster::get(&agent.name)
         .ok_or_else(|| format!("no agent {}", agent.name))
-        .and_then(|mut result| {
-            result.archived = true;
-            roster::save(&result)
+        .and_then(|mut record| {
+            record.archived = true;
+            roster::save(&record)
         });
 
     match archived {
@@ -28,45 +28,45 @@ pub(crate) fn delete(agent: &Agent, fallback: &Agent, uses: &[Use], _logs: &Path
             format!("{} deleted (archived: file + history kept)", agent.name),
             Style::default().fg(theme::pal().success()),
         )),
-        Err(error_3) => out.push(Line::styled(format!("archive failed: {error_3}"), danger)),
+        Err(error) => out.push(Line::styled(format!("archive failed: {error}"), danger)),
     }
 
     out
 }
 
-fn delete_short(agent: &Agent, fallback: &Agent, out: &mut Vec<Line<'_>>, danger: Style, user: &Use) {
-    let short: String = user.thread_id.chars().take(12).collect();
+fn leave_thread(agent: &Agent, fallback: &Agent, out: &mut Vec<Line<'_>>, danger: Style, usage: &Use) {
+    let short: String = usage.thread_id.chars().take(12).collect();
     let mut line = vec![
         Span::styled(format!("  {short} "), theme::muted()),
-        Span::raw(user.title.clone()),
+        Span::raw(usage.title.clone()),
     ];
 
-    let left = if client::alive(&user.thread_id) {
+    let left = if client::alive(&usage.thread_id) {
         client::send(
-            &user.thread_id,
+            &usage.thread_id,
             &serde_json::json!({"op": "leave", "agent": agent.name}),
         )
         .map(|_| ())
     } else {
         // as the host's leave: its flow goes first (the lead's old flow field too)
-        store::update(&user.thread_id, |thread| {
+        store::update(&usage.thread_id, |thread| {
             thread.set_flow(&agent.name, None);
-            thread.agents.retain(|agent_value| *agent_value != agent.name);
+            thread.agents.retain(|name| *name != agent.name);
         })
         .map(|_| ())
     };
 
-    if let Err(error_value) = left {
-        line.push(Span::styled(format!(" · leave failed: {error_value}"), danger));
+    if let Err(error) = left {
+        line.push(Span::styled(format!(" · leave failed: {error}"), danger));
     }
 
-    if store::load(&user.thread_id).is_some_and(|thread_value| thread_value.agents.is_empty()) {
-        match store::update(&user.thread_id, |thread_2| thread_2.agents.push(fallback.name.clone())) {
+    if store::load(&usage.thread_id).is_some_and(|thread| thread.agents.is_empty()) {
+        match store::update(&usage.thread_id, |thread| thread.agents.push(fallback.name.clone())) {
             Ok(_) => line.push(Span::styled(
                 format!(" · {} leads now", fallback.name),
                 Style::default().fg(theme::pal().success()),
             )),
-            Err(error_2) => line.push(Span::styled(format!(" · {error_2}"), danger)),
+            Err(error) => line.push(Span::styled(format!(" · {error}"), danger)),
         }
     }
 

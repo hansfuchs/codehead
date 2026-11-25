@@ -7,7 +7,7 @@ pub(crate) fn share(home: &Path, files: &[PathBuf], title: &str) -> Result<Strin
     let rel: Vec<String> = files
         .iter()
         .filter_map(|path| path.strip_prefix(home).ok())
-        .map(|path_value| path_value.display().to_string())
+        .map(|relative| relative.display().to_string())
         .collect();
 
     if rel.is_empty() {
@@ -15,7 +15,7 @@ pub(crate) fn share(home: &Path, files: &[PathBuf], title: &str) -> Result<Strin
     }
 
     let git = |args: &[&str]| -> Result<String, String> {
-        let output_value = std::process::Command::new("git")
+        let output = std::process::Command::new("git")
             .arg("-C")
             .arg(home)
             .args(args)
@@ -23,10 +23,10 @@ pub(crate) fn share(home: &Path, files: &[PathBuf], title: &str) -> Result<Strin
             .output()
             .map_err(|error| format!("git: {error}"))?;
 
-        if output_value.status.success() {
-            Ok(String::from_utf8_lossy(&output_value.stdout).into_owned())
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
-            Err(String::from_utf8_lossy(&output_value.stderr)
+            Err(String::from_utf8_lossy(&output.stderr)
                 .lines()
                 .next()
                 .unwrap_or("git failed")
@@ -52,7 +52,7 @@ pub(crate) fn share(home: &Path, files: &[PathBuf], title: &str) -> Result<Strin
 
     commit.extend(rel.iter().map(String::as_str));
     git(&commit)?;
-    let count_value = staged.lines().count();
+    let committed = staged.lines().count();
 
     if git(&["rev-parse", "--abbrev-ref", "@{u}"]).is_ok() {
         let _ = std::process::Command::new("git")
@@ -64,23 +64,23 @@ pub(crate) fn share(home: &Path, files: &[PathBuf], title: &str) -> Result<Strin
             .stderr(std::process::Stdio::null())
             .spawn();
 
-        Ok(format!("home repo: {count_value} files committed, pushing"))
+        Ok(format!("home repo: {committed} files committed, pushing"))
     } else {
-        Ok(format!("home repo: {count_value} files committed (0 upstream: 0 push)"))
+        Ok(format!("home repo: {committed} files committed (0 upstream: 0 push)"))
     }
 }
 /// yazi's config dir owned by codehead: a theme from the palette (0 change to ~/.config/yazi).
 pub(crate) fn yazi_config() -> PathBuf {
     let dir = crate::infra::config::home().join(".cache/codehead/yazi");
     let _ = std::fs::create_dir_all(&dir);
-    let hex = |character| theme::hex(character);
-    let path = theme::pal();
+    let hex = |color| theme::hex(color);
+    let palette = theme::pal();
     let theme_toml = format!(
         "[mgr]\ncwd = {{ fg = \"{acc}\" }}\nhovered = {{ fg = \"{on}\", bg = \"{acc}\" }}\npreview_hovered = {{ underline = true }}\nborder_style = {{ fg = \"{line}\" }}\n\n[status]\nsep_left = {{ open = \"\", close = \"\" }}\nsep_right = {{ open = \"\", close = \"\" }}\n\n[mode]\nnormal_main = {{ fg = \"{on}\", bg = \"{acc}\", bold = true }}\nnormal_alt = {{ fg = \"{acc}\", bg = \"{panel}\" }}\n",
-        acc = hex(path.accent),
-        on = hex(path.on_accent),
-        line = hex(path.overlay0),
-        panel = hex(path.surface0)
+        acc = hex(palette.accent),
+        on = hex(palette.on_accent),
+        line = hex(palette.overlay0),
+        panel = hex(palette.surface0)
     );
     let _ = std::fs::write(dir.join("theme.toml"), theme_toml);
 

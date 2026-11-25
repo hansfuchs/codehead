@@ -4,8 +4,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn have(bin: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|directory| directory.join(bin).is_file()))
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
 }
 
 fn wayland() -> bool {
@@ -26,7 +25,7 @@ pub(crate) fn copy(text: &str) -> bool {
     // tests: 0 writes to the owner's clipboard; the text for asserts
     #[cfg(test)]
     {
-        LAST.with_borrow_mut(|line| *line = text.to_string());
+        LAST.with_borrow_mut(|last| *last = text.to_string());
         true
     }
 
@@ -63,7 +62,7 @@ pub(crate) fn copy_with(tools: &[(&str, &[&str])], text: &str, wait: bool) -> bo
     );
 
     let run = move || {
-        let Ok(mut character) = Command::new(&bin)
+        let Ok(mut child) = Command::new(&bin)
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -73,11 +72,11 @@ pub(crate) fn copy_with(tools: &[(&str, &[&str])], text: &str, wait: bool) -> bo
             return false;
         };
 
-        if let Some(mut stdin) = character.stdin.take() {
+        if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
         }
 
-        character.wait().is_ok_and(|text_value| text_value.success())
+        child.wait().is_ok_and(|status| status.success())
     };
 
     if wait {
@@ -102,14 +101,14 @@ pub(crate) fn paste() -> Option<String> {
             continue;
         }
 
-        if let Ok(output_value) = Command::new(bin)
+        if let Ok(output) = Command::new(bin)
             .args(args)
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
-            && output_value.status.success()
+            && output.status.success()
         {
-            return Some(String::from_utf8_lossy(&output_value.stdout).into_owned());
+            return Some(String::from_utf8_lossy(&output.stdout).into_owned());
         }
     }
 
@@ -126,10 +125,10 @@ pub(crate) fn paste_image(dest: &std::path::Path) -> bool {
     let png = |bytes: &[u8]| bytes.starts_with(b"\x89PNG");
 
     if have("osascript") {
-        let path_value = dest.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+        let dest_text = dest.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
         let script = format!(
             "try\nset d to (the clipboard as «class PNGf»)\non error\nreturn \"none\"\nend try\n\
-             set f to open for access POSIX file \"{path_value}\" with write permission\nset eof f to 0\nwrite d to f\nclose access f\nreturn \"ok\""
+             set f to open for access POSIX file \"{dest_text}\" with write permission\nset eof f to 0\nwrite d to f\nclose access f\nreturn \"ok\""
         );
         let ok = Command::new("osascript")
             .args(["-e", &script])
@@ -137,8 +136,8 @@ pub(crate) fn paste_image(dest: &std::path::Path) -> bool {
             .stderr(Stdio::null())
             .output();
 
-        if ok.is_ok_and(|output_value| String::from_utf8_lossy(&output_value.stdout).trim() == "ok") {
-            return std::fs::read(dest).is_ok_and(|bytes_value| png(&bytes_value));
+        if ok.is_ok_and(|output| String::from_utf8_lossy(&output.stdout).trim() == "ok") {
+            return std::fs::read(dest).is_ok_and(|bytes| png(&bytes));
         }
 
         return false;
@@ -154,15 +153,15 @@ pub(crate) fn paste_image(dest: &std::path::Path) -> bool {
             continue;
         }
 
-        if let Ok(output_2) = Command::new(bin)
+        if let Ok(output) = Command::new(bin)
             .args(args)
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
-            && output_2.status.success()
-            && png(&output_2.stdout)
+            && output.status.success()
+            && png(&output.stdout)
         {
-            return std::fs::write(dest, &output_2.stdout).is_ok();
+            return std::fs::write(dest, &output.stdout).is_ok();
         }
     }
 

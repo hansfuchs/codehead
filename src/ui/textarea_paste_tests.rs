@@ -1,158 +1,158 @@
 use super::*;
 
 fn ta(text: &str) -> TextArea {
-    let mut thread = TextArea::new(false, "");
+    let mut input = TextArea::new(false, "");
 
-    thread.set_text(text);
-    thread
+    input.set_text(text);
+    input
 }
 
-fn press(thread: &mut TextArea, character: KeyCode, message: KeyModifiers) -> bool {
-    matches!(thread.key(KeyEvent::new(character, message)), Outcome::Handled)
+fn press(input: &mut TextArea, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    matches!(input.key(KeyEvent::new(code, modifiers)), Outcome::Handled)
 }
 
 #[test]
 fn code_paste_gets_a_fence_with_its_tag_once() {
-    let mut thread = ta("see ");
+    let mut input = ta("see ");
 
-    thread.line_edge(true, false);
-    thread.paste("fn main() {\n    let v: Vec<u8> = vec![];\n}");
+    input.line_edge(true, false);
+    input.paste("fn main() {\n    let v: Vec<u8> = vec![];\n}");
 
     assert_eq!(
-        thread.text(),
+        input.text(),
         "see \n```rs\nfn main() {\n    let v: Vec<u8> = vec![];\n}\n```"
     );
 
     // inside the fence: as is
-    let mut user = TextArea::new(false, "");
+    let mut input = TextArea::new(false, "");
 
-    user.insert("```\n");
-    user.paste("fn a() {\n}");
+    input.insert("```\n");
+    input.paste("fn a() {\n}");
 
-    assert_eq!(user.text(), "```\nfn a() {\n}");
+    assert_eq!(input.text(), "```\nfn a() {\n}");
 
     // prose: as is; unknown code: 0 tag
-    let mut path = TextArea::new(false, "");
+    let mut input = TextArea::new(false, "");
 
-    path.paste("hello there\nhow are you");
+    input.paste("hello there\nhow are you");
 
-    assert_eq!(path.text(), "hello there\nhow are you");
+    assert_eq!(input.text(), "hello there\nhow are you");
 
-    let mut query = TextArea::new(false, "");
+    let mut input = TextArea::new(false, "");
 
-    query.paste(";;;\n{}");
+    input.paste(";;;\n{}");
 
-    assert_eq!(query.text(), "```\n;;;\n{}\n```");
+    assert_eq!(input.text(), "```\n;;;\n{}\n```");
 }
 
 #[test]
 fn paste_replaces_selection_and_keeps_lines() {
-    let mut thread = ta("abc");
+    let mut input = ta("abc");
 
-    thread.select_all();
-    thread.insert("x\r\ny");
+    input.select_all();
+    input.insert("x\r\ny");
 
-    assert_eq!(thread.text(), "x\ny");
+    assert_eq!(input.text(), "x\ny");
 
-    let mut text_value = TextArea::new(true, "");
+    let mut input = TextArea::new(true, "");
 
-    text_value.insert("a\nb");
+    input.insert("a\nb");
 
-    assert_eq!(text_value.text(), "a b");
+    assert_eq!(input.text(), "a b");
 }
 
 /// ⌥⌫ / ctrl+⌫ / ctrl+h / ctrl+w: the string left of the cursor; in a path 1 segment.
 /// ⌘⌫ (alt+⌫ off macOS): to the row's start. ⌘←→ (alt off macOS): row start / end.
 #[test]
 fn word_and_row_deletes_in_every_terminal_encoding() {
-    let word = [
+    let word_keys = [
         (KeyCode::Backspace, KeyModifiers::CONTROL),
         (KeyCode::Char('h'), KeyModifiers::CONTROL),
         (KeyCode::Char('w'), KeyModifiers::CONTROL),
     ];
 
-    for (character, message) in word {
-        let mut thread = ta("git commit -m foo.bar-baz");
+    for (code, modifiers) in word_keys {
+        let mut input = ta("git commit -m foo.bar-baz");
 
-        thread.move_end();
-        press(&mut thread, character, message);
+        input.move_end();
+        press(&mut input, code, modifiers);
 
-        assert_eq!(thread.text(), "git commit -m ", "{character:?} {message:?}");
+        assert_eq!(input.text(), "git commit -m ", "{code:?} {modifiers:?}");
 
         // a path: 1 segment, its `/` stays
-        let mut thread_value = ta("cd ~/projects/code-head");
+        let mut input = ta("cd ~/projects/code-head");
 
-        thread_value.move_end();
-        press(&mut thread_value, character, message);
+        input.move_end();
+        press(&mut input, code, modifiers);
 
-        assert_eq!(thread_value.text(), "cd ~/projects/");
+        assert_eq!(input.text(), "cd ~/projects/");
 
-        press(&mut thread_value, character, message);
+        press(&mut input, code, modifiers);
 
-        assert_eq!(thread_value.text(), "cd ~/");
+        assert_eq!(input.text(), "cd ~/");
 
-        press(&mut thread_value, character, message);
+        press(&mut input, code, modifiers);
 
-        assert_eq!(thread_value.text(), "cd ");
+        assert_eq!(input.text(), "cd ");
     }
 
     // ⌥ (alt) on macOS: the string; off macOS: the row
-    let mut thread_2 = ta("one two-three");
+    let mut input = ta("one two-three");
 
-    thread_2.move_end();
-    press(&mut thread_2, KeyCode::Backspace, KeyModifiers::ALT);
+    input.move_end();
+    press(&mut input, KeyCode::Backspace, KeyModifiers::ALT);
 
-    assert_eq!(thread_2.text(), if cfg!(target_os = "macos") { "one " } else { "" });
+    assert_eq!(input.text(), if cfg!(target_os = "macos") { "one " } else { "" });
 
     // ⌘⌫ (super) and ctrl+u (⌘⌫ of macOS terminals): to the row's start
-    for (character_value, message_value) in [
+    for (code, modifiers) in [
         (KeyCode::Backspace, KeyModifiers::SUPER),
         (KeyCode::Char('u'), KeyModifiers::CONTROL),
     ] {
-        let mut thread_3 = ta("first\nsecond row");
+        let mut input = ta("first\nsecond row");
 
-        thread_3.render_for_test(40);
-        thread_3.move_end();
-        press(&mut thread_3, character_value, message_value);
+        input.render_for_test(40);
+        input.move_end();
+        press(&mut input, code, modifiers);
 
-        assert_eq!(thread_3.text(), "first\n", "{character_value:?}");
+        assert_eq!(input.text(), "first\n", "{code:?}");
     }
 
     // ⌘← row start, ⌘→ row end; ctrl+← a word
-    let mut thread_4 = ta("alpha beta gamma");
+    let mut input = ta("alpha beta gamma");
 
-    thread_4.render_for_test(40);
-    thread_4.move_end();
-    press(&mut thread_4, KeyCode::Left, KeyModifiers::SUPER);
+    input.render_for_test(40);
+    input.move_end();
+    press(&mut input, KeyCode::Left, KeyModifiers::SUPER);
 
-    assert_eq!(thread_4.cur.col, 0);
+    assert_eq!(input.cur.col, 0);
 
-    press(&mut thread_4, KeyCode::Right, KeyModifiers::SUPER);
+    press(&mut input, KeyCode::Right, KeyModifiers::SUPER);
 
-    assert_eq!(thread_4.cur.col, 16);
+    assert_eq!(input.cur.col, 16);
 
-    press(&mut thread_4, KeyCode::Left, KeyModifiers::CONTROL);
+    press(&mut input, KeyCode::Left, KeyModifiers::CONTROL);
 
-    assert_eq!(thread_4.cur.col, 11);
+    assert_eq!(input.cur.col, 11);
 
-    press(&mut thread_4, KeyCode::Left, KeyModifiers::ALT);
+    press(&mut input, KeyCode::Left, KeyModifiers::ALT);
 
-    assert_eq!(thread_4.cur.col, if cfg!(target_os = "macos") { 6 } else { 0 });
+    assert_eq!(input.cur.col, if cfg!(target_os = "macos") { 6 } else { 0 });
 }
 
 #[test]
 fn delete_key_of_a_string_filter() {
-    let key_2 = |key, key_value| KeyEvent::new(key, key_value);
+    let event = |key, modifiers| KeyEvent::new(key, modifiers);
     let mut text = String::from("src/app.rs");
 
-    assert!(delete_key(&mut text, &key_2(KeyCode::Backspace, KeyModifiers::CONTROL)));
+    assert!(delete_key(&mut text, &event(KeyCode::Backspace, KeyModifiers::CONTROL)));
     assert_eq!(text, "src/");
-    assert!(delete_key(&mut text, &key_2(KeyCode::Backspace, KeyModifiers::NONE)));
+    assert!(delete_key(&mut text, &event(KeyCode::Backspace, KeyModifiers::NONE)));
     assert_eq!(text, "src");
 
     text = "a b".into();
 
-    assert!(delete_key(&mut text, &key_2(KeyCode::Backspace, KeyModifiers::SUPER)));
+    assert!(delete_key(&mut text, &event(KeyCode::Backspace, KeyModifiers::SUPER)));
     assert_eq!(text, "");
-    assert!(!delete_key(&mut text, &key_2(KeyCode::Char('u'), KeyModifiers::NONE)));
+    assert!(!delete_key(&mut text, &event(KeyCode::Char('u'), KeyModifiers::NONE)));
 }

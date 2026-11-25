@@ -41,7 +41,7 @@ impl<K: Clone + Eq + Hash + Send + 'static, V: Send + 'static> Reads<K, V> {
             || self
                 .updated
                 .get(&key)
-                .is_some_and(|thread_value| thread_value.elapsed() < Duration::from_secs(5))
+                .is_some_and(|updated_at| updated_at.elapsed() < Duration::from_secs(5))
         {
             return;
         }
@@ -102,10 +102,10 @@ pub(crate) fn save<T: serde::Serialize>(name: &str, value: &T) {
 
     let hash = {
         use std::hash::{Hash, Hasher};
-        let mut height = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
 
-        bytes.hash(&mut height);
-        height.finish()
+        bytes.hash(&mut hasher);
+        hasher.finish()
     };
 
     if let Ok(mut last) = LAST.get_or_init(Default::default).lock() {

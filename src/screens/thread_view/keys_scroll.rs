@@ -31,7 +31,7 @@ impl View {
                 return Some(false);
             }
             KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                return Some(key_scroll_body(self, key));
+                return Some(scroll_lines(self, key));
             }
 
             _ => {}
@@ -41,7 +41,7 @@ impl View {
     }
 }
 
-fn key_scroll_body(view: &mut View, key: KeyEvent) -> bool {
+fn scroll_lines(view: &mut View, key: KeyEvent) -> bool {
     view.scroll(if key.code == KeyCode::Up { 3 } else { -3 });
     false
 }

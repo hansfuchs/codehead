@@ -10,7 +10,7 @@ impl View {
                 return Some(false);
             }
             KeyCode::Down if self.shell_mode() && self.prompt.hist_at.is_none() && self.prompt.input.on_last_row() => {
-                return Some(key_history_branch(self));
+                return Some(shell_history_down(self));
             }
             // `!` on an empty prompt: shell mode, a space after the `!`
             KeyCode::Char('!') if empty && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
@@ -44,7 +44,7 @@ impl View {
     }
 }
 
-fn key_history_branch(view: &mut View) -> bool {
+fn shell_history_down(view: &mut View) -> bool {
     if !view.shell_history_step(false) {
         view.edit_cwd();
     }

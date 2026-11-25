@@ -20,7 +20,6 @@ impl IdeState {
             ide_rows: Vec::new(),
             tutor_ide: false,
             #[cfg(test)]
-            #[cfg(test)]
             ide_opened: Vec::new(),
         }
     }

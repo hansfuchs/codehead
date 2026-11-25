@@ -11,11 +11,11 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 
 /// Hover: solid pal().surface1 bg on the cells of R (accent cells, like the selection pill, kept).
-pub(crate) fn hover(buf: &mut Buffer, area_value: Rect) {
-    let result = area_value.intersection(buf.area);
+pub(crate) fn hover(buf: &mut Buffer, area: Rect) {
+    let clipped = area.intersection(buf.area);
 
-    for y in result.top()..result.bottom() {
-        for x in result.left()..result.right() {
+    for y in clipped.top()..clipped.bottom() {
+        for x in clipped.left()..clipped.right() {
             hover_cell(buf, x, y);
         }
     }
@@ -23,11 +23,11 @@ pub(crate) fn hover(buf: &mut Buffer, area_value: Rect) {
 
 /// The cursor row R of a list: on the accent (the text `on_accent`), as the menu rows. Accent
 /// text in it (filter marks): underlined, else it would vanish.
-pub(crate) fn cursor_row(buf: &mut Buffer, area_value: Rect) {
-    let result = area_value.intersection(buf.area);
+pub(crate) fn cursor_row(buf: &mut Buffer, area: Rect) {
+    let clipped = area.intersection(buf.area);
 
-    for y in result.top()..result.bottom() {
-        for x in result.left()..result.right() {
+    for y in clipped.top()..clipped.bottom() {
+        for x in clipped.left()..clipped.right() {
             cursor_row_cell(buf, x, y);
         }
     }
@@ -35,16 +35,16 @@ pub(crate) fn cursor_row(buf: &mut Buffer, area_value: Rect) {
 
 /// A focused card / box R: its far left column on the accent (a solid bar), next to its accent
 /// border. The top + bottom cells (the corners) stay.
-pub(crate) fn accent_edge(buf: &mut Buffer, area_value: Rect) {
-    let result = area_value.intersection(buf.area);
+pub(crate) fn accent_edge(buf: &mut Buffer, area: Rect) {
+    let clipped = area.intersection(buf.area);
 
-    if result.width == 0 || result.height < 3 {
+    if clipped.width == 0 || clipped.height < 3 {
         return;
     }
 
-    for y in result.top() + 1..result.bottom() - 1 {
-        if let Some(character) = buf.cell_mut((result.x, y)) {
-            character.set_symbol(" ").set_bg(pal().accent).set_fg(pal().on_accent);
+    for y in clipped.top() + 1..clipped.bottom() - 1 {
+        if let Some(cell) = buf.cell_mut((clipped.x, y)) {
+            cell.set_symbol(" ").set_bg(pal().accent).set_fg(pal().on_accent);
         }
     }
 }
@@ -94,42 +94,42 @@ pub(crate) fn panel() -> Style {
 
 /// A picked row (of a multi-pick) in R: the accent's tint as bg, `▌` in the accent at BAR (a
 /// column of R, else 0 bar). Cells with a bg of their own keep it when `KEEP_BG`.
-pub(crate) fn picked(buf: &mut Buffer, area_value: Rect, bar: Option<u16>, keep_bg: bool) {
-    let result = area_value.intersection(buf.area);
+pub(crate) fn picked(buf: &mut Buffer, area: Rect, bar: Option<u16>, keep_bg: bool) {
+    let clipped = area.intersection(buf.area);
     let bg = tint(pal().accent, pal().surface0, 0.28);
 
-    for y in result.top()..result.bottom() {
-        for x in result.left()..result.right() {
+    for y in clipped.top()..clipped.bottom() {
+        for x in clipped.left()..clipped.right() {
             picked_cell(buf, x, y, bar, keep_bg, bg);
         }
 
         if let Some(x) = bar
-            && let Some(character_value) = buf.cell_mut((x, y))
+            && let Some(cell) = buf.cell_mut((x, y))
         {
-            character_value.set_symbol("▌").set_fg(pal().accent);
+            cell.set_symbol("▌").set_fg(pal().accent);
         }
     }
 }
 
 /// The backdrop of a modal: every cell of R faded halfway into `base`, so the modal drawn next
 /// stands out. Default colors (Reset) fade from `text` / stay the terminal's bg.
-pub(crate) fn dim(buf: &mut Buffer, area_value: Rect) {
-    let result = area_value.intersection(buf.area);
-    let path = pal();
+pub(crate) fn dim(buf: &mut Buffer, area: Rect) {
+    let clipped = area.intersection(buf.area);
+    let palette = pal();
 
-    for y in result.top()..result.bottom() {
-        for x in result.left()..result.right() {
-            dim_cell(buf, x, y, &path);
+    for y in clipped.top()..clipped.bottom() {
+        for x in clipped.left()..clipped.right() {
+            dim_cell(buf, x, y, &palette);
         }
     }
 }
 /// A key hint line (`key: label · key label · …`) as spans: each key in text, its label and the
 /// ` · ` between in muted. A key: the text before `: `, else the 1st word.
-pub(crate) fn hints(text_value: &str) -> Vec<ratatui::text::Span<'static>> {
+pub(crate) fn hints(hint_line: &str) -> Vec<ratatui::text::Span<'static>> {
     use ratatui::text::Span;
     let mut out = Vec::new();
 
-    for (i, item) in text_value.split(" · ").enumerate() {
+    for (i, item) in hint_line.split(" · ").enumerate() {
         if i > 0 {
             out.push(Span::styled(" · ", muted()));
         }
@@ -207,7 +207,7 @@ fn da1_seen(bytes: &[u8]) -> bool {
     bytes
         .windows(3)
         .enumerate()
-        .any(|(i, width)| width == b"\x1b[?" && bytes[i..].contains(&b'c'))
+        .any(|(i, window)| window == b"\x1b[?" && bytes[i..].contains(&b'c'))
 }
 
 /// `ESC ] 4 ; N ; rgb:RRRR/GGGG/BBBB` replies → (N, rgb), 1-4 hex digits per channel.
@@ -215,18 +215,18 @@ fn parse_osc4(text: &str) -> Vec<(usize, (u8, u8, u8))> {
     let re = regex::Regex::new(r"\x1b\]4;(\d+);rgb:([0-9a-fA-F]{1,4})/([0-9a-fA-F]{1,4})/([0-9a-fA-F]{1,4})")
         .expect("valid regex");
 
-    let ch = |height: &str| -> u8 {
-        let value = u32::from_str_radix(height, 16).unwrap_or(0);
-        let max = (1u32 << (4 * height.len())) - 1;
+    let ch = |hex: &str| -> u8 {
+        let value = u32::from_str_radix(hex, 16).unwrap_or(0);
+        let max = (1u32 << (4 * hex.len())) - 1;
 
         (value * 255 / max.max(1)) as u8
     };
 
     re.captures_iter(text)
-        .filter_map(|character| {
-            let i: usize = character[1].parse().ok()?;
+        .filter_map(|captures| {
+            let i: usize = captures[1].parse().ok()?;
 
-            (i < 16).then(|| (i, (ch(&character[2]), ch(&character[3]), ch(&character[4]))))
+            (i < 16).then(|| (i, (ch(&captures[2]), ch(&captures[3]), ch(&captures[4]))))
         })
         .collect()
 }
@@ -238,22 +238,21 @@ mod tests;
 pub(crate) use crate::domain::palette::*;
 
 fn hover_cell(buf: &mut Buffer, x: u16, y: u16) {
-    if let Some(character) = buf.cell_mut((x, y))
-        && character.bg != pal().accent
+    if let Some(cell) = buf.cell_mut((x, y))
+        && cell.bg != pal().accent
     {
-        character.set_bg(pal().surface1);
+        cell.set_bg(pal().surface1);
     }
 }
 
 fn cursor_row_cell(buf: &mut Buffer, x: u16, y: u16) {
-    if let Some(character) = buf.cell_mut((x, y)) {
-        if character.fg == pal().accent {
-            character
-                .modifier
+    if let Some(cell) = buf.cell_mut((x, y)) {
+        if cell.fg == pal().accent {
+            cell.modifier
                 .insert(ratatui::style::Modifier::UNDERLINED | ratatui::style::Modifier::BOLD);
         }
 
-        character.set_bg(pal().accent).set_fg(pal().on_accent);
+        cell.set_bg(pal().accent).set_fg(pal().on_accent);
     }
 }
 
@@ -262,25 +261,21 @@ fn picked_cell(buf: &mut Buffer, x: u16, y: u16, bar: Option<u16>, keep_bg: bool
         return;
     }
 
-    if let Some(character) = buf.cell_mut((x, y))
-        && (!keep_bg || character.bg == Color::Reset)
+    if let Some(cell) = buf.cell_mut((x, y))
+        && (!keep_bg || cell.bg == Color::Reset)
     {
-        character.set_bg(bg);
+        cell.set_bg(bg);
     }
 }
 
-fn dim_cell(buf: &mut Buffer, x: u16, y: u16, path: &crate::domain::palette::Palette) {
-    if let Some(character) = buf.cell_mut((x, y)) {
-        let fg = if character.fg == Color::Reset {
-            path.text
-        } else {
-            character.fg
-        };
+fn dim_cell(buf: &mut Buffer, x: u16, y: u16, palette: &crate::domain::palette::Palette) {
+    if let Some(cell) = buf.cell_mut((x, y)) {
+        let fg = if cell.fg == Color::Reset { palette.text } else { cell.fg };
 
-        character.set_fg(tint(fg, path.base, 0.45));
+        cell.set_fg(tint(fg, palette.base, 0.45));
 
-        if character.bg != Color::Reset {
-            character.set_bg(tint(character.bg, path.base, 0.45));
+        if cell.bg != Color::Reset {
+            cell.set_bg(tint(cell.bg, palette.base, 0.45));
         }
     }
 }

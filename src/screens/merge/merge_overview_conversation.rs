@@ -18,10 +18,10 @@ pub(super) fn append_comments(overview: &mut OverviewRows<'_>) {
     overview.rows.push(Row::new(Line::raw("")));
 }
 
-fn comment_hint(character_5: &gh::Comment) -> &'static str {
-    if character_5.mine {
+fn comment_hint(comment: &gh::Comment) -> &'static str {
+    if comment.mine {
         "  enter: edit / delete"
-    } else if character_5.kind == Kind::Line {
+    } else if comment.kind == Kind::Line {
         "  enter: reply"
     } else {
         "  enter: quote in a reply"
@@ -29,11 +29,11 @@ fn comment_hint(character_5: &gh::Comment) -> &'static str {
 }
 
 fn append_edit_input(overview: &mut OverviewRows<'_>) {
-    if let Some((_, ta)) = overview.edit {
+    if let Some((_, textarea)) = overview.edit {
         overview.rows.push(Row {
             line: Line::raw(""),
             stops: Vec::new(),
-            input: input_rows(overview.width, ta, false),
+            input: input_rows(overview.width, textarea, false),
         });
     }
 }
@@ -53,10 +53,10 @@ pub(super) fn append_description(overview: &mut OverviewRows<'_>) {
     ));
 
     match overview.edit {
-        Some((Edit::Body, ta)) => overview.rows.push(Row {
+        Some((Edit::Body, textarea)) => overview.rows.push(Row {
             line: Line::raw(""),
             stops: Vec::new(),
-            input: input_rows(overview.width, ta, false),
+            input: input_rows(overview.width, textarea, false),
         }),
         _ if overview.pr.body.trim().is_empty() => {
             overview
@@ -64,14 +64,14 @@ pub(super) fn append_description(overview: &mut OverviewRows<'_>) {
                 .push(Row::stop(Line::styled("  0 description", theme::muted()), Stop::Body));
         }
         _ => {
-            for result_3 in
+            for rendered in
                 crate::ui::markdown::markdown(&overview.pr.body, overview.width.saturating_sub(2), &[Span::raw("  ")])
             {
-                let lw = result_3.line.width() as u16;
+                let width = rendered.line.width() as u16;
 
                 overview.rows.push(Row {
-                    line: result_3.line,
-                    stops: vec![(0, lw, Stop::Body)],
+                    line: rendered.line,
+                    stops: vec![(0, width, Stop::Body)],
                     input: 0,
                 });
             }
@@ -88,7 +88,7 @@ struct CommentBox {
 
 fn append_new_comment(overview: &mut OverviewRows<'_>) {
     match overview.edit {
-        Some((Edit::Comment, ta)) => {
+        Some((Edit::Comment, textarea)) => {
             overview.rows.push(Row::stop(
                 Line::styled(
                     "  + write a comment",
@@ -99,7 +99,7 @@ fn append_new_comment(overview: &mut OverviewRows<'_>) {
             overview.rows.push(Row {
                 line: Line::raw(""),
                 stops: Vec::new(),
-                input: input_rows(overview.width, ta, false),
+                input: input_rows(overview.width, textarea, false),
             });
         }
         _ => overview.rows.push(Row::stop(
@@ -114,9 +114,9 @@ fn append_new_comment(overview: &mut OverviewRows<'_>) {
 
 fn comment_box(overview: &OverviewRows<'_>, index: usize, thread: &gh::Thread) -> CommentBox {
     // the comment box with the focus: an accent border (as a picked file's box)
-    let picked = matches!(overview.focus, Some(Stop::Comment(fi, _)) if fi == index);
+    let picked = matches!(overview.focus, Some(Stop::Comment(focused, _)) if focused == index);
 
-    let line_c = if picked {
+    let border = if picked {
         theme::accent_bold()
     } else {
         Style::default().fg(theme::pal().overlay0)
@@ -125,7 +125,7 @@ fn comment_box(overview: &OverviewRows<'_>, index: usize, thread: &gh::Thread) -
     let on_line = thread
         .path
         .as_ref()
-        .map(|pa| format!(" · {pa}:{}", thread.line.unwrap_or(0)))
+        .map(|path| format!(" · {path}:{}", thread.line.unwrap_or(0)))
         .unwrap_or_default();
 
     let state = if thread.resolved {
@@ -138,34 +138,34 @@ fn comment_box(overview: &OverviewRows<'_>, index: usize, thread: &gh::Thread) -
 
     CommentBox {
         index,
-        border: line_c,
+        border,
         on_line,
         state,
     }
 }
 
-fn append_thread(overview: &mut OverviewRows<'_>, i: usize, th: &gh::Thread) {
-    let context = comment_box(overview, i, th);
+fn append_thread(overview: &mut OverviewRows<'_>, index: usize, thread: &gh::Thread) {
+    let context = comment_box(overview, index, thread);
     let top = overview.rows.len();
 
-    for (key, comment) in std::iter::once(&th.root).chain(&th.replies).enumerate() {
-        append_comment(overview, &context, key, comment);
+    for (position, comment) in std::iter::once(&thread.root).chain(&thread.replies).enumerate() {
+        append_comment(overview, &context, position, comment);
     }
 
-    if let Some((Edit::Reply(ti, _), ta)) = overview.edit
-        && *ti == i
+    if let Some((Edit::Reply(reply_thread, _), textarea)) = overview.edit
+        && *reply_thread == index
     {
         overview.rows.push(Row {
             line: Line::raw(""),
             stops: Vec::new(),
-            input: input_rows(overview.width, ta, false),
+            input: input_rows(overview.width, textarea, false),
         });
     }
 
     // the bottom line: as wide as the box's widest row (a table), min. 40
     let widest = overview.rows[top..]
         .iter()
-        .map(|result_2| result_2.line.width())
+        .map(|row| row.line.width())
         .max()
         .unwrap_or(0);
 
@@ -178,36 +178,36 @@ fn append_thread(overview: &mut OverviewRows<'_>, i: usize, th: &gh::Thread) {
     )));
 }
 
-fn comment_heading(character_5: &gh::Comment, key: usize, context: &CommentBox) -> String {
+fn comment_heading(comment: &gh::Comment, position: usize, context: &CommentBox) -> String {
     let on_line = &context.on_line;
     let state = context.state;
 
-    let verdict = match character_5.verdict.as_str() {
+    let verdict = match comment.verdict.as_str() {
         "APPROVED" => " · approved",
         "CHANGES_REQUESTED" => " · requested changes",
         _ => "",
     };
 
-    let who = if character_5.mine {
-        format!("{} (you)", character_5.author)
+    let who = if comment.mine {
+        format!("{} (you)", comment.author)
     } else {
-        character_5.author.clone()
+        comment.author.clone()
     };
 
-    if key == 0 {
-        format!("{who} · {}{verdict}{on_line}{state}", gh::stamp(character_5.created))
+    if position == 0 {
+        format!("{who} · {}{verdict}{on_line}{state}", gh::stamp(comment.created))
     } else {
-        format!("↳ {who} · {}", gh::stamp(character_5.created))
+        format!("↳ {who} · {}", gh::stamp(comment.created))
     }
 }
 
-fn append_comment(overview: &mut OverviewRows<'_>, context: &CommentBox, key: usize, character_5: &gh::Comment) {
-    let comment = Stop::Comment(context.index, key);
+fn append_comment(overview: &mut OverviewRows<'_>, context: &CommentBox, position: usize, comment: &gh::Comment) {
+    let stop = Stop::Comment(context.index, position);
 
-    let head = comment_heading(character_5, key, context);
+    let head = comment_heading(comment, position, context);
 
-    let indent = append_comment_header(overview, context, key, character_5, comment, &head);
-    let editing = matches!(overview.edit, Some((Edit::Change(ti, tk, ..), _)) if *ti == context.index && *tk == key);
+    let indent = append_comment_header(overview, context, position, comment, stop, &head);
+    let editing = matches!(overview.edit, Some((Edit::Change(edit_thread, edit_position, ..), _)) if *edit_thread == context.index && *edit_position == position);
 
     if editing {
         append_edit_input(overview);
@@ -216,40 +216,40 @@ fn append_comment(overview: &mut OverviewRows<'_>, context: &CommentBox, key: us
 
     let prefix = [Span::styled(indent, context.border)];
 
-    for result_value in crate::ui::markdown::markdown(
-        &character_5.body,
+    for rendered in crate::ui::markdown::markdown(
+        &comment.body,
         overview.width.saturating_sub(indent.width() + 1),
         &prefix,
     ) {
-        overview.rows.push(Row::new(result_value.line));
+        overview.rows.push(Row::new(rendered.line));
     }
 }
 
 fn append_comment_header(
     overview: &mut OverviewRows<'_>,
     context: &CommentBox,
-    key: usize,
-    character_5: &gh::Comment,
-    comment: Stop,
+    position: usize,
+    comment: &gh::Comment,
+    stop: Stop,
     head: &str,
 ) -> &'static str {
-    let (lead, indent) = if key == 0 {
+    let (lead, indent) = if position == 0 {
         ("╭─ ", "│ ")
     } else {
         ("│  ", "│    ")
     };
 
-    let hint = if overview.focus == Some(comment) {
-        comment_hint(character_5)
+    let hint = if overview.focus == Some(stop) {
+        comment_hint(comment)
     } else {
         ""
     };
 
-    let name_st = highlight(
+    let name_style = highlight(
         overview.focus,
-        comment,
+        stop,
         Style::default()
-            .fg(if character_5.mine {
+            .fg(if comment.mine {
                 theme::pal().info()
             } else {
                 theme::pal().text
@@ -260,15 +260,15 @@ fn append_comment_header(
         Span::styled(lead, context.border),
         Span::styled(
             crate::ui::thread_card::fit(head, overview.width.saturating_sub(lead.width() + hint.width())),
-            name_st,
+            name_style,
         ),
         Span::styled(hint, theme::muted()),
     ]);
-    let lw = line.width() as u16;
+    let width = line.width() as u16;
 
     overview.rows.push(Row {
         line,
-        stops: vec![(0, lw, comment)],
+        stops: vec![(0, width, stop)],
         input: 0,
     });
 

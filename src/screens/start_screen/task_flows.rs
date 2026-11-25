@@ -6,7 +6,7 @@ impl App {
     pub(super) fn flow_key(&self) -> String {
         self.repository.repo.as_ref().map_or_else(
             || self.cfg.cwd.display().to_string(),
-            |result| result.path.display().to_string(),
+            |repo| repo.path.display().to_string(),
         )
     }
 
@@ -17,17 +17,17 @@ impl App {
             .repository
             .repo
             .as_ref()
-            .map_or_else(|| self.cfg.cwd.clone(), |result| result.path.clone());
+            .map_or_else(|| self.cfg.cwd.clone(), |repo| repo.path.clone());
 
         self.flow_selection.flow_lib = crate::engine::flows::Library::load(Some(&dir));
         let lib = &self.flow_selection.flow_lib;
 
         self.flow_selection.flow_default =
-            flow_default_get(&self.flow_key()).filter(|text| lib.flows.iter().any(|file| file.slug == *text));
+            flow_default_get(&self.flow_key()).filter(|slug| lib.flows.iter().any(|flow| flow.slug == *slug));
 
-        self.flow_selection.agent_flows.retain(|_, (text_value, _)| {
-            text_value.is_empty() || lib.flows.iter().any(|file_value| file_value.slug == *text_value)
-        });
+        self.flow_selection
+            .agent_flows
+            .retain(|_, (slug, _)| slug.is_empty() || lib.flows.iter().any(|flow| flow.slug == *slug));
 
         self.flow_selection.flow_menu = None;
     }
@@ -38,18 +38,18 @@ impl App {
             .agents
             .iter()
             .find(|agent| self.compose.picks.contains(&agent.name))
-            .map(|agent_value| agent_value.name.clone())
+            .map(|agent| agent.name.clone())
     }
 
     /// AGENT's flow for the new thread: (slug, start step); "" = 0 flow. The lead with 0 pick: the
     /// repo's last flow.
     pub(super) fn flow_of(&self, agent: &str) -> (String, usize) {
-        if let Some(file) = self.flow_selection.agent_flows.get(agent) {
-            return file.clone();
+        if let Some(picked) = self.flow_selection.agent_flows.get(agent) {
+            return picked.clone();
         }
 
         match &self.flow_selection.flow_default {
-            Some(directory) if self.task_lead().as_deref() == Some(agent) => (directory.clone(), 0),
+            Some(slug) if self.task_lead().as_deref() == Some(agent) => (slug.clone(), 0),
             _ => (String::new(), 0),
         }
     }
@@ -63,7 +63,7 @@ impl App {
             .flow_lib
             .flows
             .iter()
-            .position(|file| file.slug == slug)
+            .position(|flow| flow.slug == slug)
         {
             Some(i) => (i + 1, start),
             None => (0, 0),
@@ -74,18 +74,18 @@ impl App {
     pub(super) fn flow_steps(&self, i: usize) -> Vec<crate::engine::flows::Resolved> {
         i.checked_sub(1)
             .and_then(|i| self.flow_selection.flow_lib.flows.get(i))
-            .map(|file| crate::engine::flows::resolve(file, &self.flow_selection.flow_lib))
+            .map(|flow| crate::engine::flows::resolve(flow, &self.flow_selection.flow_lib))
             .unwrap_or_default()
     }
 
     /// The flow field for the setup tutorial's coach: (the flow dropdown open, the picked flow's
     /// slug; None: 0 flow).
     pub(crate) fn flow_peek(&self) -> (bool, Option<String>) {
-        let lead = self.task_lead().map(|line| self.flow_of(&line).0);
+        let lead = self.task_lead().map(|name| self.flow_of(&name).0);
         let slug = lead
             .into_iter()
-            .chain(self.flow_selection.agent_flows.values().map(|file| file.0.clone()))
-            .find(|text| !text.is_empty());
+            .chain(self.flow_selection.agent_flows.values().map(|picked| picked.0.clone()))
+            .find(|slug| !slug.is_empty());
 
         (self.flow_selection.flow_menu.is_some(), slug)
     }
@@ -96,7 +96,7 @@ impl App {
             .agent_list
             .agents
             .get(self.compose.pick_cursor)
-            .map(|agent_value| agent_value.name.clone())
+            .map(|card| card.name.clone())
         else {
             return;
         };
@@ -114,14 +114,14 @@ impl App {
     /// Flow I picked for the dropdown's agent, from step START: the dropdown closes. A flow for an
     /// unpicked agent picks it.
     pub(super) fn pick_flow(&mut self, i: usize, start: usize) {
-        let Some(agent) = self.flow_selection.flow_menu.take().map(|message| message.agent) else {
+        let Some(agent) = self.flow_selection.flow_menu.take().map(|menu| menu.agent) else {
             return;
         };
 
         let slug = i
             .checked_sub(1)
             .and_then(|i| self.flow_selection.flow_lib.flows.get(i))
-            .map(|file| file.slug.clone())
+            .map(|flow| flow.slug.clone())
             .unwrap_or_default();
 
         let start = if slug.is_empty() {
@@ -140,12 +140,12 @@ impl App {
     /// Keys of the open flow dropdown: ↑↓ move, enter / → the flow's steps (0 flow: picked),
     /// a letter: the next flow with it, esc / ← close. In the steps: ↑↓, enter picks, esc / ← back.
     pub(super) fn flow_menu_key(&mut self, key: KeyEvent) {
-        let Some(message) = self.flow_selection.flow_menu.as_ref() else {
+        let Some(menu) = self.flow_selection.flow_menu.as_ref() else {
             return;
         };
 
-        let (cur, sub) = (message.cursor, message.sub);
-        let agent = message.agent.clone();
+        let (cur, sub) = (menu.cursor, menu.sub);
+        let agent = menu.agent.clone();
         let (fi, fs) = self.flow_at(&agent);
         let count = self.flow_selection.flow_lib.flows.len() + 1;
 
@@ -153,8 +153,8 @@ impl App {
             return;
         }
 
-        let set = |app_value: &mut App, character: usize| {
-            set_flow_cursor(app_value, character);
+        let set = |app: &mut App, cursor: usize| {
+            set_flow_cursor(app, cursor);
         };
 
         match key.code {
@@ -162,11 +162,11 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => set(self, (cur + count - 1) % count),
             KeyCode::Down | KeyCode::Char('j') => set(self, (cur + 1) % count),
             KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ' | 'l') => {
-                flow_menu_key_message_(self, cur, fi, fs);
+                flow_menu_enter(self, cur, fi, fs);
             }
             KeyCode::Char('0') => self.pick_flow(0, 0),
-            KeyCode::Char(character_value) if character_value.is_alphanumeric() => {
-                flow_menu_key_character_(self, cur, set, character_value);
+            KeyCode::Char(letter) if letter.is_alphanumeric() => {
+                flow_menu_jump(self, cur, set, letter);
             }
             _ => {}
         }
@@ -175,20 +175,16 @@ impl App {
     /// A click with the flow dropdown open: a flow row opens its steps (0 flow: picked), a step
     /// row picks it, a click next to them closes the dropdown.
     pub(super) fn flow_menu_click(&mut self, at: Position) {
-        if let Some(&(_, text)) = self
+        if let Some(&(_, step)) = self
             .preview
             .regions
             .flow_steps
             .iter()
-            .find(|(result, _)| result.contains(at))
+            .find(|(rect, _)| rect.contains(at))
         {
-            let cur = self
-                .flow_selection
-                .flow_menu
-                .as_ref()
-                .map_or(0, |message| message.cursor);
+            let cur = self.flow_selection.flow_menu.as_ref().map_or(0, |menu| menu.cursor);
 
-            return self.pick_flow(cur, text);
+            return self.pick_flow(cur, step);
         }
 
         let Some(&(_, i)) = self
@@ -196,7 +192,7 @@ impl App {
             .regions
             .flow_rows
             .iter()
-            .find(|(result_value, _)| result_value.contains(at))
+            .find(|(rect, _)| rect.contains(at))
         else {
             self.flow_selection.flow_menu = None;
             return;
@@ -210,7 +206,7 @@ impl App {
             .flow_selection
             .flow_menu
             .as_ref()
-            .map(|message_value| message_value.agent.clone())
+            .map(|menu| menu.agent.clone())
             .unwrap_or_default();
         let (fi, fs) = self.flow_at(&agent);
         let start = if i == fi { fs } else { 0 };
@@ -218,11 +214,7 @@ impl App {
         self.flow_selection.flow_menu = Some(FlowMenu {
             agent,
             cursor: i,
-            offset: self
-                .flow_selection
-                .flow_menu
-                .as_ref()
-                .map_or(0, |message_2| message_2.offset),
+            offset: self.flow_selection.flow_menu.as_ref().map_or(0, |menu| menu.offset),
             sub: Some((start, 0)),
         });
     }
@@ -234,7 +226,7 @@ impl App {
             .flow_selection
             .flow_menu
             .as_ref()
-            .map(|message| (message.agent.clone(), message.cursor, message.offset, message.sub))
+            .map(|menu| (menu.agent.clone(), menu.cursor, menu.offset, menu.sub))
         else {
             return;
         };
@@ -242,16 +234,16 @@ impl App {
         let (fi, fs) = self.flow_at(&agent);
         let items = flow_menu_items(self, fi);
 
-        let count_value = items.len();
+        let count = items.len();
         let width = items
             .iter()
-            .map(|result| result.text.width() + result.detail.width() + 8)
+            .map(|row| row.text.width() + row.detail.width() + 8)
             .max()
             .unwrap_or(0)
             .clamp(30, 60) as u16;
         let anchor = flow_menu_anchor(self, &agent);
 
-        let Some(result_2) = dropdown::place(anchor, width, count_value, bounds, false) else {
+        let Some(area) = dropdown::place(anchor, width, count, bounds, false) else {
             return;
         };
 
@@ -264,7 +256,7 @@ impl App {
         // the parent: gray while the steps have the keys
         let (off, drawn) = dropdown::list_in(
             frame,
-            result_2,
+            area,
             dropdown::List {
                 label: &format!("flow of {agent}"),
                 note: &note,
@@ -276,11 +268,11 @@ impl App {
             sub.is_none(),
         );
 
-        self.preview.regions.flow_menu = result_2;
+        self.preview.regions.flow_menu = area;
         self.preview.regions.flow_rows.clone_from(&drawn);
 
-        if let Some(message_value) = self.flow_selection.flow_menu.as_mut() {
-            message_value.offset = off;
+        if let Some(menu) = self.flow_selection.flow_menu.as_mut() {
+            menu.offset = off;
         }
 
         // the flow under the cursor: its rail beside the list at once (the flows tab's look);
@@ -292,7 +284,7 @@ impl App {
             frame,
             &(FlowMenuDraw {
                 bounds,
-                list_area: result_2,
+                list_area: area,
                 list_rows: drawn,
                 cursor: cur,
                 selected_flow: fi,
@@ -303,48 +295,48 @@ impl App {
     }
 }
 
-fn set_flow_cursor(app_value: &mut App, character: usize) {
-    if let Some(message_3) = app_value.flow_selection.flow_menu.as_mut() {
-        message_3.cursor = character;
+fn set_flow_cursor(app: &mut App, cursor: usize) {
+    if let Some(menu) = app.flow_selection.flow_menu.as_mut() {
+        menu.cursor = cursor;
     }
 }
 
-fn open_flow_steps(cur: usize, fi: usize, fs: usize, message_4: &mut FlowMenu) {
-    message_4.sub = Some((if cur == fi { fs } else { 0 }, 0));
+fn open_flow_steps(cur: usize, fi: usize, fs: usize, menu: &mut FlowMenu) {
+    menu.sub = Some((if cur == fi { fs } else { 0 }, 0));
 }
 
-fn flow_step_key(app_state: &mut App, key: KeyEvent, cur: usize, sub: Option<(usize, usize)>) -> bool {
-    if let Some((text, _)) = sub {
-        flow_step_key_steps(app_state, key, cur, text);
+fn flow_step_key(app: &mut App, key: KeyEvent, cur: usize, sub: Option<(usize, usize)>) -> bool {
+    if let Some((step, _)) = sub {
+        flow_step_key_steps(app, key, cur, step);
         return true;
     }
 
     false
 }
 
-fn flow_step_key_steps(app_state: &mut App, key: KeyEvent, cur: usize, text: usize) {
-    let steps = app_state.flow_steps(cur).len().max(1);
+fn flow_step_key_steps(app: &mut App, key: KeyEvent, cur: usize, step: usize) {
+    let steps = app.flow_steps(cur).len().max(1);
 
-    let set = |app: &mut App, text_value: usize| {
-        if let Some(message_value) = app.flow_selection.flow_menu.as_mut() {
-            message_value.sub = Some((text_value, message_value.sub.map_or(0, |x| x.1)));
+    let set = |app: &mut App, step: usize| {
+        if let Some(menu) = app.flow_selection.flow_menu.as_mut() {
+            menu.sub = Some((step, menu.sub.map_or(0, |x| x.1)));
         }
     };
 
     match key.code {
         KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
-            if let Some(message_2) = app_state.flow_selection.flow_menu.as_mut() {
-                message_2.sub = None;
+            if let Some(menu) = app.flow_selection.flow_menu.as_mut() {
+                menu.sub = None;
             }
         }
-        KeyCode::Up | KeyCode::Char('k') => set(app_state, (text + steps - 1) % steps),
-        KeyCode::Down | KeyCode::Char('j') => set(app_state, (text + 1) % steps),
-        KeyCode::Enter | KeyCode::Char(' ') => app_state.pick_flow(cur, text),
+        KeyCode::Up | KeyCode::Char('k') => set(app, (step + steps - 1) % steps),
+        KeyCode::Down | KeyCode::Char('j') => set(app, (step + 1) % steps),
+        KeyCode::Enter | KeyCode::Char(' ') => app.pick_flow(cur, step),
         _ => {}
     }
 }
 
-fn flow_menu_items(app_state: &mut App, fi: usize) -> Vec<dropdown::Row> {
+fn flow_menu_items(app: &mut App, fi: usize) -> Vec<dropdown::Row> {
     let mut items = vec![dropdown::Row {
         text: "0 flow".into(),
         detail: "free-form".into(),
@@ -352,11 +344,11 @@ fn flow_menu_items(app_state: &mut App, fi: usize) -> Vec<dropdown::Row> {
         marks: Vec::new(),
     }];
 
-    for (i, fl) in app_state.flow_selection.flow_lib.flows.iter().enumerate() {
-        let count = crate::engine::flows::resolve(fl, &app_state.flow_selection.flow_lib).len();
+    for (i, flow) in app.flow_selection.flow_lib.flows.iter().enumerate() {
+        let count = crate::engine::flows::resolve(flow, &app.flow_selection.flow_lib).len();
 
         items.push(dropdown::Row {
-            text: format!("◆ {}", fl.name),
+            text: format!("◆ {}", flow.name),
             detail: format!("{count} steps ›"),
             now: fi == i + 1,
             marks: Vec::new(),
@@ -366,33 +358,26 @@ fn flow_menu_items(app_state: &mut App, fi: usize) -> Vec<dropdown::Row> {
     items
 }
 
-fn flow_menu_anchor(app_state: &mut App, agent: &String) -> Rect {
-    app_state
-        .preview
+fn flow_menu_anchor(app: &mut App, agent: &String) -> Rect {
+    app.preview
         .regions
         .menu_rows
         .iter()
-        .find(|(_, i)| {
-            app_state
-                .agent_list
-                .agents
-                .get(*i)
-                .is_some_and(|agent_value| agent_value.name == *agent)
-        })
-        .map_or(Rect::default(), |(result_value, _)| *result_value)
+        .find(|(_, i)| app.agent_list.agents.get(*i).is_some_and(|card| card.name == *agent))
+        .map_or(Rect::default(), |(rect, _)| *rect)
 }
 
-fn draw_flow_steps(app_state: &mut App, frame: &mut Frame<'_>, menu: &FlowMenuDraw) {
+fn draw_flow_steps(app: &mut App, frame: &mut Frame<'_>, menu: &FlowMenuDraw) {
     let Some(flow) = menu
         .cursor
         .checked_sub(1)
-        .and_then(|index| app_state.flow_selection.flow_lib.flows.get(index))
+        .and_then(|index| app.flow_selection.flow_lib.flows.get(index))
         .cloned()
     else {
         return;
     };
 
-    let preview = FlowPreview::new(flow, &app_state.flow_selection.flow_lib);
+    let preview = FlowPreview::new(flow, &app.flow_selection.flow_lib);
 
     let Some(area) = preview.place(menu) else {
         return;
@@ -400,38 +385,38 @@ fn draw_flow_steps(app_state: &mut App, frame: &mut Frame<'_>, menu: &FlowMenuDr
 
     let (rows, offset) = preview.draw(frame, area, menu);
 
-    app_state.preview.regions.flow_steps = rows;
+    app.preview.regions.flow_steps = rows;
 
-    if let Some(flow_menu) = app_state.flow_selection.flow_menu.as_mut()
+    if let Some(flow_menu) = app.flow_selection.flow_menu.as_mut()
         && let Some((step, _)) = flow_menu.sub
     {
         flow_menu.sub = Some((step, offset));
     }
 }
 
-fn flow_menu_key_message_(app_state: &mut App, cur: usize, fi: usize, fs: usize) {
+fn flow_menu_enter(app: &mut App, cur: usize, fi: usize, fs: usize) {
     if cur == 0 {
-        app_state.pick_flow(0, 0);
-    } else if let Some(message_4) = app_state.flow_selection.flow_menu.as_mut() {
+        app.pick_flow(0, 0);
+    } else if let Some(menu) = app.flow_selection.flow_menu.as_mut() {
         // the steps: on the picked start when it is this flow
-        open_flow_steps(cur, fi, fs, message_4);
+        open_flow_steps(cur, fi, fs, menu);
     }
 }
 
-fn flow_menu_key_character_(app_state: &mut App, cur: usize, set: impl Fn(&mut App, usize), character_value: char) {
-    let character_2 = character_value.to_ascii_lowercase();
+fn flow_menu_jump(app: &mut App, cur: usize, set: impl Fn(&mut App, usize), letter: char) {
+    let lower = letter.to_ascii_lowercase();
 
-    let hits: Vec<usize> = (0..app_state.flow_selection.flow_lib.flows.len())
+    let hits: Vec<usize> = (0..app.flow_selection.flow_lib.flows.len())
         .filter(|&i| {
-            app_state.flow_selection.flow_lib.flows[i]
+            app.flow_selection.flow_lib.flows[i]
                 .name
                 .to_lowercase()
-                .starts_with(character_2)
+                .starts_with(lower)
         })
         .map(|i| i + 1)
         .collect();
 
     if let Some(&next) = hits.iter().find(|&&i| i > cur).or(hits.first()) {
-        set(app_state, next);
+        set(app, next);
     }
 }

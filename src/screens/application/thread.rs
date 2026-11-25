@@ -3,7 +3,7 @@ use super::{
 };
 
 /// Append 1 line to the view log (why the thread view did not open).
-pub(super) fn view_log(msg: &str) {
+pub(super) fn view_log(message: &str) {
     let dir = engine::logs_dir();
     let _ = std::fs::create_dir_all(&dir);
 
@@ -12,14 +12,14 @@ pub(super) fn view_log(msg: &str) {
         .append(true)
         .open(dir.join("view.log"))
     {
-        let _ = writeln!(file, "{} {msg}", engine::now_ms() / 1000);
+        let _ = writeln!(file, "{} {message}", engine::now_ms() / 1000);
     }
 }
 
 /// Thread ID before its view: a done thread opens again. Its host starts with the next message.
 pub(super) fn wake(id: &str) {
     if engine::store::load(id).is_some_and(|thread| thread.state != "open") {
-        let _ = engine::store::update(id, |thread_value| thread_value.state = "open".into());
+        let _ = engine::store::update(id, |thread| thread.state = "open".into());
     }
 }
 

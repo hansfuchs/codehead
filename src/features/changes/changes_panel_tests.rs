@@ -9,22 +9,22 @@ fn alt_tap(view: &mut crate::features::changes::View) {
     view.focus_panel(on);
 }
 
-/// A view of fixture repo W (read now), the panel with the keys.
-fn commit_view(width: &std::path::Path, id: &str) -> View {
-    let mut view = View::new(id, width);
+/// A view of fixture repo DIR (read now), the panel with the keys.
+fn commit_view(dir: &std::path::Path, id: &str) -> View {
+    let mut view = View::new(id, dir);
 
     view.marks.clear();
     view.comment_state.comments.clear();
     view.stash_state.stash.clear();
-    view.changes = crate::features::changes::load(width).unwrap();
+    view.changes = crate::features::changes::load(dir).unwrap();
     view.loaded = Some(std::time::Instant::now());
     view.scm.focus = true;
 
     view
 }
 
-fn press(view: &mut View, character: KeyCode) -> Act {
-    view.key(KeyEvent::new(character, KeyModifiers::NONE))
+fn press(view: &mut View, code: KeyCode) -> Act {
+    view.key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
 /// The panel's cursor on the commit with SUBJECT.
@@ -34,7 +34,7 @@ fn on_commit(view: &mut View, subject: &str) {
         .scm
         .rows
         .iter()
-        .position(|result| matches!(result, PRow::Commit(i) if view.changes.commits.list[*i].subject == subject))
+        .position(|row| matches!(row, PRow::Commit(i) if view.changes.commits.list[*i].subject == subject))
         .unwrap();
 }
 

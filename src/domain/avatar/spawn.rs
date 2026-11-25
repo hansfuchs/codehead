@@ -57,21 +57,21 @@ pub(crate) fn count() -> usize {
 /// Dots of a cell as bits (2x4, the braille layout): braille as is, box lines as dots on the
 /// line, inward (COL: the cell's column in the sprite).
 fn mask(ch: char, col: usize) -> [[bool; 2]; 4] {
-    let mut message = [[false; 2]; 4];
-    let bytes = ch as u32;
+    let mut dots = [[false; 2]; 4];
+    let code = ch as u32;
 
-    if (0x2800..=0x28FF).contains(&bytes) {
+    if (0x2800..=0x28FF).contains(&code) {
         const BIT: [[u32; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
 
         for (y, row) in BIT.iter().enumerate() {
-            mask_braille_row(&mut message, bytes, y, *row);
+            mask_braille_row(&mut dots, code, y, *row);
         }
 
-        return message;
+        return dots;
     }
 
     // up, down, left, right
-    let (user, directory, line, result) = match ch {
+    let (up, down, left, right) = match ch {
         '─' | '┄' | '┈' | '╌' => (false, false, true, true),
         '│' | '┆' | '┊' | '╎' => (true, true, false, false),
         '╭' | '┌' => (false, true, false, true),
@@ -82,33 +82,33 @@ fn mask(ch: char, col: usize) -> [[bool; 2]; 4] {
         '┬' => (false, true, true, true),
         '┤' => (true, true, true, false),
         '├' => (true, true, false, true),
-        _ => return message,
+        _ => return dots,
     };
 
     let cx = usize::from(col == 0);
 
-    message[1][cx] = true;
+    dots[1][cx] = true;
 
-    if user {
-        message[0][cx] = true;
+    if up {
+        dots[0][cx] = true;
     }
 
-    if directory {
-        message[2][cx] = true;
-        message[3][cx] = true;
+    if down {
+        dots[2][cx] = true;
+        dots[3][cx] = true;
     }
 
-    if line || result {
-        message[1][0] = true;
-        message[1][1] = true;
+    if left || right {
+        dots[1][0] = true;
+        dots[1][1] = true;
     }
 
-    message
+    dots
 }
 
-fn mask_braille_row(message: &mut [[bool; 2]; 4], bytes: u32, y: usize, row: [u32; 2]) {
+fn mask_braille_row(dots: &mut [[bool; 2]; 4], code: u32, y: usize, row: [u32; 2]) {
     for (x, bit) in row.iter().enumerate() {
-        message[y][x] = (bytes - 0x2800) & bit != 0;
+        dots[y][x] = (code - 0x2800) & bit != 0;
     }
 }
 

@@ -6,8 +6,8 @@ impl McpTab {
     }
 }
 
-fn draw_group_heading(frame: &mut Frame<'_>, heads: &[&str], key: usize, row: Rect) {
-    let title = heads[key];
+fn draw_group_heading(frame: &mut Frame<'_>, heads: &[&str], index: usize, row: Rect) {
+    let title = heads[index];
     let rule = (row.width as usize).saturating_sub(title.chars().count() + 1);
 
     frame.render_widget(
@@ -25,11 +25,11 @@ fn draw_server_row(
     items: &[super::Item],
     label_width: usize,
     row: Rect,
-    j: usize,
+    index: usize,
     mcp_tab: &mut McpTab,
 ) {
-    let item = &items[j];
-    let area_2 = Rect {
+    let item = &items[index];
+    let indented = Rect {
         x: row.x + 2,
         width: row.width.saturating_sub(2),
         ..row
@@ -37,13 +37,13 @@ fn draw_server_row(
 
     super::row(
         frame,
-        area_2,
+        indented,
         item,
         &item.detail,
-        j == mcp_tab.cursor && active && !mcp_tab.filtering,
+        index == mcp_tab.cursor && active && !mcp_tab.filtering,
         label_width,
     );
-    mcp_tab.hits.push((area_2, j));
+    mcp_tab.hits.push((indented, index));
 }
 
 fn scroll_to_selected_row(at: usize, mcp_tab: &mut McpTab) {
@@ -139,9 +139,9 @@ fn draw_summary(mcp_tab: &McpTab, frame: &mut Frame, area: Rect) {
         theme::muted(),
     ));
 
-    for (harness, error_2) in &mcp_tab.jobs.cli_errors {
+    for (harness, error) in &mcp_tab.jobs.cli_errors {
         head.push(Span::styled(
-            format!(" · {harness}: {error_2}"),
+            format!(" · {harness}: {error}"),
             theme::text().fg(theme::pal().error()),
         ));
     }
@@ -171,10 +171,10 @@ fn draw_action_box(
 
     {
         let shown = actions.min(6);
-        let height_2 = shown as u16 + 2;
-        let area_value = Rect {
+        let height = shown as u16 + 2;
+        let action_area = Rect {
             y: body.y,
-            height: height_2.min(body.height),
+            height: height.min(body.height),
             ..body
         };
         let block = Block::new()
@@ -185,9 +185,9 @@ fn draw_action_box(
                 format!(" needs action · {actions} "),
                 theme::text().fg(theme::pal().attention()).add_modifier(Modifier::BOLD),
             ));
-        let inner = block.inner(area_value);
+        let inner = block.inner(action_area);
 
-        frame.render_widget(block, area_value);
+        frame.render_widget(block, action_area);
 
         let offset = if mcp_tab.cursor < actions {
             mcp_tab.cursor.saturating_sub(shown - 1)
@@ -213,7 +213,7 @@ fn draw_action_box(
             mcp_tab.hits.push((row, j));
         }
 
-        body.y + height_2 + 1
+        body.y + height + 1
     }
 }
 
@@ -263,7 +263,7 @@ fn draw_group_list(
     let ServerGroups { lines, heads } = groups;
     let view = list.height as usize;
 
-    if let Some(at) = lines.iter().position(|line_value| *line_value == Some(mcp_tab.cursor)) {
+    if let Some(at) = lines.iter().position(|line| *line == Some(mcp_tab.cursor)) {
         scroll_to_selected_row(at, mcp_tab);
 
         if at >= mcp_tab.offset + view {
@@ -273,16 +273,16 @@ fn draw_group_list(
 
     mcp_tab.offset = mcp_tab.offset.min(lines.len().saturating_sub(view));
 
-    for (key, line) in lines.iter().enumerate().skip(mcp_tab.offset).take(view) {
+    for (index, line) in lines.iter().enumerate().skip(mcp_tab.offset).take(view) {
         let row = Rect {
-            y: list.y + (key - mcp_tab.offset) as u16,
+            y: list.y + (index - mcp_tab.offset) as u16,
             height: 1,
             ..list
         };
 
         match line {
-            None if !heads[key].is_empty() => {
-                draw_group_heading(frame, heads, key, row);
+            None if !heads[index].is_empty() => {
+                draw_group_heading(frame, heads, index, row);
             }
             None => {}
             Some(j) => {

@@ -1,13 +1,13 @@
 use super::{Act, Fold, PRow, Sec, View};
 
 impl View {
-    pub(super) fn toggle_fold(&mut self, file: Fold, on: Option<bool>) {
-        let now = self.scm.folded.contains(&file);
+    pub(super) fn toggle_fold(&mut self, fold: Fold, on: Option<bool>) {
+        let now = self.scm.folded.contains(&fold);
 
         if on.unwrap_or(!now) {
-            self.scm.folded.insert(file);
+            self.scm.folded.insert(fold);
         } else {
-            self.scm.folded.remove(&file);
+            self.scm.folded.remove(&fold);
         }
 
         self.scm.rows = self.panel_rows();
@@ -18,43 +18,40 @@ impl View {
         parent_view(self, i)
     }
 
-    /// The items of group label R (folded ones too): file paths, comment ids, unpushed commit oids.
-    pub(super) fn group_items(&self, result: &PRow) -> (Vec<String>, Vec<String>, Vec<String>) {
-        group_items_view(self, result)
+    /// The items of group label LABEL (folded ones too): file paths, comment ids, unpushed commit oids.
+    pub(super) fn group_items(&self, label: &PRow) -> (Vec<String>, Vec<String>, Vec<String>) {
+        group_items_view(self, label)
     }
 
-    /// Group label R has 1+ items, all of them picked.
-    pub(super) fn group_picked(&self, result: &PRow) -> bool {
-        let (file, character, key) = self.group_items(result);
+    /// Group label LABEL has 1+ items, all of them picked.
+    pub(super) fn group_picked(&self, label: &PRow) -> bool {
+        let (paths, comment_ids, oids) = self.group_items(label);
 
-        (!file.is_empty() || !character.is_empty() || !key.is_empty())
-            && file.iter().all(|path| self.scm.picked.contains(path))
-            && character.iter().all(|x| self.scm.comment_picks.contains(x))
-            && key.iter().all(|x| self.scm.commit_picks.contains(x))
+        (!paths.is_empty() || !comment_ids.is_empty() || !oids.is_empty())
+            && paths.iter().all(|path| self.scm.picked.contains(path))
+            && comment_ids.iter().all(|id| self.scm.comment_picks.contains(id))
+            && oids.iter().all(|oid| self.scm.commit_picks.contains(oid))
     }
 
-    /// Space on group label R: its items picked; all picked already: 0 picked.
-    pub(super) fn pick_group(&mut self, result: &PRow) -> Act {
-        pick_group_view(self, result)
+    /// Space on group label LABEL: its items picked; all picked already: 0 picked.
+    pub(super) fn pick_group(&mut self, label: &PRow) -> Act {
+        pick_group_view(self, label)
     }
 }
 
-fn group_items_commentfile(result: &PRow, view: &View) -> (Vec<String>, Vec<String>, Vec<String>) {
+fn group_items_commentfile(label: &PRow, view: &View) -> (Vec<String>, Vec<String>, Vec<String>) {
     let at = view
         .scm
         .rows
         .iter()
-        .position(|x| x == result)
+        .position(|row| row == label)
         .unwrap_or(view.scm.rows.len());
 
     let ids = view.scm.rows[at.saturating_add(1).min(view.scm.rows.len())..]
         .iter()
-        .map_while(|x| {
-            if let PRow::Comment(ci) = x {
-                view.comment_state
-                    .comments
-                    .get(*ci)
-                    .map(|character_4| character_4.id.clone())
+        .map_while(|row| {
+            if let PRow::Comment(ci) = row {
+                view.comment_state.comments.get(*ci).map(|comment| comment.id.clone())
             } else {
                 None
             }
@@ -68,7 +65,7 @@ fn parent_view(view: &View, i: usize) -> Option<usize> {
     let mine = &view.scm.rows.get(i)?;
 
     if let PRow::CommitFile(ci, _) = mine {
-        return view.scm.rows.iter().position(|result| *result == PRow::Commit(*ci));
+        return view.scm.rows.iter().position(|row| *row == PRow::Commit(*ci));
     }
 
     let is_file_of_level = matches!(mine, PRow::File(_, false));
@@ -86,22 +83,22 @@ fn parent_view(view: &View, i: usize) -> Option<usize> {
     })
 }
 
-fn group_items_view(view: &View, result: &PRow) -> (Vec<String>, Vec<String>, Vec<String>) {
+fn group_items_view(view: &View, label: &PRow) -> (Vec<String>, Vec<String>, Vec<String>) {
     let path = |i: usize| view.changes.files[i].path.clone();
     let staged = |i: usize| view.changes.staged.get(&view.changes.files[i].path);
 
-    let files = |file: &dyn Fn(usize) -> bool| {
+    let files = |keep: &dyn Fn(usize) -> bool| {
         (0..view.changes.files.len())
-            .filter(|&i| file(i))
+            .filter(|&i| keep(i))
             .map(path)
             .collect::<Vec<_>>()
     };
 
     let (here, _) = view.comments_here();
 
-    let comments = |comment: &dyn Fn(&crate::features::changes::Comment) -> bool| {
+    let comments = |keep: &dyn Fn(&crate::features::changes::Comment) -> bool| {
         here.iter()
-            .filter(|(i, _)| comment(&view.comment_state.comments[*i]))
+            .filter(|(i, _)| keep(&view.comment_state.comments[*i]))
             .map(|(i, _)| view.comment_state.comments[*i].id.clone())
             .collect::<Vec<_>>()
     };
@@ -111,45 +108,45 @@ fn group_items_view(view: &View, result: &PRow) -> (Vec<String>, Vec<String>, Ve
             .commits
             .list
             .iter()
-            .filter(|character| !character.pushed && !view.pushing.contains(&character.oid))
-            .map(|character_value| character_value.oid.clone())
+            .filter(|commit| !commit.pushed && !view.pushing.contains(&commit.oid))
+            .map(|commit| commit.oid.clone())
             .collect::<Vec<_>>()
     };
 
-    match result {
+    match label {
         PRow::Section(Sec::Staged, _) => (files(&|i| staged(i).is_some()), vec![], vec![]),
         PRow::Section(Sec::Changes, _) => (files(&|i| staged(i) != Some(&true)), vec![], vec![]),
-        PRow::Level(line, _) => (
-            files(&|i| staged(i) != Some(&true) && view.level_of(i) == *line),
+        PRow::Level(level, _) => (
+            files(&|i| staged(i) != Some(&true) && view.level_of(i) == *level),
             vec![],
             vec![],
         ),
         PRow::Section(Sec::Comments, _) => (vec![], comments(&|_| true), vec![]),
-        PRow::CState(resolved, _) => (vec![], comments(&|character_2| character_2.open() != *resolved), vec![]),
-        PRow::CLevel(line_value, _) => (
+        PRow::CState(resolved, _) => (vec![], comments(&|comment| comment.open() != *resolved), vec![]),
+        PRow::CLevel(level, _) => (
             vec![],
-            comments(&|character_3| character_3.open() && character_3.level == *line_value),
+            comments(&|comment| comment.open() && comment.level == *level),
             vec![],
         ),
         // a comments' file: its comments, the rows under it (never folded)
-        PRow::CommentFile(..) => group_items_commentfile(result, view),
+        PRow::CommentFile(..) => group_items_commentfile(label, view),
         PRow::Section(Sec::Commits, _) | PRow::Push(false, _) => (vec![], vec![], unpushed()),
         _ => (vec![], vec![], vec![]),
     }
 }
 
-fn pick_group_view(view: &mut View, result: &PRow) -> Act {
-    let (files, comments, commits) = view.group_items(result);
+fn pick_group_view(view: &mut View, label: &PRow) -> Act {
+    let (files, comments, commits) = view.group_items(label);
 
     if files.is_empty() && comments.is_empty() && commits.is_empty() {
-        return Act::Toast(match result {
+        return Act::Toast(match label {
             PRow::Push(true, _) => "pushed: read only, 0 pick".into(),
             PRow::Section(Sec::Stash, _) => "stash: 0 pick (enter restores, x removes)".into(),
             _ => "0 items to pick".into(),
         });
     }
 
-    let all = view.group_picked(result);
+    let all = view.group_picked(label);
     let count = files.len() + comments.len() + commits.len();
 
     for path in files {
@@ -160,19 +157,19 @@ fn pick_group_view(view: &mut View, result: &PRow) -> Act {
         };
     }
 
-    for comment in comments {
+    for id in comments {
         if all {
-            view.scm.comment_picks.remove(&comment)
+            view.scm.comment_picks.remove(&id)
         } else {
-            view.scm.comment_picks.insert(comment)
+            view.scm.comment_picks.insert(id)
         };
     }
 
-    for character in commits {
+    for oid in commits {
         if all {
-            view.scm.commit_picks.remove(&character)
+            view.scm.commit_picks.remove(&oid)
         } else {
-            view.scm.commit_picks.insert(character)
+            view.scm.commit_picks.insert(oid)
         };
     }
 

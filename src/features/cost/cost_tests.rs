@@ -64,7 +64,7 @@ fn a_running_turn_counts_at_once() {
         turns: 1,
         ..Default::default()
     };
-    let user = crate::engine::harness::TurnUse {
+    let turn = crate::engine::harness::TurnUse {
         input: 10,
         output: 20,
         cache_read: 70,
@@ -72,7 +72,7 @@ fn a_running_turn_counts_at_once() {
         ctx: 5000,
     };
 
-    add_running(&mut agent, &user, "", 42);
+    add_running(&mut agent, &turn, "", 42);
 
     assert_eq!((agent.input, agent.output, agent.cache_read), (110, 70, 70));
     assert!((agent.usd - 2.0).abs() < 1e-9);
@@ -93,18 +93,17 @@ fn humanizes() {
 #[ignore = "live agent usage; explicit run required"]
 fn live_fetch() {
     let id = std::env::var("CODEHEAD_THREAD").unwrap();
-    let text_value = fetch(&id, &names());
-    let mut thread = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 14)).unwrap();
+    let snap = fetch(&id, &names());
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 14)).unwrap();
 
-    thread
-        .draw(|file| draw(file, &text_value, Duration::from_secs(0), now()))
+    term.draw(|frame| draw(frame, &snap, Duration::from_secs(0), now()))
         .unwrap();
-    let bytes = thread.backend().buffer().clone();
+    let buffer = term.backend().buffer().clone();
 
     let text: String = (0..14)
         .map(|y| {
             (0..60)
-                .map(|x| bytes[(x, y)].symbol().to_string())
+                .map(|x| buffer[(x, y)].symbol().to_string())
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -114,25 +113,24 @@ fn live_fetch() {
 
     println!("{text}");
 
-    assert!(text_value.found);
+    assert!(snap.found);
 }
 
 #[test]
 fn renders() {
     let now = 1_000_000;
-    let text_value = render_snapshot(now);
+    let snap = render_snapshot(now);
     let (width, height) = (56, 16);
-    let mut thread = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
 
-    thread
-        .draw(|file| draw(file, &text_value, Duration::from_secs(1), now))
+    term.draw(|frame| draw(frame, &snap, Duration::from_secs(1), now))
         .unwrap();
-    let bytes = thread.backend().buffer().clone();
+    let buffer = term.backend().buffer().clone();
 
     let text: String = (0..height)
         .map(|y| {
             (0..width)
-                .map(|x| bytes[(x, y)].symbol().to_string())
+                .map(|x| buffer[(x, y)].symbol().to_string())
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -153,39 +151,30 @@ fn renders() {
     assert!(text.contains(" 13%  2h") && text.contains(" 95%  3d"), "{text}");
 
     // compact: the thread view's header, a 400-char message to amon
-    assert_compact_cost(now, &text_value);
+    assert_compact_cost(now, &snap);
 }
 
-fn assert_compact_cost(now: u64, text_value: &Snap) {
-    let (width_value, height_value) = (56, 7);
+fn assert_compact_cost(now: u64, snap: &Snap) {
+    let (width, height) = (56, 7);
     let next = Next {
         to: vec!["amon".into()],
         chars: 400,
     };
-    let mut thread_value =
-        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width_value, height_value)).unwrap();
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
 
-    thread_value
-        .draw(|file_value| {
-            let agent = file_value.area();
+    term.draw(|frame| {
+        let area = frame.area();
 
-            draw_at(
-                file_value.buffer_mut(),
-                agent,
-                text_value,
-                Duration::from_secs(1),
-                now,
-                &next,
-            );
-        })
-        .unwrap();
+        draw_at(frame.buffer_mut(), area, snap, Duration::from_secs(1), now, &next);
+    })
+    .unwrap();
 
-    let bytes_value = thread_value.backend().buffer().clone();
+    let buffer = term.backend().buffer().clone();
 
-    let text: String = (0..height_value)
+    let text: String = (0..height)
         .map(|y| {
-            (0..width_value)
-                .map(|x| bytes_value[(x, y)].symbol().to_string())
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -201,70 +190,64 @@ fn assert_compact_cost(now: u64, text_value: &Snap) {
     assert!(!text.contains("q close") && !text.contains("◆"), "{text}");
 
     // amon's context line: ━ in amon's color up to 19 %, ─ rest, the % after it
-    assert_compact_context(width_value, &bytes_value, &text);
+    assert_compact_context(width, &buffer, &text);
 
     // the window bars: used ━ in text (7d: error from 90 %), the next message's share ━ in info, ─ rest
-    assert_compact_limits(width_value, &bytes_value, &text);
+    assert_compact_limits(width, &buffer, &text);
 
     // the next message: ≥ context + text tokens, $, share per window (0 rate: ?)
     assert!(text.contains("≥38.1k tok ~$0.38 · 5h +0.2% · 7d ?"), "{text}");
 }
 
-fn assert_compact_context(width_value: u16, bytes_value: &Buffer, text: &String) {
+fn assert_compact_context(width: u16, buffer: &Buffer, text: &String) {
     let row = text
         .lines()
         .position(|line| line.starts_with(" amon"))
         .expect("amon row");
-    let cells: Vec<_> = (0..width_value).map(|x| bytes_value[(x, row as u16)].clone()).collect();
+    let cells: Vec<_> = (0..width).map(|x| buffer[(x, row as u16)].clone()).collect();
     let amon = agents::color(Some("orange"));
     let fill = cells
         .iter()
-        .filter(|character_value| character_value.symbol() == "━" && character_value.fg == amon)
+        .filter(|cell| cell.symbol() == "━" && cell.fg == amon)
         .count();
-    let rest = cells.iter().filter(|character_2| character_2.symbol() == "─").count();
+    let rest = cells.iter().filter(|cell| cell.symbol() == "─").count();
 
     assert!(fill > 0 && rest > fill * 3, "{text}");
     assert!(text.lines().nth(row).unwrap().ends_with(" 19%"), "{text}");
 
     // lilith: 0 context yet, all ─
     assert!(
-        text.lines().any(|line_value| line_value.starts_with(" lilith")
-            && line_value.contains('─')
-            && !line_value.contains('━')
-            && line_value.ends_with('·')),
+        text.lines().any(|line| line.starts_with(" lilith")
+            && line.contains('─')
+            && !line.contains('━')
+            && line.ends_with('·')),
         "{text}"
     );
 }
 
-fn assert_compact_limits(width_value: u16, bytes_value: &ratatui::buffer::Buffer, text: &String) {
-    let row = text
-        .lines()
-        .position(|line_2| line_2.starts_with(" 5h"))
-        .expect("5h row");
-    let cells: Vec<_> = (0..width_value).map(|x| bytes_value[(x, row as u16)].clone()).collect();
+fn assert_compact_limits(width: u16, buffer: &ratatui::buffer::Buffer, text: &String) {
+    let row = text.lines().position(|line| line.starts_with(" 5h")).expect("5h row");
+    let cells: Vec<_> = (0..width).map(|x| buffer[(x, row as u16)].clone()).collect();
 
     assert!(
         cells
             .iter()
-            .any(|character_3| character_3.symbol() == "━" && character_3.fg == theme::pal().text),
+            .any(|cell| cell.symbol() == "━" && cell.fg == theme::pal().text),
         "used part: {text}"
     );
     assert!(
         cells
             .iter()
-            .any(|character_4| character_4.symbol() == "━" && character_4.fg == theme::pal().info()),
+            .any(|cell| cell.symbol() == "━" && cell.fg == theme::pal().info()),
         "share: {text}"
     );
     assert!(
         cells
             .iter()
-            .any(|character_5| character_5.symbol() == "━" && character_5.fg == theme::pal().error()),
+            .any(|cell| cell.symbol() == "━" && cell.fg == theme::pal().error()),
         "7d near the limit: {text}"
     );
-    assert!(
-        cells.iter().any(|character_6| character_6.symbol() == "─"),
-        "rest: {text}"
-    );
+    assert!(cells.iter().any(|cell| cell.symbol() == "─"), "rest: {text}");
     assert!(!text.contains('░') && !text.contains('▒'), "{text}");
 
     // the windows side by side: 5h and 7d on 1 row
@@ -328,7 +311,7 @@ fn a_morph_moves_only_the_changed_cells() {
     let mut to = Buffer::empty(area);
 
     to.set_string(0, 0, "ab 47%", Style::default());
-    let row = |bytes: &Buffer| (0..8).map(|x| bytes[(x, 0)].symbol().to_string()).collect::<String>();
+    let row = |buffer: &Buffer| (0..8).map(|x| buffer[(x, 0)].symbol().to_string()).collect::<String>();
     let at = |secs: f32| Morph {
         from: from.clone(),
         to: to.clone(),
@@ -351,14 +334,14 @@ fn a_morph_moves_only_the_changed_cells() {
     let mut tb = Buffer::empty(area);
 
     tb.set_string(0, 0, "▒▒▒▒▒▒▒▒", Style::default());
-    let message = Morph {
+    let bar_morph = Morph {
         from: fb,
         to: tb,
         start: Instant::now().checked_sub(MORPH_TIME / 2).unwrap(),
     };
 
     assert!(
-        row(&message.shown())
+        row(&bar_morph.shown())
             .chars()
             .all(|character| character == '░' || character == '▒')
     );

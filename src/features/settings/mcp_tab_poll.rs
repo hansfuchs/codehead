@@ -15,11 +15,11 @@ fn finish_server_save(result: Result<(servers::Server, Vec<servers::Server>), St
     mcp_tab.jobs.busy.pop();
 
     if let Some(edit_form) = mcp_tab.saving.take() {
-        let modal_value = super::key_helpers::edit_saved(edit_form, result, mcp_tab);
+        let modal = super::key_helpers::edit_saved(edit_form, result, mcp_tab);
 
         // another modal opened meanwhile: it stays
         if mcp_tab.modal.is_none() {
-            mcp_tab.modal = modal_value;
+            mcp_tab.modal = modal;
         }
     }
 }
@@ -38,13 +38,9 @@ fn poll_jobs(any: &mut bool, mcp_tab: &mut McpTab) {
             Msg::Saved(result) => {
                 finish_server_save(result, mcp_tab);
             }
-            Msg::Imported {
-                harness,
-                name,
-                result: result_value,
-            } => {
+            Msg::Imported { harness, name, result } => {
                 mcp_tab.jobs.busy.pop();
-                super::imported(&harness, &name, result_value, mcp_tab);
+                super::imported(&harness, &name, result, mcp_tab);
             }
             Msg::Done(text, error) => {
                 mcp_tab.jobs.busy.pop();

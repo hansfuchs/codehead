@@ -13,41 +13,32 @@ fn window_follows_the_cursor() {
 #[test]
 fn placed_where_room_is() {
     let area = Rect::new(0, 0, 80, 30);
-    let area_value = |x, y| Rect::new(x, y, 1, 1);
+    let cell = |x, y| Rect::new(x, y, 1, 1);
 
     // room above: above, bottom on the row over the anchor
-    assert_eq!(
-        place(area_value(5, 20), 20, 4, area, true),
-        Some(Rect::new(5, 14, 20, 6))
-    );
+    assert_eq!(place(cell(5, 20), 20, 4, area, true), Some(Rect::new(5, 14, 20, 6)));
 
     // 0 room above: below
-    assert_eq!(place(area_value(5, 1), 20, 4, area, true), Some(Rect::new(5, 2, 20, 6)));
+    assert_eq!(place(cell(5, 1), 20, 4, area, true), Some(Rect::new(5, 2, 20, 6)));
 
     // 30 rows: 10 in view
-    assert_eq!(
-        place(area_value(5, 20), 20, 30, area, true).map(|result| result.height),
-        Some(12)
-    );
+    assert_eq!(place(cell(5, 20), 20, 30, area, true).map(|rect| rect.height), Some(12));
 
     // less room than rows on both sides: the bigger side, cut
     assert_eq!(
-        place(area_value(5, 8), 20, 30, Rect::new(0, 0, 80, 14), true),
+        place(cell(5, 8), 20, 30, Rect::new(0, 0, 80, 14), true),
         Some(Rect::new(5, 0, 20, 8))
     );
 
     // right edge: shifted left
-    assert_eq!(
-        place(area_value(75, 20), 20, 2, area, true).map(|result_value| result_value.x),
-        Some(60)
-    );
+    assert_eq!(place(cell(75, 20), 20, 2, area, true).map(|rect| rect.x), Some(60));
 
     // below first
     assert_eq!(
         place(Rect::new(0, 2, 20, 1), 30, 3, area, false),
         Some(Rect::new(0, 3, 30, 5))
     );
-    assert_eq!(place(area_value(0, 1), 10, 3, Rect::new(0, 0, 80, 3), true), None);
+    assert_eq!(place(cell(0, 1), 10, 3, Rect::new(0, 0, 80, 3), true), None);
 }
 
 #[test]
@@ -90,10 +81,10 @@ fn submenu_right_then_left_then_above() {
     );
 
     // bottom edge: moved up
-    let area_value = Rect::new(0, 20, 10, 8);
+    let parent = Rect::new(0, 20, 10, 8);
 
     assert_eq!(
-        place_beside(area_value, 27, 20, 10, area, area_value).map(|result| (result.y, result.height)),
+        place_beside(parent, 27, 20, 10, area, parent).map(|rect| (rect.y, rect.height)),
         Some((18, 12))
     );
 }

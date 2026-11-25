@@ -37,13 +37,8 @@ fn mouse_thread_list(state: &mut ThreadList, event: MouseEvent) -> Out {
 }
 
 fn click_thread_list(state: &mut ThreadList, at: Position) -> Out {
-    if let Some(&(_, agent)) = state
-        .hit_regions
-        .act_rows
-        .iter()
-        .find(|(result, _)| result.contains(at))
-    {
-        return state.run(agent);
+    if let Some(&(_, act)) = state.hit_regions.act_rows.iter().find(|(rect, _)| rect.contains(at)) {
+        return state.run(act);
     }
 
     state.job_state.actions = None;
@@ -81,24 +76,19 @@ fn click_thread_list(state: &mut ThreadList, at: Position) -> Out {
         return Out::None;
     }
 
-    let Some(&(_, pos)) = state
-        .hit_regions
-        .rows
-        .iter()
-        .find(|(result_value, _)| result_value.contains(at))
-    else {
+    let Some(&(_, row)) = state.hit_regions.rows.iter().find(|(rect, _)| rect.contains(at)) else {
         return Out::Pass;
     };
 
     state.focus = Focus::List;
 
     // the menu: a click opens; the start screen: a click picks, a 2nd opens
-    if state.mode == Mode::Switch || pos == state.cursor {
-        state.cursor = pos;
+    if state.mode == Mode::Switch || row == state.cursor {
+        state.cursor = row;
         return state.run(Act::Open);
     }
 
-    state.cursor = pos;
+    state.cursor = row;
 
     Out::None
 }

@@ -13,8 +13,8 @@ impl View {
 
         // the worktree's URL (portless): the browser
         if click
-            && let Some((result, url)) = &self.urls_state.url_rect
-            && result.contains(at)
+            && let Some((rect, url)) = &self.urls_state.url_rect
+            && rect.contains(at)
         {
             let url = url.clone();
 
@@ -29,16 +29,12 @@ impl View {
             .flow_slots
             .borrow()
             .iter()
-            .find(|(_, result)| result.contains(at))
+            .find(|(_, rect)| rect.contains(at))
             .map(|(agent, _)| agent.clone());
 
         if click && let Some(agent) = flow_at {
-            match self
-                .flowbars
-                .iter_mut()
-                .find(|bytes| bytes.agent == agent && bytes.is_open())
-            {
-                Some(bytes) => bytes.close(),
+            match self.flowbars.iter_mut().find(|bar| bar.agent == agent && bar.is_open()) {
+                Some(bar) => bar.close(),
                 None => self.open_flow(&agent, false),
             }
 
@@ -57,8 +53,8 @@ impl View {
         }
 
         // the view bar
-        if click && let Some(&(_, path)) = self.layout.bar_rects.iter().find(|(result, _)| result.contains(at)) {
-            self.set_pane(path);
+        if click && let Some(&(_, pane)) = self.layout.bar_rects.iter().find(|(rect, _)| rect.contains(at)) {
+            self.set_pane(pane);
             return true;
         }
 
@@ -83,13 +79,12 @@ impl View {
             return ControlFlow::Break(());
         }
 
+        // the chat's title row in the changes view: folds / opens it
         if click && self.mini_chat_state.mini_rect.contains(at) {
             self.mini_chat_state.mini_chat = !self.mini_chat_state.mini_chat;
             self.stream.dirty = true;
             return ControlFlow::Break(());
         }
-
-        // the chat's title row in the changes view: folds / opens it
 
         // the chat of the split: as the chat view below (scroll, links, selection + copy)
         if click && self.layout.input_rect.contains(at) {

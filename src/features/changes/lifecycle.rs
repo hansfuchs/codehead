@@ -17,8 +17,8 @@ impl View {
 
     /// PR mode: the pull request's base, commits, threads (a new commit list: the picker keeps
     /// its pick while it is still there).
-    pub(crate) fn set_pr(&mut self, path: &crate::infra::gh::Pr) {
-        set_pr_view(self, path);
+    pub(crate) fn set_pr(&mut self, pr: &crate::infra::gh::Pr) {
+        set_pr_view(self, pr);
     }
 
     /// Tests: the cursor on file I's box.
@@ -59,11 +59,11 @@ impl View {
             dir: dir.to_path_buf(),
             topics: crate::infra::bus::subscribe(),
             _shown: crate::infra::watch::show(dir),
-            git: crate::infra::watch::git_dirs(dir).map(|(thread, character, output)| {
+            git: crate::infra::watch::git_dirs(dir).map(|(top, common, own)| {
                 (
-                    crate::infra::watch::canon(&thread),
-                    crate::infra::watch::canon(&character),
-                    crate::infra::watch::canon(&output),
+                    crate::infra::watch::canon(&top),
+                    crate::infra::watch::canon(&common),
+                    crate::infra::watch::canon(&own),
                 )
             }),
             stale: false,
@@ -96,9 +96,9 @@ impl View {
         }
     }
 
-    /// The read-only view of commit C of DIR's branch (the review box of the panel's commit).
-    pub(crate) fn for_commit(dir: &Path, character: &commits::Commit) -> View {
-        let mut view = View::new(&format!("commit~{}", character.short), dir);
+    /// The read-only view of COMMIT of DIR's branch (the review box of the panel's commit).
+    pub(crate) fn for_commit(dir: &Path, commit: &commits::Commit) -> View {
+        let mut view = View::new(&format!("commit~{}", commit.short), dir);
 
         view.marks.clear();
         view.comment_state.comments.clear();
@@ -108,7 +108,7 @@ impl View {
         view.classifier.classifier = None;
         view.classifier.rank = None;
         view.scm.shown = false;
-        view.commit_src = Some(character.clone());
+        view.commit_src = Some(commit.clone());
 
         view
     }
@@ -135,14 +135,14 @@ impl View {
     pub(crate) fn peeked(&self) -> Option<&str> {
         self.peek
             .as_ref()
-            .and_then(|path| path.commit_src.as_ref())
-            .map(|character| character.oid.as_str())
+            .and_then(|peek| peek.commit_src.as_ref())
+            .map(|commit| commit.oid.as_str())
     }
 }
 
-fn set_pr_view(view: &mut View, path: &crate::infra::gh::Pr) {
+fn set_pr_view(view: &mut View, pr: &crate::infra::gh::Pr) {
     let Some(src) = view.pr_src.as_mut() else { return };
-    let threads: Vec<crate::infra::gh::Thread> = path
+    let threads: Vec<crate::infra::gh::Thread> = pr
         .threads
         .iter()
         .filter(|thread| thread.path.is_some())
@@ -150,21 +150,21 @@ fn set_pr_view(view: &mut View, path: &crate::infra::gh::Pr) {
         .collect();
     let changed = src.threads != threads;
 
-    src.base.clone_from(&path.base);
-    src.commits.clone_from(&path.commits);
+    src.base.clone_from(&pr.base);
+    src.commits.clone_from(&pr.commits);
     src.threads = threads;
 
     if src
         .commit
         .as_ref()
-        .is_some_and(|character| !path.commits.iter().any(|x| &x.oid == character))
+        .is_some_and(|picked| !pr.commits.iter().any(|commit| &commit.oid == picked))
     {
         src.commit = None;
     }
 
-    let pushed = !src.head.is_empty() && src.head != path.head_oid;
+    let pushed = !src.head.is_empty() && src.head != pr.head_oid;
 
-    src.head.clone_from(&path.head_oid);
+    src.head.clone_from(&pr.head_oid);
 
     if changed {
         view.layout.built = None;

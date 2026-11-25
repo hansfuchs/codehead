@@ -44,7 +44,7 @@ fn verify_the_last_limit_note_counts_down_until_a_message_or_a_turn(
     fold: Fold<'_>,
 ) {
     let roster = vec![("ada".to_string(), "claude".to_string())];
-    let color = text(&draw(
+    let dump = text(&draw(
         &thread,
         Look::Bubbles,
         120,
@@ -55,17 +55,17 @@ fn verify_the_last_limit_note_counts_down_until_a_message_or_a_turn(
     ));
 
     assert_eq!(
-        color.matches("Resumes automatically in 12m 30s").count()
-            + color.matches("Resumes automatically in 12m 29s").count(),
+        dump.matches("Resumes automatically in 12m 30s").count()
+            + dump.matches("Resumes automatically in 12m 29s").count(),
         1,
-        "{color}"
+        "{dump}"
     );
 
-    let last = color.rfind("6:50pm").unwrap();
+    let last = dump.rfind("6:50pm").unwrap();
 
     assert!(
-        color.rfind("Resumes automatically").unwrap() > last,
-        "the last note: {color}"
+        dump.rfind("Resumes automatically").unwrap() > last,
+        "the last note: {dump}"
     );
 
     // the owner writes: 0 resume
@@ -82,16 +82,15 @@ fn verify_the_last_limit_note_counts_down_until_a_message_or_a_turn(
     assert_eq!(countdown(3_725_000), "1h 02m 05s");
 }
 
-fn text(directory: &Drawn) -> String {
-    directory
+fn text(drawn: &Drawn) -> String {
+    drawn
         .rows
         .iter()
-        .map(|result| {
-            result
-                .line
+        .map(|row| {
+            row.line
                 .spans
                 .iter()
-                .map(|text_value| text_value.content.as_ref())
+                .map(|span| span.content.as_ref())
                 .collect::<String>()
                 + "\n"
         })

@@ -7,23 +7,23 @@ pub(crate) fn dot(dots: &mut [u8], x: f32, y: f32, hot: bool) {
     let (x, y) = (x.round(), y.round());
 
     if x >= 0.0 && y >= 0.0 && (x as usize) < DOT_WIDTH && (y as usize) < DOT_HEIGHT {
-        let key = y as usize * DOT_WIDTH + x as usize;
+        let index = y as usize * DOT_WIDTH + x as usize;
 
-        dots[key] = dots[key].max(if hot { 2 } else { 1 });
+        dots[index] = dots[index].max(if hot { 2 } else { 1 });
     }
 }
 /// Sticky timing: slow to let go, slow to arrive.
-pub(crate) fn sticky(user: f32) -> f32 {
-    let user_value = user.clamp(0.0, 1.0);
-    let user_2 = user_value * user_value * (3.0 - 2.0 * user_value);
+pub(crate) fn sticky(progress: f32) -> f32 {
+    let clamped = progress.clamp(0.0, 1.0);
+    let eased = clamped * clamped * (3.0 - 2.0 * clamped);
 
-    user_2 * user_2 * (3.0 - 2.0 * user_2)
+    eased * eased * (3.0 - 2.0 * eased)
 }
 /// Animation I: the stagger, the flight time of 1 blob, the snap (s from the start).
 pub(crate) fn timing(i: usize) -> (f32, f32, f32) {
-    let (fam, value) = (FAMILIES[i / 5], i % 5);
+    let (fam, variant) = (FAMILIES[i / 5], i % 5);
 
-    let (stagger, dur): (f32, f32) = match (fam, value) {
+    let (stagger, dur): (f32, f32) = match (fam, variant) {
         (Family::Fountain, 3) => (0.5, 0.45),
         (Family::Fountain, _) => (0.7, 0.75),
         (Family::Splash, 2) => (0.25, 0.55),
@@ -273,13 +273,13 @@ fn dot_cell(dots: &[u8], x: usize, y: usize) -> Cell {
     let (mut bits, mut hot) = (0, false);
 
     for (index, bit) in DOT_BITS.iter().enumerate() {
-        let value = dots[(y * 4 + index / 2) * DOT_WIDTH + x * 2 + index % 2];
+        let dot = dots[(y * 4 + index / 2) * DOT_WIDTH + x * 2 + index % 2];
 
-        if value > 0 {
+        if dot > 0 {
             bits |= bit;
         }
 
-        hot |= value == 2;
+        hot |= dot == 2;
     }
 
     if bits == 0 {
@@ -305,8 +305,8 @@ fn snap_sprite(cells: &mut [Cell], sprite: &[Cell], flash: bool) {
     }
 }
 /// Metaballs: drops fly in, merge into 1 blob, the blob turns into the sprite. U: 0..1.
-pub(super) fn merge(value: usize, ps: &[Particle], user: f32, put: &mut impl FnMut(f32, f32, bool)) {
-    let starts: &[(f32, f32)] = match value {
+pub(super) fn merge(variant: usize, particles: &[Particle], progress: f32, put: &mut impl FnMut(f32, f32, bool)) {
+    let starts: &[(f32, f32)] = match variant {
         0 => &[(-4.0, CENTER.1), (DOT_WIDTH as f32 + 3.0, CENTER.1)],
         1 => &[(CENTER.0 - 8.0, -5.0), (CENTER.0, -9.0), (CENTER.0 + 8.0, -6.0)],
         2 => &[
@@ -324,60 +324,63 @@ pub(super) fn merge(value: usize, ps: &[Particle], user: f32, put: &mut impl FnM
         ],
     };
 
-    let agent = (user / 0.45).clamp(0.0, 1.0);
-    let message = ((user - 0.4) / 0.45).clamp(0.0, 1.0);
-    let message_value = message * message * (3.0 - 2.0 * message);
-    let rad = if value == 3 { 6.0 } else { 3.6 };
+    let gather = (progress / 0.45).clamp(0.0, 1.0);
+    let morph = ((progress - 0.4) / 0.45).clamp(0.0, 1.0);
+    let blend = morph * morph * (3.0 - 2.0 * morph);
+    let rad = if variant == 3 { 6.0 } else { 3.6 };
 
     let blobs: Vec<(f32, f32, f32)> = starts
         .iter()
         .enumerate()
-        .map(|(key, &(sx, sy))| {
-            let error = ease_in_out((agent - key as f32 * 0.06).clamp(0.0, 1.0));
+        .map(|(index, &(sx, sy))| {
+            let pull = ease_in_out((gather - index as f32 * 0.06).clamp(0.0, 1.0));
 
-            let wob = if value == 4 {
-                (user * 12.0 + key as f32).sin() * 1.5
+            let wob = if variant == 4 {
+                (progress * 12.0 + index as f32).sin() * 1.5
             } else {
                 0.0
             };
 
             (
-                sx + (CENTER.0 - sx) * error + wob,
-                sy + (CENTER.1 - sy) * error,
-                rad * (1.0 - 0.4 * message_value),
+                sx + (CENTER.0 - sx) * pull + wob,
+                sy + (CENTER.1 - sy) * pull,
+                rad * (1.0 - 0.4 * blend),
             )
         })
         .collect();
 
-    let sigma = 0.8 + (1.0 - message_value) * 3.0;
+    let sigma = 0.8 + (1.0 - blend) * 3.0;
 
     for y in 0..DOT_HEIGHT {
         for x in 0..DOT_WIDTH {
             let (fx, fy) = (x as f32, y as f32);
             let bf: f32 = blobs
                 .iter()
-                .map(|&(bx, by, result)| result * result / ((fx - bx).powi(2) + (fy - by).powi(2) * 1.3 + 0.01))
+                .map(|&(bx, by, radius)| radius * radius / ((fx - bx).powi(2) + (fy - by).powi(2) * 1.3 + 0.01))
                 .sum();
 
-            let tf = sprite_density(ps, message_value, sigma, fx, fy);
+            let tf = sprite_density(particles, blend, sigma, fx, fy);
 
-            draw_merged_dot(put, message_value, fx, fy, bf, tf);
+            draw_merged_dot(put, blend, fx, fy, bf, tf);
         }
     }
 }
 
-fn sprite_density(ps: &[Particle], message_value: f32, sigma: f32, fx: f32, fy: f32) -> f32 {
-    if message_value > 0.0 {
-        ps.iter()
-            .map(|path| (-((fx - path.goal.0).powi(2) + (fy - path.goal.1).powi(2)) / (sigma * sigma)).exp())
+fn sprite_density(particles: &[Particle], blend: f32, sigma: f32, fx: f32, fy: f32) -> f32 {
+    if blend > 0.0 {
+        particles
+            .iter()
+            .map(|particle| {
+                (-((fx - particle.goal.0).powi(2) + (fy - particle.goal.1).powi(2)) / (sigma * sigma)).exp()
+            })
             .fold(0.0, f32::max)
     } else {
         0.0
     }
 }
 
-fn draw_merged_dot(put: &mut impl FnMut(f32, f32, bool), message_value: f32, fx: f32, fy: f32, bf: f32, tf: f32) {
-    if (1.0 - message_value) * bf + message_value * tf * 2.0 > 1.0 {
-        put(fx, fy, message_value < 0.95);
+fn draw_merged_dot(put: &mut impl FnMut(f32, f32, bool), blend: f32, fx: f32, fy: f32, bf: f32, tf: f32) {
+    if (1.0 - blend) * bf + blend * tf * 2.0 > 1.0 {
+        put(fx, fy, blend < 0.95);
     }
 }

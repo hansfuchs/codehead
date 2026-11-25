@@ -2,23 +2,23 @@ use super::{EditForm, KeyCode, KeyEvent, KeyModifiers, McpTab, Modal, Server};
 
 impl McpTab {}
 
-pub(super) fn modal_key(key_value: KeyEvent, mcp_tab: &mut McpTab) {
-    let Some(message) = mcp_tab.modal.take() else {
+pub(super) fn modal_key(key: KeyEvent, mcp_tab: &mut McpTab) {
+    let Some(modal) = mcp_tab.modal.take() else {
         return;
     };
 
-    mcp_tab.modal = match message {
-        Modal::Info { title, lines, login } => match key_value.code {
+    mcp_tab.modal = match modal {
+        Modal::Info { title, lines, login } => match key.code {
             KeyCode::Char('l') if login.is_some() => {
-                let (height, count) = login.unwrap_or_default();
+                let (harness, name) = login.unwrap_or_default();
 
-                mcp_tab.login(height, count);
+                mcp_tab.login(harness, name);
                 None
             }
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => None,
             _ => Some(Modal::Info { title, lines, login }),
         },
-        Modal::Confirm { text, then } => match key_value.code {
+        Modal::Confirm { text, then } => match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
                 mcp_tab.run(then);
                 mcp_tab.modal.take()
@@ -26,111 +26,107 @@ pub(super) fn modal_key(key_value: KeyEvent, mcp_tab: &mut McpTab) {
             KeyCode::Esc | KeyCode::Char('n') => None,
             _ => Some(Modal::Confirm { text, then }),
         },
-        Modal::Agents(mut path) => match key_value.code {
+        Modal::Agents(mut pick) => match key.code {
             KeyCode::Esc => None,
             KeyCode::Up => {
-                path.cursor = path.cursor.saturating_sub(1);
-                Some(Modal::Agents(path))
+                pick.cursor = pick.cursor.saturating_sub(1);
+                Some(Modal::Agents(pick))
             }
             KeyCode::Down => {
-                path.cursor = (path.cursor + 1).min(path.rows.len().saturating_sub(1));
-                Some(Modal::Agents(path))
+                pick.cursor = (pick.cursor + 1).min(pick.rows.len().saturating_sub(1));
+                Some(Modal::Agents(pick))
             }
             KeyCode::Char(' ') => {
-                if let Some(row) = path.rows.get_mut(path.cursor) {
+                if let Some(row) = pick.rows.get_mut(pick.cursor) {
                     row.1 = !row.1;
                 }
 
-                Some(Modal::Agents(path))
+                Some(Modal::Agents(pick))
             }
             // every agent of the harness of the cursor row: on, or off when all are on
             KeyCode::Char('h') => {
-                if let Some(harness_value) = path.rows.get(path.cursor).map(|row_value| row_value.0.harness.clone()) {
-                    let all = path
-                        .rows
-                        .iter()
-                        .filter(|row_2| row_2.0.harness == harness_value)
-                        .all(|result_2| result_2.1);
+                if let Some(harness) = pick.rows.get(pick.cursor).map(|row| row.0.harness.clone()) {
+                    let all = pick.rows.iter().filter(|row| row.0.harness == harness).all(|row| row.1);
 
-                    toggle_harness_agents(&mut path, all, &harness_value);
+                    toggle_harness_agents(&mut pick, all, &harness);
                 }
 
-                Some(Modal::Agents(path))
+                Some(Modal::Agents(pick))
             }
             KeyCode::Enter => {
-                super::save_agents(&path, mcp_tab);
+                super::save_agents(&pick, mcp_tab);
                 None
             }
-            _ => Some(Modal::Agents(path)),
+            _ => Some(Modal::Agents(pick)),
         },
-        Modal::Edit(error) => edit_server_key(key_value, mcp_tab, error),
+        Modal::Edit(form) => edit_server_key(key, mcp_tab, form),
     };
 }
 
-fn toggle_harness_agents(selection: &mut super::Pick, all: bool, harness_value: &str) {
-    for row_2 in selection.rows.iter_mut().filter(|row| row.0.harness == harness_value) {
-        row_2.1 = !all;
+fn toggle_harness_agents(selection: &mut super::Pick, all: bool, harness: &str) {
+    for row in selection.rows.iter_mut().filter(|row| row.0.harness == harness) {
+        row.1 = !all;
     }
 }
 
-fn edit_server_key(key_value: KeyEvent, mcp_tab: &mut McpTab, mut error: Box<EditForm>) -> Option<Modal> {
-    let ctrl = key_value.modifiers.contains(KeyModifiers::CONTROL);
+fn edit_server_key(key: KeyEvent, mcp_tab: &mut McpTab, mut form: Box<EditForm>) -> Option<Modal> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-    match key_value.code {
+    match key.code {
         // esc: closes; edits only on a 2nd esc (esc never drops edits unasked)
         KeyCode::Esc => {
-            let dirty = error.name.edited() || error.target.edited() || error.secrets.edited();
+            let dirty = form.name.edited() || form.target.edited() || form.secrets.edited();
 
             if crate::ui::textarea::esc_drops(&mut mcp_tab.esc_at, dirty) {
                 None
             } else {
                 super::say("esc again: drop the edits · ctrl+s: save", false, mcp_tab);
-                Some(Modal::Edit(error))
+                Some(Modal::Edit(form))
             }
         }
-        KeyCode::Char('s') if ctrl => super::save_edit(error, mcp_tab),
-        KeyCode::Enter if error.field == 4 => super::save_edit(error, mcp_tab),
-        KeyCode::Down if !(error.field == 3 && key_value.code == KeyCode::Down && !super::secrets_at_end(&error)) => {
-            error.field = (error.field + 1).min(4);
-            Some(Modal::Edit(error))
+        KeyCode::Char('s') if ctrl => super::save_edit(form, mcp_tab),
+        KeyCode::Enter if form.field == 4 => super::save_edit(form, mcp_tab),
+        KeyCode::Down if !(form.field == 3 && key.code == KeyCode::Down && !super::secrets_at_end(&form)) => {
+            form.field = (form.field + 1).min(4);
+            Some(Modal::Edit(form))
         }
-        KeyCode::Up if !(error.field == 3 && key_value.code == KeyCode::Up && !super::secrets_at_start(&error)) => {
-            error.field = error.field.saturating_sub(1);
-            Some(Modal::Edit(error))
+        KeyCode::Up if !(form.field == 3 && key.code == KeyCode::Up && !super::secrets_at_start(&form)) => {
+            form.field = form.field.saturating_sub(1);
+            Some(Modal::Edit(form))
         }
-        KeyCode::Left | KeyCode::Right if error.field == 1 => {
-            error.kind = if key_value.code == KeyCode::Right {
-                (error.kind + 1) % 3
+        KeyCode::Left | KeyCode::Right if form.field == 1 => {
+            form.kind = if key.code == KeyCode::Right {
+                (form.kind + 1) % 3
             } else {
-                (error.kind + 2) % 3
+                (form.kind + 2) % 3
             };
 
-            error.target.placeholder = EditForm::target_hint(error.kind).into();
-            Some(Modal::Edit(error))
+            form.target.placeholder = EditForm::target_hint(form.kind).into();
+            Some(Modal::Edit(form))
         }
-        KeyCode::Char(' ') if error.field == 4 => {
-            error.auto_allow = !error.auto_allow;
-            Some(Modal::Edit(error))
+        KeyCode::Char(' ') if form.field == 4 => {
+            form.auto_allow = !form.auto_allow;
+            Some(Modal::Edit(form))
         }
-        KeyCode::Enter if error.field < 3 => {
-            error.field += 1;
-            Some(Modal::Edit(error))
+        KeyCode::Enter if form.field < 3 => {
+            form.field += 1;
+            Some(Modal::Edit(form))
         }
         _ => {
-            match error.field {
+            match form.field {
                 0 => {
-                    error.name.key(key_value);
+                    form.name.key(key);
                 }
                 2 => {
-                    error.target.key(key_value);
+                    form.target.key(key);
                 }
                 3 => {
-                    error.secrets.key(key_value);
+                    form.secrets.key(key);
                 }
                 _ => {}
             }
 
-            Some(Modal::Edit(error))
+            Some(Modal::Edit(form))
         }
     }
 }
@@ -138,28 +134,28 @@ fn edit_server_key(key_value: KeyEvent, mcp_tab: &mut McpTab, mut error: Box<Edi
 /// The save of form E ended with R (the server, every server): the lists, the agents picker
 /// for a new server; an error: the form again.
 pub(super) fn edit_saved(
-    error: Box<EditForm>,
+    form: Box<EditForm>,
     result: Result<(Server, Vec<Server>), String>,
     mcp_tab: &mut McpTab,
 ) -> Option<Modal> {
-    let (text, all) = match result {
+    let (server, all) = match result {
         Ok(value) => value,
         Err(why) => {
             super::say(why, true, mcp_tab);
-            return Some(Modal::Edit(error));
+            return Some(Modal::Edit(form));
         }
     };
 
     mcp_tab.servers = all;
     super::say(
-        format!("{}: saved · agents start it at their next message", text.name),
+        format!("{}: saved · agents start it at their next message", server.name),
         false,
         mcp_tab,
     );
     super::probe(mcp_tab);
 
-    if error.old.is_none() {
-        super::open_agents(&text.name, mcp_tab);
+    if form.old.is_none() {
+        super::open_agents(&server.name, mcp_tab);
         return mcp_tab.modal.take();
     }
 

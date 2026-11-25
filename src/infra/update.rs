@@ -51,7 +51,7 @@ fn cache_path() -> PathBuf {
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |directory| directory.as_secs())
+        .map_or(0, |since| since.as_secs())
 }
 
 /// Cache file: `<unix seconds> <version>`. Fresh cache → 0 requests.
@@ -59,22 +59,22 @@ fn cached_latest() -> Option<String> {
     let path = cache_path();
 
     let cached = std::fs::read_to_string(&path).ok().and_then(|text| {
-        let (at, value) = text.trim().split_once(' ')?;
+        let (at, version) = text.trim().split_once(' ')?;
 
-        Some((at.parse::<u64>().ok()?, value.to_string()))
+        Some((at.parse::<u64>().ok()?, version.to_string()))
     });
 
     let now = now();
 
-    if let Some((at, value_value)) = &cached
+    if let Some((at, version)) = &cached
         && *at <= now
         && now - at < CACHE_SECS
     {
-        return Some(value_value.clone());
+        return Some(version.clone());
     }
 
     let Some(latest) = fetch_latest() else {
-        return cached.map(|(_, value_2)| value_2);
+        return cached.map(|(_, version)| version);
     };
 
     if let Some(dir) = path.parent() {
@@ -110,15 +110,15 @@ fn fetch_latest() -> Option<String> {
     parse(&value).map(|_| value)
 }
 
-fn parse(value: &str) -> Option<Vec<u64>> {
-    let parts: Option<Vec<u64>> = value.split('.').map(|path| path.parse().ok()).collect();
+fn parse(version: &str) -> Option<Vec<u64>> {
+    let parts: Option<Vec<u64>> = version.split('.').map(|part| part.parse().ok()).collect();
 
-    parts.filter(|path_value| !path_value.is_empty())
+    parts.filter(|parts| !parts.is_empty())
 }
 
 fn newer(latest: &str, current: &str) -> bool {
     match (parse(latest), parse(current)) {
-        (Some(line), Some(character)) => line > character,
+        (Some(latest_parts), Some(current_parts)) => latest_parts > current_parts,
         _ => false,
     }
 }

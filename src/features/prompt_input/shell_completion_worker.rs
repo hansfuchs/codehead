@@ -38,11 +38,11 @@ pub(super) fn fish_complete(line: &str, dir: &Path) -> Vec<(String, String)> {
         return Vec::new();
     };
 
-    let read = std::thread::spawn(move || {
-        let mut text_value = String::new();
-        let _ = out.read_to_string(&mut text_value);
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = out.read_to_string(&mut text);
 
-        text_value
+        text
     });
 
     let start = Instant::now();
@@ -61,15 +61,15 @@ pub(super) fn fish_complete(line: &str, dir: &Path) -> Vec<(String, String)> {
         }
     }
 
-    let text = read.join().unwrap_or_default();
+    let text = reader.join().unwrap_or_default();
     let mut seen = std::collections::HashSet::new();
 
     text.lines()
-        .filter_map(|line_value| {
-            let (thread_value, directory) = line_value.split_once('\t').unwrap_or((line_value, ""));
+        .filter_map(|line| {
+            let (token, description) = line.split_once('\t').unwrap_or((line, ""));
 
-            (!thread_value.is_empty() && seen.insert(thread_value.to_string()))
-                .then(|| (thread_value.to_string(), directory.trim().to_string()))
+            (!token.is_empty() && seen.insert(token.to_string()))
+                .then(|| (token.to_string(), description.trim().to_string()))
         })
         .take(MAX)
         .collect()
@@ -79,20 +79,20 @@ pub(super) fn fish_complete(line: &str, dir: &Path) -> Vec<(String, String)> {
 pub(super) fn path_commands() -> Vec<String> {
     use std::os::unix::fs::PermissionsExt;
 
-    let mut value: Vec<String> = std::env::var_os("PATH")
+    let mut commands: Vec<String> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .unwrap_or_default()
         .into_iter()
-        .flat_map(|directory| std::fs::read_dir(directory).into_iter().flatten().flatten())
-        .filter(|error| {
-            error
+        .flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten())
+        .filter(|entry| {
+            entry
                 .metadata()
-                .is_ok_and(|message| message.is_file() && message.permissions().mode() & 0o111 != 0)
+                .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
         })
-        .map(|error_value| error_value.file_name().to_string_lossy().into_owned())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
 
-    value.sort();
-    value.dedup();
-    value
+    commands.sort();
+    commands.dedup();
+    commands
 }

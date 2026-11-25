@@ -49,8 +49,8 @@ impl Talk {
         }
     }
 }
-pub(crate) fn hash(count: u64) -> f32 {
-    let mut x = count.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+pub(crate) fn hash(seed: u64) -> f32 {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
 
     x ^= x >> 29;
     x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -60,7 +60,7 @@ pub(crate) fn hash(count: u64) -> f32 {
 /// Working: dot K of TALK off at time T. Every dot blinks on its own: per slot (its own length
 /// and phase) a chance of 1 short blink at a random point, so the pattern stays in view and single
 /// dots wink in a pseudo random rhythm. TALK sets the tempo and how often.
-pub(crate) fn blinks(talk: Talk, key: usize, thread: f32) -> bool {
+pub(crate) fn blinks(talk: Talk, dot: usize, time: f32) -> bool {
     // (slot seconds, blink chance per slot, blink seconds)
     let (slot, chance, dur) = match talk {
         Talk::Sweep => (0.55, 0.16, 0.11),
@@ -73,72 +73,66 @@ pub(crate) fn blinks(talk: Talk, key: usize, thread: f32) -> bool {
         Talk::Stutter => (0.42, 0.22, 0.06),
     };
 
-    blink(
-        (talk as u64 + 1) * 7919 + key as u64 * 104_729,
-        slot,
-        chance,
-        dur,
-        thread,
-    )
+    blink((talk as u64 + 1) * 7919 + dot as u64 * 104_729, slot, chance, dur, time)
 }
 /// Thinking: dot K of TALK off at time T. As `blinks`, slower: longer slots, longer blinks
 /// (a slow, heavy-lidded wink per dot), own phases per talk.
-pub(crate) fn blinks_slow(talk: Talk, key: usize, thread: f32) -> bool {
-    blink((talk as u64 + 41) * 7919 + key as u64 * 104_729, 1.5, 0.3, 0.26, thread)
+pub(crate) fn blinks_slow(talk: Talk, dot: usize, time: f32) -> bool {
+    blink((talk as u64 + 41) * 7919 + dot as u64 * 104_729, 1.5, 0.3, 0.26, time)
 }
 /// 1 dot of seed SEED off at time T: per slot (SLOT s, ±30 % per dot, its own phase) CHANCE of 1
 /// blink of DUR s at a random point of the slot.
-pub(crate) fn blink(seed: u64, slot: f32, chance: f32, dur: f32, thread: f32) -> bool {
+pub(crate) fn blink(seed: u64, slot: f32, chance: f32, dur: f32, time: f32) -> bool {
     let len = slot * (0.7 + 0.6 * hash(seed));
-    let user = thread + hash(seed + 1) * len;
-    let j = (user / len).floor() as u64;
-    let at = user - j as f32 * len;
-    let text = seed.wrapping_mul(31).wrapping_add(j);
+    let local = time + hash(seed + 1) * len;
+    let j = (local / len).floor() as u64;
+    let at = local - j as f32 * len;
+    let slot_seed = seed.wrapping_mul(31).wrapping_add(j);
 
-    if hash(text * 3 + 2) >= chance {
+    if hash(slot_seed * 3 + 2) >= chance {
         return false;
     }
 
-    let start = hash(text * 3 + 3) * (len - dur).max(0.0);
+    let start = hash(slot_seed * 3 + 3) * (len - dur).max(0.0);
 
     (start..start + dur).contains(&at)
 }
 /// Dot K of PAT on at time T, status S (0 working, 1 thinking, 2 idle, 3 blocked, 4 done).
 /// BLINK: the idle blink style (0 single, 1 double, 2 row by row).
-pub(crate) fn lit(pat: Pattern, talk: Talk, blink: usize, text: usize, thread: f32, key: usize) -> bool {
-    let directory = pat.dots();
-    let (x, y) = directory[key];
+pub(crate) fn lit(pat: Pattern, talk: Talk, blink: usize, status: usize, time: f32, dot: usize) -> bool {
+    let dots = pat.dots();
+    let (x, y) = dots[dot];
     let center = x == 0.0 && y == 0.0;
 
-    match text {
-        0 => !blinks(talk, key, thread),
-        1 => !blinks_slow(talk, key, thread),
+    match status {
+        0 => !blinks(talk, dot, time),
+        1 => !blinks_slow(talk, dot, time),
         2 => {
-            let path = 2.6 + (blink as f32) * 0.7;
-            let user = thread.rem_euclid(path);
+            let period = 2.6 + (blink as f32) * 0.7;
+            let local = time.rem_euclid(period);
 
             match blink % 3 {
-                0 => user > 0.13,
-                1 => !(user < 0.1 || (0.22..0.32).contains(&user)),
-                _ => !(user < 0.48 && (user / 0.12) as usize == (y + 1.5) as usize),
+                0 => local > 0.13,
+                1 => !(local < 0.1 || (0.22..0.32).contains(&local)),
+                _ => !(local < 0.48 && (local / 0.12) as usize == (y + 1.5) as usize),
             }
         }
-        3 => center || ((thread * 4.0) as usize).is_multiple_of(2) == (x <= 0.0),
+        3 => center || ((time * 4.0) as usize).is_multiple_of(2) == (x <= 0.0),
         // done: the center (a pattern without one: its middle column, else its 1st dot)
         _ => {
             center
-                || (!directory.contains(&(0.0, 0.0))
-                    && if directory.iter().any(|path_value| path_value.0 == 0.0) {
+                || (!dots.contains(&(0.0, 0.0))
+                    && if dots.iter().any(|eye| eye.0 == 0.0) {
                         x == 0.0
                     } else {
-                        key == 0
+                        dot == 0
                     })
         }
     }
 }
 /// Eye, frame color of status S.
-pub(crate) fn colors(text: usize) -> (crate::domain::avatar::glyph::Rgb, crate::domain::avatar::glyph::Rgb) {
-    match text {
+pub(crate) fn colors(status: usize) -> (crate::domain::avatar::glyph::Rgb, crate::domain::avatar::glyph::Rgb) {
+    match status {
         0 => (CORAL, mix(MUTED, CORAL, 0.5)),
         3 => (WARN, WARN),
         4 => (MUTED, mix(BG, MUTED, 0.7)),

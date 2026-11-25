@@ -20,15 +20,15 @@ pub(crate) const WAVE_MS: u128 = 150;
 pub(crate) const CARD_H: u16 = 4;
 
 /// Rows of card C: `CARD_H`, +1 for its projects line.
-pub(crate) fn card_h(character: &Card) -> u16 {
-    CARD_H + u16::from(!character.projects.is_empty())
+pub(crate) fn card_h(card: &Card) -> u16 {
+    CARD_H + u16::from(!card.projects.is_empty())
 }
 
 /// S cut to W display columns (… at the cut).
-pub(crate) fn fit(text: &str, width_value: usize) -> String {
+pub(crate) fn fit(text: &str, width: usize) -> String {
     use unicode_width::UnicodeWidthChar;
 
-    if unicode_width::UnicodeWidthStr::width(text) <= width_value {
+    if unicode_width::UnicodeWidthStr::width(text) <= width {
         return text.to_string();
     }
 
@@ -38,7 +38,7 @@ pub(crate) fn fit(text: &str, width_value: usize) -> String {
     for character in text.chars() {
         let cw = character.width().unwrap_or(0);
 
-        if used + cw + 1 > width_value {
+        if used + cw + 1 > width {
             break;
         }
 
@@ -54,7 +54,7 @@ pub(crate) fn fit(text: &str, width_value: usize) -> String {
 pub(crate) fn draw_card(
     buf: &mut ratatui::buffer::Buffer,
     area: ratatui::layout::Rect,
-    character: &Card,
+    card: &Card,
     look: Look,
     tick: usize,
 ) {
@@ -81,26 +81,26 @@ pub(crate) fn draw_card(
     let inner = block.inner(area);
 
     block.render(area, buf);
-    let width_value = inner.width.saturating_sub(2) as usize;
+    let width = inner.width.saturating_sub(2) as usize;
 
-    let title_st = if character.unread || cur {
+    let title_st = if card.unread || cur {
         theme::bold()
     } else {
         theme::text()
     };
 
-    let mut status = card_status(character, tick);
+    let mut status = card_status(card, tick);
 
     if age {
-        append_age(character, width_value, &mut status);
+        append_age(card, width, &mut status);
     }
 
-    let mut lines = vec![Line::from(Span::styled(fit(&character.name(), width_value), title_st))];
+    let mut lines = vec![Line::from(Span::styled(fit(&card.name(), width), title_st))];
 
     // the projects: own line, below the title, above the status line
-    if !character.projects.is_empty() {
+    if !card.projects.is_empty() {
         lines.push(Line::from(Span::styled(
-            fit(&character.projects.join(" · "), width_value),
+            fit(&card.projects.join(" · "), width),
             theme::muted(),
         )));
     }
@@ -118,7 +118,7 @@ pub(crate) fn draw_card(
         theme::accent_edge(buf, area);
     }
 
-    draw_marks(buf, area, character);
+    draw_marks(buf, area, card);
 }
 
 #[cfg(test)]
@@ -135,15 +135,15 @@ pub(crate) struct Look {
     pub age: bool,
 }
 
-fn card_status(character: &Card, tick: usize) -> Vec<Span<'static>> {
-    let open = character.land.as_ref().filter(|line_value| line_value.open());
+fn card_status(card: &Card, tick: usize) -> Vec<Span<'static>> {
+    let open = card.land.as_ref().filter(|land| land.open());
 
-    if character.archived() {
-        archived_status(character)
-    } else if character.agents.blocked {
+    if card.archived() {
+        archived_status(card)
+    } else if card.agents.blocked {
         vec![Span::styled("? blocked", theme::fg(theme::pal().attention()))]
-    } else if character.agents.busy {
-        let word = if character.agents.monitoring {
+    } else if card.agents.busy {
+        let word = if card.agents.monitoring {
             "monitoring…"
         } else {
             "working…"
@@ -156,48 +156,45 @@ fn card_status(character: &Card, tick: usize) -> Vec<Span<'static>> {
             ),
             Span::styled(word, theme::muted()),
         ]
-    } else if character.completion.review {
+    } else if card.completion.review {
         vec![Span::styled("▷ step to review", theme::fg(theme::pal().info()))]
-    } else if let Some(line_3) = open {
+    } else if let Some(land) = open {
         vec![Span::styled(
-            format!("◇ {}", line_3.badge()),
+            format!("◇ {}", land.badge()),
             theme::fg(theme::pal().caution()),
         )]
-    } else if let Some(line_4) = character.land.as_ref().filter(|_| character.shipped()) {
-        let st = if *line_4 == crate::domain::landed::Land::Landed {
+    } else if let Some(land) = card.land.as_ref().filter(|_| card.shipped()) {
+        let st = if *land == crate::domain::landed::Land::Landed {
             theme::fg(theme::pal().success())
         } else {
             theme::muted()
         };
 
-        vec![Span::styled(format!("⇲ {}", line_4.badge()), st)]
-    } else if character.stale(crate::engine::now_ms()) {
-        stale_status(character)
-    } else if character.agents.live == 0 {
+        vec![Span::styled(format!("⇲ {}", land.badge()), st)]
+    } else if card.stale(crate::engine::now_ms()) {
+        stale_status(card)
+    } else if card.agents.live == 0 {
         vec![Span::styled("◦ ended", theme::muted())]
     } else {
         vec![Span::styled("◦ idle", theme::muted())]
     }
 }
 
-fn append_age(character: &Card, width_value: usize, status: &mut Vec<Span<'static>>) {
+fn append_age(card: &Card, width: usize, status: &mut Vec<Span<'static>>) {
     let used: usize = status.iter().map(ratatui::prelude::Span::width).sum();
-    let tail = [ago(character.activity), character.branch.clone()]
+    let tail = [ago(card.activity), card.branch.clone()]
         .into_iter()
-        .filter(|text_value| !text_value.is_empty())
+        .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join(" · ");
 
-    if !tail.is_empty() && used + 3 < width_value {
-        status.push(Span::styled(
-            fit(&format!(" · {tail}"), width_value - used),
-            theme::muted(),
-        ));
+    if !tail.is_empty() && used + 3 < width {
+        status.push(Span::styled(fit(&format!(" · {tail}"), width - used), theme::muted()));
     }
 }
 
-fn draw_marks(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, character: &Card) {
-    if character.unread {
+fn draw_marks(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, card: &Card) {
+    if card.unread {
         let dot = ratatui::layout::Rect {
             x: area.right().saturating_sub(3),
             y: area.y,
@@ -215,12 +212,12 @@ fn draw_marks(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, ch
     // an unsent message in the prompt: on the bottom border, right
     let tag = " ✎ unsent ";
 
-    if character.draft && area.width >= tag.chars().count() as u16 + 8 {
-        let width_2 = tag.chars().count() as u16;
+    if card.draft && area.width >= tag.chars().count() as u16 + 8 {
+        let width = tag.chars().count() as u16;
         let at = ratatui::layout::Rect {
-            x: area.right() - width_2 - 3,
+            x: area.right() - width - 3,
             y: area.bottom() - 1,
-            width: width_2,
+            width,
             height: 1,
         };
 
@@ -232,24 +229,24 @@ fn draw_marks(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, ch
     }
 }
 
-fn archived_status(character: &Card) -> Vec<Span<'static>> {
-    let open = character.land.as_ref().filter(|line| line.open());
-    let mut value = vec![Span::styled("▣ archived", theme::muted())];
+fn archived_status(card: &Card) -> Vec<Span<'static>> {
+    let open = card.land.as_ref().filter(|land| land.open());
+    let mut spans = vec![Span::styled("▣ archived", theme::muted())];
 
-    if let Some(line_2) = open {
-        value.push(Span::styled(
-            format!(" · ◇ {}", line_2.badge()),
+    if let Some(land) = open {
+        spans.push(Span::styled(
+            format!(" · ◇ {}", land.badge()),
             theme::fg(theme::pal().caution()),
         ));
     }
 
-    value
+    spans
 }
 
-fn stale_status(character: &Card) -> Vec<Span<'static>> {
-    let days = crate::domain::landed::archive_in_days(character.activity, crate::engine::now_ms());
+fn stale_status(card: &Card) -> Vec<Span<'static>> {
+    let days = crate::domain::landed::archive_in_days(card.activity, crate::engine::now_ms());
 
-    let what = if character.land == Some(crate::domain::landed::Land::Main) {
+    let what = if card.land == Some(crate::domain::landed::Land::Main) {
         "on main"
     } else {
         "0 code"

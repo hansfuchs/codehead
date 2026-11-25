@@ -30,81 +30,79 @@ pub(crate) fn path() -> PathBuf {
 static CACHE: Mutex<Option<(Option<SystemTime>, Vec<Shortcut>)>> = Mutex::new(None);
 
 /// A valid name: letters, digits, `_`, `-`.
-pub(crate) fn valid_name(count: &str) -> bool {
-    !count.is_empty()
-        && count
+pub(crate) fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
             .chars()
             .all(|character| character.is_alphanumeric() || character == '_' || character == '-')
 }
 
 pub(crate) fn parse(text: &str) -> Result<Vec<Shortcut>, String> {
-    let thread: toml::Table = text.parse().map_err(|error: toml::de::Error| error.to_string())?;
+    let table: toml::Table = text.parse().map_err(|error: toml::de::Error| error.to_string())?;
 
-    let mut value: Vec<Shortcut> = thread
+    let mut shortcuts: Vec<Shortcut> = table
         .into_iter()
-        .filter_map(|(name, val)| {
+        .filter_map(|(name, value)| {
             Some(Shortcut {
                 name,
-                text: val.as_str()?.to_string(),
+                text: value.as_str()?.to_string(),
             })
         })
         .collect();
 
-    value.sort_by(|agent, bytes| agent.name.cmp(&bytes.name));
-    Ok(value)
+    shortcuts.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(shortcuts)
 }
 
 /// Every shortcut, A→Z (1 stat per call; the file again when it changed).
 pub(crate) fn all() -> Vec<Shortcut> {
-    let path_value = path();
-    let at = std::fs::metadata(&path_value)
-        .and_then(|message| message.modified())
-        .ok();
-    let mut group = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let file = path();
+    let at = std::fs::metadata(&file).and_then(|meta| meta.modified()).ok();
+    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    if let Some((thread, value)) = group.as_ref()
-        && *thread == at
+    if let Some((cached_at, cached)) = cache.as_ref()
+        && *cached_at == at
     {
-        return value.clone();
+        return cached.clone();
     }
 
-    let value_value = match std::fs::read_to_string(&path_value) {
+    let shortcuts = match std::fs::read_to_string(&file) {
         Ok(text) => parse(&text).unwrap_or_default(),
         Err(_) => defaults(),
     };
 
-    *group = Some((at, value_value.clone()));
+    *cache = Some((at, shortcuts.clone()));
 
-    value_value
+    shortcuts
 }
 
 /// The text of shortcut NAME.
 pub(crate) fn get(name: &str) -> Option<String> {
     all()
         .into_iter()
-        .find(|text_value| text_value.name == name)
-        .map(|text_2| text_2.text)
+        .find(|shortcut| shortcut.name == name)
+        .map(|shortcut| shortcut.text)
 }
 
 /// TOML of LIST: `name = '''text'''` (a text with `'''` in it: a basic string).
 pub(crate) fn render(list: &[Shortcut]) -> String {
     let mut out = String::from("# codehead shortcuts: #name in a prompt → this text\n\n");
 
-    for text_value in list {
-        let key = if text_value
+    for shortcut in list {
+        let key = if shortcut
             .name
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
         {
-            text_value.name.clone()
+            shortcut.name.clone()
         } else {
-            toml::Value::String(text_value.name.clone()).to_string()
+            toml::Value::String(shortcut.name.clone()).to_string()
         };
 
-        if text_value.text.contains("'''") {
-            let _ = write!(out, "{key} = {}\n\n", toml::Value::String(text_value.text.clone()));
+        if shortcut.text.contains("'''") {
+            let _ = write!(out, "{key} = {}\n\n", toml::Value::String(shortcut.text.clone()));
         } else {
-            let _ = write!(out, "{key} = '''\n{}'''\n\n", text_value.text);
+            let _ = write!(out, "{key} = '''\n{}'''\n\n", shortcut.text);
         }
     }
 
@@ -113,20 +111,17 @@ pub(crate) fn render(list: &[Shortcut]) -> String {
 
 /// LIST into the file.
 pub(crate) fn save(list: &[Shortcut]) -> Result<(), String> {
-    let path_value = path();
+    let file = path();
 
-    if let Some(directory) = path_value.parent() {
-        std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     }
 
     let mut list = list.to_vec();
 
-    list.sort_by(|agent, bytes| agent.name.cmp(&bytes.name));
-    crate::engine::write_atomic(&path_value, render(&list).as_bytes())
-        .map_err(|error_value| error_value.to_string())?;
-    let at = std::fs::metadata(&path_value)
-        .and_then(|message| message.modified())
-        .ok();
+    list.sort_by(|left, right| left.name.cmp(&right.name));
+    crate::engine::write_atomic(&file, render(&list).as_bytes()).map_err(|error| error.to_string())?;
+    let at = std::fs::metadata(&file).and_then(|meta| meta.modified()).ok();
 
     *CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((at, list));
 
@@ -144,44 +139,43 @@ pub(crate) fn expand(text: &str) -> String {
 
 pub(crate) fn expand_with(list: &[Shortcut], text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
-    let name = |character: char| character.is_alphanumeric() || character == '_' || character == '-';
+    let name_char = |character: char| character.is_alphanumeric() || character == '_' || character == '-';
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
 
     while i < chars.len() {
-        let character_value = chars[i];
+        let character = chars[i];
         let start = i == 0 || chars[i - 1].is_whitespace() || matches!(chars[i - 1], '(' | '[' | '"' | '\'');
 
-        if let ControlFlow::Break(()) =
-            skip_terminal_marker(list, &chars, name, &mut out, &mut i, character_value, start)
+        if let ControlFlow::Break(()) = expand_shortcut_at(list, &chars, name_char, &mut out, &mut i, character, start)
         {
             continue;
         }
 
-        out.push(character_value);
+        out.push(character);
         i += 1;
     }
 
     out
 }
 
-fn skip_terminal_marker(
+fn expand_shortcut_at(
     list: &[Shortcut],
     chars: &[char],
-    name: impl Fn(char) -> bool,
+    name_char: impl Fn(char) -> bool,
     out: &mut String,
     i: &mut usize,
-    character_value: char,
+    character: char,
     start: bool,
 ) -> ControlFlow<()> {
-    if character_value == '#' && start {
+    if character == '#' && start {
         let mut j = *i + 1;
 
-        expand_with_while_j_chars_len_name_chars(chars, name, &mut j);
+        skip_name_chars(chars, name_char, &mut j);
 
         let word: String = chars[*i + 1..j].iter().collect();
 
-        if let ControlFlow::Break(()) = expand_named_argument(list, out, i, j, &word) {
+        if let ControlFlow::Break(()) = push_shortcut_text(list, out, i, j, &word) {
             return ControlFlow::Break(());
         }
     }
@@ -189,9 +183,9 @@ fn skip_terminal_marker(
     ControlFlow::Continue(())
 }
 
-fn expand_named_argument(list: &[Shortcut], out: &mut String, i: &mut usize, j: usize, word: &str) -> ControlFlow<()> {
-    if let Some(text_2) = list.iter().find(|text_value| text_value.name == word) {
-        out.push_str(&text_2.text);
+fn push_shortcut_text(list: &[Shortcut], out: &mut String, i: &mut usize, j: usize, word: &str) -> ControlFlow<()> {
+    if let Some(shortcut) = list.iter().find(|shortcut| shortcut.name == word) {
+        out.push_str(&shortcut.text);
         *i = j;
         return ControlFlow::Break(());
     }
@@ -199,8 +193,8 @@ fn expand_named_argument(list: &[Shortcut], out: &mut String, i: &mut usize, j: 
     ControlFlow::Continue(())
 }
 
-fn expand_with_while_j_chars_len_name_chars(chars: &[char], name: impl Fn(char) -> bool, j: &mut usize) {
-    while *j < chars.len() && name(chars[*j]) {
+fn skip_name_chars(chars: &[char], name_char: impl Fn(char) -> bool, j: &mut usize) {
+    while *j < chars.len() && name_char(chars[*j]) {
         *j += 1;
     }
 }

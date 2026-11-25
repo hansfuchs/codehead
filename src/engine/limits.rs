@@ -19,22 +19,22 @@ fn path() -> std::path::PathBuf {
     super::data_dir().join("limits.json")
 }
 
-/// F on the file's JSON, under its lock, written back.
-fn edit(file: impl FnOnce(&mut Value)) {
-    let path_value = path();
+/// CHANGE on the file's JSON, under its lock, written back.
+fn edit(change: impl FnOnce(&mut Value)) {
+    let file = path();
 
     let _ = super::locked(&super::data_dir().join("limits.lock"), || {
-        let mut value: Value = std::fs::read(&path_value)
+        let mut value: Value = std::fs::read(&file)
             .ok()
-            .and_then(|thread| serde_json::from_slice(&thread).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_else(|| json!({}));
 
         if !value.is_object() {
             value = json!({});
         }
 
-        file(&mut value);
-        super::write_atomic(&path_value, value.to_string().as_bytes())
+        change(&mut value);
+        super::write_atomic(&file, value.to_string().as_bytes())
     });
 }
 
@@ -66,21 +66,21 @@ pub(crate) fn add_cost(usd: f64) {
     });
 }
 
-/// HARNESS reported windows L (window, used %, resets at): the new values, a calibration sample.
-pub(crate) fn record(harness: &str, line: &[(String, f64, Option<u64>)]) {
+/// HARNESS reported WINDOWS (window, used %, resets at): the new values, a calibration sample.
+pub(crate) fn record(harness: &str, windows: &[(String, f64, Option<u64>)]) {
     edit(|value| {
-        for (width, pct, resets) in line {
-            value[harness][width] = json!({"pct": pct, "resets": resets});
+        for (window, pct, resets) in windows {
+            value[harness][window] = json!({"pct": pct, "resets": resets});
         }
 
         let usd = value["_cal"]["usd"].as_f64().unwrap_or(0.0);
-        let windows: serde_json::Map<String, Value> = line
+        let reported: serde_json::Map<String, Value> = windows
             .iter()
-            .map(|(width_value, pct, resets)| (format!("{harness}/{width_value}"), json!([pct, resets])))
+            .map(|(window, pct, resets)| (format!("{harness}/{window}"), json!([pct, resets])))
             .collect();
         let mut samples = value["_cal"]["samples"].as_array().cloned().unwrap_or_default();
 
-        samples.push(json!({"ts": super::now_ms() / 1000, "usd": usd, "w": windows}));
+        samples.push(json!({"ts": super::now_ms() / 1000, "usd": usd, "w": reported}));
         let drop = samples.len().saturating_sub(SAMPLES);
 
         samples.drain(..drop);
@@ -116,36 +116,36 @@ fn parse(value: &Value) -> Vec<Window> {
     let samples = value["_cal"]["samples"].as_array().cloned().unwrap_or_default();
     let mut out = Vec::new();
 
-    for (height, ws) in value.as_object().into_iter().flatten() {
-        if height.starts_with('_') {
+    for (harness, windows) in value.as_object().into_iter().flatten() {
+        if harness.starts_with('_') {
             continue;
         }
 
-        parse_windows(&samples, &mut out, height, ws);
+        parse_windows(&samples, &mut out, harness, windows);
     }
 
     out
 }
 
-fn parse_windows(samples: &[Value], out: &mut Vec<Window>, height: &String, ws: &Value) {
-    for (width, line) in ws.as_object().into_iter().flatten() {
+fn parse_windows(samples: &[Value], out: &mut Vec<Window>, harness: &String, windows: &Value) {
+    for (label, window) in windows.as_object().into_iter().flatten() {
         // `seven_day_overage_included`: the 7d window again, with overage: 0 own row
-        if let ControlFlow::Break(()) = skip_overage_window(width) {
+        if let ControlFlow::Break(()) = skip_overage_window(label) {
             continue;
         }
 
         out.push(Window {
-            harness: height.clone(),
-            label: width.clone(),
-            pct: line["pct"].as_f64().unwrap_or(0.0),
-            resets: line["resets"].as_u64(),
-            usd_per_pct: rate(samples, &format!("{height}/{width}")),
+            harness: harness.clone(),
+            label: label.clone(),
+            pct: window["pct"].as_f64().unwrap_or(0.0),
+            resets: window["resets"].as_u64(),
+            usd_per_pct: rate(samples, &format!("{harness}/{label}")),
         });
     }
 }
 
-fn skip_overage_window(width: &str) -> ControlFlow<()> {
-    if width.ends_with("_overage_included") {
+fn skip_overage_window(label: &str) -> ControlFlow<()> {
+    if label.ends_with("_overage_included") {
         return ControlFlow::Break(());
     }
 
@@ -158,12 +158,12 @@ fn rate(samples: &[Value], key: &str) -> Option<f64> {
     // per period, in order: (resets, (usd, pct) first, (usd, pct) last)
     let mut periods: Vec<WindowPeriod> = Vec::new();
 
-    for text in samples {
-        let Some(width) = text["w"].get(key) else { continue };
+    for sample in samples {
+        let Some(window) = sample["w"].get(key) else { continue };
         let (pct, resets, usd) = (
-            width[0].as_f64().unwrap_or(0.0),
-            width[1].as_u64(),
-            text["usd"].as_f64().unwrap_or(0.0),
+            window[0].as_f64().unwrap_or(0.0),
+            window[1].as_u64(),
+            sample["usd"].as_f64().unwrap_or(0.0),
         );
 
         match periods.last_mut() {
@@ -179,12 +179,12 @@ fn rate(samples: &[Value], key: &str) -> Option<f64> {
     }
 
     periods.iter().rev().find_map(|period| {
-        let (du, dp) = (
+        let (usd_rise, pct_rise) = (
             period.last.usd - period.first.usd,
             period.last.percent - period.first.percent,
         );
 
-        (dp >= MIN_RISE && du > 0.0).then(|| du / dp)
+        (pct_rise >= MIN_RISE && usd_rise > 0.0).then(|| usd_rise / pct_rise)
     })
 }
 

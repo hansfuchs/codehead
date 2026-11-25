@@ -142,10 +142,8 @@ pub(crate) struct Command {
     pub action: Option<Action>,
 }
 
-fn secs(thread: SystemTime) -> u64 {
-    thread
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |directory| directory.as_secs())
+fn secs(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs())
 }
 
 fn age(time: u64) -> String {
@@ -159,10 +157,10 @@ fn age(time: u64) -> String {
 /// Fuzzy score of Q in a path-like LABEL, like the VS Code file picker: Q's chars in order, a run
 /// and a word start score more, a match in the last path part counts double. None: 0 match.
 pub(crate) fn score(query: &str, label: &str) -> Option<i64> {
-    let query_value = query.to_lowercase();
-    let whole = crate::domain::notes::fuzzy(&query_value, label)?;
+    let lower = query.to_lowercase();
+    let whole = crate::domain::notes::fuzzy(&lower, label)?;
     let base = label.rsplit('/').next().unwrap_or(label);
-    let in_base = crate::domain::notes::fuzzy(&query_value, base).map_or(0, |text| text * 2);
+    let in_base = crate::domain::notes::fuzzy(&lower, base).map_or(0, |points| points * 2);
 
     // a shorter label with the same match: closer to what was typed
     Some(whole.max(in_base) * 4 - (label.chars().count() as i64).min(200) / 8)
@@ -175,33 +173,33 @@ pub(crate) fn matches(items: &[Item], query: &str) -> Vec<usize> {
         return (0..items.len()).collect();
     }
 
-    let in_info = |it: &Item| {
-        if it.info.is_empty() {
+    let in_info = |item: &Item| {
+        if item.info.is_empty() {
             None
         } else {
-            crate::domain::notes::fuzzy(&query.to_lowercase(), &it.info)
-                .filter(|text| *text >= 100)
-                .map(|text_value| text_value - 10_000)
+            crate::domain::notes::fuzzy(&query.to_lowercase(), &item.info)
+                .filter(|points| *points >= 100)
+                .map(|points| points - 10_000)
         }
     };
 
-    let mut value: Vec<(i64, usize)> = items
+    let mut scored: Vec<(i64, usize)> = items
         .iter()
         .enumerate()
-        .filter_map(|(i, it)| {
-            score(query, &it.label)
-                .or_else(|| in_info(it))
-                .map(|text_2| (text_2, i))
+        .filter_map(|(i, item)| {
+            score(query, &item.label)
+                .or_else(|| in_info(item))
+                .map(|points| (points, i))
         })
         .collect();
 
-    value.sort_by_key(|(text_3, i)| (*text_3, items[*i].time, *i));
-    value.into_iter().map(|(_, i)| i).collect()
+    scored.sort_by_key(|(points, i)| (*points, items[*i].time, *i));
+    scored.into_iter().map(|(_, i)| i).collect()
 }
 
 /// The last W columns of S (`…` in front when cut): a path keeps its file name.
-fn tail(text: &str, width_value: usize) -> String {
-    if text.width() <= width_value {
+fn tail(text: &str, width: usize) -> String {
+    if text.width() <= width {
         return text.to_string();
     }
 
@@ -209,13 +207,13 @@ fn tail(text: &str, width_value: usize) -> String {
     let mut used = 1;
 
     for character in text.chars().rev() {
-        let cw = character.width().unwrap_or(0);
+        let char_width = character.width().unwrap_or(0);
 
-        if used + cw > width_value {
+        if used + char_width > width {
             break;
         }
 
-        used += cw;
+        used += char_width;
         out.push(character);
     }
 
@@ -225,8 +223,8 @@ fn tail(text: &str, width_value: usize) -> String {
 }
 
 /// The first W columns of S (`…` at the end when cut).
-fn head(text: &str, width_value: usize) -> String {
-    if text.width() <= width_value {
+fn head(text: &str, width: usize) -> String {
+    if text.width() <= width {
         return text.to_string();
     }
 
@@ -234,13 +232,13 @@ fn head(text: &str, width_value: usize) -> String {
     let mut used = 1;
 
     for character in text.chars() {
-        let cw = character.width().unwrap_or(0);
+        let char_width = character.width().unwrap_or(0);
 
-        if used + cw > width_value {
+        if used + char_width > width {
             break;
         }
 
-        used += cw;
+        used += char_width;
         out.push(character);
     }
 
@@ -295,11 +293,11 @@ impl Command {
     }
 
     /// Row of the last draw at P (hover).
-    pub(crate) fn row_at(&self, path: Position) -> Option<Rect> {
+    pub(crate) fn row_at(&self, at: Position) -> Option<Rect> {
         self.rows
             .iter()
-            .map(|(result, _, _)| *result)
-            .find(|result_value| result_value.contains(path))
+            .map(|(rect, _, _)| *rect)
+            .find(|rect| rect.contains(at))
     }
 }
 
@@ -352,10 +350,10 @@ fn apply_current_source(source: &str, items: Vec<Item>, command: &mut Command) {
     }
 }
 
-fn sync_command(command_value: &mut Command, ta: &TextArea) -> Option<(Pos, String)> {
+fn sync_command(command: &mut Command, ta: &TextArea) -> Option<(Pos, String)> {
     // a live preview in the text: the `>query` typed before it stays open
-    if let Some((at, typed)) = command_value.preview.typed(ta)
-        && command_value.at == Some(at)
+    if let Some((at, typed)) = command.preview.typed(ta)
+        && command.at == Some(at)
     {
         return Some((at, typed.chars().skip(1).collect()));
     }
@@ -364,17 +362,17 @@ fn sync_command(command_value: &mut Command, ta: &TextArea) -> Option<(Pos, Stri
 
     // the cursor left the closed `>`: a `>` typed there later opens again
     if found.is_none() {
-        command_value.closed = None;
+        command.closed = None;
     }
 
-    let Some((at, query)) = found.filter(|(at, _)| command_value.closed != Some(*at)) else {
-        self::reset(command_value);
+    let Some((at, query)) = found.filter(|(at, _)| command.closed != Some(*at)) else {
+        self::reset(command);
         return None;
     };
 
-    if command_value.at != Some(at) {
-        self::reset(command_value);
-        command_value.at = Some(at);
+    if command.at != Some(at) {
+        self::reset(command);
+        command.at = Some(at);
     }
 
     Some((at, query))
@@ -440,8 +438,8 @@ fn settle_command(command: &mut Command, query: &str) -> usize {
         request_artifact_titles(command);
     }
 
-    let directory = self::depth(command);
-    let level = self::level(directory, command);
+    let depth = self::depth(command);
+    let level = self::level(depth, command);
 
     let count = if let Level::Items(_) = level {
         update_matches(command, query, level);
@@ -454,42 +452,42 @@ fn settle_command(command: &mut Command, query: &str) -> usize {
     if command
         .seen
         .as_ref()
-        .is_none_or(|(sd, sq)| *sd != directory || sq != query)
+        .is_none_or(|(seen_depth, seen_query)| *seen_depth != depth || seen_query != query)
     {
         let top = Command::from_top(level);
 
-        command.cursor[directory] = if top { 0 } else { count.saturating_sub(1) };
+        command.cursor[depth] = if top { 0 } else { count.saturating_sub(1) };
 
-        command.offset[directory] = if top {
+        command.offset[depth] = if top {
             0
         } else {
             count.saturating_sub(dropdown::MAX_ROWS)
         };
 
-        command.seen = Some((directory, query.to_string()));
+        command.seen = Some((depth, query.to_string()));
     }
 
-    command.cursor[directory] = command.cursor[directory].min(count.saturating_sub(1));
+    command.cursor[depth] = command.cursor[depth].min(count.saturating_sub(1));
 
     count
 }
 
 fn update_matches(command: &mut Command, query: &str, level: Level) {
     if command.matched.0 != query {
-        let mut message = matches(&command.items, query);
+        let mut order = matches(&command.items, query);
 
         // top-down list: the best match on top
         if Command::from_top(level) && !query.is_empty() {
-            message.reverse();
+            order.reverse();
         }
 
-        command.matched = (query.to_string(), message);
+        command.matched = (query.to_string(), order);
     }
 }
 
 fn update_cached_titles(command: &mut Command, url: &String, title: &String) {
     for items in command.cache.values_mut() {
-        for item in items.iter_mut().filter(|i| i.insert == *url) {
+        for item in items.iter_mut().filter(|candidate| candidate.insert == *url) {
             title.clone_into(&mut item.label);
         }
     }
@@ -512,7 +510,7 @@ fn request_artifact_titles(command: &mut Command) {
 }
 
 fn update_artifact_labels(url: &str, items: &mut [Item], title: &str) {
-    for item in items.iter_mut().filter(|i| i.insert == url) {
+    for item in items.iter_mut().filter(|candidate| candidate.insert == url) {
         title.clone_into(&mut item.label);
     }
 }

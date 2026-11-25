@@ -2,12 +2,12 @@ use super::*;
 
 #[test]
 fn enter_on_a_comment_edits_it_0_text_deletes_it() {
-    let mut value = view(parse(DIFF));
+    let mut view = view(parse(DIFF));
 
-    value.id = "changes-edit-0000".into();
-    value.comment_state.comments.clear();
-    value.build(100);
-    value.add_comment(
+    view.id = "changes-edit-0000".into();
+    view.comment_state.comments.clear();
+    view.build(100);
+    view.add_comment(
         &[Spot {
             path: "src/a.rs".into(),
             line: 11,
@@ -16,208 +16,185 @@ fn enter_on_a_comment_edits_it_0_text_deletes_it() {
         "old",
     );
 
-    assert_eq!(value.comment_state.comments[0].quote, "+ let b = 3;");
+    assert_eq!(view.comment_state.comments[0].quote, "+ let b = 3;");
 
-    value.at = value
-        .layout
-        .rows
-        .iter()
-        .position(|result| result.comment == Some(0))
-        .unwrap();
-    press(&mut value, KeyCode::Enter);
+    view.at = view.layout.rows.iter().position(|row| row.comment == Some(0)).unwrap();
+    press(&mut view, KeyCode::Enter);
 
     let Some(Modal::Comment {
         target: Target::Edit(_),
         ..
-    }) = &value.modal_state.modal
+    }) = &view.modal_state.modal
     else {
         panic!("edit modal")
     };
 
-    value.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    view.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
 
-    for character in "new".chars() {
-        press(&mut value, KeyCode::Char(character));
+    for typed in "new".chars() {
+        press(&mut view, KeyCode::Char(typed));
     }
 
-    value.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+    view.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
 
     assert!(
-        value.comment_state.comments[0].text.ends_with("new"),
+        view.comment_state.comments[0].text.ends_with("new"),
         "{:?}",
-        value.comment_state.comments
+        view.comment_state.comments
     );
 
-    press(&mut value, KeyCode::Enter);
-    value.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    press(&mut view, KeyCode::Enter);
+    view.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
 
-    if let Some(Modal::Comment { text, .. }) = value.modal_state.modal.as_mut() {
+    if let Some(Modal::Comment { text, .. }) = view.modal_state.modal.as_mut() {
         text.set_text("");
     }
 
-    value.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+    view.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
 
-    assert_eq!(value.comment_state.comments, [] as [crate::domain::changes::Comment; 0]);
+    assert_eq!(view.comment_state.comments, [] as [crate::domain::changes::Comment; 0]);
 
     let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-edit-0000"));
 }
 
 #[test]
 fn comment_threads_unfold_reply_edit_fold_by_keys() {
-    let (id, mut value) = prepare_comment_thread();
+    let (id, mut view) = prepare_comment_thread();
 
     let Some(Modal::Comment {
         target: Target::EditReply(cid, 0),
-        text: ta,
+        text: area,
         ..
-    }) = &mut value.modal_state.modal
+    }) = &mut view.modal_state.modal
     else {
         panic!("reply edit modal")
     };
 
     assert_eq!(cid, "c1");
 
-    ta.set_text("the spec says 3, page 2");
-    value.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+    area.set_text("the spec says 3, page 2");
+    view.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
 
     assert_eq!(read_comments(id)[0].replies[0].text, "the spec says 3, page 2");
 
     // c on the comment: a reply of the owner, under the agent's
-    press(&mut value, KeyCode::Char('c'));
+    press(&mut view, KeyCode::Char('c'));
 
     let Some(Modal::Comment {
         target: Target::Reply(_),
         ..
-    }) = &value.modal_state.modal
+    }) = &view.modal_state.modal
     else {
         panic!("reply modal")
     };
 
-    for ch in "ok, keep it".chars() {
-        press(&mut value, KeyCode::Char(ch));
+    for typed in "ok, keep it".chars() {
+        press(&mut view, KeyCode::Char(typed));
     }
 
     assert_eq!(
-        value.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
+        view.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
         Act::Toast("reply on c1 · ctrl+enter: in the batch · @agent: at once".into())
     );
 
-    let comment_value = &read_comments(id)[0];
+    let comment = &read_comments(id)[0];
 
     assert_eq!(
         (
-            comment_value.replies.len(),
-            comment_value.replies[1].by.as_str(),
-            comment_value.replies[1].text.as_str(),
-            comment_value.sent
+            comment.replies.len(),
+            comment.replies[1].by.as_str(),
+            comment.replies[1].text.as_str(),
+            comment.sent
         ),
         (2, "", "ok, keep it", false)
     );
     assert!(
-        text(&value)
+        text(&view)
             .iter()
-            .any(|line_4| line_4.contains("↳ you") && line_4.contains("ok, keep it"))
+            .any(|line| line.contains("↳ you") && line.contains("ok, keep it"))
     );
 
     // d d on the owner's reply: it goes
-    value.at = (0..value.layout.rows.len())
-        .find(|&i| value.row_comment(i) == Some((0, Some(1))))
+    view.at = (0..view.layout.rows.len())
+        .find(|&i| view.row_comment(i) == Some((0, Some(1))))
         .unwrap();
-    press(&mut value, KeyCode::Char('d'));
-    press(&mut value, KeyCode::Char('d'));
+    press(&mut view, KeyCode::Char('d'));
+    press(&mut view, KeyCode::Char('d'));
 
     assert_eq!(read_comments(id)[0].replies.len(), 1);
 
     // e off a comment: the file in the IDE
-    value.at = value
-        .layout
-        .rows
-        .iter()
-        .position(|result_value| result_value.head)
-        .unwrap();
+    view.at = view.layout.rows.iter().position(|row| row.head).unwrap();
 
-    assert!(matches!(press(&mut value, KeyCode::Char('e')), Act::Open(..)));
+    assert!(matches!(press(&mut view, KeyCode::Char('e')), Act::Open(..)));
 
     let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir(id));
 }
 
 fn prepare_comment_thread() -> (&'static str, View) {
     let id = "changes-threads-keys-0000";
-    let mut value = thread_view(id);
+    let mut view = thread_view(id);
 
-    value.add_comment(&spot11(), "why 3?");
+    view.add_comment(&spot11(), "why 3?");
     threads::reply(id, "REV", "c1", "the spec says 3\nsee docs", false).unwrap();
-    resync(&mut value);
+    resync(&mut view);
 
     // unfolded: the reply under the comment, its unseen dot
-    let thread = text(&value);
-    let at = thread.iter().position(|line| line.contains("✎ c1")).unwrap();
+    let rows = text(&view);
+    let at = rows.iter().position(|line| line.contains("✎ c1")).unwrap();
 
     assert!(
-        thread[at + 1].contains("↳ ● @REV")
-            && thread[at + 1].contains("the spec says 3")
-            && thread[at + 2].contains("see docs"),
-        "{thread:#?}"
+        rows[at + 1].contains("↳ ● @REV")
+            && rows[at + 1].contains("the spec says 3")
+            && rows[at + 2].contains("see docs"),
+        "{rows:#?}"
     );
 
     // C on the comment: 1 row, the reply count, the unseen count
-    value.at = value
-        .layout
-        .rows
-        .iter()
-        .position(|result| result.comment == Some(0))
-        .unwrap();
-    value.key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT));
-    let thread_value = text(&value);
-    let at = thread_value
-        .iter()
-        .position(|line_value| line_value.contains("✎ c1"))
-        .unwrap();
+    view.at = view.layout.rows.iter().position(|row| row.comment == Some(0)).unwrap();
+    view.key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT));
+    let folded = text(&view);
+    let at = folded.iter().position(|line| line.contains("✎ c1")).unwrap();
 
     assert!(
-        thread_value[at].contains("(1 reply)")
-            && thread_value[at].contains("● 1 new")
-            && !thread_value.iter().any(|line_2| line_2.contains("the spec says 3")),
-        "{thread_value:#?}"
+        folded[at].contains("(1 reply)")
+            && folded[at].contains("● 1 new")
+            && !folded.iter().any(|line| line.contains("the spec says 3")),
+        "{folded:#?}"
     );
 
     // enter: the whole thread, the cursor on its head; ↓: the reply's row
-    press(&mut value, KeyCode::Enter);
+    press(&mut view, KeyCode::Enter);
 
-    assert!(text(&value).iter().any(|line_3| line_3.contains("the spec says 3")));
-    assert_eq!(value.row_comment(value.at), Some((0, None)));
+    assert!(text(&view).iter().any(|line| line.contains("the spec says 3")));
+    assert_eq!(view.row_comment(view.at), Some((0, None)));
 
-    press(&mut value, KeyCode::Down);
+    press(&mut view, KeyCode::Down);
 
-    assert_eq!(value.row_comment(value.at), Some((0, Some(0))));
+    assert_eq!(view.row_comment(view.at), Some((0, Some(0))));
 
     // enter on the reply: its edit modal; ctrl+enter saves it
-    press(&mut value, KeyCode::Enter);
+    press(&mut view, KeyCode::Enter);
 
-    (id, value)
+    (id, view)
 }
 
 #[test]
 fn an_owner_mention_sends_the_comment_at_once_and_skips_the_batch() {
     let id = "changes-mention-0000";
-    let mut value = thread_view(id);
+    let mut view = thread_view(id);
 
-    value.members = vec!["REV".into(), "LEAD".into()];
-    value.add_comment(&spot11(), "why 3?");
-    value.at = value
-        .layout
-        .rows
-        .iter()
-        .position(|result| result.comment == Some(0))
-        .unwrap();
+    view.members = vec!["REV".into(), "LEAD".into()];
+    view.add_comment(&spot11(), "why 3?");
+    view.at = view.layout.rows.iter().position(|row| row.comment == Some(0)).unwrap();
 
-    press(&mut value, KeyCode::Char('c'));
+    press(&mut view, KeyCode::Char('c'));
 
-    if let Some(Modal::Comment { text, .. }) = value.modal_state.modal.as_mut() {
+    if let Some(Modal::Comment { text, .. }) = view.modal_state.modal.as_mut() {
         text.set_text("@REV is 3 right?");
     }
 
-    let Act::Mention { to, text, context } = value.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)) else {
+    let Act::Mention { to, text, context } = view.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)) else {
         panic!("mention")
     };
 
@@ -232,20 +209,20 @@ fn an_owner_mention_sends_the_comment_at_once_and_skips_the_batch() {
     assert!(read_comments(id)[0].sent, "delivered: 0 batch");
     assert!(
         matches!(
-            value.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
+            view.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
             Act::Toast(_)
         ),
         "0 new comments"
     );
 
     // a new comment that names an agent: to it at once too
-    value.open_comment(spot11());
+    view.open_comment(spot11());
 
-    if let Some(Modal::Comment { text, .. }) = value.modal_state.modal.as_mut() {
+    if let Some(Modal::Comment { text, .. }) = view.modal_state.modal.as_mut() {
         text.set_text("@LEAD take a look");
     }
 
-    let Act::Mention { to, .. } = value.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)) else {
+    let Act::Mention { to, .. } = view.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)) else {
         panic!("mention")
     };
 
@@ -257,10 +234,10 @@ fn an_owner_mention_sends_the_comment_at_once_and_skips_the_batch() {
 #[test]
 fn a_comment_on_the_1st_changed_line_sits_under_it_not_under_the_why() {
     use crate::domain::changes::rank::{Group, RFile, Rank};
-    let mut value = thread_view("changes-why-0000");
-    let key = crate::domain::changes::rank::key(&value.changes.files);
+    let mut view = thread_view("changes-why-0000");
+    let key = crate::domain::changes::rank::key(&view.changes.files);
 
-    value.classifier.rank = Some(Rank {
+    view.classifier.rank = Some(Rank {
         key,
         model: "haiku".into(),
         groups: vec![Group {
@@ -273,15 +250,15 @@ fn a_comment_on_the_1st_changed_line_sits_under_it_not_under_the_why() {
             }],
         }],
     });
-    value.apply_rank(false);
-    value.add_comment(&spot11(), "why 3?");
-    value.layout.built = None;
-    value.build(100);
+    view.apply_rank(false);
+    view.add_comment(&spot11(), "why 3?");
+    view.layout.built = None;
+    view.build(100);
 
-    let thread = text(&value);
-    let at = thread.iter().position(|line| line.contains("+ let b = 3;")).unwrap();
+    let rows = text(&view);
+    let at = rows.iter().position(|line| line.contains("+ let b = 3;")).unwrap();
 
-    assert!(thread[at + 1].contains("✎ c1"), "under its line: {thread:#?}");
+    assert!(rows[at + 1].contains("✎ c1"), "under its line: {rows:#?}");
 
     let _ = std::fs::remove_dir_all(crate::engine::store::thread_dir("changes-why-0000"));
 }

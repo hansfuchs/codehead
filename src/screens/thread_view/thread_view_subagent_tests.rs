@@ -3,15 +3,15 @@ use ratatui::backend::TestBackend;
 use std::fmt::Write;
 
 fn screen(view: &mut View) -> Vec<String> {
-    let mut thread = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(100, 40)).unwrap();
 
-    thread.draw(|file| view.draw(file)).unwrap();
-    let bytes = thread.backend().buffer().clone();
+    term.draw(|frame| view.draw(frame)).unwrap();
+    let buf = term.backend().buffer().clone();
 
     (0..40)
         .map(|y| {
             (0..100)
-                .map(|x| bytes[(x, y)].symbol().to_string())
+                .map(|x| buf[(x, y)].symbol().to_string())
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -56,20 +56,20 @@ fn a_click_on_an_attachment_opens_the_files_tab_on_it() {
 
     // the marker in the body, then the 📎 row: each opens the files tab on the file
     for (needle, back) in [("[Image #1]", true), ("📎", false)] {
-        let text_value = screen(&mut view);
-        let y = text_value
+        let rows = screen(&mut view);
+        let y = rows
             .iter()
-            .position(|result| result.contains(needle))
-            .unwrap_or_else(|| panic!("{text_value:#?}"));
-        let x = text_value[y]
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        let x = rows[y]
             .find(needle)
-            .map(|bytes| text_value[y][..bytes].chars().count())
+            .map(|byte| rows[y][..byte].chars().count())
             .unwrap() as u16;
 
         click(&mut view, x + 1, y as u16);
 
         assert_eq!(view.panes.pane, Pane::Files, "{needle}");
-        assert!(view.panes.files.files.iter().any(|error| error.path == img), "{needle}");
+        assert!(view.panes.files.files.iter().any(|file| file.path == img), "{needle}");
 
         if back {
             view.set_pane(Pane::Chat);
@@ -122,7 +122,7 @@ fn running_subagents_show_grouped_by_master_and_stop_with_d() {
     let text = screen(&mut view);
     let row = text
         .iter()
-        .position(|result| result.contains("subagents (3)"))
+        .position(|row| row.contains("subagents (3)"))
         .unwrap_or_else(|| panic!("{text:#?}"));
 
     assert!(
@@ -131,17 +131,17 @@ fn running_subagents_show_grouped_by_master_and_stop_with_d() {
         text[row]
     );
     assert!(
-        text.iter().any(|result| result.contains("subagents…")),
+        text.iter().any(|row| row.contains("subagents…")),
         "the agent card: {text:#?}"
     );
 
     click(&mut view, 2, row as u16);
     let text = screen(&mut view);
 
-    let at = |x: &str| {
+    let at = |needle: &str| {
         text.iter()
-            .position(|result| result.contains(x))
-            .unwrap_or_else(|| panic!("{x}: {text:#?}"))
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}: {text:#?}"))
     };
 
     assert_subagent_stop(view, &text, at);
@@ -161,7 +161,7 @@ fn assert_subagent_stop(mut view: View, text: &[String], at: impl Fn(&str) -> us
         "{text:#?}"
     );
 
-    let col = |result: &str, x: &str| result[..result.find(x).unwrap()].chars().count();
+    let col = |row: &str, needle: &str| row[..row.find(needle).unwrap()].chars().count();
 
     assert!(col(&text[docs], "read") > col(&text[scan], "scan"), "nested: indented");
     assert!(
@@ -177,7 +177,7 @@ fn assert_subagent_stop(mut view: View, text: &[String], at: impl Fn(&str) -> us
     view.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
 
     assert!(
-        !view.ops.borrow().iter().any(|output| output["op"] == "sub_stop"),
+        !view.ops.borrow().iter().any(|recorded| recorded["op"] == "sub_stop"),
         "1 d: 0 stop"
     );
 
@@ -228,7 +228,7 @@ fn a_report_is_a_message_of_the_master_folded_and_a_lost_one_can_be_picked_up() 
     assert!(!view.thread.working("ada"));
 
     let text = screen(&mut view);
-    let at = |text: &[String], x: &str| text.iter().position(|result| result.contains(x));
+    let at = |text: &[String], needle: &str| text.iter().position(|row| row.contains(needle));
 
     assert!(
         at(&text, "↳ subagent “scan the repo” · done · 1m10s").is_some(),
@@ -241,10 +241,7 @@ fn a_report_is_a_message_of_the_master_folded_and_a_lost_one_can_be_picked_up() 
 
     let more = at(&text, "3 more lines").unwrap();
 
-    assert!(
-        !text.iter().any(|result| result.contains("subagents (")),
-        "0 running: 0 row"
-    );
+    assert!(!text.iter().any(|row| row.contains("subagents (")), "0 running: 0 row");
 
     click(&mut view, 6, more as u16);
     let text = screen(&mut view);
@@ -330,14 +327,14 @@ fn a_resumed_subagent_reports_in_a_2nd_block_at_the_bottom() {
 
     view.stream.dirty = true;
     let text = screen(&mut view);
-    let count = |text: &[String], x: &str| text.iter().filter(|result| result.contains(x)).count();
+    let count = |text: &[String], needle: &str| text.iter().filter(|row| row.contains(needle)).count();
 
     assert!(
-        text.iter().any(|result| result.contains("subagents…")),
+        text.iter().any(|row| row.contains("subagents…")),
         "the agent card: {text:#?}"
     );
     assert!(
-        text.iter().any(|result| result.contains("subagents (1)")),
+        text.iter().any(|row| row.contains("subagents (1)")),
         "the running row: {text:#?}"
     );
     assert_eq!(
@@ -370,10 +367,10 @@ fn assert_subagent_resume(mut view: View, count: impl Fn(&[String], &str) -> usi
     view.stream.dirty = true;
     let text = screen(&mut view);
 
-    let at = |x: &str| {
+    let at = |needle: &str| {
         text.iter()
-            .position(|result| result.contains(x))
-            .unwrap_or_else(|| panic!("{x}: {text:#?}"))
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}: {text:#?}"))
     };
 
     let (old, first, new, second) = (
@@ -388,8 +385,5 @@ fn assert_subagent_resume(mut view: View, count: impl Fn(&[String], &str) -> usi
         "old block, then the rerun's block below: {text:#?}"
     );
     assert_eq!(count(&text, "fixed 12 of 13"), 1, "{text:#?}");
-    assert!(
-        !text.iter().any(|result| result.contains("subagents (")),
-        "0 running: 0 row"
-    );
+    assert!(!text.iter().any(|row| row.contains("subagents (")), "0 running: 0 row");
 }

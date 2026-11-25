@@ -36,8 +36,8 @@ impl Host {
 }
 
 fn set_answer_option(request: &Value, input: &mut Value) {
-    if let (Some(output), Some(opt)) = (input.as_object_mut(), request["option"].as_str()) {
-        output.insert("_option".into(), Value::String(opt.into()));
+    if let (Some(fields), Some(option)) = (input.as_object_mut(), request["option"].as_str()) {
+        fields.insert("_option".into(), Value::String(option.into()));
     }
 }
 
@@ -60,40 +60,40 @@ fn request_list(request: &Value, key: &str) -> Vec<String> {
     }
 }
 
-fn command_ping(model_state: &mut Host) -> serde_json::Value {
+fn command_ping(host: &mut Host) -> serde_json::Value {
     json!({
-        "live": model_state.sessions.keys().collect::<Vec<_>>(),
+        "live": host.sessions.keys().collect::<Vec<_>>(),
         // busy: in a turn, or waiting on running subagents
-        "busy": model_state.sessions.iter().filter(|(name, live)| live.busy || model_state.subagents.masters().contains(*name)).map(|(name, _)| name).collect::<Vec<_>>(),
-        "asks": model_state.asks.len(),
-        "usage": model_state.turn_use,
+        "busy": host.sessions.iter().filter(|(name, live)| live.busy || host.subagents.masters().contains(*name)).map(|(name, _)| name).collect::<Vec<_>>(),
+        "asks": host.asks.len(),
+        "usage": host.turn_use,
     })
 }
 
-fn command_prompt(request: &Value, model_state: &mut Host) -> Result<Value, String> {
+fn command_prompt(request: &Value, host: &mut Host) -> Result<Value, String> {
     let text = request_text(request, "text");
 
     if text.trim().is_empty() {
         return Err("empty message".into());
     }
 
-    let thread_value = model_state.thread()?;
+    let thread = host.thread()?;
     let mut to = request_list(request, "to");
 
     if to.is_empty() {
-        let names: Vec<String> = roster::active().into_iter().map(|agent_2| agent_2.name).collect();
+        let names: Vec<String> = roster::active().into_iter().map(|profile| profile.name).collect();
 
         to = mentions(&text, &names);
     }
 
     if to.is_empty() {
-        to = thread_value
+        to = thread
             .lead()
-            .map(|line_value| vec![line_value.to_string()])
+            .map(|lead| vec![lead.to_string()])
             .ok_or("thread has 0 agents")?;
     }
 
-    model_state.log(
+    host.log(
         None,
         Kind::Prompt {
             from: "owner".into(),
@@ -102,12 +102,12 @@ fn command_prompt(request: &Value, model_state: &mut Host) -> Result<Value, Stri
         },
     );
 
-    for agent_3 in &to {
-        model_state.cancel_resume(agent_3);
+    for agent in &to {
+        host.cancel_resume(agent);
     }
 
-    if thread_value.state != "open" {
-        store::update(&model_state.id, |thread_2| thread_2.state = "open".into())?;
+    if thread.state != "open" {
+        store::update(&host.id, |stored| stored.state = "open".into())?;
     }
 
     // CONTEXT (the owner's shell commands since the last message): for the agents only
@@ -120,20 +120,20 @@ fn command_prompt(request: &Value, model_state: &mut Host) -> Result<Value, Stri
     };
 
     // a flow whose current step went to 0 agent yet: the step goes with this message
-    let steps = model_state.flow_unsent(&thread_value, &to, &full);
+    let steps = host.flow_unsent(&thread, &to, &full);
 
-    model_state.later.extend(
+    host.later.extend(
         to.iter()
-            .map(|agent_4| match steps.iter().find(|(sa, _)| sa == agent_4) {
-                Some((_, message)) => (agent_4.clone(), message.clone()),
-                None => (agent_4.clone(), full.clone()),
+            .map(|agent| match steps.iter().find(|(step_agent, _)| step_agent == agent) {
+                Some((_, message)) => (agent.clone(), message.clone()),
+                None => (agent.clone(), full.clone()),
             }),
     );
 
     Ok(json!({"to": to}))
 }
 
-fn command_send(request: &Value, model_state: &mut Host) -> Result<Value, String> {
+fn command_send(request: &Value, host: &mut Host) -> Result<Value, String> {
     let (from, text, to) = (
         request_text(request, "from"),
         request_text(request, "text"),
@@ -148,13 +148,13 @@ fn command_send(request: &Value, model_state: &mut Host) -> Result<Value, String
         return Err("send: 0 messages to yourself".into());
     }
 
-    for agent_5 in &to {
-        roster::get(agent_5)
-            .filter(|agent_6| !agent_6.archived)
-            .ok_or_else(|| format!("no agent {agent_5}"))?;
+    for agent in &to {
+        roster::get(agent)
+            .filter(|profile| !profile.archived)
+            .ok_or_else(|| format!("no agent {agent}"))?;
     }
 
-    model_state.log(
+    host.log(
         Some(&from),
         Kind::Prompt {
             from: from.clone(),
@@ -163,27 +163,23 @@ fn command_send(request: &Value, model_state: &mut Host) -> Result<Value, String
         },
     );
 
-    for agent_7 in &to {
-        model_state.cancel_resume(agent_7);
+    for agent in &to {
+        host.cancel_resume(agent);
     }
 
-    for agent_8 in &to {
-        model_state.deliver(agent_8, &format!("[from @{from}] {text}"))?;
+    for agent in &to {
+        host.deliver(agent, &format!("[from @{from}] {text}"))?;
     }
 
     Ok(json!({"to": to}))
 }
 
-fn command_answer(request: &Value, model_state: &mut Host) -> Result<Value, String> {
+fn command_answer(request: &Value, host: &mut Host) -> Result<Value, String> {
     let id = request_text(request, "id");
-    let (agent, req) = model_state
-        .asks
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| format!("no open ask {id}"))?;
+    let (agent, ask) = host.asks.get(&id).cloned().ok_or_else(|| format!("no open ask {id}"))?;
 
-    let Some(live) = model_state.sessions.get_mut(&agent) else {
-        model_state.asks.remove(&id);
+    let Some(live) = host.sessions.get_mut(&agent) else {
+        host.asks.remove(&id);
         return Err(format!("{agent}: session gone"));
     };
 
@@ -191,30 +187,30 @@ fn command_answer(request: &Value, model_state: &mut Host) -> Result<Value, Stri
 
     // an ACP option picks itself, allow or reject
     if allow || request["option"].is_string() {
-        let mut input = req["input"].clone();
+        let mut input = ask["input"].clone();
 
         set_answer_option(request, &mut input);
 
-        if let (Some(output_value), Some(ans)) = (
+        if let (Some(fields), Some(answers)) = (
             input.as_object_mut(),
-            request.get("answers").filter(|agent_9| agent_9.is_object()),
+            request.get("answers").filter(|value| value.is_object()),
         ) {
-            output_value.insert("answers".into(), ans.clone());
+            fields.insert("answers".into(), answers.clone());
         }
 
         live.session.allow(&id, &input)?;
     } else {
         let why = request["note"]
             .as_str()
-            .filter(|count| !count.is_empty())
+            .filter(|note| !note.is_empty())
             .unwrap_or("The owner said no.");
 
         live.session.deny(&id, why)?;
     }
 
     // answered: the ask goes only now (a failed write keeps it open for a retry)
-    model_state.asks.remove(&id);
-    model_state.log(
+    host.asks.remove(&id);
+    host.log(
         Some(&agent),
         Kind::Answer {
             id,
@@ -226,43 +222,43 @@ fn command_answer(request: &Value, model_state: &mut Host) -> Result<Value, Stri
     Ok(json!({}))
 }
 
-fn command_sub_stop(request: &Value, model_state: &mut Host) -> Result<Value, String> {
+fn command_sub_stop(request: &Value, host: &mut Host) -> Result<Value, String> {
     let id = request_text(request, "id");
-    let result_value = model_state
+    let subagent = host
         .subagents
         .stop(&id)
         .ok_or_else(|| format!("subagent {id}: 0 running"))?;
-    let master = result_value.agent.clone();
+    let master = subagent.agent.clone();
 
-    let how = if result_value.background && !result_value.task.is_empty() {
+    let how = if subagent.background && !subagent.task.is_empty() {
         let text = format!(
             "[codehead] The owner stopped your background subagent “{}” (task id {}). Stop it now with TaskStop (task_id: {}) and go on without its result.",
-            result_value.description, result_value.task, result_value.task
+            subagent.description, subagent.task, subagent.task
         );
 
-        model_state.deliver(&master, &text)?;
+        host.deliver(&master, &text)?;
         "its master stops it"
     } else {
         // a foreground subagent ends with its master's turn: its other foreground ones too
-        if let Some(line_3) = model_state.sessions.get_mut(&master).filter(|line_2| line_2.busy) {
-            line_3.session.interrupt()?;
-            line_3.interrupted = true;
+        if let Some(live) = host.sessions.get_mut(&master).filter(|live| live.busy) {
+            live.session.interrupt()?;
+            live.interrupted = true;
         }
 
-        let rest: Vec<String> = model_state
+        let rest: Vec<String> = host
             .subagents
             .running
             .iter()
-            .filter(|(_, x)| x.agent == master && !x.background)
-            .map(|(i, _)| i.clone())
+            .filter(|(_, running)| running.agent == master && !running.background)
+            .map(|(other, _)| other.clone())
             .collect();
 
-        for i in rest {
-            model_state.subagents.stop(&i);
-            model_state.log(
+        for other in rest {
+            host.subagents.stop(&other);
+            host.log(
                 Some(&master),
                 Kind::SubEnd {
-                    id: i,
+                    id: other,
                     state: "stopped".into(),
                     result: "its master's turn was interrupted".into(),
                 },
@@ -272,7 +268,7 @@ fn command_sub_stop(request: &Value, model_state: &mut Host) -> Result<Value, St
         "its master's turn interrupted"
     };
 
-    model_state.log(
+    host.log(
         Some(&master),
         Kind::SubEnd {
             id,
@@ -284,10 +280,10 @@ fn command_sub_stop(request: &Value, model_state: &mut Host) -> Result<Value, St
     Ok(json!({"stopped": how}))
 }
 
-fn command_interrupt(model_state: &mut Host) -> Result<Value, String> {
+fn command_interrupt(host: &mut Host) -> Result<Value, String> {
     let (mut stopped, mut errs) = (Vec::new(), Vec::new());
 
-    for (name, live) in model_state.sessions.iter_mut().filter(|(_, line_4)| line_4.busy) {
+    for (name, live) in host.sessions.iter_mut().filter(|(_, live)| live.busy) {
         match live.session.interrupt() {
             Ok(()) => {
                 live.interrupted = true;
@@ -298,7 +294,7 @@ fn command_interrupt(model_state: &mut Host) -> Result<Value, String> {
     }
 
     // their open asks are moot: 0 answer comes (ACP: `cancel` answered them)
-    model_state.asks.retain(|_, (agent_10, _)| !stopped.contains(agent_10));
+    host.asks.retain(|_, (agent, _)| !stopped.contains(agent));
 
     if !errs.is_empty() {
         return Err(errs.join("; "));
@@ -307,14 +303,14 @@ fn command_interrupt(model_state: &mut Host) -> Result<Value, String> {
     Ok(json!({"interrupted": stopped.len()}))
 }
 
-fn command_join(request: &Value, model_state: &mut Host) -> Result<Value, String> {
+fn command_join(request: &Value, host: &mut Host) -> Result<Value, String> {
     let agent = request_text(request, "agent");
 
-    model_state.ensure(&agent)?;
+    host.ensure(&agent)?;
     let text = request_text(request, "text");
 
     if !text.trim().is_empty() {
-        model_state.log(
+        host.log(
             None,
             Kind::Prompt {
                 from: "owner".into(),
@@ -322,78 +318,78 @@ fn command_join(request: &Value, model_state: &mut Host) -> Result<Value, String
                 text: text.clone(),
             },
         );
-        model_state.deliver(&agent, &text)?;
+        host.deliver(&agent, &text)?;
     }
 
     Ok(json!({}))
 }
 
-fn command_leave(request: &Value, model_state: &mut Host) -> Result<Value, String> {
+fn command_leave(request: &Value, host: &mut Host) -> Result<Value, String> {
     let (agent, to) = (request_text(request, "agent"), request_text(request, "to"));
 
-    if let Some(mut line_5) = model_state.sessions.remove(&agent) {
-        line_5.session.kill();
+    if let Some(mut live) = host.sessions.remove(&agent) {
+        live.session.kill();
     }
 
-    model_state.asks.retain(|_, (agent_11, _)| *agent_11 != agent);
-    let flow = model_state.thread()?.flow_of(&agent);
+    host.asks.retain(|_, (asker, _)| *asker != agent);
+    let flow = host.thread()?.flow_of(&agent);
 
-    if let Some(file) = &flow {
+    if let Some(current) = &flow {
         let line = if to.is_empty() {
-            format!("flow {} of @{agent} ended: it left", file.title)
+            format!("flow {} of @{agent} ended: it left", current.title)
         } else {
-            format!("flow {} of @{agent} → @{to}", file.title)
+            format!("flow {} of @{agent} → @{to}", current.title)
         };
 
-        model_state.flow_log(&agent, "clear", line);
+        host.flow_log(&agent, "clear", line);
     }
 
-    store::update(&model_state.id, |thread_3| {
-        thread_3.set_flow(&agent, None);
-        thread_3.agents.retain(|agent_12| *agent_12 != agent);
+    store::update(&host.id, |thread| {
+        thread.set_flow(&agent, None);
+        thread.agents.retain(|member| *member != agent);
 
-        if let Some(mut file_value) = flow.filter(|_| !to.is_empty()) {
-            file_value.sent = false;
-            file_value.pending = None;
-            thread_3.set_flow(&to, Some(file_value));
+        if let Some(mut moved) = flow.filter(|_| !to.is_empty()) {
+            moved.sent = false;
+            moved.pending = None;
+            thread.set_flow(&to, Some(moved));
         }
     })?;
 
-    model_state.log(Some(&agent), Kind::Leave);
+    host.log(Some(&agent), Kind::Leave);
 
     Ok(json!({}))
 }
 
-fn command_reload(request: &Value, model_state: &mut Host) -> Result<Value, String> {
+fn command_reload(request: &Value, host: &mut Host) -> Result<Value, String> {
     // the agent's profile changed: its idle session ends, the next message starts
     // the new one (fresh: the harness changed, the conversation does not carry over)
     let agent = request_text(request, "agent");
 
-    if model_state.sessions.get(&agent).is_some_and(|line_6| line_6.busy) {
+    if host.sessions.get(&agent).is_some_and(|live| live.busy) {
         return Err(format!("{agent} is mid-turn"));
     }
 
-    if let Some(mut line_7) = model_state.sessions.remove(&agent) {
-        line_7.session.kill();
+    if let Some(mut live) = host.sessions.remove(&agent) {
+        live.session.kill();
     }
 
     if request["fresh"].as_bool() == Some(true) {
-        store::update(&model_state.id, |thread_4| {
-            thread_4.sessions.remove(&agent);
+        store::update(&host.id, |thread| {
+            thread.sessions.remove(&agent);
         })?;
     }
 
     Ok(json!({}))
 }
 
-fn command_status(request: &Value, model_state: &mut Host) -> Result<Value, String> {
+fn command_status(request: &Value, host: &mut Host) -> Result<Value, String> {
     let state = request_text(request, "state");
 
     if !["working", "blocked", "review", "done"].contains(&state.as_str()) {
         return Err("status: working, blocked, review or done".into());
     }
 
-    model_state.log(
+    host.log(
         Some(&request_text(request, "agent")),
         Kind::Status {
             state,
@@ -403,27 +399,27 @@ fn command_status(request: &Value, model_state: &mut Host) -> Result<Value, Stri
     Ok(json!({}))
 }
 
-fn command_stop(model_state: &mut Host) -> serde_json::Value {
-    model_state.stopping = true;
+fn command_stop(host: &mut Host) -> serde_json::Value {
+    host.stopping = true;
     json!({})
 }
 
-fn command_sub_start(request: &Value, model_state: &mut Host) -> Result<Value, String> {
+fn command_sub_start(request: &Value, host: &mut Host) -> Result<Value, String> {
     let id = request_text(request, "id");
 
     if id.is_empty() {
         return Err("sub_start: id required".into());
     }
 
-    let key_2 = id.clone();
+    let kid = id.clone();
 
-    store::update(&model_state.id, move |thread_5| {
-        if !thread_5.kids.contains(&key_2) {
-            thread_5.kids.push(key_2);
+    store::update(&host.id, move |thread| {
+        if !thread.kids.contains(&kid) {
+            thread.kids.push(kid);
         }
     })?;
 
-    model_state.log(
+    host.log(
         None,
         Kind::SubThread {
             id,
@@ -436,16 +432,16 @@ fn command_sub_start(request: &Value, model_state: &mut Host) -> Result<Value, S
     Ok(json!({}))
 }
 
-fn command_sub_done(request: &Value, model_state: &mut Host) -> Result<Value, String> {
+fn command_sub_done(request: &Value, host: &mut Host) -> Result<Value, String> {
     let id = request_text(request, "id");
-    let thread_6 = model_state.thread()?;
+    let thread = host.thread()?;
 
-    if !thread_6.kids.contains(&id) {
+    if !thread.kids.contains(&id) {
         return Ok(json!({}));
     }
 
-    let key_3 = id.clone();
-    let thread_8 = store::update(&model_state.id, move |thread_7| thread_7.kids.retain(|x| *x != key_3))?;
+    let kid = id.clone();
+    let updated = store::update(&host.id, move |stored| stored.kids.retain(|other| *other != kid))?;
 
     let state = if request_text(request, "state").is_empty() {
         "done".to_string()
@@ -455,8 +451,8 @@ fn command_sub_done(request: &Value, model_state: &mut Host) -> Result<Value, St
 
     let agent = request_text(request, "agent");
 
-    model_state.log(
-        Some(&agent).filter(|agent_13| !agent_13.is_empty()).map(String::as_str),
+    host.log(
+        Some(&agent).filter(|name| !name.is_empty()).map(String::as_str),
         Kind::SubThread {
             id,
             title: request_text(request, "title"),
@@ -465,10 +461,10 @@ fn command_sub_done(request: &Value, model_state: &mut Host) -> Result<Value, St
         },
     );
 
-    if thread_8.kids.is_empty() {
-        let held = std::mem::take(&mut model_state.held);
+    if updated.kids.is_empty() {
+        let held = std::mem::take(&mut host.held);
 
-        model_state.later.extend(held);
+        host.later.extend(held);
     }
 
     Ok(json!({}))

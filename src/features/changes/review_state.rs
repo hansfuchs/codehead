@@ -11,14 +11,14 @@ impl View {
             return false;
         };
 
-        let Ok(result) = rx.try_recv() else { return false };
+        let Ok(read) = rx.try_recv() else { return false };
 
         self.reviewer.reviewing = None;
 
-        match result {
-            Ok(result) => {
-                self.operation_state.note = Some(format!("review: {} findings", result.findings.len()));
-                self.reviewer.review = Some(result);
+        match read {
+            Ok(review) => {
+                self.operation_state.note = Some(format!("review: {} findings", review.findings.len()));
+                self.reviewer.review = Some(review);
             }
             Err(error) => self.reviewer.review_error = Some(error),
         }
@@ -28,11 +28,11 @@ impl View {
 
     /// Drop finding I (dismissed or taken into the batch).
     pub(super) fn drop_finding(&mut self, i: usize) {
-        if let Some(result) = self.reviewer.review.as_mut()
-            && i < result.findings.len()
+        if let Some(review) = self.reviewer.review.as_mut()
+            && i < review.findings.len()
         {
-            result.findings.remove(i);
-            crate::features::changes::review::store(&self.id, result);
+            review.findings.remove(i);
+            crate::features::changes::review::store(&self.id, review);
         }
     }
 }

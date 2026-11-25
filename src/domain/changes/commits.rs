@@ -45,70 +45,75 @@ pub(crate) struct Commits {
 
 impl Commits {
     pub(crate) fn find(&self, oid: &str) -> Option<&Commit> {
-        self.list.iter().find(|character| character.oid == oid)
+        self.list.iter().find(|commit| commit.oid == oid)
     }
 }
 
 /// DIR's branch (None: detached HEAD).
 fn branch(dir: &Path) -> Option<String> {
-    let bytes = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+    let branch = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()?
         .trim()
         .to_string();
 
-    (!bytes.is_empty() && bytes != "HEAD").then_some(bytes)
+    (!branch.is_empty() && branch != "HEAD").then_some(branch)
 }
 
 /// The remote branch B of DIR tracks when that remote branch has B's name (`refs/heads/B`).
-fn tracked_remote(dir: &Path, bytes: &str) -> Option<String> {
+fn tracked_remote(dir: &Path, branch: &str) -> Option<String> {
     let out = git(
         dir,
         &[
             "for-each-ref",
             "--format=%(upstream:remotename)%00%(upstream:remoteref)",
-            &format!("refs/heads/{bytes}"),
+            &format!("refs/heads/{branch}"),
         ],
     )
     .ok()?;
     let (remote, rref) = out.trim().split_once('\0')?;
 
-    (!remote.is_empty() && rref == format!("refs/heads/{bytes}")).then(|| remote.to_string())
+    (!remote.is_empty() && rref == format!("refs/heads/{branch}")).then(|| remote.to_string())
 }
 
 /// The upstream of DIR's branch `x`: the tracked branch when its name is `x` too (`origin/x`,
 /// `fork/x`), else `origin/x` when it exists. A branch that tracks another name (`origin/main`,
 /// `origin/hans/x`): `origin/x`, so a push never lands on that other branch.
 pub(crate) fn upstream(dir: &Path) -> Option<String> {
-    let bytes = branch(dir)?;
+    let branch = branch(dir)?;
 
     // a remote branch deleted after the merge (`[gone]`): 0 upstream, every commit unpushed
-    let exists = |result: &str| {
+    let exists = |remote_branch: &str| {
         git(
             dir,
-            &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{result}")],
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/remotes/{remote_branch}"),
+            ],
         )
         .is_ok()
     };
 
-    if let Some(result_2) = tracked_remote(dir, &bytes).map(|result_value| format!("{result_value}/{bytes}"))
-        && exists(&result_2)
+    if let Some(tracked) = tracked_remote(dir, &branch).map(|remote| format!("{remote}/{branch}"))
+        && exists(&tracked)
     {
-        return Some(result_2);
+        return Some(tracked);
     }
 
-    let result_3 = format!("origin/{bytes}");
+    let origin = format!("origin/{branch}");
 
-    exists(&result_3).then_some(result_3)
+    exists(&origin).then_some(origin)
 }
 
 /// The commits of DIR's branch since REV (the merge-base; `HEAD`: 0 base, the newest `MAX`).
 pub(crate) fn list(dir: &Path, rev: &str) -> Commits {
     let up = upstream(dir);
-    let count_value = format!("-n{}", MAX + 1);
+    let limit = format!("-n{}", MAX + 1);
     let mut args = vec![
         "log",
         "--topo-order",
-        &count_value,
+        &limit,
         "--format=%H%x1f%h%x1f%P%x1f%an%x1f%ct%x1f%s%x1f%B%x1e",
         "HEAD",
     ];
@@ -129,13 +134,13 @@ pub(crate) fn list(dir: &Path, rev: &str) -> Commits {
     let mut remote_only = 0;
 
     // a failed read: unknown, as 0 upstream (never "all pushed")
-    let local: Option<HashSet<String>> = up.as_ref().and_then(|user| {
-        let lr = git(dir, &["rev-list", "--left-right", &format!("HEAD...{user}")]).ok()?;
+    let local: Option<HashSet<String>> = up.as_ref().and_then(|upstream| {
+        let lr = git(dir, &["rev-list", "--left-right", &format!("HEAD...{upstream}")]).ok()?;
 
         remote_only = lr.lines().filter(|line| line.starts_with('>')).count();
         Some(
             lr.lines()
-                .filter_map(|line_value| line_value.strip_prefix('<'))
+                .filter_map(|line| line.strip_prefix('<'))
                 .map(str::to_string)
                 .collect(),
         )
@@ -149,35 +154,35 @@ fn parse_commit_list(up: Option<String>, out: &str, remote_only: usize, local: O
         .split('\x1e')
         .filter_map(|rec| {
             let rec = rec.trim_start_matches('\n');
-            let file: Vec<&str> = rec.splitn(7, '\x1f').collect();
+            let fields: Vec<&str> = rec.splitn(7, '\x1f').collect();
 
-            if file.len() < 7 {
+            if fields.len() < 7 {
                 return None;
             }
 
-            let pushed = local.as_ref().is_some_and(|line_2| !line_2.contains(file[0]));
+            let pushed = local.as_ref().is_some_and(|ids| !ids.contains(fields[0]));
 
             Some(Commit {
-                oid: file[0].into(),
-                short: file[1].into(),
-                merge: file[2].split_whitespace().count() > 1,
-                author: file[3].into(),
-                time: file[4].parse().unwrap_or(0),
-                subject: file[5].into(),
-                body: file[6].trim_end().into(),
+                oid: fields[0].into(),
+                short: fields[1].into(),
+                merge: fields[2].split_whitespace().count() > 1,
+                author: fields[3].into(),
+                time: fields[4].parse().unwrap_or(0),
+                subject: fields[5].into(),
+                body: fields[6].trim_end().into(),
                 pushed,
             })
         })
         .collect();
 
     // HEAD: the log's 1st commit (0 commits: 0 pick, 0 uncommit, HEAD unused)
-    let head = list.first().map(|character| character.oid.clone()).unwrap_or_default();
+    let head = list.first().map(|commit| commit.oid.clone()).unwrap_or_default();
     let more = list.len() > MAX;
 
     list.truncate(MAX);
 
     // unpushed first (stable: newest first within each)
-    list.sort_by_key(|character_value| character_value.pushed);
+    list.sort_by_key(|commit| commit.pushed);
 
     Commits {
         list,
@@ -196,43 +201,44 @@ fn run(
     stdin: Option<&str>,
 ) -> Result<String, (i32, String, String)> {
     use std::io::Write;
-    let mut character = Command::new("git");
+    let mut command = Command::new("git");
 
-    character
+    command
         .arg("-C")
         .arg(dir)
         .args(["-c", "core.quotePath=false", "-c", "log.showSignature=false"])
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    character.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
+    command.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
 
     for (key, value) in env {
-        character.env(key, value);
+        command.env(key, value);
     }
 
-    let mut ch = character
+    let mut child = command
         .spawn()
         .map_err(|error| (-1, String::new(), format!("git: {error}")))?;
 
-    if let (Some(text), Some(mut i)) = (stdin, ch.stdin.take()) {
-        let _ = i.write_all(text.as_bytes());
+    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        let _ = pipe.write_all(text.as_bytes());
     }
 
-    let out = ch
+    let out = child
         .wait_with_output()
-        .map_err(|error_value| (-1, String::new(), format!("git: {error_value}")))?;
-    let so = String::from_utf8_lossy(&out.stdout).into_owned();
+        .map_err(|error| (-1, String::new(), format!("git: {error}")))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
 
     if out.status.success() {
-        Ok(so)
+        Ok(stdout)
     } else {
-        let se = String::from_utf8_lossy(&out.stderr);
+        let stderr = String::from_utf8_lossy(&out.stderr);
 
         Err((
             out.status.code().unwrap_or(-1),
-            so,
-            se.lines()
+            stdout,
+            stderr
+                .lines()
                 .find(|line| !line.trim().is_empty())
                 .unwrap_or("git failed")
                 .to_string(),
@@ -265,13 +271,13 @@ impl Uncommitted {
         );
 
         if !self.cascaded.is_empty() {
-            let value: Vec<String> = self
+            let parts: Vec<String> = self
                 .cascaded
                 .iter()
-                .map(|(character, path)| format!("{path} ({character})"))
+                .map(|(commit, path)| format!("{path} ({commit})"))
                 .collect();
 
-            let _ = write!(text, " · cascaded: {}", value.join(", "));
+            let _ = write!(text, " · cascaded: {}", parts.join(", "));
         }
 
         if !self.dropped.is_empty() {

@@ -1,5 +1,4 @@
 use super::{Act, Card, Form, Instant, Out, PathBuf, Pending, ThreadList};
-use std::ops::ControlFlow;
 
 impl ThreadList {
     /// The actions on the targets.
@@ -12,22 +11,22 @@ impl ThreadList {
 
     /// The yes to a question: its job starts. The thread in view among its threads: home.
     pub(super) fn confirm(&mut self) -> Out {
-        let Some(path) = self.job_state.pending.take() else {
+        let Some(pending) = self.job_state.pending.take() else {
             return Out::None;
         };
 
-        let home = self.here.as_ref().is_some_and(|height| path.ids.contains(height));
+        let home = self.here.as_ref().is_some_and(|here| pending.ids.contains(here));
 
-        start(path.act, path.ids, self);
+        start(pending.act, pending.ids, self);
         if home { Out::Home } else { Out::None }
     }
 
-    fn finish_start(&mut self, act: Act, work: impl FnOnce() -> (String, bool) + Send + 'static) -> ControlFlow<()> {
+    fn spawn_job(&mut self, act: Act, work: impl FnOnce() -> (String, bool) + Send + 'static) {
         if self.inline {
             let (text, err) = work();
 
             self.done(text, err);
-            return ControlFlow::Break(());
+            return;
         }
 
         let (tx, rx) = crate::infra::bus::channel();
@@ -49,67 +48,65 @@ impl ThreadList {
             false,
             Instant::now(),
         ));
-
-        ControlFlow::Continue(())
     }
-    pub(super) fn edit(&mut self, id: String, error: crate::domain::threads::Edit) {
-        edit_thread_list(self, id, error);
+    pub(super) fn edit(&mut self, id: String, edit: crate::domain::threads::Edit) {
+        edit_thread_list(self, id, edit);
     }
 }
 /// Delete thread ID: its row from the store (linked worktree or in place), `threads::remove`.
 pub(super) fn delete(id: &str) -> Result<String, String> {
-    let width = crate::domain::threads::row_of(id).ok_or_else(|| format!("no thread {id}"))?;
-    let repo = width.repo.clone().unwrap_or_else(|| PathBuf::from(&width.path));
-    let lines = crate::ui::worktree_preview::remove(&repo, &[width], &crate::engine::logs_dir());
+    let row = crate::domain::threads::row_of(id).ok_or_else(|| format!("no thread {id}"))?;
+    let repo = row.repo.clone().unwrap_or_else(|| PathBuf::from(&row.path));
+    let lines = crate::ui::worktree_preview::remove(&repo, &[row], &crate::engine::logs_dir());
 
-    let text: Vec<String> = lines
+    let messages: Vec<String> = lines
         .iter()
         .skip(1)
         .map(|line| {
             line.spans
                 .iter()
-                .map(|text_value| text_value.content.as_ref())
+                .map(|span| span.content.as_ref())
                 .collect::<String>()
                 .trim()
                 .to_string()
         })
         .collect();
 
-    match text.iter().find(|line_value| {
-        line_value.starts_with("skip:")
-            || line_value.contains("failed")
-            || line_value.starts_with("worktree:")
-            || line_value.starts_with("branch:")
+    match messages.iter().find(|message| {
+        message.starts_with("skip:")
+            || message.contains("failed")
+            || message.starts_with("worktree:")
+            || message.starts_with("branch:")
     }) {
         Some(error) => Err(error.clone()),
-        None => Ok(format!("deleted · {}", text.join(" · "))),
+        None => Ok(format!("deleted · {}", messages.join(" · "))),
     }
 }
 
-fn run_act_unarchive(thread: &[Card], view_state: &mut ThreadList) -> Out {
-    let ids = thread
+fn run_act_unarchive(targets: &[Card], thread_list: &mut ThreadList) -> Out {
+    let ids = targets
         .iter()
-        .filter(|character| character.archived())
-        .map(|character_value| character_value.id.clone())
+        .filter(|card| card.archived())
+        .map(|card| card.id.clone())
         .collect();
 
-    start(Act::Unarchive, ids, view_state);
+    start(Act::Unarchive, ids, thread_list);
     Out::None
 }
 
-fn run_act_edit(thread: &[Card], view_state: &mut ThreadList) -> Out {
-    view_state.form = Form::open(&thread[0].id, &view_state.cards, &view_state.roster);
+fn run_act_edit(targets: &[Card], thread_list: &mut ThreadList) -> Out {
+    thread_list.form = Form::open(&targets[0].id, &thread_list.cards, &thread_list.roster);
 
-    if view_state.form.is_none() {
-        view_state.job_state.status = Some(("thread gone".into(), true, Instant::now()));
+    if thread_list.form.is_none() {
+        thread_list.job_state.status = Some(("thread gone".into(), true, Instant::now()));
     }
 
     Out::None
 }
 
 /// ACT on IDS, off the UI thread (tests: at once).
-fn start(act: Act, ids: Vec<String>, view_state: &mut ThreadList) {
-    view_state.sel.clear();
+fn start(act: Act, ids: Vec<String>, thread_list: &mut ThreadList) {
+    thread_list.sel.clear();
 
     for id in &ids {
         let to = match act {
@@ -118,15 +115,15 @@ fn start(act: Act, ids: Vec<String>, view_state: &mut ThreadList) {
             _ => None,
         };
 
-        view_state.job_state.moved.insert(id.clone(), to);
+        thread_list.job_state.moved.insert(id.clone(), to);
     }
 
-    let cards = view_state.cards.clone();
+    let cards = thread_list.cards.clone();
 
-    view_state.set_cards(cards);
+    thread_list.set_cards(cards);
 
     // the next list (menu closed, opened again) starts from the moved cards too
-    crate::infra::background::save("cards", &view_state.cards);
+    crate::infra::background::save("cards", &thread_list.cards);
 
     let work = move || {
         let mut ok = Vec::new();
@@ -141,7 +138,7 @@ fn start(act: Act, ids: Vec<String>, view_state: &mut ThreadList) {
             };
 
             match result {
-                Ok(thread_value) => ok.push(thread_value),
+                Ok(message) => ok.push(message),
                 Err(error) => errs.push(error),
             }
         }
@@ -155,34 +152,31 @@ fn start(act: Act, ids: Vec<String>, view_state: &mut ThreadList) {
         match (ok.len(), errs.first()) {
             (1, None) if ids.len() == 1 => (ok[0].clone(), false),
             (count, None) => (format!("{count} threads {verb}"), false),
-            (0, Some(error_value)) => (error_value.clone(), true),
-            (count_value, Some(error_2)) => (
-                format!("{count_value} threads {verb} · {} failed: {error_2}", errs.len()),
-                true,
-            ),
+            (0, Some(error)) => (error.clone(), true),
+            (count, Some(error)) => (format!("{count} threads {verb} · {} failed: {error}", errs.len()), true),
         }
     };
 
-    if let ControlFlow::Break(()) = view_state.finish_start(act, work) {}
+    thread_list.spawn_job(act, work);
 }
 
 fn run_thread_list(state: &mut ThreadList, act: Act) -> Out {
     state.job_state.actions = None;
-    let thread = state.targets();
+    let targets = state.targets();
 
-    if thread.is_empty() || !state.acts().contains(&act) {
+    if targets.is_empty() || !state.acts().contains(&act) {
         return Out::None;
     }
 
     match act {
-        Act::Open => Out::Open(Box::new(thread[0].clone())),
-        Act::Edit => run_act_edit(&thread, state),
-        Act::Unarchive => run_act_unarchive(&thread, state),
+        Act::Open => Out::Open(Box::new(targets[0].clone())),
+        Act::Edit => run_act_edit(&targets, state),
+        Act::Unarchive => run_act_unarchive(&targets, state),
         Act::Archive => {
-            let ids = thread
+            let ids = targets
                 .iter()
-                .filter(|character_2| !character_2.archived())
-                .map(|character_3| character_3.id.clone())
+                .filter(|card| !card.archived())
+                .map(|card| card.id.clone())
                 .collect();
 
             state.job_state.pending = Some(Pending { act, ids });
@@ -191,7 +185,7 @@ fn run_thread_list(state: &mut ThreadList, act: Act) -> Out {
         Act::Delete => {
             state.job_state.pending = Some(Pending {
                 act,
-                ids: thread.iter().map(|character_4| character_4.id.clone()).collect(),
+                ids: targets.iter().map(|card| card.id.clone()).collect(),
             });
             Out::None
         }
@@ -199,45 +193,45 @@ fn run_thread_list(state: &mut ThreadList, act: Act) -> Out {
 }
 
 fn acts_thread_list(state: &ThreadList) -> Vec<Act> {
-    let thread = state.targets();
+    let targets = state.targets();
 
-    if thread.is_empty() {
+    if targets.is_empty() {
         return Vec::new();
     }
 
-    let mut value = Vec::new();
+    let mut acts = Vec::new();
 
-    if thread.len() == 1 {
-        value.push(Act::Open);
+    if targets.len() == 1 {
+        acts.push(Act::Open);
     }
 
-    if thread.iter().any(|character| !character.archived()) {
-        value.push(Act::Archive);
+    if targets.iter().any(|card| !card.archived()) {
+        acts.push(Act::Archive);
     }
 
-    if thread.iter().any(Card::archived) {
-        value.push(Act::Unarchive);
+    if targets.iter().any(Card::archived) {
+        acts.push(Act::Unarchive);
     }
 
-    if thread.len() == 1 {
-        value.push(Act::Edit);
+    if targets.len() == 1 {
+        acts.push(Act::Edit);
     }
 
-    value.push(Act::Delete);
+    acts.push(Act::Delete);
 
-    value
+    acts
 }
 
-fn edit_thread_list(state: &mut ThreadList, id: String, error: crate::domain::threads::Edit) {
-    let work = move || match crate::domain::threads::edit(&id, &error) {
-        Ok(thread_value) => (thread_value, false),
-        Err(error_value) => (error_value, true),
+fn edit_thread_list(state: &mut ThreadList, id: String, edit: crate::domain::threads::Edit) {
+    let work = move || match crate::domain::threads::edit(&id, &edit) {
+        Ok(message) => (message, false),
+        Err(error) => (error, true),
     };
 
     if cfg!(test) {
-        let (thread_2, err) = work();
+        let (message, err) = work();
 
-        state.done(thread_2, err);
+        state.done(message, err);
         return;
     }
 

@@ -21,14 +21,14 @@ impl View {
         spans.push(Span::styled("│ ", theme::line()));
         let used: usize = spans
             .iter()
-            .map(|text| unicode_width::UnicodeWidthStr::width(text.content.as_ref()))
+            .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
             .sum();
 
         let link = self.bar_link();
 
         let link_w = link
             .as_ref()
-            .map_or(0, |(thread, _)| unicode_width::UnicodeWidthStr::width(thread.as_str()));
+            .map_or(0, |(label, _)| unicode_width::UnicodeWidthStr::width(label.as_str()));
 
         let badge = self.bar_badge();
 
@@ -71,15 +71,15 @@ impl View {
     pub(super) fn bar_home(&mut self, top: Rect, x: &mut u16, spans: &mut Vec<Span<'static>>) {
         // home (the start screen), with the count of the other threads that need the owner
         let (home, waiting) = home_label(&crate::domain::notifications::unseen(Some(&self.id)));
-        let hw = unicode_width::UnicodeWidthStr::width(home.as_str()) as u16;
+        let home_w = unicode_width::UnicodeWidthStr::width(home.as_str()) as u16;
 
         self.layout.home_rect = Rect {
             x: *x,
             y: top.y,
-            width: hw,
+            width: home_w,
             height: 1,
         };
-        *x += hw + 1;
+        *x += home_w + 1;
         spans.push(Span::styled(
             home,
             if waiting {
@@ -92,13 +92,13 @@ impl View {
         *x += 2;
     }
     pub(super) fn bar_panes(&mut self, top: Rect, x: &mut u16, spans: &mut Vec<Span<'static>>) {
-        for path in Pane::ALL {
-            bar_panes_label(self, top, x, spans, path);
+        for pane in Pane::ALL {
+            bar_panes_label(self, top, x, spans, pane);
         }
     }
 
-    pub(super) fn pane_label(&mut self, path: Pane) -> String {
-        match path {
+    pub(super) fn pane_label(&mut self, pane: Pane) -> String {
+        match pane {
             Pane::Chat if !self.thread.asks.is_empty() => format!(" chat ?{} ", self.thread.asks.len()),
             Pane::Chat => " chat ".to_string(),
             Pane::Changes => " changes ".to_string(),
@@ -117,13 +117,13 @@ impl View {
             String::new()
         };
 
-        self.urls_state.urls.first().map(|user| {
-            let host = user
+        self.urls_state.urls.first().map(|url| {
+            let host = url
                 .trim_start_matches("https://")
                 .trim_start_matches("http://")
                 .trim_end_matches('/');
 
-            (format!("↗ {host}{more} "), user.clone())
+            (format!("↗ {host}{more} "), url.clone())
         })
     }
     pub(super) fn bar_badge(&mut self) -> Vec<Span<'static>> {
@@ -142,7 +142,7 @@ impl View {
     }
 }
 
-fn draw_bar_right_area(
+fn draw_bar_badge(
     frame: &mut Frame<'_>,
     top: Rect,
     link_w: usize,
@@ -150,14 +150,14 @@ fn draw_bar_right_area(
     badge_w: usize,
     used: usize,
 ) {
-    let lw = if top.width as usize > link_w + used + 4 {
+    let shown_link_w = if top.width as usize > link_w + used + 4 {
         link_w
     } else {
         0
     };
 
     let area = Rect {
-        x: top.right().saturating_sub((lw + badge_w + 1) as u16),
+        x: top.right().saturating_sub((shown_link_w + badge_w + 1) as u16),
         width: badge_w as u16,
         ..top
     };
@@ -173,10 +173,10 @@ fn count_label(label: &str, count: usize) -> String {
     }
 }
 
-fn bar_panes_label(view: &mut View, top: Rect, x: &mut u16, spans: &mut Vec<Span<'static>>, path: Pane) {
-    let label = view.pane_label(path);
+fn bar_panes_label(view: &mut View, top: Rect, x: &mut u16, spans: &mut Vec<Span<'static>>, pane: Pane) {
+    let label = view.pane_label(pane);
 
-    let st = if path == view.panes.pane {
+    let style = if pane == view.panes.pane {
         theme::pill()
     } else {
         theme::muted()
@@ -191,10 +191,10 @@ fn bar_panes_label(view: &mut View, top: Rect, x: &mut u16, spans: &mut Vec<Span
             width,
             height: 1,
         },
-        path,
+        pane,
     ));
     *x += width + 1;
-    spans.push(Span::styled(label, st));
+    spans.push(Span::styled(label, style));
     spans.push(Span::raw(" "));
 }
 
@@ -227,6 +227,6 @@ fn draw_bar_right(view: &mut View, frame: &mut Frame, top: Rect, right: BarRight
     }
 
     if badge_w > 0 {
-        draw_bar_right_area(frame, top, link_w, badge, badge_w, used);
+        draw_bar_badge(frame, top, link_w, badge, badge_w, used);
     }
 }

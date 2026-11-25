@@ -12,7 +12,7 @@ fn leak(text: String) -> &'static str {
 
 /// The fields of harness H.
 fn fields(harness: &Harness) -> Vec<Spec> {
-    let key = |file: &str| leak(format!("harness.{}.{file}", harness.name));
+    let key = |setting: &str| leak(format!("harness.{}.{setting}", harness.name));
 
     match harness.drive {
         Drive::Claude => vec![
@@ -77,21 +77,21 @@ pub(crate) fn form(path: PathBuf) -> Form {
     let mut specs = Vec::new();
     let mut sections = Vec::new();
 
-    for height in shown() {
-        let how = match height.drive {
+    for harness in shown() {
+        let how = match harness.drive {
             Drive::Claude => "stream-json",
             Drive::Codex => "app server",
             Drive::Acp(_) => "ACP",
         };
 
-        let at = which(height.bin).unwrap_or_else(|| height.bin.to_string());
+        let at = which(harness.bin).unwrap_or_else(|| harness.bin.to_string());
 
         sections.push((
             specs.len(),
-            height.label,
+            harness.label,
             leak(format!("{at} · {how} · agent form values win")),
         ));
-        specs.extend(fields(height));
+        specs.extend(fields(harness));
     }
 
     Form::with(path, specs, sections, false, 0)
@@ -102,20 +102,20 @@ fn which(binary: &str) -> Option<String> {
 
     std::env::split_paths(&path)
         .map(|directory| directory.join(binary))
-        .find(|path_value| path_value.is_file())
-        .map(|path_2| path_2.display().to_string())
+        .find(|candidate| candidate.is_file())
+        .map(|found| found.display().to_string())
 }
 
 /// The placeholder of harness field KEY: what applies while it is empty.
 pub(crate) fn default_of(key: &str) -> Option<String> {
     let (name, field) = key.strip_prefix("harness.")?.split_once('.')?;
-    let height = harnesses::get(name)?;
+    let harness = harnesses::get(name)?;
 
-    Some(match (field, &height.drive) {
+    Some(match (field, &harness.drive) {
         ("command", Drive::Acp(command)) => command.join(" "),
         ("command", Drive::Codex) => "codex app-server".into(),
         ("args", _) => "none".into(),
-        _ => format!("{}'s own", height.label),
+        _ => format!("{}'s own", harness.label),
     })
 }
 
@@ -123,7 +123,7 @@ pub(crate) fn default_of(key: &str) -> Option<String> {
 pub(crate) fn missing() -> Vec<(&'static str, &'static str)> {
     harnesses::ALL
         .iter()
-        .filter(|height| !harnesses::on_path(height.bin))
+        .filter(|harness| !harnesses::on_path(harness.bin))
         .map(|harness| (harness.label, harness.install))
         .collect()
 }

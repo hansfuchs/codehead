@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 impl App {
     pub(super) fn draw_compose(&mut self, frame: &mut Frame, area: Rect) {
-        let label = |text: &str, focused: bool| draw_compose_body(text, focused);
+        let label = |text: &str, focused: bool| field_label(text, focused);
 
         let layout = self.task_layout(area);
 
@@ -33,10 +33,10 @@ impl App {
     /// Cursor: accent border.
     pub(super) fn draw_card(&self, frame: &mut Frame, area: Rect, agent: &Agent, cur: bool) {
         let color = agents::color(agent.color.as_deref());
-        let order = self.compose.picks.iter().position(|path| *path == agent.name);
+        let order = self.compose.picks.iter().position(|pick| *pick == agent.name);
 
         let mark = match order {
-            Some(count) if self.compose.picks.len() > 1 => format!(" ◼ {} ", count + 1),
+            Some(index) if self.compose.picks.len() > 1 => format!(" ◼ {} ", index + 1),
             Some(_) => " ◼ ".to_string(),
             None => " ◻ ".to_string(),
         };
@@ -66,8 +66,8 @@ impl App {
         let (slug, start) = self.flow_of(&agent.name);
 
         let flow = match self.flow_selection.flow_lib.flow(&slug).filter(|_| !slug.is_empty()) {
-            Some(fl) if start > 0 => format!("◆ {} › {}", fl.name, start + 1),
-            Some(fl) => format!("◆ {}", fl.name),
+            Some(flow) if start > 0 => format!("◆ {} › {}", flow.name, start + 1),
+            Some(flow) => format!("◆ {}", flow.name),
             None => "0 flow".into(),
         };
 
@@ -75,14 +75,14 @@ impl App {
     }
 }
 
-fn draw_compose_body(text: &str, focused: bool) -> Line<'static> {
+fn field_label(text: &str, focused: bool) -> Line<'static> {
     Line::styled(
         text.to_string(),
         if focused { theme::accent_bold() } else { theme::muted() },
     )
 }
 
-fn draw_task_drafts_branch(cur: bool) -> Style {
+fn draft_button_style(cur: bool) -> Style {
     if cur {
         theme::pill().add_modifier(Modifier::BOLD)
     } else {
@@ -90,57 +90,57 @@ fn draw_task_drafts_branch(cur: bool) -> Style {
     }
 }
 
-fn draw_task_notes_body(lines: &mut Vec<Line<'_>>, character: &crate::infra::claude::Session) {
+fn push_carry_line(lines: &mut Vec<Line<'_>>, session: &crate::infra::claude::Session) {
     lines.push(Line::from(vec![
         Span::styled(
-            if character.thread.is_some() {
+            if session.thread.is_some() {
                 "  ↳ thread "
             } else {
                 "  ↳ claude code "
             },
             theme::accent(),
         ),
-        Span::raw(character.title.clone()),
+        Span::raw(session.title.clone()),
         Span::styled(
-            format!(" · last response, {} lines", character.last.lines().count()),
+            format!(" · last response, {} lines", session.last.lines().count()),
             theme::muted(),
         ),
     ]));
 }
 
-fn draw_task_drafts_hint(frame: &mut Frame<'_>, r_drafts: Rect, btn: usize, area_2: Rect) {
+fn draw_task_drafts_hint(frame: &mut Frame<'_>, r_drafts: Rect, btn: usize, save_area: Rect) {
     let hint = if btn == 0 {
         "enter: list of unsent tasks"
     } else {
         "enter: keep the task for later, start over"
     };
 
-    let hx = area_2.right() + 2;
-    let area_3 = Rect {
+    let hx = save_area.right() + 2;
+    let hint_area = Rect {
         x: hx,
         width: r_drafts.right().saturating_sub(hx),
         height: 1,
         ..r_drafts
     };
 
-    frame.render_widget(Paragraph::new(Line::styled(hint, theme::muted())), area_3);
+    frame.render_widget(Paragraph::new(Line::styled(hint, theme::muted())), hint_area);
 }
 
-fn draw_task_repository_head(
+fn draw_chip_row(
     chip: Style,
-    frame_value: &mut Frame<'_>,
-    area_4: Rect,
+    frame: &mut Frame<'_>,
+    row_area: Rect,
     name: &str,
     on: bool,
     value: &str,
     text: String,
 ) -> Rect {
     let head = format!(" {name:<7}");
-    let x = area_4.x + head.width() as u16;
+    let x = row_area.x + head.width() as u16;
     let value = format!(" {value} ");
     let area = Rect {
-        x: x.min(area_4.right().saturating_sub(1)),
-        y: area_4.y,
+        x: x.min(row_area.right().saturating_sub(1)),
+        y: row_area.y,
         width: value.width() as u16,
         height: 1,
     };
@@ -152,51 +152,51 @@ fn draw_task_repository_head(
         Span::styled(text, theme::muted()),
     ];
 
-    frame_value.render_widget(Paragraph::new(Line::from(spans)), area_4);
+    frame.render_widget(Paragraph::new(Line::from(spans)), row_area);
 
     area
 }
 
-fn draw_task_drafts(app_state: &mut App, frame: &mut Frame<'_>, r_drafts: Rect) {
-    let on = app_state.compose.field == Field::Drafts;
-    let btn = app_state.draft_btn();
-    let st = |cur: bool| draw_task_drafts_branch(cur);
+fn draw_task_drafts(app: &mut App, frame: &mut Frame<'_>, r_drafts: Rect) {
+    let on = app.compose.field == Field::Drafts;
+    let btn = app.draft_btn();
+    let st = |cur: bool| draft_button_style(cur);
     let mut x = r_drafts.x;
 
-    app_state.preview.regions.drafts = Rect::default();
+    app.preview.regions.drafts = Rect::default();
 
-    if !app_state.draft_selection.drafts.is_empty() {
-        let text = format!(" view drafts ({}) ", app_state.draft_selection.drafts.len());
-        let area_value = Rect {
+    if !app.draft_selection.drafts.is_empty() {
+        let text = format!(" view drafts ({}) ", app.draft_selection.drafts.len());
+        let view_area = Rect {
             x,
             width: (text.width() as u16).min(r_drafts.width),
             height: 1,
             ..r_drafts
         };
 
-        frame.render_widget(Paragraph::new(text).style(st(on && btn == 0)), area_value);
-        app_state.preview.regions.drafts = area_value;
-        x = area_value.right() + 2;
+        frame.render_widget(Paragraph::new(text).style(st(on && btn == 0)), view_area);
+        app.preview.regions.drafts = view_area;
+        x = view_area.right() + 2;
     }
 
     let text = " save as draft ";
-    let area_2 = Rect {
+    let save_area = Rect {
         x,
         width: (text.width() as u16).min(r_drafts.right().saturating_sub(x)),
         height: 1,
         ..r_drafts
     };
 
-    frame.render_widget(Paragraph::new(text).style(st(on && btn == 1)), area_2);
-    app_state.preview.regions.save_draft = area_2;
+    frame.render_widget(Paragraph::new(text).style(st(on && btn == 1)), save_area);
+    app.preview.regions.save_draft = save_area;
 
-    if on && app_state.draft_selection.drafts_menu.is_none() {
-        draw_task_drafts_hint(frame, r_drafts, btn, area_2);
+    if on && app.draft_selection.drafts_menu.is_none() {
+        draw_task_drafts_hint(frame, r_drafts, btn, save_area);
     }
 }
 
 fn draw_task_title(
-    app_state: &mut App,
+    app: &mut App,
     frame: &mut Frame<'_>,
     label: impl Fn(&str, bool) -> Line<'static>,
     l_title: Rect,
@@ -204,29 +204,29 @@ fn draw_task_title(
 ) {
     frame.render_widget(
         Paragraph::new(label(
-            if app_state.compose.title.is_empty() {
+            if app.compose.title.is_empty() {
                 "title · optional: the prompt's 1st line"
             } else {
                 "title"
             },
-            app_state.compose.field == Field::Title,
+            app.compose.field == Field::Title,
         )),
         l_title,
     );
     frame.render_widget(Paragraph::new("").style(theme::panel()), i_title);
-    app_state.compose.title.render(
+    app.compose.title.render(
         frame,
         Rect {
             x: i_title.x + 1,
             width: i_title.width.saturating_sub(2),
             ..i_title
         },
-        app_state.compose.field == Field::Title,
+        app.compose.field == Field::Title,
     );
 }
 
 fn draw_task_repository(
-    app_state: &mut App,
+    app: &mut App,
     frame: &mut Frame<'_>,
     label: impl Fn(&str, bool) -> Line<'static>,
     layout: &TaskLayout,
@@ -243,7 +243,7 @@ fn draw_task_repository(
     } = *layout;
 
     let any = matches!(
-        app_state.compose.field,
+        app.compose.field,
         Field::Repo | Field::Projects | Field::Where | Field::Opts
     );
 
@@ -251,46 +251,43 @@ fn draw_task_repository(
     let chip = Style::default().fg(theme::pal().text).add_modifier(Modifier::BOLD);
 
     // a row: the sub-label, the chip (its area back), the text
-    let row = |frame_value: &mut Frame, area_4: Rect, name: &str, on: bool, value: String, text: String| -> Rect {
-        draw_task_repository_head(chip, frame_value, area_4, name, on, &value, text)
+    let row = |frame: &mut Frame, row_area: Rect, name: &str, on: bool, value: String, text: String| -> Rect {
+        draw_chip_row(chip, frame, row_area, name, on, &value, text)
     };
 
-    let (repo_value, repo_text) = match &app_state.repository.repo {
-        Some(result) if app_state.clone_first().is_some() => (
-            result.name.clone(),
-            format!("{} · 0 clone yet", tilde(&result.path.display().to_string())),
+    let (repo_name, repo_text) = match &app.repository.repo {
+        Some(repo) if app.clone_first().is_some() => (
+            repo.name.clone(),
+            format!("{} · 0 clone yet", tilde(&repo.path.display().to_string())),
         ),
-        Some(result_value) => (
-            result_value.name.clone(),
-            tilde(&result_value.path.display().to_string()),
-        ),
+        Some(repo) => (repo.name.clone(), tilde(&repo.path.display().to_string())),
         None => (
             "0 git repo".into(),
             format!(
                 "works in {} · enter: pick a repo",
-                tilde(&app_state.cfg.cwd.display().to_string())
+                tilde(&app.cfg.cwd.display().to_string())
             ),
         ),
     };
 
-    app_state.preview.regions.repo_chip = row(
+    app.preview.regions.repo_chip = row(
         frame,
         repo_row,
         "repo",
-        app_state.compose.field == Field::Repo,
-        repo_value,
+        app.compose.field == Field::Repo,
+        repo_name,
         repo_text,
     );
-    app_state.preview.regions.repo_row = repo_row;
+    app.preview.regions.repo_row = repo_row;
 
-    draw_task_branch(app_state, frame, proj_h, proj_row, info, row);
+    draw_task_branch(app, frame, proj_h, proj_row, info, row);
 
     // opts: ◼ checkout, ◻ stash below it, in the column of the sub-labels
-    draw_task_options(app_state, frame, opts_h, opts);
+    draw_task_options(app, frame, opts_h, opts);
 }
 
 fn draw_task_branch(
-    app_state: &mut App,
+    app: &mut App,
     frame: &mut Frame<'_>,
     proj_h: u16,
     proj_row: Rect,
@@ -298,62 +295,62 @@ fn draw_task_branch(
     row: impl Fn(&mut Frame<'_>, Rect, &str, bool, String, String) -> Rect,
 ) {
     if proj_h > 0 {
-        draw_task_branch_count(app_state, frame, proj_row, &row);
+        draw_task_projects(app, frame, proj_row, &row);
     }
 
-    if !app_state.repository.wheres.is_empty() {
-        app_state.preview.regions.where_chip = row(
+    if !app.repository.wheres.is_empty() {
+        app.preview.regions.where_chip = row(
             frame,
             info,
             "branch",
-            app_state.compose.field == Field::Where,
-            app_state.where_chip(),
-            app_state.where_text(),
+            app.compose.field == Field::Where,
+            app.where_chip(),
+            app.where_text(),
         );
-        app_state.preview.regions.where_row = info;
+        app.preview.regions.where_row = info;
     }
 }
 
-fn draw_task_branch_count(
-    app_state: &mut App,
+fn draw_task_projects(
+    app: &mut App,
     frame: &mut Frame<'_>,
     proj_row: Rect,
     row: &impl Fn(&mut Frame<'_>, Rect, &str, bool, String, String) -> Rect,
 ) {
-    let on = app_state.compose.field == Field::Projects;
-    let count = app_state.task_projects().len();
+    let on = app.compose.field == Field::Projects;
+    let count = app.task_projects().len();
 
     let value = if count == 0 {
         "0 projects".to_string()
     } else {
-        app_state.proj_value()
+        app.proj_chip_text()
     };
 
     let text = if count == 0 {
         "projects tab (F3): new project".to_string()
-    } else if app_state.project_selection.proj_picks.is_none() {
+    } else if app.project_selection.proj_picks.is_none() {
         format!("agents assign projects · {count} in this repo")
     } else {
         format!("{count} in this repo")
     };
 
-    app_state.preview.regions.proj_chip = row(frame, proj_row, "project", on, value, text);
-    app_state.preview.regions.proj_row = proj_row;
+    app.preview.regions.proj_chip = row(frame, proj_row, "project", on, value, text);
+    app.preview.regions.proj_row = proj_row;
 }
 
-fn draw_task_options(app_state: &mut App, frame: &mut Frame<'_>, opts_h: u16, opts: Rect) {
+fn draw_task_options(app: &mut App, frame: &mut Frame<'_>, opts_h: u16, opts: Rect) {
     if opts_h > 0 {
-        draw_task_options_text(app_state, frame, opts);
+        draw_task_option_boxes(app, frame, opts);
     }
 }
 
-fn draw_task_options_text(app_state: &mut App, frame: &mut Frame<'_>, opts: Rect) {
-    let on = app_state.compose.field == Field::Opts;
+fn draw_task_option_boxes(app: &mut App, frame: &mut Frame<'_>, opts: Rect) {
+    let on = app.compose.field == Field::Opts;
     let x = opts.x;
 
     for (i, (checked, enabled), label) in [
-        (0, app_state.checkout_box(), "checkout selected branch"),
-        (1, app_state.stash_box(), "stash conflicting local changes (git stash)"),
+        (0, app.checkout_box(), "checkout selected branch"),
+        (1, app.stash_box(), "stash conflicting local changes (git stash)"),
     ] {
         if i as u16 >= opts.height {
             break;
@@ -363,7 +360,7 @@ fn draw_task_options_text(app_state: &mut App, frame: &mut Frame<'_>, opts: Rect
         let width = (text.width() as u16).min((opts.x + opts.width).saturating_sub(x));
 
         // the box under the cursor: accent, like the other fields (disabled: dim on accent)
-        let style = match (enabled, on && app_state.repository.opt_i == i) {
+        let style = match (enabled, on && app.repository.opt_i == i) {
             (true, true) => theme::pill().add_modifier(Modifier::BOLD),
             (false, true) => theme::pill().add_modifier(Modifier::DIM),
             (false, false) => Style::default().fg(theme::pal().overlay0),
@@ -371,47 +368,47 @@ fn draw_task_options_text(app_state: &mut App, frame: &mut Frame<'_>, opts: Rect
             (true, false) => theme::muted(),
         };
 
-        let area_5 = Rect {
+        let area = Rect {
             x,
             y: opts.y + i as u16,
             width,
             height: 1,
         };
 
-        frame.render_widget(Paragraph::new(text).style(style), area_5);
-        app_state.preview.regions.opts.push((area_5, i));
+        frame.render_widget(Paragraph::new(text).style(style), area);
+        app.preview.regions.opts.push((area, i));
     }
 }
 
 fn draw_task_agents(
-    app_state: &mut App,
+    app: &mut App,
     frame: &mut Frame<'_>,
     label: impl Fn(&str, bool) -> Line<'static>,
     l_agents: Rect,
     r_agents: Rect,
 ) {
-    let focused = app_state.compose.field == Field::Agents;
+    let focused = app.compose.field == Field::Agents;
 
-    let agents_label = match app_state.compose.picks.len() {
+    let agents_label = match app.compose.picks.len() {
         0 => "agents · 0 picked".to_string(),
         1 => "agents · 1 picked".to_string(),
-        count_value => format!("agents · {count_value} picked: 1st starts the thread, the others join"),
+        count => format!("agents · {count} picked: 1st starts the thread, the others join"),
     };
 
     frame.render_widget(Paragraph::new(label(&agents_label, focused)), l_agents);
-    app_state.preview.regions.task_agents = r_agents;
-    app_state.draw_agent_grid(frame, r_agents, true);
+    app.preview.regions.task_agents = r_agents;
+    app.draw_agent_grid(frame, r_agents, true);
 }
 
 fn draw_task_notes(
-    app_state: &mut App,
+    app: &mut App,
     frame: &mut Frame<'_>,
     label: impl Fn(&str, bool) -> Line<'static>,
     n_notes: usize,
     l_notes: Rect,
     notes: Rect,
 ) {
-    let focused = app_state.compose.field == Field::Notes;
+    let focused = app.compose.field == Field::Notes;
 
     let mut notes_label = if n_notes == 0 {
         "notes · 0 picked".to_string()
@@ -419,12 +416,8 @@ fn draw_task_notes(
         format!("notes · {n_notes} picked, listed above the prompt")
     };
 
-    if !app_state.compose.carry.is_empty() {
-        let _ = write!(
-            notes_label,
-            " · {} context (threads tab: c)",
-            app_state.compose.carry.len()
-        );
+    if !app.compose.carry.is_empty() {
+        let _ = write!(notes_label, " · {} context (threads tab: c)", app.compose.carry.len());
     }
 
     if focused {
@@ -432,35 +425,35 @@ fn draw_task_notes(
     }
 
     frame.render_widget(Paragraph::new(label(&notes_label, focused)), l_notes);
-    app_state.preview.regions.notes_label = l_notes;
-    let mut lines: Vec<Line> = app_state
+    app.preview.regions.notes_label = l_notes;
+    let mut lines: Vec<Line> = app
         .note_list
         .selected
         .iter()
         .take(5)
-        .map(|path| Line::from(vec![Span::styled("  ◼ ", theme::accent()), Span::raw(path.clone())]))
+        .map(|note| Line::from(vec![Span::styled("  ◼ ", theme::accent()), Span::raw(note.clone())]))
         .collect();
 
     if n_notes > 5 {
         lines.push(Line::styled(format!("  … {} more", n_notes - 5), theme::muted()));
     }
 
-    for character in app_state.compose.carry.iter().take(5) {
-        draw_task_notes_body(&mut lines, character);
+    for session in app.compose.carry.iter().take(5) {
+        push_carry_line(&mut lines, session);
     }
 
     frame.render_widget(Paragraph::new(lines), notes);
 }
 
 fn draw_task_prompt(
-    app_state: &mut App,
+    app: &mut App,
     frame: &mut Frame<'_>,
     label: impl Fn(&str, bool) -> Line<'static>,
     l_prompt: Rect,
     i_prompt: Rect,
 ) {
     frame.render_widget(
-        Paragraph::new(label("prompt", app_state.compose.field == Field::Prompt)),
+        Paragraph::new(label("prompt", app.compose.field == Field::Prompt)),
         l_prompt,
     );
     frame.render_widget(Paragraph::new("").style(theme::panel()), i_prompt);
@@ -470,9 +463,8 @@ fn draw_task_prompt(
         ..i_prompt
     };
 
-    app_state.compose.prompt.marks = app_state.agent_names();
-    app_state
-        .compose
+    app.compose.prompt.marks = app.agent_names();
+    app.compose
         .prompt
-        .render(frame, inner, app_state.compose.field == Field::Prompt);
+        .render(frame, inner, app.compose.field == Field::Prompt);
 }

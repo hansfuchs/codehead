@@ -30,7 +30,7 @@ impl Settings {
 
 fn key_settings(settings: &mut Settings, key: KeyEvent) -> Action {
     if settings.bar {
-        let at = SUBS.iter().position(|text| text.0 == settings.sub).unwrap_or(0);
+        let at = SUBS.iter().position(|tab| tab.0 == settings.sub).unwrap_or(0);
 
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => settings.switch(SUBS[(at + SUBS.len() - 1) % SUBS.len()].0),

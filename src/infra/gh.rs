@@ -45,14 +45,14 @@ pub(crate) fn pr_urls(text: &str) -> Vec<PrRef> {
 
     let mut out: Vec<PrRef> = Vec::new();
 
-    for character in re.captures_iter(text) {
-        let result = PrRef::new(
-            &format!("{}/{}", &character[1], &character[2]),
-            character[3].parse().unwrap_or(0),
+    for captures in re.captures_iter(text) {
+        let pr = PrRef::new(
+            &format!("{}/{}", &captures[1], &captures[2]),
+            captures[3].parse().unwrap_or(0),
         );
 
-        if result.number > 0 && !out.contains(&result) {
-            out.push(result);
+        if pr.number > 0 && !out.contains(&pr) {
+            out.push(pr);
         }
     }
 
@@ -61,15 +61,15 @@ pub(crate) fn pr_urls(text: &str) -> Vec<PrRef> {
 
 /// `owner/name` of a git remote URL (ssh or https, github.com only).
 pub(crate) fn repo_of_remote(url: &str) -> Option<String> {
-    let user = url.trim().trim_end_matches('/').trim_end_matches(".git");
-    let rest = user
+    let trimmed = url.trim().trim_end_matches('/').trim_end_matches(".git");
+    let rest = trimmed
         .strip_prefix("git@github.com:")
-        .or_else(|| user.split_once("github.com/").map(|(_, result)| result))
-        .or_else(|| user.strip_prefix("ssh://git@github.com/"))?;
-    let mut it = rest.split('/');
-    let (output, count) = (it.next()?, it.next()?);
+        .or_else(|| trimmed.split_once("github.com/").map(|(_, path)| path))
+        .or_else(|| trimmed.strip_prefix("ssh://git@github.com/"))?;
+    let mut parts = rest.split('/');
+    let (owner, name) = (parts.next()?, parts.next()?);
 
-    (!output.is_empty() && !count.is_empty()).then(|| format!("{output}/{count}"))
+    (!owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
 }
 
 /// `owner/name` of the checkout DIR (its `origin`, else its 1st GitHub remote).
@@ -83,12 +83,12 @@ pub(crate) fn repo_of_dir(dir: &Path) -> Option<String> {
             .stderr(Stdio::null())
             .output()
             .ok()
-            .filter(|output_value| output_value.status.success())
-            .map(|output_2| String::from_utf8_lossy(&output_2.stdout).into_owned())
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
     };
 
-    if let Some(result) = git(&["remote", "get-url", "origin"]).and_then(|user| repo_of_remote(&user)) {
-        return Some(result);
+    if let Some(repo) = git(&["remote", "get-url", "origin"]).and_then(|url| repo_of_remote(&url)) {
+        return Some(repo);
     }
 
     git(&["remote", "-v"])?
@@ -335,20 +335,14 @@ impl Pr {
         let required_fail = self
             .checks
             .iter()
-            .any(|character| character.verdict == Verdict::Fail && character.required);
-        let any_fail = self
-            .checks
-            .iter()
-            .any(|character_value| character_value.verdict == Verdict::Fail);
+            .any(|check| check.verdict == Verdict::Fail && check.required);
+        let any_fail = self.checks.iter().any(|check| check.verdict == Verdict::Fail);
 
         if required_fail || (any_fail && self.merge_state == "BLOCKED") {
             return Ready::ChecksFailed;
         }
 
-        if self
-            .checks
-            .iter()
-            .any(|character_2| character_2.verdict == Verdict::Pending)
+        if self.checks.iter().any(|check| check.verdict == Verdict::Pending)
             && matches!(self.merge_state.as_str(), "BLOCKED" | "UNSTABLE" | "UNKNOWN")
         {
             return Ready::ChecksRunning;
@@ -381,18 +375,13 @@ impl Pr {
 
     /// (failed, passed, skipped, pending).
     pub(crate) fn check_counts(&self) -> (usize, usize, usize, usize) {
-        let count_value = |value: Verdict| {
-            self.checks
-                .iter()
-                .filter(|character| character.verdict == value)
-                .count()
-        };
+        let count_of = |verdict: Verdict| self.checks.iter().filter(|check| check.verdict == verdict).count();
 
         (
-            count_value(Verdict::Fail),
-            count_value(Verdict::Pass),
-            count_value(Verdict::Skip),
-            count_value(Verdict::Pending),
+            count_of(Verdict::Fail),
+            count_of(Verdict::Pass),
+            count_of(Verdict::Skip),
+            count_of(Verdict::Pending),
         )
     }
 }
@@ -405,29 +394,29 @@ pub(crate) fn iso(text: &str) -> u64 {
         return 0;
     }
 
-    let count = |result: std::ops::Range<usize>| text.get(result).and_then(|x| x.parse::<i64>().ok());
+    let field = |range: std::ops::Range<usize>| text.get(range).and_then(|part| part.parse::<i64>().ok());
 
-    let (Some(y), Some(mo), Some(directory), Some(height), Some(mi), Some(se)) = (
-        count(0..4),
-        count(5..7),
-        count(8..10),
-        count(11..13),
-        count(14..16),
-        count(17..19),
+    let (Some(y), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        field(0..4),
+        field(5..7),
+        field(8..10),
+        field(11..13),
+        field(14..16),
+        field(17..19),
     ) else {
         return 0;
     };
 
     // days from civil (H. Hinnant)
-    let y = if mo <= 2 { y - 1 } else { y };
+    let y = if month <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
-    let mp = (mo + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + directory - 1;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
 
-    (days * 86400 + height * 3600 + mi * 60 + se).max(0) as u64
+    (days * 86400 + hour * 3600 + minute * 60 + second).max(0) as u64
 }
 
 /// Unix s → local `2026-11-19 20:00:41`.

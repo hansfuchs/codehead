@@ -15,7 +15,7 @@ pub(super) fn context(ta: &TextArea) -> Option<Ctx> {
 pub(super) fn context_of(text: &str, col: usize) -> Option<Ctx> {
     let chars: Vec<char> = text.chars().collect();
 
-    if !text.starts_with('!') || col == 0 || chars.get(col).is_some_and(|character| !character.is_whitespace()) {
+    if !text.starts_with('!') || col == 0 || chars.get(col).is_some_and(|next| !next.is_whitespace()) {
         return None;
     }
 
@@ -35,11 +35,11 @@ pub(super) fn context_of(text: &str, col: usize) -> Option<Ctx> {
     let head = &line[..line.len() - word.len()];
     let mut before: Vec<String> = Vec::new();
 
-    for width in head.split_whitespace() {
-        if matches!(width, "|" | "||" | "&&" | ";") {
+    for word in head.split_whitespace() {
+        if matches!(word, "|" | "||" | "&&" | ";") {
             before.clear();
         } else {
-            before.push(width.to_string());
+            before.push(word.to_string());
         }
     }
 
@@ -53,9 +53,9 @@ pub(super) fn context_of(text: &str, col: usize) -> Option<Ctx> {
 
 /// The runner whose tasks go after BEFORE (the words before the cursor's word), None: 0 runner.
 pub(super) fn runner_of(before: &[String]) -> Option<&'static str> {
-    let width: Vec<&str> = before.iter().map(String::as_str).collect();
+    let words: Vec<&str> = before.iter().map(String::as_str).collect();
 
-    match width.as_slice() {
+    match words.as_slice() {
         ["just", ..] => Some("just"),
         ["make", ..] => Some("make"),
         ["npm", "run" | "run-script"] | ["pnpm" | "yarn"] | ["pnpm" | "yarn" | "bun", "run"] => Some("package"),

@@ -50,15 +50,15 @@ impl Wizard {
     }
 }
 
-fn draw_harness_options(widget_state: &Wizard, lines: &mut Vec<Line<'static>>) {
-    for (i, height) in widget_state.harness_rows().iter().enumerate() {
-        draw_harness_option(widget_state, lines, i, height);
+fn draw_harness_options(wizard: &Wizard, lines: &mut Vec<Line<'static>>) {
+    for (i, harness) in wizard.harness_rows().iter().enumerate() {
+        draw_harness_option(wizard, lines, i, harness);
     }
 }
 
-fn draw_harness_option(widget_state: &Wizard, lines: &mut Vec<Line<'static>>, i: usize, height: &harnesses::Harness) {
-    let ok = widget_state.harness_state.installed.contains(&height.name);
-    let cur = i == widget_state.harness_state.hcursor;
+fn draw_harness_option(wizard: &Wizard, lines: &mut Vec<Line<'static>>, i: usize, harness: &harnesses::Harness) {
+    let ok = wizard.harness_state.installed.contains(&harness.name);
+    let cur = i == wizard.harness_state.hcursor;
 
     let mark = if ok {
         Span::styled("  ✓ ", Style::default().fg(theme::pal().success()))
@@ -67,7 +67,7 @@ fn draw_harness_option(widget_state: &Wizard, lines: &mut Vec<Line<'static>>, i:
     };
 
     let label = Span::styled(
-        format!("{:<14}", height.label),
+        format!("{:<14}", harness.label),
         if cur { theme::accent_bold() } else { theme::text() },
     );
 
@@ -75,7 +75,7 @@ fn draw_harness_option(widget_state: &Wizard, lines: &mut Vec<Line<'static>>, i:
         Span::styled("ready", theme::muted())
     } else {
         Span::styled(
-            height.install.to_string(),
+            harness.install.to_string(),
             if cur { theme::text() } else { theme::muted() },
         )
     };
@@ -88,13 +88,13 @@ fn draw_harness_option(widget_state: &Wizard, lines: &mut Vec<Line<'static>>, i:
     ]));
 }
 
-fn draw_home_options(widget_state: &Wizard, lines: &mut Vec<Line<'static>>) {
-    for (i, (character, name, what)) in HOME_CHOICES.iter().enumerate() {
-        draw_home_option(widget_state, lines, i, *character, name, what);
+fn draw_home_options(wizard: &Wizard, lines: &mut Vec<Line<'static>>) {
+    for (i, (choice, name, what)) in HOME_CHOICES.iter().enumerate() {
+        draw_home_option(wizard, lines, i, *choice, name, what);
     }
 
     lines.push(Line::from(""));
-    let choice = HOME_CHOICES[widget_state.home_state.home].0;
+    let choice = HOME_CHOICES[wizard.home_state.home].0;
 
     if choice == HomeChoice::Skip {
         lines.push(Line::from(Span::styled(
@@ -125,14 +125,14 @@ fn draw_home_options(widget_state: &Wizard, lines: &mut Vec<Line<'static>>) {
 }
 
 fn draw_home_option(
-    widget_state: &Wizard,
+    wizard: &Wizard,
     lines: &mut Vec<Line<'static>>,
     i: usize,
-    character: HomeChoice,
+    choice: HomeChoice,
     name: &&str,
     what: &&str,
 ) {
-    let cur = i == widget_state.home_state.home;
+    let cur = i == wizard.home_state.home;
 
     lines.push(Line::from(vec![
         Span::styled(if cur { "  › " } else { "    " }, theme::accent()),
@@ -143,13 +143,13 @@ fn draw_home_option(
         Span::styled(what.to_string(), theme::muted()),
     ]));
 
-    if cur && character != HomeChoice::Skip {
-        let hint = match character {
+    if cur && choice != HomeChoice::Skip {
+        let hint = match choice {
             HomeChoice::Clone => "git URL",
             _ => "path",
         };
 
-        let text = widget_state.home_state.paths[i].clone();
+        let text = wizard.home_state.paths[i].clone();
         let caret = Span::styled("▏", theme::accent());
 
         let row = if text.is_empty() {
@@ -162,12 +162,12 @@ fn draw_home_option(
     }
 }
 
-fn draw_crew_options(widget_state: &Wizard, lines: &mut Vec<Line<'static>>) {
+fn draw_crew_options(wizard: &Wizard, lines: &mut Vec<Line<'static>>) {
     // presets row
     let mut row = vec![Span::raw("  ")];
 
     for (i, (name, _)) in PRESETS.iter().enumerate() {
-        let st = if i == widget_state.crew_state.preset {
+        let st = if i == wizard.crew_state.preset {
             theme::pill()
         } else {
             theme::muted()
@@ -181,32 +181,32 @@ fn draw_crew_options(widget_state: &Wizard, lines: &mut Vec<Line<'static>>) {
     lines.push(Line::from(""));
 
     // the agents side by side: 1 column of 20 per agent
-    let canvases: Vec<[String; avatar::SPAWN_H]> = widget_state
+    let canvases: Vec<[String; avatar::SPAWN_H]> = wizard
         .crew_state
         .crew
         .iter()
-        .map(|message| Wizard::canvas(message, Status::Idle))
+        .map(|member| Wizard::canvas(member, Status::Idle))
         .collect();
 
-    for result in 0..avatar::SPAWN_H {
-        draw_crew_sprite_row(widget_state, lines, &canvases, result);
+    for row in 0..avatar::SPAWN_H {
+        draw_crew_sprite_row(wizard, lines, &canvases, row);
     }
 
-    let cell = |text_value: String, st: Style| vec![Span::styled(format!("{text_value:<CW$}"), st)];
+    let cell = |text: String, st: Style| vec![Span::styled(format!("{text:<CW$}"), st)];
     let mut names = vec![Span::raw("  ")];
     let mut roles = vec![Span::raw("  ")];
     let mut hs = vec![Span::raw("  ")];
 
-    for (i, message_2) in widget_state.crew_state.crew.iter().enumerate() {
-        let focused = i == widget_state.crew_state.focus;
-        let style_value = Style::default()
-            .fg(crate::domain::agents::color(Some(message_2.color)))
+    for (i, member) in wizard.crew_state.crew.iter().enumerate() {
+        let focused = i == wizard.crew_state.focus;
+        let style = Style::default()
+            .fg(crate::domain::agents::color(Some(member.color)))
             .add_modifier(Modifier::BOLD);
 
         let name = if focused {
-            format!("{}▏", message_2.name)
+            format!("{}▏", member.name)
         } else {
-            message_2.name.clone()
+            member.name.clone()
         };
 
         let mark = if focused { "› " } else { "  " };
@@ -214,22 +214,22 @@ fn draw_crew_options(widget_state: &Wizard, lines: &mut Vec<Line<'static>>) {
         names.extend(cell(
             format!("  {mark}{name}"),
             if focused {
-                style_value
+                style
             } else {
-                style_value.remove_modifier(Modifier::BOLD)
+                style.remove_modifier(Modifier::BOLD)
             },
         ));
-        roles.extend(cell(format!("    {}", message_2.role.name()), theme::text()));
-        let model = crate::infra::config::harness_opt(message_2.harness, "model").unwrap_or_else(|| "default".into());
+        roles.extend(cell(format!("    {}", member.role.name()), theme::text()));
+        let model = crate::infra::config::harness_opt(member.harness, "model").unwrap_or_else(|| "default".into());
 
-        hs.extend(cell(format!("    {} · {model}", message_2.harness), theme::muted()));
+        hs.extend(cell(format!("    {} · {model}", member.harness), theme::muted()));
     }
 
-    draw_crew_description(widget_state, lines, names, roles, hs);
+    draw_crew_description(wizard, lines, names, roles, hs);
 }
 
 fn draw_crew_description(
-    widget_state: &Wizard,
+    wizard: &Wizard,
     lines: &mut Vec<Line<'static>>,
     names: Vec<Span<'static>>,
     roles: Vec<Span<'static>>,
@@ -240,17 +240,15 @@ fn draw_crew_description(
     lines.push(Line::from(hs));
     lines.push(Line::from(""));
 
-    let teach = match PRESETS[widget_state.crew_state.preset].0 {
+    let teach = match PRESETS[wizard.crew_state.preset].0 {
         "solo" => "1 agent does it all.".to_string(),
         "pair" => format!(
             "{} writes, {} checks. they talk on their own.",
-            widget_state.crew_state.crew[0].name, widget_state.crew_state.crew[1].name
+            wizard.crew_state.crew[0].name, wizard.crew_state.crew[1].name
         ),
         _ => format!(
             "{} plans, {} writes, {} checks.",
-            widget_state.crew_state.crew[0].name,
-            widget_state.crew_state.crew[1].name,
-            widget_state.crew_state.crew[2].name
+            wizard.crew_state.crew[0].name, wizard.crew_state.crew[1].name, wizard.crew_state.crew[2].name
         ),
     };
 
@@ -258,17 +256,17 @@ fn draw_crew_description(
 }
 
 fn draw_crew_sprite_row(
-    widget_state: &Wizard,
+    wizard: &Wizard,
     lines: &mut Vec<Line<'static>>,
     canvases: &[[String; avatar::SPAWN_H]],
-    result: usize,
+    row: usize,
 ) {
     let mut spans = vec![Span::raw("  ")];
 
-    for (i, message_value) in widget_state.crew_state.crew.iter().enumerate() {
-        let style = Style::default().fg(crate::domain::agents::color(Some(message_value.color)));
+    for (i, member) in wizard.crew_state.crew.iter().enumerate() {
+        let style = Style::default().fg(crate::domain::agents::color(Some(member.color)));
 
-        spans.push(Span::styled(format!("   {}", canvases[i][result]), style));
+        spans.push(Span::styled(format!("   {}", canvases[i][row]), style));
         spans.push(Span::raw(" ".repeat(CW - 3 - avatar::SPAWN_W)));
     }
 

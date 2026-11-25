@@ -16,10 +16,10 @@ fn main_checkout_worktree_and_detached_head() {
         Some("feat/x")
     );
 
-    let text_value = spot(&main, None);
+    let app = spot(&main, None);
 
     assert_eq!(
-        text_value,
+        app,
         Spot {
             repo: "app".into(),
             branch: Some("feat/x".into()),
@@ -63,7 +63,7 @@ fn main_checkout_worktree_and_detached_head() {
 
     let text: String = spans(&[spot(&main, None), spot(&wt, None)])
         .iter()
-        .map(|text_2| text_2.content.to_string())
+        .map(|span| span.content.to_string())
         .collect();
 
     assert_eq!(text, "  · in app ⎇ feat/x, app ⎇ @0123456 (worktree)");

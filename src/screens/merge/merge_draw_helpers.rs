@@ -37,13 +37,13 @@ fn draw_merge(merge: &mut Merge, frame: &mut Frame, area: Rect, focused: bool) {
         return;
     }
 
-    let focus = merge.tab_ref().and_then(|thread| thread.focus);
+    let focus = merge.tab_ref().and_then(|tab| tab.focus);
     let tabs_focused = focused && focus == Some(Stop::Tabs);
     let subs_focused = focused && focus == Some(Stop::Subs);
 
     // row 0: the PR tabs; row 1: the views
     draw_pull_request_tabs(merge, frame, area, tabs_focused);
-    let sub = merge.tab_ref().map(|thread_value| thread_value.sub).unwrap_or_default();
+    let sub = merge.tab_ref().map(|tab| tab.sub).unwrap_or_default();
 
     draw_sub_tabs(merge, frame, area, subs_focused, sub);
     let body = Rect {
@@ -64,18 +64,18 @@ fn draw_merge(merge: &mut Merge, frame: &mut Frame, area: Rect, focused: bool) {
 }
 
 fn draw_changes(merge: &mut Merge, frame: &mut Frame<'_>, body: Rect) {
-    if let Some(character) = merge.changes_view() {
-        character.draw(frame, body);
+    if let Some(view) = merge.changes_view() {
+        view.draw(frame, body);
 
-        if let Some(count) = character.take_note() {
-            merge.note = Some(count);
+        if let Some(note) = view.take_note() {
+            merge.note = Some(note);
         }
     }
 }
 
 fn association_message(merge: &Merge) -> String {
-    if let Some(error_value) = &merge.assoc_error {
-        format!("  pull requests: {error_value}")
+    if let Some(error) = &merge.assoc_error {
+        format!("  pull requests: {error}")
     } else {
         "  0 pull requests: 0 PR of the thread's branches, 0 PR link in the thread. r: read again".to_string()
     }

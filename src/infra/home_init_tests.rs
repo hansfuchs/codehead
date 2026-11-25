@@ -2,11 +2,11 @@ use super::*;
 use std::path::PathBuf;
 
 fn tmp(name: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!("codehead-homeinit-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
+    let dir = std::env::temp_dir().join(format!("codehead-homeinit-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
 
-    std::fs::create_dir_all(&directory).unwrap();
-    directory
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 #[test]
@@ -19,12 +19,12 @@ fn init_moves_files_links_back_and_splits_settings() {
     std::fs::write(config.join("agents/REGI.toml"), "harness = \"claude\"\n").unwrap();
     std::fs::write(config.join("mcp.toml"), "[linear]\nurl = \"https://x\"\n").unwrap();
     let local = config.join("codehead.toml");
-    let text = format!(
+    let config_text = format!(
         "# mine\nagent = \"REGI\"\nnotes = \"{0}/notes/\"\nhome = \"{0}\"\neditor = \"zed\"\n\n[colors]\nscheme = \"amber\"\n\n[aliases]\n\"x:y\" = \"/tmp/y\"\n",
         home.display()
     );
 
-    std::fs::write(&local, &text).unwrap();
+    std::fs::write(&local, &config_text).unwrap();
     let before = config::read_layers(&local).unwrap().merged();
 
     let lines = init(&home, &local, &config).unwrap();
@@ -56,13 +56,13 @@ fn init_moves_files_links_back_and_splits_settings() {
     assert!(device.path.starts_with(dir.join("devices")));
 
     // codehead.toml: the pointer only
-    let line = &layers.local.file;
+    let pointer = &layers.local.file;
 
     assert_eq!(
-        (line.agent.as_ref(), line.editor.as_ref(), line.notes.as_ref()),
+        (pointer.agent.as_ref(), pointer.editor.as_ref(), pointer.notes.as_ref()),
         (None, None, None)
     );
-    assert!(line.home.is_some() && line.device.is_some());
+    assert!(pointer.home.is_some() && pointer.device.is_some());
 
     // the same values, notes = the default now
     let mut after = layers.merged();
@@ -78,7 +78,7 @@ fn init_moves_files_links_back_and_splits_settings() {
     assert!(
         again
             .iter()
-            .all(|line_value| !line_value.starts_with("moved") && !line_value.starts_with("settings")),
+            .all(|line| !line.starts_with("moved") && !line.starts_with("settings")),
         "{again:?}"
     );
 
@@ -126,11 +126,11 @@ fn init_keeps_what_home_has_and_needs_git() {
 #[test]
 fn status_names_the_missing_dir() {
     let root = tmp("status");
-    let text = status(&root, "mbp");
+    let lines = status(&root, "mbp");
 
     assert!(
-        text.iter().any(|line| line.starts_with("codehead dir: missing")),
-        "{text:?}"
+        lines.iter().any(|line| line.starts_with("codehead dir: missing")),
+        "{lines:?}"
     );
 
     let _ = std::fs::remove_dir_all(&root);

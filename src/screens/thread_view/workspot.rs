@@ -21,22 +21,18 @@ pub(crate) struct Spot {
 
 /// The git dir of DIR's checkout: (its top dir, the git dir, a linked worktree).
 fn git_dir(dir: &Path) -> Option<(PathBuf, PathBuf, bool)> {
-    for directory_value in dir.ancestors().filter(|directory| !directory.as_os_str().is_empty()) {
-        let group = directory_value.join(".git");
+    for top in dir.ancestors().filter(|ancestor| !ancestor.as_os_str().is_empty()) {
+        let dot_git = top.join(".git");
 
-        if group.is_dir() {
-            return Some((directory_value.to_path_buf(), group, false));
+        if dot_git.is_dir() {
+            return Some((top.to_path_buf(), dot_git, false));
         }
 
-        if group.is_file() {
-            let text = std::fs::read_to_string(&group).ok()?;
-            let gd = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+        if dot_git.is_file() {
+            let text = std::fs::read_to_string(&dot_git).ok()?;
+            let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
 
-            return Some((
-                directory_value.to_path_buf(),
-                resolve_git_dir(directory_value, gd),
-                true,
-            ));
+            return Some((top.to_path_buf(), resolve_git_dir(top, gitdir), true));
         }
     }
 
@@ -46,17 +42,17 @@ fn git_dir(dir: &Path) -> Option<(PathBuf, PathBuf, bool)> {
 /// The branch of HEAD in `GIT_DIR` (detached: `@` + 7 chars of the commit).
 fn head(git_dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    let thread = text.trim();
+    let head = text.trim();
 
-    match thread.strip_prefix("ref:") {
-        Some(result) => Some(result.trim().trim_start_matches("refs/heads/").to_string()),
-        None => Some(format!("@{}", thread.get(..7).unwrap_or(thread))),
+    match head.strip_prefix("ref:") {
+        Some(reference) => Some(reference.trim().trim_start_matches("refs/heads/").to_string()),
+        None => Some(format!("@{}", head.get(..7).unwrap_or(head))),
     }
 }
 
 /// The top dir of DIR's checkout (a linked worktree: its own top); 0 git: DIR.
 pub(crate) fn top(dir: &Path) -> PathBuf {
-    git_dir(dir).map_or_else(|| dir.to_path_buf(), |group| group.0)
+    git_dir(dir).map_or_else(|| dir.to_path_buf(), |(top, _, _)| top)
 }
 
 /// The spot of DIR (BRANCH: the stored one, for a dir without git data).
@@ -64,17 +60,17 @@ pub(crate) fn spot(dir: &Path, branch: Option<String>) -> Spot {
     let name = |path: &Path| {
         path.file_name().map_or_else(
             || path.display().to_string(),
-            |count| count.to_string_lossy().into_owned(),
+            |file_name| file_name.to_string_lossy().into_owned(),
         )
     };
 
     match git_dir(dir) {
-        Some((_, gd, worktree)) => {
+        Some((_, gitdir, worktree)) => {
             let repo = crate::domain::threads::repo_root(dir).unwrap_or_else(|| dir.to_path_buf());
 
             Spot {
                 repo: name(&repo),
-                branch: head(&gd).or(branch),
+                branch: head(&gitdir).or(branch),
                 worktree,
             }
         }
@@ -95,8 +91,8 @@ pub(crate) fn of_thread(id: &str) -> Vec<Spot> {
     thread
         .all_checkouts()
         .into_iter()
-        .filter(|character| Path::new(&character.dir).is_dir())
-        .map(|character_value| spot(Path::new(&character_value.dir), character_value.branch))
+        .filter(|checkout| Path::new(&checkout.dir).is_dir())
+        .map(|checkout| spot(Path::new(&checkout.dir), checkout.branch))
         .collect()
 }
 
@@ -106,32 +102,32 @@ pub(crate) fn spans(spots: &[Spot]) -> Vec<Span<'static>> {
         return Vec::new();
     }
 
-    let mut value = vec![Span::styled("  · in ", theme::muted())];
+    let mut spans = vec![Span::styled("  · in ", theme::muted())];
 
-    for (i, text_value) in spots.iter().enumerate() {
+    for (i, spot) in spots.iter().enumerate() {
         if i > 0 {
-            value.push(Span::styled(", ", theme::muted()));
+            spans.push(Span::styled(", ", theme::muted()));
         }
 
-        value.push(Span::styled(text_value.repo.clone(), theme::text()));
+        spans.push(Span::styled(spot.repo.clone(), theme::text()));
 
-        if let Some(bytes) = &text_value.branch {
-            value.push(Span::styled(" ⎇ ", theme::muted()));
-            value.push(Span::styled(bytes.clone(), theme::fg(theme::pal().info())));
+        if let Some(branch) = &spot.branch {
+            spans.push(Span::styled(" ⎇ ", theme::muted()));
+            spans.push(Span::styled(branch.clone(), theme::fg(theme::pal().info())));
         }
 
-        if text_value.worktree {
-            value.push(Span::styled(" (worktree)", theme::muted()));
+        if spot.worktree {
+            spans.push(Span::styled(" (worktree)", theme::muted()));
         }
     }
 
-    value
+    spans
 }
 
 #[cfg(test)]
 #[path = "thread_view_workspot_tests.rs"]
 mod tests;
 
-fn resolve_git_dir(directory: &Path, path: PathBuf) -> PathBuf {
-    if path.is_relative() { directory.join(path) } else { path }
+fn resolve_git_dir(top: &Path, gitdir: PathBuf) -> PathBuf {
+    if gitdir.is_relative() { top.join(gitdir) } else { gitdir }
 }

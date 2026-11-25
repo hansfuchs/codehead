@@ -9,25 +9,25 @@ impl View {
             .map(|thread| thread.all_checkouts())
             .unwrap_or_default();
 
-        for path in all
+        for dir in all
             .iter()
-            .map(|path| PathBuf::from(&path.dir))
-            .filter(|directory| directory.is_dir())
+            .map(|checkout| PathBuf::from(&checkout.dir))
+            .filter(|dir| dir.is_dir())
             .chain([self.cwd.clone()])
         {
-            ide_dirs_top(&mut dirs, &(path));
+            push_top(&mut dirs, &dir);
         }
 
         dirs.into_iter()
-            .map(|directory| {
-                let text = crate::screens::thread_view::workspot::spot(&directory, None);
+            .map(|dir| {
+                let spot = crate::screens::thread_view::workspot::spot(&dir, None);
 
-                let label = match &text.branch {
-                    Some(bytes) => format!("{} ⎇ {bytes}", text.repo),
-                    None => text.repo,
+                let label = match &spot.branch {
+                    Some(branch) => format!("{} ⎇ {branch}", spot.repo),
+                    None => spot.repo,
                 };
 
-                (directory, label)
+                (dir, label)
             })
             .collect()
     }
@@ -37,8 +37,8 @@ impl View {
         let dirs = self.ide_dirs();
 
         match dirs.len() {
-            0 => self.open_ide(&(self.cwd.clone())),
-            1 => self.open_ide(&(dirs[0].0.clone())),
+            0 => self.open_ide(&self.cwd.clone()),
+            1 => self.open_ide(&dirs[0].0.clone()),
             _ => self.ide.ide_pick = Some((0, 0)),
         }
     }
@@ -61,8 +61,8 @@ impl View {
     pub(super) fn ide_pick_open(&mut self, i: usize) {
         self.ide.ide_pick = None;
 
-        if let Some((directory, _)) = self.ide_dirs().into_iter().nth(i) {
-            self.open_ide(&(directory));
+        if let Some((dir, _)) = self.ide_dirs().into_iter().nth(i) {
+            self.open_ide(&dir);
         }
     }
 
@@ -87,16 +87,16 @@ impl View {
         let dirs = self.ide_dirs();
         let rows: Vec<crate::ui::dropdown::Row> = dirs
             .iter()
-            .map(|(directory, line)| crate::ui::dropdown::Row {
-                text: line.clone(),
-                detail: tilde(directory),
-                now: *directory == crate::screens::thread_view::workspot::top(&self.cwd),
+            .map(|(dir, label)| crate::ui::dropdown::Row {
+                text: label.clone(),
+                detail: tilde(dir),
+                now: *dir == crate::screens::thread_view::workspot::top(&self.cwd),
                 marks: Vec::new(),
             })
             .collect();
         let width = rows
             .iter()
-            .map(|result| result.text.chars().count() + result.detail.chars().count() + 8)
+            .map(|row| row.text.chars().count() + row.detail.chars().count() + 8)
             .max()
             .unwrap_or(0)
             .clamp(30, 90) as u16;
@@ -155,28 +155,28 @@ impl View {
             return;
         }
 
-        let Some(error) = crate::infra::editor::find() else {
+        let Some(editor) = crate::infra::editor::find() else {
             self.toast("IDE: 0 found · setting editor (code, cursor, zed, idea …)");
             return;
         };
 
         // a terminal editor: full screen in this terminal (the view loop suspends codehead)
-        if error.kind.in_terminal() {
-            let mut argv: Vec<std::ffi::OsString> = vec![error.bin.clone().into()];
+        if editor.kind.in_terminal() {
+            let mut argv: Vec<std::ffi::OsString> = vec![editor.bin.clone().into()];
 
-            argv.extend(build_command(error.kind));
+            argv.extend(build_command(editor.kind));
             self.panes.outside = Some(argv);
             return;
         }
 
-        let (argv, reused) = match crate::infra::editor::reuse_args(&error, wt, target) {
-            Some(agent) => (agent, true),
-            None => (build_command(error.kind), false),
+        let (argv, reused) = match crate::infra::editor::reuse_args(&editor, wt, target) {
+            Some(args) => (args, true),
+            None => (build_command(editor.kind), false),
         };
 
         let what = if reused { format!("{what} (open window)") } else { what };
 
-        match crate::infra::editor::spawn(&error, &argv) {
+        match crate::infra::editor::spawn(&editor, &argv) {
             Ok(()) => {
                 let hint = crate::infra::editor::trust_hint(wt);
 
@@ -187,8 +187,8 @@ impl View {
     }
 }
 
-fn ide_dirs_top(dirs: &mut Vec<PathBuf>, path: &Path) {
-    let top = crate::screens::thread_view::workspot::top(path);
+fn push_top(dirs: &mut Vec<PathBuf>, dir: &Path) {
+    let top = crate::screens::thread_view::workspot::top(dir);
 
     if !dirs.contains(&top) {
         dirs.push(top);

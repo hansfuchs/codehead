@@ -62,8 +62,8 @@ pub(crate) fn read(thread: &str) -> Vec<Entry> {
         .unwrap_or_default()
 }
 
-pub(crate) fn write(thread: &str, error: &[Entry]) {
-    if let Ok(bytes) = serde_json::to_vec_pretty(error) {
+pub(crate) fn write(thread: &str, entries: &[Entry]) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(entries) {
         let _ = crate::engine::write_atomic(&path(thread), &bytes);
     }
 }
@@ -71,32 +71,32 @@ pub(crate) fn write(thread: &str, error: &[Entry]) {
 /// The stash file's change time (the view re-reads on a change: an agent named an entry).
 pub(crate) fn stamp(thread: &str) -> Option<std::time::SystemTime> {
     std::fs::metadata(path(thread))
-        .and_then(|message| message.modified())
+        .and_then(|metadata| metadata.modified())
         .ok()
 }
 
 /// A new id: ms since the epoch, base 36 (short enough to type).
 pub(crate) fn new_id() -> String {
-    let mut count = crate::engine::now_ms();
-    let mut text = Vec::new();
+    let mut millis = crate::engine::now_ms();
+    let mut digits = Vec::new();
 
-    while count > 0 {
-        text.push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(count % 36) as usize]);
-        count /= 36;
+    while millis > 0 {
+        digits.push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(millis % 36) as usize]);
+        millis /= 36;
     }
 
-    text.reverse();
-    String::from_utf8(text).unwrap_or_default()
+    digits.reverse();
+    String::from_utf8(digits).unwrap_or_default()
 }
 
 /// The message that asks E's agent for a name (`@agent` first: the thread view routes it).
-pub(crate) fn name_ask(error: &Entry) -> String {
-    let at = error
+pub(crate) fn name_ask(entry: &Entry) -> String {
+    let at = entry
         .agent
         .as_ref()
-        .map(|agent_value| format!("@{agent_value} "))
+        .map(|agent| format!("@{agent} "))
         .unwrap_or_default();
-    let patch: Vec<&str> = error
+    let patch: Vec<&str> = entry
         .patch
         .lines()
         .filter(|line| !line.starts_with("diff --git") && !line.starts_with("---") && !line.starts_with("+++"))
@@ -105,28 +105,28 @@ pub(crate) fn name_ask(error: &Entry) -> String {
 
     format!(
         "{at}[codehead stash] The owner took `{}` out of the worktree into the stash (entry `{}`). Name the entry: call the codehead MCP tool `stash_name` with id `{}` and 2-6 words on what these lines do. Nothing else: 0 file changes, 0 restore.\n\n```diff\n{}\n```",
-        error.spot(),
-        error.id,
-        error.id,
+        entry.spot(),
+        entry.id,
+        entry.id,
         patch.join("\n")
     )
 }
 
 /// The message that asks an agent to put E back (`@agent` first: E's agent).
-pub(crate) fn restore_ask(error: &Entry) -> String {
-    let at = error
+pub(crate) fn restore_ask(entry: &Entry) -> String {
+    let at = entry
         .agent
         .as_ref()
-        .map(|agent_value| format!("@{agent_value} "))
+        .map(|agent| format!("@{agent} "))
         .unwrap_or_default();
 
     format!(
         "{at}[codehead stash] Restore the stash entry “{}” (`{}`, id `{}`) at its original location: apply the patch below from the worktree root (`git apply`); it fails: `git apply -C1` (its context can hold the spot of an other stash entry). It may not apply cleanly: the code around it changed since. On any conflict or doubt, ask the owner how to resolve it before you change anything; never guess. When the lines are back, call the codehead MCP tool `stash_restored` with id `{}`.\n\n```diff\n{}\n```",
-        error.title(),
-        error.spot(),
-        error.id,
-        error.id,
-        error.patch.trim_end()
+        entry.title(),
+        entry.spot(),
+        entry.id,
+        entry.id,
+        entry.patch.trim_end()
     )
 }
 
@@ -146,13 +146,13 @@ pub(crate) fn set_name(thread: &str, id: &str, name: &str) -> Result<String, Str
     }
 
     let mut all = read(thread);
-    let error_value = all
+    let entry = all
         .iter_mut()
-        .find(|error| error.id == id)
+        .find(|entry| entry.id == id)
         .ok_or_else(|| format!("0 stash entry {id}"))?;
 
-    error_value.name = name.chars().take(60).collect();
-    let done = format!("stash entry {id} named “{}”", error_value.name);
+    entry.name = name.chars().take(60).collect();
+    let done = format!("stash entry {id} named “{}”", entry.name);
 
     write(thread, &all);
 
@@ -162,11 +162,11 @@ pub(crate) fn set_name(thread: &str, id: &str, name: &str) -> Result<String, Str
 /// MCP `stash_restored`: entry ID of THREAD is back in the worktree: it leaves the stash.
 pub(crate) fn restored(thread: &str, id: &str) -> Result<String, String> {
     let mut all = read(thread);
-    let count = all.len();
+    let before = all.len();
 
-    all.retain(|error| error.id != id);
+    all.retain(|entry| entry.id != id);
 
-    if all.len() == count {
+    if all.len() == before {
         return Err(format!("0 stash entry {id}"));
     }
 

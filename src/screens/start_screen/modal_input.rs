@@ -39,11 +39,11 @@ fn picker_key(form: &mut AgentForm, key: KeyEvent) -> bool {
     true
 }
 
-fn confirm_key(app_state: &mut App, title: String, question: String, yes: bool, action: ConfirmAction, key: KeyEvent) {
+fn confirm_key(app: &mut App, title: String, question: String, yes: bool, action: ConfirmAction, key: KeyEvent) {
     match key.code {
-        KeyCode::Char('y') => app_state.confirmed(action),
-        KeyCode::Enter if yes => app_state.confirmed(action),
-        KeyCode::Char('n') | KeyCode::Esc | KeyCode::Enter => app_state.declined(action),
+        KeyCode::Char('y') => app.confirmed(action),
+        KeyCode::Enter if yes => app.confirmed(action),
+        KeyCode::Char('n') | KeyCode::Esc | KeyCode::Enter => app.declined(action),
         _ => {
             let yes = if matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l')) {
                 !yes
@@ -51,7 +51,7 @@ fn confirm_key(app_state: &mut App, title: String, question: String, yes: bool, 
                 yes
             };
 
-            app_state.overlays.modal = Some(Modal::Confirm {
+            app.overlays.modal = Some(Modal::Confirm {
                 title,
                 question,
                 yes,
@@ -61,38 +61,38 @@ fn confirm_key(app_state: &mut App, title: String, question: String, yes: bool, 
     }
 }
 
-fn agent_form_key(app_state: &mut App, mut form: Box<AgentForm>, key: KeyEvent) {
+fn agent_form_key(app: &mut App, mut form: Box<AgentForm>, key: KeyEvent) {
     if picker_key(&mut form, key) {
-        app_state.overlays.modal = Some(Modal::Agent(form));
+        app.overlays.modal = Some(Modal::Agent(form));
         return;
     }
 
     if form.pick.is_some() {
-        app_state.form_pick_key(&mut form, key);
-        app_state.overlays.modal = Some(Modal::Agent(form));
+        app.form_pick_key(&mut form, key);
+        app.overlays.modal = Some(Modal::Agent(form));
         return;
     }
 
     match form.key(key) {
-        FormAction::Keep => app_state.overlays.modal = Some(Modal::Agent(form)),
+        FormAction::Keep => app.overlays.modal = Some(Modal::Agent(form)),
         FormAction::Close => {}
-        FormAction::Discard => discard_agent_form(app_state, form),
-        FormAction::Save => app_state.save_agent(form),
+        FormAction::Discard => discard_agent_form(app, form),
+        FormAction::Save => app.save_agent(form),
         FormAction::Models(model) => {
-            app_state.open_form_pick(&mut form, model);
-            app_state.overlays.modal = Some(Modal::Agent(form));
+            app.open_form_pick(&mut form, model);
+            app.overlays.modal = Some(Modal::Agent(form));
         }
     }
 }
 
-fn discard_agent_form(app_state: &mut App, form: Box<AgentForm>) {
+fn discard_agent_form(app: &mut App, form: Box<AgentForm>) {
     let what = if form.edit.is_some() {
         "edits of this agent"
     } else {
         "this new agent"
     };
 
-    app_state.overlays.modal = Some(Modal::Confirm {
+    app.overlays.modal = Some(Modal::Confirm {
         title: "discard".into(),
         question: format!("drop the {what}?"),
         yes: false,
@@ -100,7 +100,7 @@ fn discard_agent_form(app_state: &mut App, form: Box<AgentForm>) {
     });
 }
 
-fn info_key(app_state: &mut App, title: String, lines: Vec<Line<'static>>, scroll: u16, key: KeyEvent) {
+fn info_key(app: &mut App, title: String, lines: Vec<Line<'static>>, scroll: u16, key: KeyEvent) {
     let scroll = match key.code {
         KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => return,
         KeyCode::Down | KeyCode::Char('j') => scroll.saturating_add(1),
@@ -108,5 +108,5 @@ fn info_key(app_state: &mut App, title: String, lines: Vec<Line<'static>>, scrol
         _ => scroll,
     };
 
-    app_state.overlays.modal = Some(Modal::Info { title, lines, scroll });
+    app.overlays.modal = Some(Modal::Info { title, lines, scroll });
 }

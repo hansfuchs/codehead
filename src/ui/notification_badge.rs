@@ -13,33 +13,33 @@ pub(crate) fn badge(notes: &[Note]) -> Vec<Span<'static>> {
 
     let mut by: Vec<(Kind, usize)> = Vec::new();
 
-    for count_value in notes {
-        match by.iter_mut().find(|x| x.0 == count_value.kind) {
-            Some(x) => x.1 += count_value.count(),
-            None => by.push((count_value.kind, count_value.count())),
+    for note in notes {
+        match by.iter_mut().find(|entry| entry.0 == note.kind) {
+            Some(entry) => entry.1 += note.count(),
+            None => by.push((note.kind, note.count())),
         }
     }
 
-    by.sort_by_key(|x| x.0);
-    let mut text = Vec::new();
+    by.sort_by_key(|entry| entry.0);
+    let mut spans = Vec::new();
 
-    for (key, count_2) in by {
-        text.push(Span::styled(
-            format!("{} {} {count_2}", key.icon(), key.label()),
-            Style::default().fg(key.color()).add_modifier(Modifier::BOLD),
+    for (kind, count) in by {
+        spans.push(Span::styled(
+            format!("{} {} {count}", kind.icon(), kind.label()),
+            Style::default().fg(kind.color()).add_modifier(Modifier::BOLD),
         ));
-        text.push(Span::raw("  "));
+        spans.push(Span::raw("  "));
     }
 
-    text.push(Span::styled("ctrl+n ", theme::muted()));
+    spans.push(Span::styled("ctrl+n ", theme::muted()));
 
-    text
+    spans
 }
 
 pub(crate) fn width(spans: &[Span]) -> u16 {
     spans
         .iter()
-        .map(|text| unicode_width::UnicodeWidthStr::width(text.content.as_ref()) as u16)
+        .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()) as u16)
         .sum()
 }
 
@@ -47,38 +47,38 @@ pub(crate) fn width(spans: &[Span]) -> u16 {
 pub(crate) fn card_badge(buf: &mut ratatui::buffer::Buffer, area: Rect, notes: &[Note], id: &str) {
     use ratatui::widgets::Widget;
 
-    let Some(count_3) = notes
+    let Some(top) = notes
         .iter()
-        .filter(|count_value| count_value.thread == id)
-        .min_by_key(|count_2| count_2.kind)
+        .filter(|note| note.thread == id)
+        .min_by_key(|note| note.kind)
     else {
         return;
     };
 
-    let more = notes.iter().filter(|x| x.thread == id).count() - 1;
+    let more = notes.iter().filter(|note| note.thread == id).count() - 1;
 
     let text = if more > 0 {
-        format!(" {} {} +{more} ", count_3.kind.icon(), count_3.kind.label())
+        format!(" {} {} +{more} ", top.kind.icon(), top.kind.label())
     } else {
-        format!(" {} {} ", count_3.kind.icon(), count_3.kind.label())
+        format!(" {} {} ", top.kind.icon(), top.kind.label())
     };
 
-    let width_value = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
+    let width = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
 
-    if area.width < width_value + 8 {
+    if area.width < width + 8 {
         return;
     }
 
     let at = Rect {
-        x: area.right() - width_value - 5,
+        x: area.right() - width - 5,
         y: area.y,
-        width: width_value,
+        width,
         height: 1,
     };
 
     Paragraph::new(Span::styled(
         text,
-        Style::default().fg(count_3.kind.color()).add_modifier(Modifier::BOLD),
+        Style::default().fg(top.kind.color()).add_modifier(Modifier::BOLD),
     ))
     .render(at, buf);
 }

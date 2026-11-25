@@ -1,5 +1,4 @@
 use self::messages::{BubbleAgentContext, BubbleAnswerContent, BubbleAnswerLayout};
-use std::ops::ControlFlow;
 
 use super::{
     Call, Color, Colors, Drawn, Fold, HashMap, Hit, Item, Line, Modifier, Open, Picker, Row, Span, Style, Thoughts,
@@ -16,18 +15,18 @@ pub(super) fn draw_bubbles(
     fold: &Fold,
     ask: &Picker,
 ) -> Drawn {
-    let width_value = usize::from(width.max(12));
+    let width = usize::from(width.max(12));
 
     // content width inside `│ ` … ` │`
-    let inner = width_value - 2;
-    let mut directory = Drawn::default();
+    let inner = width - 2;
+    let mut drawn = Drawn::default();
     let mut cur: Option<Open> = None;
 
-    let close = |directory: &mut Drawn, cur: &mut Option<Open>| close_bubble(width_value, directory, cur);
+    let close = |drawn: &mut Drawn, cur: &mut Option<Open>| close_bubble(width, drawn, cur);
 
-    let gap = |directory_2: &mut Drawn| {
-        if !directory_2.rows.is_empty() {
-            directory_2.rows.push(Row::plain(Line::raw("")));
+    let gap = |drawn: &mut Drawn| {
+        if !drawn.rows.is_empty() {
+            drawn.rows.push(Row::plain(Line::raw("")));
         }
     };
 
@@ -37,17 +36,17 @@ pub(super) fn draw_bubbles(
 
     for (idx, item) in thread.items.iter().enumerate() {
         // an item outside the open box: the box closes first (its bottom border: its last item's)
-        draw_bubbles_joins(
+        draw_bubble_item(
             BubbleRenderContext {
                 thread,
                 colors,
                 roster,
                 fold,
-                width_value,
+                width,
                 inner,
                 last_of: &last_of,
             },
-            &mut directory,
+            &mut drawn,
             &mut cur,
             close,
             gap,
@@ -56,7 +55,7 @@ pub(super) fn draw_bubbles(
         );
     }
 
-    close(&mut directory, &mut cur);
+    close(&mut drawn, &mut cur);
 
     // agents at work with 0 output in this turn yet: 0 box (their header card shows the work);
     // the box comes with the 1st output (live text included)
@@ -65,48 +64,29 @@ pub(super) fn draw_bubbles(
         thread,
         colors,
         ask,
-        BubbleFinishLayout {
-            width_value,
-            inner,
-            directory,
-        },
+        BubbleFinishLayout { width, inner, drawn },
         close,
         gap,
     )
 }
 
-fn draw_bubbles_branch_state(width_value: usize, output_value: &Open, row: &mut Row) {
-    if let ControlFlow::Break(()) = draw_bubbles_branch(width_value, output_value, row) {}
-}
+fn close_row(width: usize, open: &Open, row: &mut Row) {
+    let row_width = row.line.width();
 
-fn draw_bubbles_branch(width_value: usize, output_value: &Open, row: &mut Row) -> ControlFlow<()> {
-    if let ControlFlow::Break(()) = draw_bubbles_body(width_value, output_value, row) {
-        return ControlFlow::Break(());
-    }
-
-    ControlFlow::Continue(())
-}
-
-fn draw_bubbles_body(width_value: usize, output_value: &Open, row: &mut Row) -> ControlFlow<()> {
-    let rw = row.line.width();
-
-    if rw >= width_value {
-        return ControlFlow::Break(());
+    // a full row (a minute divider): its own right end
+    if row_width >= width {
+        return;
     }
 
     row.line
         .spans
-        .push(Span::raw(" ".repeat((width_value - 1).saturating_sub(rw))));
-    row.line.spans.push(Span::styled("│", output_value.border));
-
-    // a full row (a minute divider): its own right end
-
-    ControlFlow::Continue(())
+        .push(Span::raw(" ".repeat((width - 1).saturating_sub(row_width))));
+    row.line.spans.push(Span::styled("│", open.border));
 }
 
-fn draw_bubbles_joins(
+fn draw_bubble_item(
     context: BubbleRenderContext<'_>,
-    directory: &mut Drawn,
+    drawn: &mut Drawn,
     cur: &mut Option<Open>,
     close: impl Fn(&mut Drawn, &mut Option<Open>),
     gap: impl Fn(&mut Drawn),
@@ -120,21 +100,21 @@ fn draw_bubbles_joins(
             true
         }
         Item::Text { agent, .. } | Item::Run { agent, .. } | Item::Sub { agent, .. } => {
-            cur.as_ref().and_then(|output_2| output_2.agent.as_deref()) == Some(agent.as_str())
+            cur.as_ref().and_then(|open| open.agent.as_deref()) == Some(agent.as_str())
         }
         _ => false,
     };
 
     if !joins {
-        close(directory, cur);
+        close(drawn, cur);
     }
 
-    directory.starts.push(directory.rows.len());
+    drawn.starts.push(drawn.rows.len());
 
     match item {
         Item::Prompt { from, to, text, ts } if from == "owner" => {
-            close(directory, cur);
-            gap(directory);
+            close(drawn, cur);
+            gap(drawn);
 
             let to_note = if to.len() > 1 {
                 format!("→ {}", to.join(", "))
@@ -142,36 +122,36 @@ fn draw_bubbles_joins(
                 String::new()
             };
 
-            owner_bubble(directory, context.width_value, text, &to_note, *ts);
+            owner_bubble(drawn, context.width, text, &to_note, *ts);
         }
         Item::Settled { .. } => {
-            render_bubble_settled(&context, directory, cur, &close, &gap, idx, item);
+            render_bubble_settled(&context, drawn, cur, &close, &gap, idx, item);
         }
         Item::Prompt { .. } => {
-            render_bubble_prompt(&context, directory, cur, &close, &gap, idx, item);
+            render_bubble_prompt(&context, drawn, cur, &close, &gap, idx, item);
         }
         // only thoughts, hidden: 0 rows
         Item::Text { text, thoughts, .. }
             if text.trim().is_empty() && (thoughts.is_empty() || context.fold.thoughts == Thoughts::Hidden) => {}
         Item::Text { .. } | Item::Run { .. } | Item::Sub { .. } => {
-            render_bubble_text_run_sub(&context, directory, cur, &close, &gap, idx, item);
+            render_bubble_text_run_sub(&context, drawn, cur, &close, &gap, idx, item);
         }
         Item::Kid { .. } => {
-            render_bubble_kid(&context, directory, cur, &close, &gap, idx, item);
+            render_bubble_kid(&context, drawn, cur, &close, &gap, idx, item);
         }
         Item::Shell { .. } => {
-            render_bubble_shell(&context, directory, cur, &close, &gap, idx, item);
+            render_bubble_shell(&context, drawn, cur, &close, &gap, idx, item);
         }
         Item::Edits { .. } => {
-            render_bubble_edits(&context, directory, cur, &close, &gap, idx, item);
+            render_bubble_edits(&context, drawn, cur, &close, &gap, idx, item);
         }
         Item::Note { .. } => {
-            render_bubble_note(&context, directory, cur, &close, &gap, idx, item);
+            render_bubble_note(&context, drawn, cur, &close, &gap, idx, item);
         }
     }
 }
 
-fn draw_bubbles_joins_character_(
+fn draw_note_bubble(
     context: BubbleNoteContext<'_>,
     close: impl Fn(&mut Drawn, &mut Option<Open>),
     gap: impl Fn(&mut Drawn),
@@ -184,31 +164,28 @@ fn draw_bubbles_joins_character_(
         thread,
         colors,
         roster,
-        width_value,
-        directory,
+        width,
+        drawn,
         cur,
     } = context;
 
-    close(directory, cur);
-    gap(directory);
-    let character_7 = color_of(colors, agent);
+    close(drawn, cur);
+    gap(drawn);
+    let agent_color = color_of(colors, agent);
     let pre = [
         Span::styled("● ", Style::default().fg(color)),
-        Span::styled(format!("{agent} "), Style::default().fg(character_7)),
+        Span::styled(format!("{agent} "), Style::default().fg(agent_color)),
     ];
 
-    directory
+    drawn
         .rows
-        .extend(markdown::plain(text, width_value, Style::default().fg(color), &pre));
+        .extend(markdown::plain(text, width, Style::default().fg(color), &pre));
 
     if color == theme::pal().error() {
-        for height_value in error_hint(agent, text, roster, resume_of(thread, item)) {
-            directory.rows.extend(markdown::plain(
-                &height_value,
-                width_value,
-                theme::muted(),
-                &[Span::raw("  ")],
-            ));
+        for hint in error_hint(agent, text, roster, resume_of(thread, item)) {
+            drawn
+                .rows
+                .extend(markdown::plain(&hint, width, theme::muted(), &[Span::raw("  ")]));
         }
     }
 }
@@ -222,14 +199,14 @@ fn finish_draw_bubbles(
     gap: impl Fn(&mut Drawn),
 ) -> Drawn {
     let BubbleFinishLayout {
-        width_value,
+        width,
         inner,
-        mut directory,
+        mut drawn,
     } = context;
 
-    if let Some(agent_value) = thread.asks.first() {
-        gap(&mut directory);
-        let character_8 = color_of(colors, &agent_value.agent);
+    if let Some(open_ask) = thread.asks.first() {
+        gap(&mut drawn);
+        let agent_color = color_of(colors, &open_ask.agent);
         let border = theme::fg(theme::pal().attention());
 
         let more = if thread.asks.len() > 1 {
@@ -238,9 +215,9 @@ fn finish_draw_bubbles(
             String::new()
         };
 
-        let what = if agent_value.tool == crate::engine::flows::run::WAIT_TOOL {
+        let what = if open_ask.tool == crate::engine::flows::run::WAIT_TOOL {
             "waits on you"
-        } else if agent_value.questions().is_empty() {
+        } else if open_ask.questions().is_empty() {
             "asks to run"
         } else {
             "asks"
@@ -248,15 +225,15 @@ fn finish_draw_bubbles(
 
         let name = vec![
             Span::styled(
-                agent_value.agent.clone(),
-                Style::default().fg(character_8).add_modifier(Modifier::BOLD),
+                open_ask.agent.clone(),
+                Style::default().fg(agent_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!(" {what}{more}"), border),
         ];
-        let (top, _) = top_border(width_value, border, name, false, "");
+        let (top, _) = top_border(width, border, name, false, "");
 
         let mut cur = Some(Open {
-            start: directory.rows.len(),
+            start: drawn.rows.len(),
             border,
             agent: None,
             minute: String::new(),
@@ -264,19 +241,19 @@ fn finish_draw_bubbles(
             wave: None,
         });
 
-        directory.rows.push(top);
+        drawn.rows.push(top);
         let bar = [Span::styled("│ ", border)];
 
-        ask_rows(&mut directory, agent_value, inner, &bar, ask);
-        close(&mut directory, &mut cur);
+        ask_rows(&mut drawn, open_ask, inner, &bar, ask);
+        close(&mut drawn, &mut cur);
     }
 
-    directory
+    drawn
 }
 
 #[path = "bubble_messages.rs"]
 mod messages;
-use messages::{draw_bubbles_item_settled, draw_bubbles_item_text_agent_ts};
+use messages::{draw_agent_bubble, draw_settled_bubble};
 
 #[derive(Clone, Copy)]
 pub(super) struct BubbleRenderContext<'render> {
@@ -284,7 +261,7 @@ pub(super) struct BubbleRenderContext<'render> {
     pub(super) colors: &'render HashMap<String, Color>,
     pub(super) roster: &'render [(String, String)],
     pub(super) fold: &'render Fold<'render>,
-    pub(super) width_value: usize,
+    pub(super) width: usize,
     pub(super) inner: usize,
     pub(super) last_of: &'render HashMap<&'render str, usize>,
 }
@@ -293,43 +270,36 @@ pub(super) struct BubbleNoteContext<'render> {
     pub(super) thread: &'render Thread,
     pub(super) colors: &'render HashMap<String, Color>,
     pub(super) roster: &'render [(String, String)],
-    pub(super) width_value: usize,
-    pub(super) directory: &'render mut Drawn,
+    pub(super) width: usize,
+    pub(super) drawn: &'render mut Drawn,
     pub(super) cur: &'render mut Option<Open>,
 }
 
 pub(super) struct BubbleFinishLayout {
-    pub(super) width_value: usize,
+    pub(super) width: usize,
     pub(super) inner: usize,
-    pub(super) directory: Drawn,
+    pub(super) drawn: Drawn,
 }
 
-fn close_bubble(width_value: usize, directory_value: &mut Drawn, cur: &mut Option<Open>) {
-    let Some(output_value) = cur.take() else { return };
+fn close_bubble(width: usize, drawn: &mut Drawn, cur: &mut Option<Open>) {
+    let Some(open) = cur.take() else { return };
 
     // 1 blank row above the bottom border (0 below the top border)
-    directory_value
+    drawn
         .rows
-        .push(Row::plain(Line::from(vec![Span::styled("│ ", output_value.border)])));
+        .push(Row::plain(Line::from(vec![Span::styled("│ ", open.border)])));
 
-    for row in &mut directory_value.rows[output_value.start + 1..] {
-        draw_bubbles_branch_state(width_value, &output_value, row);
+    for row in &mut drawn.rows[open.start + 1..] {
+        close_row(width, &open, row);
     }
 
-    let (bottom, wave_at) = bottom_border(
-        width_value,
-        output_value.border,
-        output_value.name,
-        output_value.wave.is_some(),
-    );
+    let (bottom, wave_at) = bottom_border(width, open.border, open.name, open.wave.is_some());
 
-    if let Some(character) = output_value.wave {
-        directory_value
-            .waves
-            .push((directory_value.rows.len(), wave_at, character));
+    if let Some(color) = open.wave {
+        drawn.waves.push((drawn.rows.len(), wave_at, color));
     }
 
-    directory_value.rows.push(bottom);
+    drawn.rows.push(bottom);
 }
 
 fn last_working_items(thread: &Thread) -> HashMap<&str, usize> {
@@ -337,7 +307,7 @@ fn last_working_items(thread: &Thread) -> HashMap<&str, usize> {
         .items
         .iter()
         .enumerate()
-        .filter_map(|(i, it)| match it {
+        .filter_map(|(i, item)| match item {
             Item::Text { agent, .. } | Item::Run { agent, .. } | Item::Sub { agent, .. } => Some((agent.as_str(), i)),
             _ => None,
         })
@@ -345,11 +315,11 @@ fn last_working_items(thread: &Thread) -> HashMap<&str, usize> {
     let turn_at = thread
         .items
         .iter()
-        .rposition(|it| matches!(it, Item::Prompt { .. } | Item::Settled { .. }));
+        .rposition(|item| matches!(item, Item::Prompt { .. } | Item::Settled { .. }));
 
     last_of
         .into_iter()
-        .filter(|&(_, line_value)| turn_at.is_none_or(|path| line_value > path))
+        .filter(|&(_, last)| turn_at.is_none_or(|turn| last > turn))
         .collect()
 }
 

@@ -13,37 +13,37 @@ impl Act {
 }
 
 impl ThreadList {
-    pub(crate) fn key(&mut self, key_value: KeyEvent) -> Out {
-        key_thread_list(self, key_value)
+    pub(crate) fn key(&mut self, key: KeyEvent) -> Out {
+        key_thread_list(self, key)
     }
 }
 
 impl Form {
-    pub(super) fn key(&mut self, key_value: KeyEvent) -> FormOut {
-        key_form(self, key_value)
+    pub(super) fn key(&mut self, key: KeyEvent) -> FormOut {
+        key_form(self, key)
     }
 }
 
-fn finish_key(key_value: KeyEvent, ctrl: bool, view_state: &mut ThreadList) -> Out {
-    match view_state.focus {
-        Focus::Repos => key_focus_repos(key_value, ctrl, view_state),
-        Focus::Projects => key_focus_projects(key_value, ctrl, view_state),
-        Focus::Views => finish_key_body(key_value, ctrl, view_state),
-        Focus::Status => finish_key_body_state(key_value, ctrl, view_state),
-        Focus::List => view_state.list_key(key_value),
+fn focus_key(key: KeyEvent, ctrl: bool, thread_list: &mut ThreadList) -> Out {
+    match thread_list.focus {
+        Focus::Repos => repo_tabs_key(key, ctrl, thread_list),
+        Focus::Projects => project_tabs_key(key, ctrl, thread_list),
+        Focus::Views => view_tabs_key(key, ctrl, thread_list),
+        Focus::Status => status_tabs_key(key, ctrl, thread_list),
+        Focus::List => thread_list.list_key(key),
     }
 }
 
-fn finish_key_body_state(key_value: KeyEvent, ctrl: bool, view_state: &mut ThreadList) -> Out {
-    match key_value.code {
-        KeyCode::Up => view_state.focus = Focus::Views,
-        KeyCode::Down | KeyCode::Enter => view_state.focus = Focus::List,
+fn status_tabs_key(key: KeyEvent, ctrl: bool, thread_list: &mut ThreadList) -> Out {
+    match key.code {
+        KeyCode::Up => thread_list.focus = Focus::Views,
+        KeyCode::Down | KeyCode::Enter => thread_list.focus = Focus::List,
         KeyCode::Left | KeyCode::Right => {
-            view_state.step_stat(if key_value.code == KeyCode::Right { 1 } else { -1 });
+            thread_list.step_stat(if key.code == KeyCode::Right { 1 } else { -1 });
         }
-        KeyCode::Char(_) if view_state.mode == Mode::Switch && !ctrl => {
-            view_state.focus = Focus::List;
-            view_state.type_filter(key_value);
+        KeyCode::Char(_) if thread_list.mode == Mode::Switch && !ctrl => {
+            thread_list.focus = Focus::List;
+            thread_list.type_filter(key);
         }
         _ => return Out::Pass,
     }
@@ -51,33 +51,17 @@ fn finish_key_body_state(key_value: KeyEvent, ctrl: bool, view_state: &mut Threa
     Out::None
 }
 
-fn finish_key_body(key_value: KeyEvent, ctrl: bool, view_state: &mut ThreadList) -> Out {
-    match key_value.code {
-        KeyCode::Up => view_state.focus = Focus::Projects,
-        KeyCode::Down if view_state.has_stats() => view_state.focus = Focus::Status,
-        KeyCode::Down | KeyCode::Enter => view_state.focus = Focus::List,
+fn view_tabs_key(key: KeyEvent, ctrl: bool, thread_list: &mut ThreadList) -> Out {
+    match key.code {
+        KeyCode::Up => thread_list.focus = Focus::Projects,
+        KeyCode::Down if thread_list.has_stats() => thread_list.focus = Focus::Status,
+        KeyCode::Down | KeyCode::Enter => thread_list.focus = Focus::List,
         KeyCode::Left | KeyCode::Right => {
-            view_state.step_view(if key_value.code == KeyCode::Right { 1 } else { -1 });
+            thread_list.step_view(if key.code == KeyCode::Right { 1 } else { -1 });
         }
-        KeyCode::Char(_) if view_state.mode == Mode::Switch && !ctrl => {
-            view_state.focus = Focus::List;
-            view_state.type_filter(key_value);
-        }
-        _ => return Out::Pass,
-    }
-
-    Out::None
-}
-
-fn key_focus_projects(key_value: KeyEvent, ctrl: bool, view_state: &mut ThreadList) -> Out {
-    match key_value.code {
-        KeyCode::Up => view_state.focus = Focus::Repos,
-        KeyCode::Down => view_state.focus = Focus::Views,
-        KeyCode::Enter => view_state.focus = Focus::List,
-        KeyCode::Left | KeyCode::Right => view_state.step_proj(if key_value.code == KeyCode::Right { 1 } else { -1 }),
-        KeyCode::Char(_) if view_state.mode == Mode::Switch && !ctrl => {
-            view_state.focus = Focus::List;
-            view_state.type_filter(key_value);
+        KeyCode::Char(_) if thread_list.mode == Mode::Switch && !ctrl => {
+            thread_list.focus = Focus::List;
+            thread_list.type_filter(key);
         }
         _ => return Out::Pass,
     }
@@ -85,15 +69,31 @@ fn key_focus_projects(key_value: KeyEvent, ctrl: bool, view_state: &mut ThreadLi
     Out::None
 }
 
-fn key_focus_repos(key_value: KeyEvent, ctrl: bool, view_state: &mut ThreadList) -> Out {
-    match key_value.code {
+fn project_tabs_key(key: KeyEvent, ctrl: bool, thread_list: &mut ThreadList) -> Out {
+    match key.code {
+        KeyCode::Up => thread_list.focus = Focus::Repos,
+        KeyCode::Down => thread_list.focus = Focus::Views,
+        KeyCode::Enter => thread_list.focus = Focus::List,
+        KeyCode::Left | KeyCode::Right => thread_list.step_proj(if key.code == KeyCode::Right { 1 } else { -1 }),
+        KeyCode::Char(_) if thread_list.mode == Mode::Switch && !ctrl => {
+            thread_list.focus = Focus::List;
+            thread_list.type_filter(key);
+        }
+        _ => return Out::Pass,
+    }
+
+    Out::None
+}
+
+fn repo_tabs_key(key: KeyEvent, ctrl: bool, thread_list: &mut ThreadList) -> Out {
+    match key.code {
         KeyCode::Up => return Out::Up,
-        KeyCode::Down => view_state.focus = Focus::Projects,
-        KeyCode::Enter => view_state.focus = Focus::List,
-        KeyCode::Left | KeyCode::Right => view_state.step_repo(if key_value.code == KeyCode::Right { 1 } else { -1 }),
-        KeyCode::Char(_) if view_state.mode == Mode::Switch && !ctrl => {
-            view_state.focus = Focus::List;
-            view_state.type_filter(key_value);
+        KeyCode::Down => thread_list.focus = Focus::Projects,
+        KeyCode::Enter => thread_list.focus = Focus::List,
+        KeyCode::Left | KeyCode::Right => thread_list.step_repo(if key.code == KeyCode::Right { 1 } else { -1 }),
+        KeyCode::Char(_) if thread_list.mode == Mode::Switch && !ctrl => {
+            thread_list.focus = Focus::List;
+            thread_list.type_filter(key);
         }
         _ => return Out::Pass,
     }
@@ -101,44 +101,44 @@ fn key_focus_repos(key_value: KeyEvent, ctrl: bool, view_state: &mut ThreadList)
     Out::None
 }
 
-fn key_keycode_char_keycode_enter(view_state: &mut Form) {
-    let i = view_state.row - 2;
+fn toggle_project(form: &mut Form) {
+    let i = form.row - 2;
 
-    view_state.projs[i].1 = !view_state.projs[i].1;
+    form.projs[i].1 = !form.projs[i].1;
 
     if i == 0 {
         // auto: the agents' pick from now on; off: the current picks stay
-        key_keycode_char_keycode_enter_branch(view_state);
+        clear_picks_on_auto(form);
     } else {
-        view_state.projs[0].1 = false;
+        form.projs[0].1 = false;
     }
 }
 
-fn key_keycode_char_keycode_enter_branch(view_state: &mut Form) {
-    if view_state.projs[0].1 {
-        for path in view_state.projs.iter_mut().skip(1) {
-            path.1 = false;
+fn clear_picks_on_auto(form: &mut Form) {
+    if form.projs[0].1 {
+        for project in form.projs.iter_mut().skip(1) {
+            project.1 = false;
         }
     }
 }
 
-fn key_directory(key_value: KeyEvent, view_state: &mut Form) {
-    let directory: isize = if key_value.code == KeyCode::Right { 1 } else { -1 };
+fn step_repo_pick(key: KeyEvent, form: &mut Form) {
+    let delta: isize = if key.code == KeyCode::Right { 1 } else { -1 };
 
-    view_state.repo_i = (view_state.repo_i as isize + directory).rem_euclid(view_state.repos.len() as isize) as usize;
+    form.repo_i = (form.repo_i as isize + delta).rem_euclid(form.repos.len() as isize) as usize;
 }
 
-fn key_thread_list(state: &mut ThreadList, key_value: KeyEvent) -> Out {
+fn key_thread_list(state: &mut ThreadList, key: KeyEvent) -> Out {
     state.poll(true);
-    let ctrl = key_value.modifiers.contains(KeyModifiers::CONTROL);
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     if let Some(form) = state.form.as_mut() {
-        match form.key(key_value) {
+        match form.key(key) {
             FormOut::Stay => {}
             FormOut::Close => state.form = None,
-            FormOut::Save(id, error) => {
+            FormOut::Save(id, edit) => {
                 state.form = None;
-                state.edit(id, error);
+                state.edit(id, edit);
             }
         }
 
@@ -146,7 +146,7 @@ fn key_thread_list(state: &mut ThreadList, key_value: KeyEvent) -> Out {
     }
 
     if state.job_state.pending.is_some() {
-        return match key_value.code {
+        return match key.code {
             KeyCode::Enter | KeyCode::Char('y') => state.confirm(),
             _ => {
                 state.job_state.pending = None;
@@ -158,16 +158,16 @@ fn key_thread_list(state: &mut ThreadList, key_value: KeyEvent) -> Out {
     if let Some(cur) = state.job_state.actions {
         let acts = state.acts();
 
-        match key_value.code {
+        match key.code {
             KeyCode::Esc => state.job_state.actions = None,
-            _ if crate::ui::context_menu::is_key(&key_value) => state.job_state.actions = None,
+            _ if crate::ui::context_menu::is_key(&key) => state.job_state.actions = None,
             KeyCode::Up => state.job_state.actions = Some(cur.saturating_sub(1)),
             KeyCode::Down => state.job_state.actions = Some((cur + 1).min(acts.len().saturating_sub(1))),
-            KeyCode::Enter => return acts.get(cur).map_or(Out::None, |&agent| state.run(agent)),
-            KeyCode::Char(character) => {
+            KeyCode::Enter => return acts.get(cur).map_or(Out::None, |&act| state.run(act)),
+            KeyCode::Char(letter) => {
                 return acts
                     .iter()
-                    .find(|action| action.key() == character.to_string())
+                    .find(|action| action.key() == letter.to_string())
                     .copied()
                     .map_or(Out::None, |action| state.run(action));
             }
@@ -178,53 +178,53 @@ fn key_thread_list(state: &mut ThreadList, key_value: KeyEvent) -> Out {
     }
 
     if state.filtering {
-        match key_value.code {
+        match key.code {
             KeyCode::Esc | KeyCode::Enter => state.filtering = false,
             KeyCode::Up => state.cursor = state.cursor.saturating_sub(1),
             KeyCode::Down => state.cursor = (state.cursor + 1).min(state.count().saturating_sub(1)),
-            _ => state.type_filter(key_value),
+            _ => state.type_filter(key),
         }
 
         return Out::None;
     }
 
-    finish_key(key_value, ctrl, state)
+    focus_key(key, ctrl, state)
 }
 
-fn key_agent(view_state: &mut Form) {
-    let i = view_state.row - 2 - view_state.projs.len();
+fn toggle_link_or_agent(form: &mut Form) {
+    let i = form.row - 2 - form.projs.len();
 
-    match view_state.links.get_mut(i) {
-        Some(line) => line.1 = !line.1,
+    match form.links.get_mut(i) {
+        Some(link) => link.1 = !link.1,
         None => {
-            if let Some(agent) = view_state.agents.get_mut(i - view_state.links.len()) {
+            if let Some(agent) = form.agents.get_mut(i - form.links.len()) {
                 agent.1 = !agent.1;
             }
         }
     }
 }
 
-fn key_form(state: &mut Form, key_value: KeyEvent) -> FormOut {
-    let ctrl = key_value.modifiers.contains(KeyModifiers::CONTROL) || key_value.modifiers.contains(KeyModifiers::SUPER);
-    let count = state.n_rows();
+fn key_form(state: &mut Form, key: KeyEvent) -> FormOut {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER);
+    let rows = state.n_rows();
 
-    match key_value.code {
+    match key.code {
         KeyCode::Esc => return FormOut::Close,
         KeyCode::Char('s') if ctrl => return state.save(),
         KeyCode::Enter if ctrl || state.row == 0 => return state.save(),
         KeyCode::Up | KeyCode::BackTab => state.row = state.row.saturating_sub(1),
-        KeyCode::Down | KeyCode::Tab => state.row = (state.row + 1).min(count - 1),
+        KeyCode::Down | KeyCode::Tab => state.row = (state.row + 1).min(rows - 1),
         _ if state.row == 0 => {
-            state.title.key(key_value);
+            state.title.key(key);
         }
         KeyCode::Left | KeyCode::Right if state.row == 1 => {
-            key_directory(key_value, state);
+            step_repo_pick(key, state);
         }
         KeyCode::Char(' ') | KeyCode::Enter if state.row >= 2 && state.row < 2 + state.projs.len() => {
-            key_keycode_char_keycode_enter(state);
+            toggle_project(state);
         }
         KeyCode::Char(' ') | KeyCode::Enter if state.row >= 2 => {
-            key_agent(state);
+            toggle_link_or_agent(state);
         }
         _ => {}
     }

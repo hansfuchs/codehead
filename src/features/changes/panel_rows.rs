@@ -14,7 +14,7 @@ impl View {
     /// Comment CI's path in this view's checkout (None: another checkout's).
     pub(in crate::features::changes) fn comment_path(&self, ci: usize) -> Option<String> {
         match crate::features::changes::place(self.comment_state.comments.get(ci)?) {
-            (Some(result), _) if !crate::features::changes::same_dir(&result, &self.dir) => None,
+            (Some(root), _) if !crate::features::changes::same_dir(&root, &self.dir) => None,
             (_, rel) => Some(rel),
         }
     }
@@ -57,17 +57,17 @@ fn panel_file_rows(panel: &Panel, order: &[usize], rows: &mut Vec<PRow>, pr: boo
 }
 
 fn panel_level_rows(panel: &Panel, rows: &mut Vec<PRow>, view: &View, open: &[usize]) {
-    for line in Level::ALL {
-        let fs: Vec<usize> = open.iter().copied().filter(|&i| view.level_of(i) == line).collect();
+    for level in Level::ALL {
+        let files: Vec<usize> = open.iter().copied().filter(|&i| view.level_of(i) == level).collect();
 
-        if fs.is_empty() {
+        if files.is_empty() {
             continue;
         }
 
-        rows.push(PRow::Level(line, fs.len()));
+        rows.push(PRow::Level(level, files.len()));
 
-        if !panel.folded.contains(&Fold::Level(line)) {
-            rows.extend(fs.iter().map(|&i| PRow::File(i, false)));
+        if !panel.folded.contains(&Fold::Level(level)) {
+            rows.extend(files.iter().map(|&i| PRow::File(i, false)));
         }
     }
 }
@@ -134,10 +134,10 @@ fn panel_commit_files(
     for i in at {
         rows.push(PRow::Commit(i));
 
-        let Some(peek) = view.peek.as_ref().filter(|x| {
-            x.commit_src
+        let Some(peek) = view.peek.as_ref().filter(|peek| {
+            peek.commit_src
                 .as_ref()
-                .is_some_and(|character| character.oid == cs.list[i].oid)
+                .is_some_and(|commit| commit.oid == cs.list[i].oid)
         }) else {
             continue;
         };
@@ -176,10 +176,7 @@ fn panel_comment_rows(panel: &Panel, rows: &mut Vec<PRow>, view: &View) {
         // (its files, their comments)
         panel_comment_states(panel, rows, view, &here);
 
-        rows.extend(
-            away.into_iter()
-                .map(|(root, count_value)| PRow::Elsewhere(root, count_value)),
-        );
+        rows.extend(away.into_iter().map(|(root, count)| PRow::Elsewhere(root, count)));
     }
 }
 
@@ -188,7 +185,7 @@ fn panel_comment_states(panel: &Panel, rows: &mut Vec<PRow>, view: &View, here: 
         let at: Vec<(usize, &str)> = here
             .iter()
             .filter(|(i, _)| view.comment_state.comments[*i].open() != resolved)
-            .map(|(i, path_3)| (*i, path_3.as_str()))
+            .map(|(i, path)| (*i, path.as_str()))
             .collect();
 
         if at.is_empty() {
@@ -211,20 +208,20 @@ fn panel_comment_states(panel: &Panel, rows: &mut Vec<PRow>, view: &View, here: 
 }
 
 fn panel_comment_files(panel: &Panel, rows: &mut Vec<PRow>, view: &View, at: &[(usize, &str)]) {
-    for line_value in Level::ALL {
+    for level in Level::ALL {
         let of: Vec<(usize, &str)> = at
             .iter()
             .copied()
-            .filter(|(i, _)| view.comment_state.comments[*i].level == line_value)
+            .filter(|(i, _)| view.comment_state.comments[*i].level == level)
             .collect();
 
         if of.is_empty() {
             continue;
         }
 
-        rows.push(PRow::CLevel(line_value, of.len()));
+        rows.push(PRow::CLevel(level, of.len()));
 
-        if !panel.folded.contains(&Fold::CLevel(line_value)) {
+        if !panel.folded.contains(&Fold::CLevel(level)) {
             append_comment_files(rows, &of);
         }
     }
@@ -242,7 +239,7 @@ fn append_comment_files(rows: &mut Vec<PRow>, at: &[(usize, &str)]) {
     for path in paths {
         let of: Vec<usize> = at
             .iter()
-            .filter(|(_, path_2)| *path_2 == path)
+            .filter(|(_, comment_path)| *comment_path == path)
             .map(|(i, _)| *i)
             .collect();
 
@@ -270,14 +267,14 @@ fn append_checkout_comment(
     comment: &crate::domain::changes::Comment,
 ) {
     match crate::features::changes::place(comment) {
-        (Some(result), _) if !crate::features::changes::same_dir(&result, &view.dir) => {
+        (Some(root), _) if !crate::features::changes::same_dir(&root, &view.dir) => {
             if !comment.open() {
                 return;
             }
 
-            match away.iter_mut().find(|(agent, _)| *agent == result) {
+            match away.iter_mut().find(|(checkout, _)| *checkout == root) {
                 Some((_, count)) => *count += 1,
-                None => away.push((result, 1)),
+                None => away.push((root, 1)),
             }
         }
         (_, rel) => here.push((i, rel)),
@@ -285,37 +282,37 @@ fn append_checkout_comment(
 }
 
 fn panel_rows_view(view: &View) -> Vec<PRow> {
-    let path_value = &view.scm;
+    let panel = &view.scm;
     let mut order: Vec<usize> = (0..view.changes.files.len()).collect();
 
     order.sort_by_key(|&i| view.level_of(i) as usize);
-    let mut value = Vec::new();
+    let mut rows = Vec::new();
     let pr = view.pr_src.is_some();
 
     if pr {
-        value.push(PRow::Pick);
+        rows.push(PRow::Pick);
     }
 
-    panel_file_rows(path_value, &order, &mut value, pr, view);
+    panel_file_rows(panel, &order, &mut rows, pr, view);
 
     // the comments of this checkout (their path in it); the open ones of other checkouts:
     // 1 row per checkout
-    panel_comment_rows(path_value, &mut value, view);
+    panel_comment_rows(panel, &mut rows, view);
 
     if pr {
-        return value;
+        return rows;
     }
 
-    value.push(PRow::Section(Sec::Stash, view.stash_state.stash.len()));
+    rows.push(PRow::Section(Sec::Stash, view.stash_state.stash.len()));
 
-    if !path_value.folded.contains(&Fold::Sec(Sec::Stash)) {
+    if !panel.folded.contains(&Fold::Sec(Sec::Stash)) {
         if view.stash_state.stash.is_empty() {
-            value.push(PRow::Empty("p on lines / files: stash them"));
+            rows.push(PRow::Empty("p on lines / files: stash them"));
         }
 
-        value.extend((0..view.stash_state.stash.len()).map(PRow::Stash));
+        rows.extend((0..view.stash_state.stash.len()).map(PRow::Stash));
     }
 
     // the branch's commits: unpushed, then pushed (newest first in each)
-    panel_commit_rows(path_value, value, view)
+    panel_commit_rows(panel, rows, view)
 }

@@ -227,7 +227,7 @@ fn monitor_bar_click_opens_details_and_escape_closes_without_navigation() {
 
     assert_eq!(panel.rows(100, 20), 1);
 
-    term.draw(|area_value| panel.render(area_value, Rect::new(0, 24, 100, 1), 0))
+    term.draw(|frame| panel.render(frame, Rect::new(0, 24, 100, 1), 0))
         .unwrap();
 
     assert!(panel.mouse(MouseEvent {
@@ -244,7 +244,7 @@ fn monitor_bar_click_opens_details_and_escape_closes_without_navigation() {
 
     let area = Rect::new(0, 25 - rows, 100, rows);
 
-    term.draw(|file| panel.render(file, area, 1)).unwrap();
+    term.draw(|frame| panel.render(frame, area, 1)).unwrap();
 
     assert!(!panel.popup.is_empty() && panel.popup.bottom() == 24);
 
@@ -304,7 +304,7 @@ fn d_ends_the_selected_watch_and_its_process() {
 
     // a later read: still hidden
     panel.watches = parse(&[monitor("watch1")], 2000);
-    panel.watches.retain(|width| !panel.ended.contains(&width.key()));
+    panel.watches.retain(|watch| !panel.ended.contains(&watch.key()));
 
     assert!(panel.watches.is_empty());
 }

@@ -4,94 +4,94 @@ use super::*;
 
 #[test]
 fn the_keys_walk_the_stops_not_the_lines() {
-    let mut message = with(pr());
+    let mut merge = with(pr());
 
     // the 1st key: the title
-    key(&mut message, KeyCode::Down);
+    key(&mut merge, KeyCode::Down);
 
-    assert_eq!(focus(&message), Some(Stop::Status));
+    assert_eq!(focus(&merge), Some(Stop::Status));
 
-    key(&mut message, KeyCode::Down);
+    key(&mut merge, KeyCode::Down);
 
     // the labels row: its 1st stop; → along it
-    assert_eq!(focus(&message), Some(Stop::Label(0)));
+    assert_eq!(focus(&merge), Some(Stop::Label(0)));
 
-    key(&mut message, KeyCode::Right);
+    key(&mut merge, KeyCode::Right);
 
-    assert_eq!(focus(&message), Some(Stop::AddLabel));
+    assert_eq!(focus(&merge), Some(Stop::AddLabel));
 
     // ↓ leaves the row: update + merge share 1
-    key(&mut message, KeyCode::Down);
+    key(&mut merge, KeyCode::Down);
 
-    assert_eq!(focus(&message), Some(Stop::Update));
+    assert_eq!(focus(&merge), Some(Stop::Update));
 
-    key(&mut message, KeyCode::Right);
+    key(&mut merge, KeyCode::Right);
 
-    assert_eq!(focus(&message), Some(Stop::Merge));
+    assert_eq!(focus(&merge), Some(Stop::Merge));
 
-    key(&mut message, KeyCode::Down);
+    key(&mut merge, KeyCode::Down);
 
-    assert_eq!(focus(&message), Some(Stop::Checks));
+    assert_eq!(focus(&merge), Some(Stop::Checks));
 
     // → shows the checks: failed + passed (skipped: 1 gray line), ← hides them
-    key(&mut message, KeyCode::Right);
-    key(&mut message, KeyCode::Down);
+    key(&mut merge, KeyCode::Right);
+    key(&mut merge, KeyCode::Down);
 
-    assert_eq!(focus(&message), Some(Stop::Check(0)));
+    assert_eq!(focus(&merge), Some(Stop::Check(0)));
 
-    key(&mut message, KeyCode::Down);
+    key(&mut merge, KeyCode::Down);
 
-    assert_eq!(focus(&message), Some(Stop::Check(1)));
+    assert_eq!(focus(&merge), Some(Stop::Check(1)));
 
-    key(&mut message, KeyCode::Down);
+    key(&mut merge, KeyCode::Down);
 
-    assert_eq!(focus(&message), Some(Stop::NewComment));
+    assert_eq!(focus(&merge), Some(Stop::NewComment));
 
-    key(&mut message, KeyCode::Up);
-    key(&mut message, KeyCode::Left);
+    key(&mut merge, KeyCode::Up);
+    key(&mut merge, KeyCode::Left);
 
-    assert_eq!(focus(&message), Some(Stop::Checks));
-    assert!(!message.tab_ref().unwrap().checks_open);
+    assert_eq!(focus(&merge), Some(Stop::Checks));
+    assert!(!merge.tab_ref().unwrap().checks_open);
 
     // up into a row: its 1st stop
-    key(&mut message, KeyCode::Up);
+    key(&mut merge, KeyCode::Up);
 
-    assert_eq!(focus(&message), Some(Stop::Update));
+    assert_eq!(focus(&merge), Some(Stop::Update));
 }
 
 #[test]
 fn enter_on_comments_edits_own_replies_to_line_threads_quotes_others() {
-    let mut message = with(pr());
+    let mut merge = with(pr());
 
-    message.tab().unwrap().focus = Some(Stop::Comment(0, 0));
-    key(&mut message, KeyCode::Enter);
+    merge.tab().unwrap().focus = Some(Stop::Comment(0, 0));
+    key(&mut merge, KeyCode::Enter);
 
     // someone's flat comment: a new comment that quotes it
-    let thread_value = message.tab_ref().unwrap();
+    let tab = merge.tab_ref().unwrap();
 
     assert!(
-        matches!(thread_value.input.edit, Some((Edit::Comment, ref ta)) if ta.text().starts_with("@rev wrote:\n> looks off"))
+        matches!(tab.input.edit, Some((Edit::Comment, ref textarea)) if textarea.text().starts_with("@rev wrote:\n> looks off"))
     );
 
-    key(&mut message, KeyCode::Esc);
+    key(&mut merge, KeyCode::Esc);
 
     // a line thread: a real reply
-    message.tab().unwrap().focus = Some(Stop::Comment(1, 0));
-    key(&mut message, KeyCode::Enter);
+    merge.tab().unwrap().focus = Some(Stop::Comment(1, 0));
+    key(&mut merge, KeyCode::Enter);
 
     assert!(matches!(
-        message.tab_ref().unwrap().input.edit,
+        merge.tab_ref().unwrap().input.edit,
         Some((Edit::Reply(1, 2), _))
     ));
 
-    key(&mut message, KeyCode::Esc);
+    key(&mut merge, KeyCode::Esc);
 
     // own reply: edit / delete
-    message.tab().unwrap().focus = Some(Stop::Comment(1, 1));
-    key(&mut message, KeyCode::Enter);
+    merge.tab().unwrap().focus = Some(Stop::Comment(1, 1));
+    key(&mut merge, KeyCode::Enter);
 
     assert!(matches!(
-        message.tab_ref().unwrap().input.menu,
+        merge.tab_ref().unwrap().input.menu,
         Some(Menu::Mine {
             thread: 1,
             comment: 1,
@@ -99,164 +99,164 @@ fn enter_on_comments_edits_own_replies_to_line_threads_quotes_others() {
         })
     ));
 
-    key(&mut message, KeyCode::Enter);
+    key(&mut merge, KeyCode::Enter);
 
     assert!(
-        matches!(message.tab_ref().unwrap().input.edit, Some((Edit::Change(1, 1, Kind::Line, 3), ref ta)) if ta.text() == "because")
+        matches!(merge.tab_ref().unwrap().input.edit, Some((Edit::Change(1, 1, Kind::Line, 3), ref textarea)) if textarea.text() == "because")
     );
 }
 
 #[test]
 fn merge_asks_twice_update_prompts_the_agent() {
-    let mut message = with(pr());
+    let mut merge = with(pr());
 
-    message.tab().unwrap().focus = Some(Stop::Merge);
-    let agent = key(&mut message, KeyCode::Enter);
+    merge.tab().unwrap().focus = Some(Stop::Merge);
+    let act = key(&mut merge, KeyCode::Enter);
 
     assert!(
-        matches!(agent, Act::Toast(ref thread) if thread.contains("enter again: merge when ready (squash)")),
-        "{agent:?}"
+        matches!(act, Act::Toast(ref toast) if toast.contains("enter again: merge when ready (squash)")),
+        "{act:?}"
     );
 
     // update: a 1st enter asks, a 2nd sends the prompt
-    message.tab().unwrap().focus = Some(Stop::Update);
-    let agent_value = key(&mut message, KeyCode::Enter);
+    merge.tab().unwrap().focus = Some(Stop::Update);
+    let act = key(&mut merge, KeyCode::Enter);
 
     assert!(
-        matches!(agent_value, Act::Toast(ref thread_value) if thread_value.contains("enter again: the agents update")),
-        "{agent_value:?}"
+        matches!(act, Act::Toast(ref toast) if toast.contains("enter again: the agents update")),
+        "{act:?}"
     );
 
-    let agent_2 = key(&mut message, KeyCode::Enter);
+    let act = key(&mut merge, KeyCode::Enter);
 
     assert!(
-        matches!(agent_2, Act::Prompt(ref thread_2) if thread_2.contains("Update the branch `feat/x`") && thread_2.contains("0 conflicts expected")),
-        "{agent_2:?}"
+        matches!(act, Act::Prompt(ref prompt) if prompt.contains("Update the branch `feat/x`") && prompt.contains("0 conflicts expected")),
+        "{act:?}"
     );
 
-    let mut path = pr();
+    let mut pr = pr();
 
-    path.mergeable = "CONFLICTING".into();
-    let mut message_value = with(path);
+    pr.mergeable = "CONFLICTING".into();
+    let mut conflicted = with(pr);
 
-    message_value.tab().unwrap().focus = Some(Stop::Update);
-    key(&mut message_value, KeyCode::Enter);
-    let agent_3 = key(&mut message_value, KeyCode::Enter);
+    conflicted.tab().unwrap().focus = Some(Stop::Update);
+    key(&mut conflicted, KeyCode::Enter);
+    let act = key(&mut conflicted, KeyCode::Enter);
 
     assert!(
-        matches!(agent_3, Act::Prompt(ref thread_3) if thread_3.contains("resolve every conflict")),
-        "{agent_3:?}"
+        matches!(act, Act::Prompt(ref prompt) if prompt.contains("resolve every conflict")),
+        "{act:?}"
     );
 }
 
 #[test]
 fn a_label_goes_on_a_2nd_enter_and_brackets_type_into_the_diff_filter() {
-    let mut path = pr();
+    let mut pr = pr();
 
-    path.labels = vec![gh::Label {
+    pr.labels = vec![gh::Label {
         name: "bug".into(),
         color: String::new(),
     }];
-    let mut message = with(path);
+    let mut merge = with(pr);
 
-    message.tab().unwrap().focus = Some(Stop::Label(0));
-    let agent = key(&mut message, KeyCode::Enter);
+    merge.tab().unwrap().focus = Some(Stop::Label(0));
+    let act = key(&mut merge, KeyCode::Enter);
 
     assert!(
-        matches!(agent, Act::Toast(ref thread) if thread.contains("enter again: remove the label bug")),
-        "{agent:?}"
+        matches!(act, Act::Toast(ref toast) if toast.contains("enter again: remove the label bug")),
+        "{act:?}"
     );
 
     // another stop between: the arm goes
-    message.tab().unwrap().focus = Some(Stop::Update);
-    key(&mut message, KeyCode::Enter);
-    message.tab().unwrap().focus = Some(Stop::Label(0));
-    let agent_value = key(&mut message, KeyCode::Enter);
+    merge.tab().unwrap().focus = Some(Stop::Update);
+    key(&mut merge, KeyCode::Enter);
+    merge.tab().unwrap().focus = Some(Stop::Label(0));
+    let act = key(&mut merge, KeyCode::Enter);
 
     assert!(
-        matches!(agent_value, Act::Toast(ref thread_value) if thread_value.contains("enter again: remove the label")),
-        "{agent_value:?}"
+        matches!(act, Act::Toast(ref toast) if toast.contains("enter again: remove the label")),
+        "{act:?}"
     );
 
     // the PR diff's filter takes [ ] < > as text, 0 PR switch
-    key(&mut message, KeyCode::Char('>'));
-    message.tab().unwrap().focus = None;
-    message.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    key(&mut merge, KeyCode::Char('>'));
+    merge.tab().unwrap().focus = None;
+    merge.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
 
     for character in "[a]<>".chars() {
-        key(&mut message, KeyCode::Char(character));
+        key(&mut merge, KeyCode::Char(character));
     }
 
-    assert_eq!(message.tab_ref().unwrap().sub, Sub::Changes);
-    assert!(message.typing(), "the filter still takes keys");
+    assert_eq!(merge.tab_ref().unwrap().sub, Sub::Changes);
+    assert!(merge.typing(), "the filter still takes keys");
 }
 
 #[test]
 fn the_changes_view_reaches_the_bar_rows() {
-    let mut message = with(pr());
-    let sub = |message_value: &Merge| message_value.tab_ref().unwrap().sub;
+    let mut merge = with(pr());
+    let sub = |merge: &Merge| merge.tab_ref().unwrap().sub;
 
-    key(&mut message, KeyCode::Char('>'));
+    key(&mut merge, KeyCode::Char('>'));
 
-    assert_eq!((sub(&message), focus(&message)), (Sub::Changes, None));
+    assert_eq!((sub(&merge), focus(&merge)), (Sub::Changes, None));
 
     // ↑ on the diff's 1st row: the views row; ←→ there: overview / changes, the focus stays
-    key(&mut message, KeyCode::Up);
+    key(&mut merge, KeyCode::Up);
 
-    assert_eq!(focus(&message), Some(Stop::Subs));
+    assert_eq!(focus(&merge), Some(Stop::Subs));
 
-    key(&mut message, KeyCode::Left);
+    key(&mut merge, KeyCode::Left);
 
-    assert_eq!((sub(&message), focus(&message)), (Sub::Overview, Some(Stop::Subs)));
+    assert_eq!((sub(&merge), focus(&merge)), (Sub::Overview, Some(Stop::Subs)));
 
-    key(&mut message, KeyCode::Right);
+    key(&mut merge, KeyCode::Right);
 
-    assert_eq!((sub(&message), focus(&message)), (Sub::Changes, Some(Stop::Subs)));
-    assert!(message.hints().contains("←→ PR / view"), "{}", message.hints());
+    assert_eq!((sub(&merge), focus(&merge)), (Sub::Changes, Some(Stop::Subs)));
+    assert!(merge.hints().contains("←→ PR / view"), "{}", merge.hints());
 
     // ↑: the PR tabs; ↓ ↓: back in the diff
-    key(&mut message, KeyCode::Up);
+    key(&mut merge, KeyCode::Up);
 
-    assert_eq!(focus(&message), Some(Stop::Tabs));
+    assert_eq!(focus(&merge), Some(Stop::Tabs));
 
-    key(&mut message, KeyCode::Down);
-    key(&mut message, KeyCode::Down);
+    key(&mut merge, KeyCode::Down);
+    key(&mut merge, KeyCode::Down);
 
-    assert_eq!((sub(&message), focus(&message)), (Sub::Changes, None));
+    assert_eq!((sub(&merge), focus(&merge)), (Sub::Changes, None));
 
     // enter on the views row: into the diff too
-    key(&mut message, KeyCode::Up);
-    key(&mut message, KeyCode::Enter);
+    key(&mut merge, KeyCode::Up);
+    key(&mut merge, KeyCode::Enter);
 
-    assert_eq!(focus(&message), None);
+    assert_eq!(focus(&merge), None);
 }
 
 #[test]
 fn the_title_edits_in_place() {
-    let mut message = with(pr());
+    let mut merge = with(pr());
 
-    message.tab().unwrap().focus = Some(Stop::Title);
-    key(&mut message, KeyCode::Enter);
+    merge.tab().unwrap().focus = Some(Stop::Title);
+    key(&mut merge, KeyCode::Enter);
 
-    assert!(message.typing());
+    assert!(merge.typing());
 
     for character in " now".chars() {
-        key(&mut message, KeyCode::Char(character));
+        key(&mut merge, KeyCode::Char(character));
     }
 
-    key(&mut message, KeyCode::Enter);
+    key(&mut merge, KeyCode::Enter);
 
     // saved: on screen at once (the gh call fails in tests: a note)
-    assert_eq!(message.tab_ref().unwrap().pr.as_ref().unwrap().title, "Add X now");
-    assert!(!message.typing());
+    assert_eq!(merge.tab_ref().unwrap().pr.as_ref().unwrap().title, "Add X now");
+    assert!(!merge.typing());
 }
 
 #[test]
 fn the_overview_draws() {
-    let mut message = with(pr());
+    let mut merge = with(pr());
 
-    message.tab().unwrap().checks_open = true;
-    let text = draw(&mut message, 100, 60);
+    merge.tab().unwrap().checks_open = true;
+    let text = draw(&mut merge, 100, 60);
 
     for want in [
         "platform#12",
@@ -292,31 +292,28 @@ fn the_overview_draws() {
 
 #[test]
 fn a_label_click_removes_the_plus_opens_the_dropdown() {
-    let mut message = with(pr());
+    let mut merge = with(pr());
 
-    draw(&mut message, 100, 60);
-    let plus = message
+    draw(&mut merge, 100, 60);
+    let plus = merge
         .layout
         .hits
         .iter()
-        .find(|(_, text)| *text == Stop::AddLabel)
-        .map(|(result, _)| *result)
+        .find(|(_, stop)| *stop == Stop::AddLabel)
+        .map(|(rect, _)| *rect)
         .unwrap();
 
-    message.mouse(MouseEvent {
+    merge.mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: plus.x,
         row: plus.y,
         modifiers: KeyModifiers::NONE,
     });
 
-    assert!(matches!(
-        message.tab_ref().unwrap().input.menu,
-        Some(Menu::Labels { .. })
-    ));
+    assert!(matches!(merge.tab_ref().unwrap().input.menu, Some(Menu::Labels { .. })));
 
     // the dropdown filters as it is typed
-    message.labels.insert(
+    merge.labels.insert(
         "acme/platform".into(),
         vec![
             gh::Label {
@@ -334,12 +331,12 @@ fn a_label_click_removes_the_plus_opens_the_dropdown() {
         ],
     );
 
-    assert_eq!(message.label_opts("").len(), 2, "the PR's own label: not offered");
+    assert_eq!(merge.label_opts("").len(), 2, "the PR's own label: not offered");
 
-    key(&mut message, KeyCode::Char('b'));
+    key(&mut merge, KeyCode::Char('b'));
 
     assert_eq!(
-        message.label_opts("b").first().map(|line| line.name.as_str()),
+        merge.label_opts("b").first().map(|label| label.name.as_str()),
         Some("backend")
     );
 }

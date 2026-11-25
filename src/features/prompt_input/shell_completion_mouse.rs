@@ -2,22 +2,22 @@ use super::{MouseButton, MouseEvent, MouseEventKind, Path, Position, ShellComp, 
 
 impl ShellComp {
     /// Click on a row: taken. Wheel: the cursor. True: used.
-    pub(crate) fn mouse(&mut self, event: MouseEvent, ta: &mut TextArea, dir: &Path, thread: &[String]) -> bool {
-        mouse_shell_comp(self, event, ta, dir, thread)
+    pub(crate) fn mouse(
+        &mut self,
+        event: MouseEvent,
+        ta: &mut TextArea,
+        dir: &Path,
+        thread_commands: &[String],
+    ) -> bool {
+        mouse_shell_comp(self, event, ta, dir, thread_commands)
     }
 }
 
-fn mouse_mouseeventkind_down_mousebutton_left(
-    ta: &mut TextArea,
-    path: Position,
-    ctx: &super::Ctx,
-    entries: &[super::Entry],
-    shell: &mut ShellComp,
-) {
-    if let Some(&(_, i)) = shell.rows.iter().find(|(result, _)| result.contains(path)) {
-        let error = entries[i].clone();
+fn click_row(ta: &mut TextArea, point: Position, ctx: &super::Ctx, entries: &[super::Entry], shell: &mut ShellComp) {
+    if let Some(&(_, i)) = shell.rows.iter().find(|(rect, _)| rect.contains(point)) {
+        let entry = entries[i].clone();
 
-        shell.pick(ta, ctx, &error);
+        shell.pick(ta, ctx, &entry);
     }
 }
 
@@ -26,18 +26,18 @@ fn mouse_shell_comp(
     event: MouseEvent,
     ta: &mut TextArea,
     dir: &Path,
-    thread: &[String],
+    thread_commands: &[String],
 ) -> bool {
-    let path = Position {
+    let point = Position {
         x: event.column,
         y: event.row,
     };
 
-    if !shell.area.contains(path) {
+    if !shell.area.contains(point) {
         return false;
     }
 
-    let Some((ctx, entries)) = shell.open(ta, dir, thread) else {
+    let Some((ctx, entries)) = shell.open(ta, dir, thread_commands) else {
         return false;
     };
 
@@ -45,7 +45,7 @@ fn mouse_shell_comp(
         MouseEventKind::ScrollUp => shell.cursor = shell.cursor.saturating_sub(3),
         MouseEventKind::ScrollDown => shell.cursor = (shell.cursor + 3).min(entries.len() - 1),
         MouseEventKind::Down(MouseButton::Left) => {
-            self::mouse_mouseeventkind_down_mousebutton_left(ta, path, &ctx, &entries, shell);
+            self::click_row(ta, point, &ctx, &entries, shell);
         }
         _ => {}
     }

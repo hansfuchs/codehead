@@ -68,7 +68,7 @@ fn requested_languages_get_token_colors() {
 
         let colors: std::collections::HashSet<_> = chars
             .iter()
-            .filter(|(_, character_value)| !character_value.is_whitespace())
+            .filter(|(_, character)| !character.is_whitespace())
             .map(|(color, _)| *color)
             .collect();
 

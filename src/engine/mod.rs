@@ -36,8 +36,8 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Data dir: $`CODEHEAD_HOME`, else $`XDG_DATA_HOME/codehead`, else ~/.local/share/codehead.
 pub(crate) fn data_dir() -> PathBuf {
-    if let Some(path_value) = std::env::var_os("CODEHEAD_HOME").filter(|path| !path.is_empty()) {
-        return PathBuf::from(path_value);
+    if let Some(home) = std::env::var_os("CODEHEAD_HOME").filter(|path| !path.is_empty()) {
+        return PathBuf::from(home);
     }
 
     // tests never write to the owner's data dir: 1 temp dir per test process
@@ -46,7 +46,7 @@ pub(crate) fn data_dir() -> PathBuf {
     }
 
     std::env::var_os("XDG_DATA_HOME")
-        .filter(|path_2| !path_2.is_empty())
+        .filter(|path| !path.is_empty())
         .map_or_else(|| crate::infra::config::home().join(".local/share"), PathBuf::from)
         .join("codehead")
 }
@@ -73,8 +73,8 @@ pub(crate) fn logs_dir() -> PathBuf {
 /// Host sockets: $`XDG_RUNTIME_DIR/codehead`, else /tmp/codehead-<uid>. Not under the data dir:
 /// a Unix socket path holds max. 104-108 bytes.
 pub(crate) fn run_dir() -> PathBuf {
-    if let Some(path_value) = std::env::var_os("CODEHEAD_RUN").filter(|path| !path.is_empty()) {
-        return PathBuf::from(path_value);
+    if let Some(dir) = std::env::var_os("CODEHEAD_RUN").filter(|path| !path.is_empty()) {
+        return PathBuf::from(dir);
     }
 
     // tests never bind sockets in the owner's run dir (short: a socket path holds max. 104 bytes)
@@ -82,8 +82,8 @@ pub(crate) fn run_dir() -> PathBuf {
         return PathBuf::from(format!("/tmp/codehead-test-{}", std::process::id()));
     }
 
-    match std::env::var_os("XDG_RUNTIME_DIR").filter(|path_2| !path_2.is_empty()) {
-        Some(path_3) => PathBuf::from(path_3).join("codehead"),
+    match std::env::var_os("XDG_RUNTIME_DIR").filter(|path| !path.is_empty()) {
+        Some(runtime) => PathBuf::from(runtime).join("codehead"),
         // SAFETY: getuid has 0 failure modes.
         None => std::env::temp_dir().join(format!("codehead-{}", unsafe { libc::getuid() })),
     }
@@ -93,69 +93,71 @@ pub(crate) fn run_dir() -> PathBuf {
 /// deletes the running file (Linux: `current_exe` ends in " (deleted)"): then the binary at the
 /// same path, else `codehead` on $PATH.
 pub(crate) fn exe() -> PathBuf {
-    let cur = std::env::current_exe().ok();
+    let current = std::env::current_exe().ok();
 
-    if let Some(path) = &cur
+    if let Some(path) = &current
         && path.exists()
     {
         return path.clone();
     }
 
-    if let Some(path_2) = cur
+    if let Some(rebuilt) = current
         .as_ref()
-        .and_then(|path_value| path_value.to_str())
+        .and_then(|path| path.to_str())
         .and_then(|text| text.strip_suffix(" (deleted)"))
         .map(PathBuf::from)
-        && path_2.exists()
+        && rebuilt.exists()
     {
-        return path_2;
+        return rebuilt;
     }
 
-    if let Some(path_4) = std::env::var_os("PATH")
+    if let Some(on_path) = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
         .map(|directory| directory.join("codehead"))
-        .find(|path_3| path_3.is_file())
+        .find(|candidate| candidate.is_file())
     {
-        return path_4;
+        return on_path;
     }
 
-    cur.unwrap_or_else(|| PathBuf::from("codehead"))
+    current.unwrap_or_else(|| PathBuf::from("codehead"))
 }
 
 /// Milliseconds since the epoch.
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |directory| directory.as_millis() as u64)
+        .map_or(0, |since_epoch| since_epoch.as_millis() as u64)
 }
 
 /// 16 hex chars: 8 from the clock (sorts by creation), 8 random.
 pub(crate) fn new_id() -> String {
-    let mut result = [0u8; 4];
+    let mut random = [0u8; 4];
 
     if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
         use std::io::Read;
-        let _ = file.read_exact(&mut result);
+        let _ = file.read_exact(&mut random);
     }
 
     format!(
         "{:08x}{:02x}{:02x}{:02x}{:02x}",
         (now_ms() / 1000) as u32,
-        result[0],
-        result[1],
-        result[2],
-        result[3]
+        random[0],
+        random[1],
+        random[2],
+        random[3]
     )
 }
 
 /// Write PATH atomically: a temp file next to it, then rename.
-/// F while this process holds an exclusive `flock` on PATH (made if missing): a read-modify-write
+/// BODY while this process holds an exclusive `flock` on PATH (made if missing): a read-modify-write
 /// of a file that hosts, views and the CLI share.
-pub(crate) fn locked<T>(path: &std::path::Path, file: impl FnOnce() -> T) -> std::io::Result<T> {
-    let _lock = lock(path, true)?;
+pub(crate) fn locked<T>(path: &std::path::Path, body: impl FnOnce() -> T) -> std::io::Result<T> {
+    let held = lock(path, true)?;
+    let result = body();
 
-    Ok(file())
+    drop(held);
+    Ok(result)
 }
 
 /// An exclusive `flock` on PATH (made if missing), held until the file drops. WAIT false: Err when
@@ -173,14 +175,14 @@ pub(crate) fn lock(path: &std::path::Path, wait: bool) -> std::io::Result<std::f
         .write(true)
         .open(path)?;
 
-    let op = if wait {
+    let operation = if wait {
         libc::LOCK_EX
     } else {
         libc::LOCK_EX | libc::LOCK_NB
     };
 
     // SAFETY: flock(2) on an fd FILE owns; the lock ends when FILE closes.
-    if unsafe { libc::flock(file.as_raw_fd(), op) } != 0 {
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
 
@@ -276,11 +278,11 @@ pub(crate) fn watch<F: FnOnce() -> String>(label: F) -> Watch<F> {
 /// CPU time of the calling thread: a step's own work (its wall time also holds waits and a
 /// busy machine).
 pub(crate) fn thread_cpu() -> std::time::Duration {
-    let mut thread = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut spec = libc::timespec { tv_sec: 0, tv_nsec: 0 };
 
-    // SAFETY: T is a valid timespec; the clock id is a constant.
-    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut thread) };
-    std::time::Duration::new(thread.tv_sec as u64, thread.tv_nsec as u32)
+    // SAFETY: SPEC is a valid timespec; the clock id is a constant.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut spec) };
+    std::time::Duration::new(spec.tv_sec as u64, spec.tv_nsec as u32)
 }
 
 /// $`CODEHEAD_TRACE=all`: every watched step in the trace, not only the slow ones.
@@ -323,17 +325,17 @@ pub(crate) fn trace(label: &str) {
     }
 }
 
-fn trace_elapsed<F: FnOnce() -> String>(took: std::time::Duration, model_state: &mut Watch<F>) {
+fn trace_elapsed<F: FnOnce() -> String>(took: std::time::Duration, watch: &mut Watch<F>) {
     if (took > BUDGET || trace_all())
-        && let Some(line) = model_state.label.take()
+        && let Some(label) = watch.label.take()
     {
         let tag = if took > BUDGET { "SLOW" } else { "ok" };
 
         trace(&format!(
             "{tag} {} cpu {} {}",
             took.as_millis(),
-            (thread_cpu().saturating_sub(model_state.cpu)).as_millis(),
-            line()
+            (thread_cpu().saturating_sub(watch.cpu)).as_millis(),
+            label()
         ));
     }
 }

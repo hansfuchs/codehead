@@ -66,13 +66,13 @@ impl AgentForm {
                 self.random_sprite();
             }
             KeyCode::Left | KeyCode::Right if self.field == F_MCP => {
-                self.choice_key_direction(key);
+                self.move_server_cursor(key);
             }
             KeyCode::Char(' ') if self.field == F_MCP => self.toggle_server(),
             KeyCode::Left | KeyCode::Right
                 if matches!(self.field, F_MODEL | F_EFFORT | F_COLOR | F_MODE | F_STYLE | F_BUTTONS) =>
             {
-                self.choice_key_body(key);
+                self.step_choice(key);
             }
             _ => return false,
         }
@@ -80,11 +80,11 @@ impl AgentForm {
         true
     }
 
-    fn choice_key_body(&mut self, key: KeyEvent) {
+    fn step_choice(&mut self, key: KeyEvent) {
         self.cycle_choice(if key.code == KeyCode::Left { -1 } else { 1 });
     }
 
-    fn choice_key_direction(&mut self, key: KeyEvent) {
+    fn move_server_cursor(&mut self, key: KeyEvent) {
         let direction = if key.code == KeyCode::Left { -1 } else { 1 };
 
         self.mcp_cur = cycle(self.mcp_cur, direction, self.mcp.len().max(1));

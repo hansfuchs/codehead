@@ -13,7 +13,7 @@ pub(super) fn gh(args: &[&str], stdin: Option<&str>) -> Result<String, String> {
         return Err("tutorial: 0 GitHub calls".into());
     }
 
-    let mut character = Command::new("gh")
+    let mut child = Command::new("gh")
         .args(args)
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
@@ -21,13 +21,11 @@ pub(super) fn gh(args: &[&str], stdin: Option<&str>) -> Result<String, String> {
         .spawn()
         .map_err(|error| format!("gh: {error}"))?;
 
-    if let (Some(text), Some(mut i)) = (stdin, character.stdin.take()) {
+    if let (Some(text), Some(mut i)) = (stdin, child.stdin.take()) {
         let _ = i.write_all(text.as_bytes());
     }
 
-    let output = character
-        .wait_with_output()
-        .map_err(|error_value| format!("gh: {error_value}"))?;
+    let output = child.wait_with_output().map_err(|error| format!("gh: {error}"))?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -48,8 +46,8 @@ pub(super) fn graphql(query: &str, vars: &[(&str, Value)]) -> Result<Value, Stri
     let out = gh(&["api", "graphql", "--input", "-"], Some(&body.to_string()))?;
     let value: Value = serde_json::from_str(&out).map_err(|error| format!("gh: {error}"))?;
 
-    if let Some(error_2) = value["errors"].as_array().and_then(|error_value| error_value.first()) {
-        return Err(error_2["message"].as_str().unwrap_or("GraphQL error").to_string());
+    if let Some(first) = value["errors"].as_array().and_then(|errors| errors.first()) {
+        return Err(first["message"].as_str().unwrap_or("GraphQL error").to_string());
     }
 
     Ok(value["data"].clone())
@@ -76,18 +74,18 @@ last:commits(last:1){{nodes{{commit{{statusCheckRollup{{contexts(first:100){{nod
 }
 
 /// Everything of PR R (1 GraphQL call).
-pub(crate) fn fetch(result: &PrRef) -> Result<Pr, String> {
+pub(crate) fn fetch(pr: &PrRef) -> Result<Pr, String> {
     if let Some(repo) = crate::infra::tutorial::active() {
-        return Ok(crate::infra::tutorial::mock_pr(result, &repo));
+        return Ok(crate::infra::tutorial::mock_pr(pr, &repo));
     }
 
-    let (output, count) = result.owner_name();
-    let directory = graphql(
+    let (owner, name) = pr.owner_name();
+    let data = graphql(
         &detail_query(),
-        &[("o", json!(output)), ("r", json!(count)), ("n", json!(result.number))],
+        &[("o", json!(owner)), ("r", json!(name)), ("n", json!(pr.number))],
     )?;
 
-    parse_detail(result, &directory).ok_or_else(|| format!("{}: 0 such pull request", result.label()))
+    parse_detail(pr, &data).ok_or_else(|| format!("{}: 0 such pull request", pr.label()))
 }
 
 /// The viewer's PRs (every repo, every state), newest first: max. PAGES x 100.
@@ -97,7 +95,7 @@ pub(crate) fn mine(pages: usize) -> Result<Vec<Item>, String> {
     let mut after = Value::Null;
 
     for _ in 0..pages.max(1) {
-        let directory = graphql(
+        let data = graphql(
             query,
             &[
                 ("q", json!("author:@me is:pr sort:created-desc")),
@@ -105,8 +103,8 @@ pub(crate) fn mine(pages: usize) -> Result<Vec<Item>, String> {
             ],
         )?;
 
-        out.extend(parse_items(&directory["search"]));
-        let pi = &directory["search"]["pageInfo"];
+        out.extend(parse_items(&data["search"]));
+        let pi = &data["search"]["pageInfo"];
 
         if pi["hasNextPage"] != true {
             break;
@@ -120,15 +118,12 @@ pub(crate) fn mine(pages: usize) -> Result<Vec<Item>, String> {
 
 /// The PRs of BRANCH (as head) in REPO, every state.
 pub(crate) fn for_branch(repo: &str, branch: &str) -> Result<Vec<u64>, String> {
-    let (output, count) = repo.split_once('/').ok_or("0 owner")?;
+    let (owner, name) = repo.split_once('/').ok_or("0 owner")?;
     let query = "query($o:String!,$r:String!,$b:String!){repository(owner:$o,name:$r){pullRequests(headRefName:$b,first:10,orderBy:{field:CREATED_AT,direction:DESC}){nodes{number}}}}";
-    let directory = graphql(
-        query,
-        &[("o", json!(output)), ("r", json!(count)), ("b", json!(branch))],
-    )?;
+    let data = graphql(query, &[("o", json!(owner)), ("r", json!(name)), ("b", json!(branch))])?;
 
-    Ok(nodes(&directory["repository"]["pullRequests"])
-        .filter_map(|count_value| count_value["number"].as_u64())
+    Ok(nodes(&data["repository"]["pullRequests"])
+        .filter_map(|node| node["number"].as_u64())
         .collect())
 }
 
@@ -157,80 +152,78 @@ pub(crate) fn labels(repo: &str) -> Result<Vec<Label>, String> {
         .as_array()
         .into_iter()
         .flatten()
-        .map(|line| Label {
-            name: line["name"].as_str().unwrap_or_default().into(),
-            color: line["color"].as_str().unwrap_or_default().into(),
+        .map(|label| Label {
+            name: label["name"].as_str().unwrap_or_default().into(),
+            color: label["color"].as_str().unwrap_or_default().into(),
         })
         .collect())
 }
 
 /// The diff of R: COMMIT's own, else the whole PR against the merge base.
-pub(crate) fn diff(result: &PrRef, commit: Option<&str>) -> Result<String, String> {
+pub(crate) fn diff(pr: &PrRef, commit: Option<&str>) -> Result<String, String> {
     if let Some(repo) = crate::infra::tutorial::active() {
         return Ok(crate::infra::tutorial::mock_diff(&repo, commit));
     }
 
     match commit {
-        Some(character) => gh(
+        Some(sha) => gh(
             &[
                 "api",
-                &format!("repos/{}/commits/{character}", result.repo),
+                &format!("repos/{}/commits/{sha}", pr.repo),
                 "-H",
                 "Accept: application/vnd.github.diff",
             ],
             None,
         ),
-        None => gh(&["pr", "diff", &result.number.to_string(), "-R", &result.repo], None),
+        None => gh(&["pr", "diff", &pr.number.to_string(), "-R", &pr.repo], None),
     }
 }
 
 /// Run OP on R.
-pub(crate) fn run(result: &PrRef, op: &Op) -> Result<(), String> {
+pub(crate) fn run(pr: &PrRef, op: &Op) -> Result<(), String> {
     if let Some(repo) = crate::infra::tutorial::active() {
         return crate::infra::tutorial::mock_run(&repo, op);
     }
 
-    let count = result.number.to_string();
+    let number = pr.number.to_string();
 
     match op {
-        Op::Title(thread) => pr_command(result, &["edit", &count, "--title", thread], None),
-        Op::Body(bytes_value) => pr_command(result, &["edit", &count, "--body-file", "-"], Some(bytes_value)),
-        Op::Close => pr_command(result, &["close", &count], None),
-        Op::Reopen => pr_command(result, &["reopen", &count], None),
-        Op::Ready => pr_command(result, &["ready", &count], None),
-        Op::Draft => pr_command(result, &["ready", &count, "--undo"], None),
-        Op::AddLabel(line) => pr_command(result, &["edit", &count, "--add-label", line], None),
-        Op::RemoveLabel(line_value) => pr_command(result, &["edit", &count, "--remove-label", line_value], None),
-        Op::Comment(comment) => pr_command(result, &["comment", &count, "--body-file", "-"], Some(comment)),
-        Op::Reply(id, bytes_2) => api_command(
+        Op::Title(title) => pr_command(pr, &["edit", &number, "--title", title], None),
+        Op::Body(body) => pr_command(pr, &["edit", &number, "--body-file", "-"], Some(body)),
+        Op::Close => pr_command(pr, &["close", &number], None),
+        Op::Reopen => pr_command(pr, &["reopen", &number], None),
+        Op::Ready => pr_command(pr, &["ready", &number], None),
+        Op::Draft => pr_command(pr, &["ready", &number, "--undo"], None),
+        Op::AddLabel(label) => pr_command(pr, &["edit", &number, "--add-label", label], None),
+        Op::RemoveLabel(label) => pr_command(pr, &["edit", &number, "--remove-label", label], None),
+        Op::Comment(comment) => pr_command(pr, &["comment", &number, "--body-file", "-"], Some(comment)),
+        Op::Reply(id, body) => api_command(
             "POST",
-            &(format!("repos/{}/pulls/{count}/comments/{id}/replies", result.repo)),
-            Some(json!({"body": bytes_2})),
+            &(format!("repos/{}/pulls/{number}/comments/{id}/replies", pr.repo)),
+            Some(json!({"body": body})),
         ),
-        Op::Edit(Kind::Issue, id, bytes_3) => api_command(
+        Op::Edit(Kind::Issue, id, body) => api_command(
             "PATCH",
-            &(format!("repos/{}/issues/comments/{id}", result.repo)),
-            Some(json!({"body": bytes_3})),
+            &(format!("repos/{}/issues/comments/{id}", pr.repo)),
+            Some(json!({"body": body})),
         ),
-        Op::Edit(Kind::Line, id, bytes_4) => api_command(
+        Op::Edit(Kind::Line, id, body) => api_command(
             "PATCH",
-            &(format!("repos/{}/pulls/comments/{id}", result.repo)),
-            Some(json!({"body": bytes_4})),
+            &(format!("repos/{}/pulls/comments/{id}", pr.repo)),
+            Some(json!({"body": body})),
         ),
-        Op::Edit(Kind::Review, id, bytes_5) => api_command(
+        Op::Edit(Kind::Review, id, body) => api_command(
             "PUT",
-            &(format!("repos/{}/pulls/{count}/reviews/{id}", result.repo)),
-            Some(json!({"body": bytes_5})),
+            &(format!("repos/{}/pulls/{number}/reviews/{id}", pr.repo)),
+            Some(json!({"body": body})),
         ),
         Op::Delete(Kind::Issue, id) => {
-            api_command("DELETE", &(format!("repos/{}/issues/comments/{id}", result.repo)), None)
+            api_command("DELETE", &(format!("repos/{}/issues/comments/{id}", pr.repo)), None)
         }
-        Op::Delete(Kind::Line, id) => {
-            api_command("DELETE", &(format!("repos/{}/pulls/comments/{id}", result.repo)), None)
-        }
+        Op::Delete(Kind::Line, id) => api_command("DELETE", &(format!("repos/{}/pulls/comments/{id}", pr.repo)), None),
         Op::Delete(Kind::Review, _) => Err("a review body cannot be deleted: edit it".into()),
-        Op::Merge(message, auto) => merge_pr(result, &count, message, *auto),
-        Op::DisableAuto => pr_command(result, &["merge", &count, "--disable-auto"], None),
+        Op::Merge(method, auto) => merge_pr(pr, &number, method, *auto),
+        Op::DisableAuto => pr_command(pr, &["merge", &number, "--disable-auto"], None),
         Op::Dequeue(id) => graphql(
             "mutation($id:ID!){dequeuePullRequest(input:{id:$id}){clientMutationId}}",
             &[("id", json!(id))],
@@ -241,7 +234,7 @@ pub(crate) fn run(result: &PrRef, op: &Op) -> Result<(), String> {
 
 /// Quote BODY as a markdown reply to AUTHOR.
 pub(crate) fn quote(author: &str, body: &str) -> String {
-    let query: Vec<String> = body
+    let quoted: Vec<String> = body
         .lines()
         .map(|line| {
             if line.is_empty() {
@@ -252,7 +245,7 @@ pub(crate) fn quote(author: &str, body: &str) -> String {
         })
         .collect();
 
-    format!("@{author} wrote:\n{}\n\n", query.join("\n"))
+    format!("@{author} wrote:\n{}\n\n", quoted.join("\n"))
 }
 
 fn pr_command(reference: &PrRef, args: &[&str], stdin: Option<&str>) -> Result<(), String> {
@@ -273,18 +266,18 @@ fn api_command(method: &str, path: &str, body: Option<Value>) -> Result<(), Stri
     gh(&command, text.as_deref()).map(|_| ())
 }
 
-fn merge_pr(result: &PrRef, count: &str, message: &str, auto: bool) -> Result<(), String> {
-    let flag = match message {
+fn merge_pr(pr: &PrRef, number: &str, method: &str, auto: bool) -> Result<(), String> {
+    let flag = match method {
         "SQUASH" => "--squash",
         "REBASE" => "--rebase",
         _ => "--merge",
     };
 
-    let mut agent_2 = vec!["merge", count, flag];
+    let mut args = vec!["merge", number, flag];
 
     if auto {
-        agent_2.push("--auto");
+        args.push("--auto");
     }
 
-    pr_command(result, &agent_2, None)
+    pr_command(pr, &args, None)
 }

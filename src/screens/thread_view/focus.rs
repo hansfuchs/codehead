@@ -25,7 +25,7 @@ impl View {
 
         let want = agent.map(String::from).or_else(|| self.default_to().into_iter().next());
         let at = want
-            .and_then(|width| self.agents.order.iter().position(|agent_value| *agent_value == width))
+            .and_then(|name| self.agents.order.iter().position(|agent| *agent == name))
             .unwrap_or(0);
 
         self.agents.agents_focus = Some(AgentsFocus {
@@ -48,21 +48,21 @@ impl View {
     /// The regions tab walks, in order: the prompt, the view (changes, merge, files), the panel,
     /// the repo tabs, an open question, the agents box (the chat; a wide changes view too).
     pub(super) fn regions(&self) -> Vec<Region> {
-        let mut result = vec![Region::Prompt];
+        let mut regions = vec![Region::Prompt];
 
         if self.panes.pane != Pane::Chat {
-            regions_body(self, &mut result);
+            push_view_regions(self, &mut regions);
         }
 
         if !self.thread.asks.is_empty() {
-            result.push(Region::Ask);
+            regions.push(Region::Ask);
         }
 
         if !self.agents.order.is_empty() && (self.panes.pane == Pane::Chat || self.layout.wide_split) {
-            result.push(Region::Agents);
+            regions.push(Region::Agents);
         }
 
-        result
+        regions
     }
 
     /// The region with the keys.
@@ -72,14 +72,14 @@ impl View {
         } else if self.ask.focus && !self.thread.asks.is_empty() {
             Region::Ask
         } else if self.panes.pane != Pane::Chat && !self.panes.prompt_focus {
-            region_branch(self)
+            view_region(self)
         } else {
             Region::Prompt
         }
     }
 
-    /// The keys to region R; every box, bar and dropdown that holds them lets go.
-    pub(super) fn set_region(&mut self, result: Region) {
+    /// The keys to REGION; every box, bar and dropdown that holds them lets go.
+    pub(super) fn set_region(&mut self, region: Region) {
         self.agents.agents_focus = None;
         self.ask.focus = false;
         self.checkout_state.repo_focus = false;
@@ -89,10 +89,10 @@ impl View {
             .for_each(crate::features::flows::flow_bar::FlowBar::close);
         let side = self.panes.pane != Pane::Chat;
 
-        match result {
+        match region {
             Region::Prompt => self.panes.prompt_focus = side,
             Region::View | Region::Panel => {
-                focus_view_region(self, result);
+                focus_view_region(self, region);
             }
             Region::Repos => {
                 self.panes.prompt_focus = false;
@@ -111,10 +111,11 @@ impl View {
         self.stream.dirty = true;
     }
 
-    pub(super) fn cycle(&mut self, directory: isize) {
-        let rs = self.regions();
-        let at = rs.iter().position(|x| *x == self.region()).unwrap_or(0) as isize;
-        let to = rs[(at + directory).rem_euclid(rs.len() as isize) as usize];
+    /// Tab (STEP 1) / shift+tab (STEP -1): the next / previous region.
+    pub(super) fn cycle(&mut self, step: isize) {
+        let regions = self.regions();
+        let at = regions.iter().position(|region| *region == self.region()).unwrap_or(0) as isize;
+        let to = regions[(at + step).rem_euclid(regions.len() as isize) as usize];
 
         self.set_region(to);
     }
@@ -141,19 +142,19 @@ impl View {
     }
 }
 
-fn regions_body(view: &View, result: &mut Vec<Region>) {
-    result.push(Region::View);
+fn push_view_regions(view: &View, regions: &mut Vec<Region>) {
+    regions.push(Region::View);
 
     if view.panes.pane == Pane::Changes && view.panes.changes.panel_shown() {
-        result.push(Region::Panel);
+        regions.push(Region::Panel);
     }
 
     if view.panes.pane == Pane::Changes && view.checkout_state.checkouts.len() > 1 {
-        result.push(Region::Repos);
+        regions.push(Region::Repos);
     }
 }
 
-fn region_branch(view: &View) -> Region {
+fn view_region(view: &View) -> Region {
     if view.panes.pane == Pane::Changes && view.checkout_state.repo_focus {
         Region::Repos
     } else if view.panes.pane == Pane::Changes && view.panes.changes.panel_focus() {
@@ -163,11 +164,10 @@ fn region_branch(view: &View) -> Region {
     }
 }
 
-/// Tab (D 1) / shift+tab (D -1): the next / previous region.
-fn focus_view_region(view: &mut View, result: Region) {
+fn focus_view_region(view: &mut View, region: Region) {
     view.panes.prompt_focus = false;
 
     if view.panes.pane == Pane::Changes {
-        view.panes.changes.focus_panel(result == Region::Panel);
+        view.panes.changes.focus_panel(region == Region::Panel);
     }
 }

@@ -172,13 +172,7 @@ fn modal_mouse_view(view: &mut View, event: MouseEvent) -> Act {
     };
     let click = matches!(event.kind, MouseEventKind::Down(MouseButton::Left));
 
-    if click
-        && let Some(&(_, yes)) = view
-            .modal_state
-            .modal_btns
-            .iter()
-            .find(|(result, _)| result.contains(at))
-    {
+    if click && let Some(&(_, yes)) = view.modal_state.modal_btns.iter().find(|(rect, _)| rect.contains(at)) {
         return modal_button(view, yes);
     }
 

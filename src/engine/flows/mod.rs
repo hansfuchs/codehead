@@ -195,7 +195,7 @@ pub(crate) fn user_dir(kind: &str) -> PathBuf {
 /// Repo root of DIR: the nearest dir with `.git` above it.
 pub(crate) fn repo_root(dir: &Path) -> Option<PathBuf> {
     dir.ancestors()
-        .find(|directory| directory.join(".git").exists())
+        .find(|ancestor| ancestor.join(".git").exists())
         .map(Path::to_path_buf)
 }
 
@@ -207,33 +207,33 @@ pub(crate) fn dir_of(layer: Layer, kind: &str, repo: Option<&Path>) -> Option<Pa
     match layer {
         Layer::Builtin => None,
         Layer::User => Some(user_dir(kind)),
-        Layer::Repo => repo.map(|result| repo_dir(result, kind)),
+        Layer::Repo => repo.map(|root| repo_dir(root, kind)),
     }
 }
 
 fn files(dir: &Path, ext: &str) -> Vec<(String, String)> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
 
-    let mut value: Vec<(String, String)> = rd
+    let mut files: Vec<(String, String)> = entries
         .flatten()
-        .filter_map(|error| {
-            let path_value = error.path();
+        .filter_map(|entry| {
+            let path = entry.path();
 
-            if path_value.extension()?.to_str()? != ext {
+            if path.extension()?.to_str()? != ext {
                 return None;
             }
 
             Some((
-                path_value.file_stem()?.to_str()?.to_string(),
-                std::fs::read_to_string(&path_value).ok()?,
+                path.file_stem()?.to_str()?.to_string(),
+                std::fs::read_to_string(&path).ok()?,
             ))
         })
         .collect();
 
-    value.sort();
-    value
+    files.sort();
+    files
 }
 
 /// Every step and flow of the layers (built-in, user, repo of REPO), the last layer wins per
@@ -256,56 +256,55 @@ impl Library {
             ..Default::default()
         };
 
-        for (count, thread) in BUILTIN_STEPS {
-            lib.steps.push(parse_step(count, thread));
+        for (name, text) in BUILTIN_STEPS {
+            lib.steps.push(parse_step(name, text));
         }
 
-        for (count_value, thread_value) in BUILTIN_FLOWS {
-            match parse_flow(count_value, thread_value) {
-                Ok(file) => lib.flows.push(file),
-                Err(error) => lib.errors.push((format!("built-in {count_value}"), error)),
+        for (slug, text) in BUILTIN_FLOWS {
+            match parse_flow(slug, text) {
+                Ok(flow) => lib.flows.push(flow),
+                Err(error) => lib.errors.push((format!("built-in {slug}"), error)),
             }
         }
 
         let mut layers = vec![(Layer::User, user_dir("steps"), user_dir("flows"))];
 
-        if let Some(result) = &repo {
-            layers.push((Layer::Repo, repo_dir(result, "steps"), repo_dir(result, "flows")));
+        if let Some(root) = &repo {
+            layers.push((Layer::Repo, repo_dir(root, "steps"), repo_dir(root, "flows")));
         }
 
         load_layers(&mut lib, layers);
 
         let builtin = BUILTIN_FLOWS.len().min(lib.flows.len());
 
-        lib.flows[builtin..].sort_by_key(|file_2| file_2.name.to_lowercase());
-        lib.steps.sort_by(|agent, bytes| agent.name.cmp(&bytes.name));
+        lib.flows[builtin..].sort_by_key(|flow| flow.name.to_lowercase());
+        lib.steps.sort_by(|left, right| left.name.cmp(&right.name));
 
         lib
     }
 
     pub(crate) fn step(&self, name: &str) -> Option<&Step> {
-        self.steps.iter().find(|text| text.name == name)
+        self.steps.iter().find(|step| step.name == name)
     }
 
     /// Flow by slug, else by name (any case).
     pub(crate) fn flow(&self, key: &str) -> Option<&Flow> {
-        self.flows.iter().find(|file| file.slug == key).or_else(|| {
-            self.flows
-                .iter()
-                .find(|file_value| file_value.name.eq_ignore_ascii_case(key))
-        })
+        self.flows
+            .iter()
+            .find(|flow| flow.slug == key)
+            .or_else(|| self.flows.iter().find(|flow| flow.name.eq_ignore_ascii_case(key)))
     }
 
     /// The flows that use step NAME.
     pub(crate) fn users_of(&self, name: &str) -> Vec<&Flow> {
         self.flows
             .iter()
-            .filter(|file| file.steps.iter().any(|count| count.uses.as_deref() == Some(name)))
+            .filter(|flow| flow.steps.iter().any(|node| node.uses.as_deref() == Some(name)))
             .collect()
     }
 
     pub(crate) fn is_builtin_step(name: &str) -> bool {
-        BUILTIN_STEPS.iter().any(|(count, _)| *count == name)
+        BUILTIN_STEPS.iter().any(|(builtin, _)| *builtin == name)
     }
 
     /// The layer an edit of LAYER writes to: built-in → user.
@@ -313,37 +312,37 @@ impl Library {
         if layer == Layer::Repo { Layer::Repo } else { Layer::User }
     }
 
-    /// Write step S into its layer (built-in → user).
-    pub(crate) fn save_step(&self, text: &Step) -> Result<PathBuf, String> {
-        if !valid_name(&text.name) {
-            return Err(format!("step name {:?}: letters, digits, - and _ only", text.name));
+    /// Write STEP into its layer (built-in → user).
+    pub(crate) fn save_step(&self, step: &Step) -> Result<PathBuf, String> {
+        if !valid_name(&step.name) {
+            return Err(format!("step name {:?}: letters, digits, - and _ only", step.name));
         }
 
         let dir =
-            dir_of(Self::write_layer(text.layer), "steps", self.repo.as_deref()).ok_or("0 repo for a repo step")?;
+            dir_of(Self::write_layer(step.layer), "steps", self.repo.as_deref()).ok_or("0 repo for a repo step")?;
 
         std::fs::create_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
-        let path = dir.join(format!("{}.md", text.name));
+        let path = dir.join(format!("{}.md", step.name));
 
-        super::write_atomic(&path, render_step(text).as_bytes())
-            .map_err(|error_value| format!("{}: {error_value}", path.display()))?;
+        super::write_atomic(&path, render_step(step).as_bytes())
+            .map_err(|error| format!("{}: {error}", path.display()))?;
 
         Ok(path)
     }
 
-    pub(crate) fn save_flow(&self, file: &Flow) -> Result<PathBuf, String> {
-        if !valid_name(&file.slug) {
-            return Err(format!("flow file name {:?}: letters, digits, - and _ only", file.slug));
+    pub(crate) fn save_flow(&self, flow: &Flow) -> Result<PathBuf, String> {
+        if !valid_name(&flow.slug) {
+            return Err(format!("flow file name {:?}: letters, digits, - and _ only", flow.slug));
         }
 
         let dir =
-            dir_of(Self::write_layer(file.layer), "flows", self.repo.as_deref()).ok_or("0 repo for a repo flow")?;
+            dir_of(Self::write_layer(flow.layer), "flows", self.repo.as_deref()).ok_or("0 repo for a repo flow")?;
 
         std::fs::create_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
-        let path = dir.join(format!("{}.toml", file.slug));
+        let path = dir.join(format!("{}.toml", flow.slug));
 
-        super::write_atomic(&path, render_flow(file)?.as_bytes())
-            .map_err(|error_value| format!("{}: {error_value}", path.display()))?;
+        super::write_atomic(&path, render_flow(flow)?.as_bytes())
+            .map_err(|error| format!("{}: {error}", path.display()))?;
 
         Ok(path)
     }
@@ -365,11 +364,11 @@ impl Library {
 
     /// A free name: BASE, else BASE-2, BASE-3, ...
     pub(crate) fn free_step_name(&self, base: &str) -> String {
-        free(base, |count| self.step(count).is_some())
+        free(base, |name| self.step(name).is_some())
     }
 
     pub(crate) fn free_flow_slug(&self, base: &str) -> String {
-        free(base, |count| self.flows.iter().any(|file| file.slug == count))
+        free(base, |name| self.flows.iter().any(|flow| flow.slug == name))
     }
 
     /// Rename step OLD to NEW: the file moves, each flow that uses it (user / repo layer; a
@@ -383,22 +382,22 @@ impl Library {
             return Err(format!("step {new} exists already"));
         }
 
-        let mut text = self.step(old).cloned().ok_or_else(|| format!("no step {old}"))?;
+        let mut step = self.step(old).cloned().ok_or_else(|| format!("no step {old}"))?;
 
         if Self::is_builtin_step(old) {
             return Err("a built-in step keeps its name: duplicate it".into());
         }
 
-        text.name = new.to_string();
-        self.save_step(&text)?;
-        self.remove_step_file(old, text.layer)?;
+        step.name = new.to_string();
+        self.save_step(&step)?;
+        self.remove_step_file(old, step.layer)?;
 
-        for file in self.users_of(old) {
-            let mut file_value = file.clone();
+        for flow in self.users_of(old) {
+            let mut renamed = flow.clone();
 
-            rename_step_uses(old, new, &mut file_value);
+            rename_step_uses(old, new, &mut renamed);
 
-            self.save_flow(&file_value)?;
+            self.save_flow(&renamed)?;
         }
 
         Ok(())
@@ -406,18 +405,18 @@ impl Library {
 
     /// Delete step NAME: each flow that uses it gets the text as a one-off node.
     pub(crate) fn delete_step(&self, name: &str) -> Result<usize, String> {
-        let text = self.step(name).cloned().ok_or_else(|| format!("no step {name}"))?;
+        let step = self.step(name).cloned().ok_or_else(|| format!("no step {name}"))?;
         let users: Vec<Flow> = self.users_of(name).into_iter().cloned().collect();
 
-        for mut file in users.iter().cloned() {
-            inline_removed_step(name, &text, &mut file);
+        for mut flow in users.iter().cloned() {
+            inline_removed_step(name, &step, &mut flow);
 
-            self.save_flow(&file)?;
+            self.save_flow(&flow)?;
         }
 
-        match text.layer {
+        match step.layer {
             Layer::Builtin => return Err("a built-in step stays: edit it, or remove it from the flows".into()),
-            line => self.remove_step_file(name, line)?,
+            layer => self.remove_step_file(name, layer)?,
         }
 
         Ok(users.len())
@@ -425,66 +424,66 @@ impl Library {
 }
 
 fn load_layers(lib: &mut Library, layers: Vec<(Layer, PathBuf, PathBuf)>) {
-    for (layer, sd, fd) in layers {
-        load_steps(lib, layer, &sd);
+    for (layer, steps_dir, flows_dir) in layers {
+        load_steps(lib, layer, &steps_dir);
 
-        load_flows(lib, layer, &fd);
+        load_flows(lib, layer, &flows_dir);
     }
 }
 
-fn load_flows(lib: &mut Library, layer: Layer, fd: &Path) {
-    for (count_3, thread_3) in files(fd, "toml") {
-        match parse_flow(&count_3, &thread_3) {
-            Ok(file_value) => {
-                replace_flow(lib, layer, &count_3, file_value);
+fn load_flows(lib: &mut Library, layer: Layer, flows_dir: &Path) {
+    for (slug, text) in files(flows_dir, "toml") {
+        match parse_flow(&slug, &text) {
+            Ok(flow) => {
+                replace_flow(lib, layer, &slug, flow);
             }
-            Err(error_value) => lib
+            Err(error) => lib
                 .errors
-                .push((fd.join(format!("{count_3}.toml")).display().to_string(), error_value)),
+                .push((flows_dir.join(format!("{slug}.toml")).display().to_string(), error)),
         }
     }
 }
 
-fn replace_flow(lib: &mut Library, layer: Layer, count_3: &String, mut file_value: Flow) {
-    file_value.layer = layer;
+fn replace_flow(lib: &mut Library, layer: Layer, slug: &String, mut flow: Flow) {
+    flow.layer = layer;
 
-    match lib.flows.iter().position(|x| x.slug == *count_3) {
+    match lib.flows.iter().position(|loaded| loaded.slug == *slug) {
         Some(i) => {
-            file_value.edited = lib.flows[i].layer == Layer::Builtin || lib.flows[i].edited;
-            lib.flows[i] = file_value;
+            flow.edited = lib.flows[i].layer == Layer::Builtin || lib.flows[i].edited;
+            lib.flows[i] = flow;
         }
-        None => lib.flows.push(file_value),
+        None => lib.flows.push(flow),
     }
 }
 
-fn load_steps(lib: &mut Library, layer: Layer, sd: &Path) {
-    for (count_2, thread_2) in files(sd, "md") {
-        let mut text = parse_step(&count_2, &thread_2);
+fn load_steps(lib: &mut Library, layer: Layer, steps_dir: &Path) {
+    for (name, text) in files(steps_dir, "md") {
+        let mut step = parse_step(&name, &text);
 
-        text.layer = layer;
+        step.layer = layer;
 
-        match lib.steps.iter().position(|x| x.name == count_2) {
+        match lib.steps.iter().position(|loaded| loaded.name == name) {
             Some(i) => {
-                text.edited = lib.steps[i].layer == Layer::Builtin || lib.steps[i].edited;
-                lib.steps[i] = text;
+                step.edited = lib.steps[i].layer == Layer::Builtin || lib.steps[i].edited;
+                lib.steps[i] = step;
             }
-            None => lib.steps.push(text),
+            None => lib.steps.push(step),
         }
     }
 }
 
-fn inline_removed_step(name: &str, text: &Step, file: &mut Flow) {
-    for count in &mut file.steps {
-        if count.uses.as_deref() == Some(name) {
-            *count = inline(count, text);
+fn inline_removed_step(name: &str, step: &Step, flow: &mut Flow) {
+    for node in &mut flow.steps {
+        if node.uses.as_deref() == Some(name) {
+            *node = inline(node, step);
         }
     }
 }
 
-fn rename_step_uses(old: &str, new: &str, file_value: &mut Flow) {
-    for count in &mut file_value.steps {
-        if count.uses.as_deref() == Some(old) {
-            count.uses = Some(new.to_string());
+fn rename_step_uses(old: &str, new: &str, flow: &mut Flow) {
+    for node in &mut flow.steps {
+        if node.uses.as_deref() == Some(old) {
+            node.uses = Some(new.to_string());
         }
     }
 }
@@ -494,16 +493,16 @@ fn free(base: &str, taken: impl Fn(&str) -> bool) -> String {
         return base.to_string();
     }
 
-    let mut key = 2;
+    let mut number = 2;
 
     loop {
-        let candidate = format!("{base}-{key}");
+        let candidate = format!("{base}-{number}");
 
         if !taken(&candidate) {
             return candidate;
         }
 
-        key += 1;
+        number += 1;
     }
 }
 

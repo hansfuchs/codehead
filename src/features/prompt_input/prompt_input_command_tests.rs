@@ -1,8 +1,8 @@
 use super::*;
 use ratatui::crossterm::event::KeyModifiers;
 
-fn key(character: &mut Command, ta: &mut TextArea, code: KeyCode) -> bool {
-    character.key(KeyEvent::new(code, KeyModifiers::NONE), ta)
+fn key(command: &mut Command, ta: &mut TextArea, code: KeyCode) -> bool {
+    command.key(KeyEvent::new(code, KeyModifiers::NONE), ta)
 }
 
 fn item(label: &str, time: u64) -> Item {
@@ -14,13 +14,13 @@ fn item(label: &str, time: u64) -> Item {
     }
 }
 
-fn screen(character: &mut Command, ta: &mut TextArea, width: u16, height: u16, input: Rect) -> String {
+fn screen(command: &mut Command, ta: &mut TextArea, width: u16, height: u16, input: Rect) -> String {
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut term = ratatui::Terminal::new(backend).unwrap();
 
-    term.draw(|file| {
-        ta.render(file, input, true);
-        character.render(file, ta, file.area(), input);
+    term.draw(|frame| {
+        ta.render(frame, input, true);
+        command.render(frame, ta, frame.area(), input);
     })
     .unwrap();
 
@@ -45,20 +45,14 @@ fn fuzzy_like_a_file_picker() {
     assert_eq!(matches(&items, ""), [0, 1, 2, 3]);
 
     // chars in order, across the path: the best match last
-    let message = matches(&items, "txa");
+    let order = matches(&items, "txa");
+
+    assert_eq!(order.last().map(|&i| items[i].label.as_str()), Some("src/textarea.rs"));
+
+    let order = matches(&items, "srcth");
 
     assert_eq!(
-        message.last().map(|&i| items[i].label.as_str()),
-        Some("src/textarea.rs")
-    );
-
-    let message_value = matches(&items, "srcth");
-
-    assert_eq!(
-        message_value
-            .iter()
-            .map(|&i| items[i].label.as_str())
-            .collect::<Vec<_>>(),
+        order.iter().map(|&i| items[i].label.as_str()).collect::<Vec<_>>(),
         ["src/theme.rs"]
     );
 
@@ -72,118 +66,118 @@ fn fuzzy_like_a_file_picker() {
 #[test]
 fn levels_open_filter_insert_and_go_back() {
     let mut ta = TextArea::new(false, "");
-    let mut character = Command::default();
+    let mut command = Command::default();
 
     ta.set_text("see >");
     ta.move_end();
 
-    assert_eq!(super::open_level(&ta, &mut character), Some(0));
+    assert_eq!(super::open_level(&ta, &mut command), Some(0));
 
     // typed text filters the 1st level; enter opens the kinds, the text after `>` goes
     ta.insert("me");
 
-    assert!(key(&mut character, &mut ta, KeyCode::Enter));
+    assert!(key(&mut command, &mut ta, KeyCode::Enter));
     assert_eq!(
-        (super::open_level(&ta, &mut character), ta.text().as_str()),
+        (super::open_level(&ta, &mut command), ta.text().as_str()),
         (Some(1), "see >")
     );
 
     // esc: 1 level back
-    assert!(key(&mut character, &mut ta, KeyCode::Esc));
-    assert_eq!(super::open_level(&ta, &mut character), Some(0));
-    assert!(key(&mut character, &mut ta, KeyCode::Enter));
-    assert_eq!(super::menu(Level::Kinds, "thr", &character), [2]);
+    assert!(key(&mut command, &mut ta, KeyCode::Esc));
+    assert_eq!(super::open_level(&ta, &mut command), Some(0));
+    assert!(key(&mut command, &mut ta, KeyCode::Enter));
+    assert_eq!(super::menu(Level::Kinds, "thr", &command), [2]);
 
     // the items come from disk, replaced here
     super::set_test_items(
         Kind::Files,
         vec![item("src/app.rs", 1), item("src/view.rs", 2), item("README.md", 3)],
-        &mut character,
+        &mut command,
     );
 
     // the latest (last) row is current
-    character.settle("");
+    command.settle("");
 
-    assert_eq!(character.cursor[2], 2);
-    assert!(key(&mut character, &mut ta, KeyCode::Up));
-    assert_eq!(character.cursor[2], 1);
+    assert_eq!(command.cursor[2], 2);
+    assert!(key(&mut command, &mut ta, KeyCode::Up));
+    assert_eq!(command.cursor[2], 1);
 
     // typed text: fuzzy, the best match current
     for ch in "app".chars() {
-        assert!(!key(&mut character, &mut ta, KeyCode::Char(ch)));
+        assert!(!key(&mut command, &mut ta, KeyCode::Char(ch)));
 
         ta.insert(&ch.to_string());
     }
 
-    assert!(key(&mut character, &mut ta, KeyCode::Enter));
+    assert!(key(&mut command, &mut ta, KeyCode::Enter));
     assert_eq!(ta.text(), "see src/app.rs ");
-    assert_eq!(super::open_level(&ta, &mut character), None);
+    assert_eq!(super::open_level(&ta, &mut command), None);
 
     // esc on the 1st level: closed for this `>` only
-    assert_first_level_escapes(ta, character);
+    assert_first_level_escapes(ta, command);
 }
 
-fn assert_first_level_escapes(mut ta: TextArea, mut character: Command) {
+fn assert_first_level_escapes(mut ta: TextArea, mut command: Command) {
     ta.set_text(">");
     ta.move_end();
 
-    assert!(key(&mut character, &mut ta, KeyCode::Esc));
-    assert_eq!(super::open_level(&ta, &mut character), None);
-    assert!(!key(&mut character, &mut ta, KeyCode::Enter));
+    assert!(key(&mut command, &mut ta, KeyCode::Esc));
+    assert_eq!(super::open_level(&ta, &mut command), None);
+    assert!(!key(&mut command, &mut ta, KeyCode::Enter));
 
     ta.insert(" >");
 
-    assert_eq!(super::open_level(&ta, &mut character), Some(0));
+    assert_eq!(super::open_level(&ta, &mut command), Some(0));
 
     // `> ` (a quote), `->`, 0 matching commands: 0 dropdown, keys pass
     ta.set_text("> ");
     ta.move_end();
 
-    assert_eq!(super::open_level(&ta, &mut character), None);
+    assert_eq!(super::open_level(&ta, &mut command), None);
 
     ta.set_text("a->");
     ta.move_end();
 
-    assert_eq!(super::open_level(&ta, &mut character), None);
+    assert_eq!(super::open_level(&ta, &mut command), None);
 
     ta.set_text(">zz");
     ta.move_end();
 
-    assert!(!key(&mut character, &mut ta, KeyCode::Enter));
+    assert!(!key(&mut command, &mut ta, KeyCode::Enter));
 }
 
 #[test]
 fn backspace_on_an_empty_filter_goes_back() {
     let mut ta = TextArea::new(false, "");
-    let mut character = Command::default();
+    let mut command = Command::default();
 
     ta.set_text(">");
     ta.move_end();
 
-    assert!(key(&mut character, &mut ta, KeyCode::Enter));
-    assert_eq!(super::open_level(&ta, &mut character), Some(1));
-    assert!(key(&mut character, &mut ta, KeyCode::Backspace));
+    assert!(key(&mut command, &mut ta, KeyCode::Enter));
+    assert_eq!(super::open_level(&ta, &mut command), Some(1));
+    assert!(key(&mut command, &mut ta, KeyCode::Backspace));
     assert_eq!(
-        (super::open_level(&ta, &mut character), ta.text().as_str()),
+        (super::open_level(&ta, &mut command), ta.text().as_str()),
         (Some(0), ">")
     );
 
     // 1st level: backspace is the input's (removes the `>`)
-    assert!(!key(&mut character, &mut ta, KeyCode::Backspace));
+    assert!(!key(&mut command, &mut ta, KeyCode::Backspace));
 }
 
 #[test]
 fn branch_only_with_a_thread_and_skills_insert_their_name() {
     let mut ta = TextArea::new(false, "");
-    let mut character = Command::default();
+    let mut command = Command::default();
 
     // 0 thread (task screen): 0 branch
-    assert_eq!(super::menu(Level::Commands, "", &character), [MENTION, SKILLS]);
+    assert_eq!(super::menu(Level::Commands, "", &command), [MENTION, SKILLS]);
 
-    character.can_branch = true;
+    command.can_branch = true;
 
     assert_eq!(
-        super::menu(Level::Commands, "", &character),
+        super::menu(Level::Commands, "", &command),
         [MENTION, BRANCH, SKILLS, HANDOFF, RELOAD, FLOW, SUB]
     );
 
@@ -191,61 +185,55 @@ fn branch_only_with_a_thread_and_skills_insert_their_name() {
     ta.set_text(">su");
     ta.move_end();
 
-    assert!(key(&mut character, &mut ta, KeyCode::Enter));
-    assert_eq!((ta.text().as_str(), character.action.take()), (">sub ", None));
+    assert!(key(&mut command, &mut ta, KeyCode::Enter));
+    assert_eq!((ta.text().as_str(), command.action.take()), (">sub ", None));
 
     // `>rel` enter: the reload action
     ta.set_text(">rel");
     ta.move_end();
 
-    assert!(key(&mut character, &mut ta, KeyCode::Enter));
-    assert_eq!(
-        (ta.text().as_str(), character.action.take()),
-        ("", Some(Action::Reload))
-    );
+    assert!(key(&mut command, &mut ta, KeyCode::Enter));
+    assert_eq!((ta.text().as_str(), command.action.take()), ("", Some(Action::Reload)));
 
     ta.set_text(">flo");
     ta.move_end();
 
-    assert!(key(&mut character, &mut ta, KeyCode::Enter));
-    assert_eq!((ta.text().as_str(), character.action.take()), ("", Some(Action::Flow)));
+    assert!(key(&mut command, &mut ta, KeyCode::Enter));
+    assert_eq!((ta.text().as_str(), command.action.take()), ("", Some(Action::Flow)));
 
     // `>hand` enter: the handoff action
     ta.set_text(">hand");
     ta.move_end();
 
-    assert!(key(&mut character, &mut ta, KeyCode::Enter));
-    assert_eq!(
-        (ta.text().as_str(), character.action.take()),
-        ("", Some(Action::Handoff))
-    );
+    assert!(key(&mut command, &mut ta, KeyCode::Enter));
+    assert_eq!((ta.text().as_str(), command.action.take()), ("", Some(Action::Handoff)));
 
     // `>br` enter: the text goes, the host gets the action
     ta.set_text("x >br");
     ta.move_end();
 
-    assert!(key(&mut character, &mut ta, KeyCode::Enter));
+    assert!(key(&mut command, &mut ta, KeyCode::Enter));
     assert_eq!(
-        (ta.text().as_str(), character.action.take()),
+        (ta.text().as_str(), command.action.take()),
         ("x ", Some(Action::Branch))
     );
 
     // skills: 1 level below the commands, top-down, the 1st row current
-    assert_skill_insertion(ta, character);
+    assert_skill_insertion(ta, command);
 }
 
-fn assert_skill_insertion(mut ta: TextArea, mut character: Command) {
+fn assert_skill_insertion(mut ta: TextArea, mut command: Command) {
     ta.set_text(">");
     ta.move_end();
 
-    assert_eq!(super::open_level(&ta, &mut character), Some(0));
+    assert_eq!(super::open_level(&ta, &mut command), Some(0));
 
-    let skill = |count: &str, directory: &str, i: u64| Item {
-        label: count.into(),
-        detail: directory.into(),
-        insert: format!("/{count}"),
+    let skill = |name: &str, description: &str, i: u64| Item {
+        label: name.into(),
+        detail: description.into(),
+        insert: format!("/{name}"),
         time: i,
-        info: directory.into(),
+        info: description.into(),
     };
 
     super::set_test_items(
@@ -255,12 +243,12 @@ fn assert_skill_insertion(mut ta: TextArea, mut character: Command) {
             skill("tmux", "Use the tmux CLI to manage sessions.", 1),
             skill("xlsx", "Spreadsheet files.", 2),
         ],
-        &mut character,
+        &mut command,
     );
 
-    assert_eq!((character.settle(""), character.cursor[1]), (3, 0));
+    assert_eq!((command.settle(""), command.cursor[1]), (3, 0));
 
-    let area = screen(&mut character, &mut ta, 100, 24, Rect::new(0, 18, 100, 4));
+    let area = screen(&mut command, &mut ta, 100, 24, Rect::new(0, 18, 100, 4));
 
     // name + description in the row, the full description of the current row in a box above
     assert!(
@@ -275,8 +263,8 @@ fn assert_skill_insertion(mut ta: TextArea, mut character: Command) {
     // typed text: the name first, a match in the description too; the best on top
     ta.insert("spread");
 
-    assert_eq!(character.settle("spread"), 1);
-    assert!(key(&mut character, &mut ta, KeyCode::Enter));
+    assert_eq!(command.settle("spread"), 1);
+    assert!(key(&mut command, &mut ta, KeyCode::Enter));
     assert_eq!(ta.text(), "/xlsx ");
 }
 
@@ -292,18 +280,18 @@ fn files_notes_artifacts_from_disk() {
     std::fs::write(dir.join("node_modules/c.js"), "c").unwrap();
 
     // 0 git: the files below the dir, relative
-    let mut file: Vec<String> = files(&dir).into_iter().map(|i| i.insert).collect();
+    let mut paths: Vec<String> = files(&dir).into_iter().map(|item| item.insert).collect();
 
-    file.sort();
+    paths.sort();
 
-    assert_eq!(file, ["b.txt", "sub/a.md"]);
+    assert_eq!(paths, ["b.txt", "sub/a.md"]);
 
     // notes: .md files, shown relative, inserted as the full path
-    let count = notes(&dir);
+    let notes = notes(&dir);
 
-    assert_eq!(count.len(), 1);
+    assert_eq!(notes.len(), 1);
     assert_eq!(
-        (count[0].label.as_str(), count[0].insert.as_str()),
+        (notes[0].label.as_str(), notes[0].insert.as_str()),
         ("sub/a.md", dir.join("sub/a.md").display().to_string().as_str())
     );
 
@@ -314,12 +302,12 @@ fn files_notes_artifacts_from_disk() {
         "{\"t\":\"see https://claude.ai/artifact/DsbWsZWkLy5uQJbKuyXwue?sk=abc and https://claude.ai/code/artifact/683e1f81-0b14-4581-9bd1-d1f9a90b6eb5\"}\n{\"t\":\"https://claude.ai/artifact/DsbWsZWkLy5uQJbKuyXwue\"}",
     )
     .unwrap();
-    let mut agent: Vec<String> = scan_artifacts(&dir).into_iter().map(|i| i.insert).collect();
+    let mut urls: Vec<String> = scan_artifacts(&dir).into_iter().map(|item| item.insert).collect();
 
-    agent.sort();
+    urls.sort();
 
     assert_eq!(
-        agent,
+        urls,
         [
             "https://claude.ai/artifact/DsbWsZWkLy5uQJbKuyXwue",
             "https://claude.ai/code/artifact/683e1f81-0b14-4581-9bd1-d1f9a90b6eb5"
@@ -345,12 +333,12 @@ fn artifact_labels_use_titles_and_insert_urls() {
     assert_eq!(titles.get(second).map(String::as_str), Some("Release dashboard"));
     assert!(!titles.contains_key(third));
 
-    let mut character = Command::default();
+    let mut command = Command::default();
     let mut ta = TextArea::new(false, "");
 
     ta.set_text(">");
     ta.move_end();
-    key(&mut character, &mut ta, KeyCode::Enter);
+    key(&mut command, &mut ta, KeyCode::Enter);
     super::set_test_items(
         Kind::Artifacts,
         vec![Item {
@@ -358,13 +346,13 @@ fn artifact_labels_use_titles_and_insert_urls() {
             insert: first.into(),
             ..Default::default()
         }],
-        &mut character,
+        &mut command,
     );
-    let screen = screen(&mut character, &mut ta, 100, 24, Rect::new(0, 18, 100, 4));
+    let screen = screen(&mut command, &mut ta, 100, 24, Rect::new(0, 18, 100, 4));
 
     assert!(screen.contains("Search field design"), "{screen}");
     assert!(!screen.contains("claude.ai/"), "{screen}");
-    assert!(key(&mut character, &mut ta, KeyCode::Enter));
+    assert!(key(&mut command, &mut ta, KeyCode::Enter));
     assert_eq!(ta.text(), format!("{first} "));
 }
 
@@ -381,19 +369,19 @@ fn artifact_page_titles_skip_generic_or_blocked_pages() {
 #[test]
 fn dropdowns_stay_above_the_prompt_box() {
     let mut ta = TextArea::new(false, "");
-    let mut character = Command::default();
+    let mut command = Command::default();
 
     // a prompt of 3 rows, the `>` on its last row
     ta.set_text("line 1\nline 2\nx >");
     ta.move_end();
-    key(&mut character, &mut ta, KeyCode::Enter);
+    key(&mut command, &mut ta, KeyCode::Enter);
     super::set_test_items(
         Kind::Files,
         (0..30).map(|i| item(&format!("src/file-{i:02}.rs"), i)).collect(),
-        &mut character,
+        &mut command,
     );
     let input = Rect::new(0, 20, 100, 5);
-    let all = screen(&mut character, &mut ta, 100, 30, input);
+    let all = screen(&mut command, &mut ta, 100, 30, input);
 
     for label in ["┌ commands ", "┌ mention ", "┌ mention › files "] {
         assert!(all.contains(label), "{label}:\n{all}");
@@ -407,16 +395,16 @@ fn dropdowns_stay_above_the_prompt_box() {
     assert!(all.contains('▲') && !all.contains('▼'), "{all}");
 
     // 3 dropdowns, left to right, all above the prompt box (its 3 rows stay in view)
-    assert_eq!(character.areas.len(), 3);
+    assert_eq!(command.areas.len(), 3);
     assert!(
-        character.areas[0].right() <= character.areas[1].x && character.areas[1].right() <= character.areas[2].x,
+        command.areas[0].right() <= command.areas[1].x && command.areas[1].right() <= command.areas[2].x,
         "{:?}",
-        character.areas
+        command.areas
     );
     assert!(
-        character.areas.iter().all(|result| result.bottom() <= input.y),
+        command.areas.iter().all(|area| area.bottom() <= input.y),
         "{:?}",
-        character.areas
+        command.areas
     );
     assert!(
         all.contains("line 1") && all.contains("line 2") && all.contains("x >"),
@@ -424,26 +412,26 @@ fn dropdowns_stay_above_the_prompt_box() {
     );
 
     // narrow screen (0 room beside): the files go above the 2 menus, not over them or the prompt
-    assert_narrow_dropdowns(ta, character);
+    assert_narrow_dropdowns(ta, command);
 }
 
-fn assert_narrow_dropdowns(mut ta: TextArea, mut character: Command) {
+fn assert_narrow_dropdowns(mut ta: TextArea, mut command: Command) {
     let input = Rect::new(0, 20, 60, 5);
-    let all = screen(&mut character, &mut ta, 60, 30, input);
+    let all = screen(&mut command, &mut ta, 60, 30, input);
 
-    let [agent, bytes, files] = character.areas[..] else {
-        panic!("{:?}", character.areas)
+    let [commands, kinds, files] = command.areas[..] else {
+        panic!("{:?}", command.areas)
     };
 
     assert!(
-        files.bottom() <= agent.y.min(bytes.y) && files.right() <= 60,
+        files.bottom() <= commands.y.min(kinds.y) && files.right() <= 60,
         "{:?}",
-        character.areas
+        command.areas
     );
     assert!(
-        !files.intersects(agent) && !files.intersects(bytes) && bytes.bottom() <= input.y,
+        !files.intersects(commands) && !files.intersects(kinds) && kinds.bottom() <= input.y,
         "{:?}",
-        character.areas
+        command.areas
     );
     assert!(
         all.contains("┌ commands ") && all.contains("┌ mention ") && all.contains("x >"),
@@ -455,7 +443,7 @@ fn assert_narrow_dropdowns(mut ta: TextArea, mut character: Command) {
 
     ta.set_text(">");
     ta.move_end();
-    screen(&mut character, &mut ta, 100, 30, input);
+    screen(&mut command, &mut ta, 100, 30, input);
 
-    assert!(character.areas[0].y >= input.bottom(), "{:?}", character.areas);
+    assert!(command.areas[0].y >= input.bottom(), "{:?}", command.areas);
 }

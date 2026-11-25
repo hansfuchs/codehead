@@ -1,12 +1,12 @@
 use super::{
     BubbleAgentContext, BubbleAnswerContent, BubbleAnswerLayout, BubbleNoteContext, BubbleRenderContext, Drawn, Item,
-    Modifier, Open, Span, Style, clock, color_of, draw_bubbles_item_settled, draw_bubbles_item_text_agent_ts,
-    draw_bubbles_joins_character_, edits_row, kid_rows, kid_tag, markdown, shell_rows, theme, top_border,
+    Modifier, Open, Span, Style, clock, color_of, draw_agent_bubble, draw_note_bubble, draw_settled_bubble, edits_row,
+    kid_rows, kid_tag, markdown, shell_rows, theme, top_border,
 };
 
 pub(super) fn render_bubble_settled(
     context: &BubbleRenderContext<'_>,
-    directory: &mut Drawn,
+    drawn: &mut Drawn,
     cur: &mut Option<Open>,
     close: &impl Fn(&mut Drawn, &mut Option<Open>),
     gap: &impl Fn(&mut Drawn),
@@ -26,12 +26,12 @@ pub(super) fn render_bubble_settled(
         return;
     };
 
-    draw_bubbles_item_settled(
+    draw_settled_bubble(
         BubbleAnswerLayout {
             colors: context.colors,
-            width_value: context.width_value,
+            width: context.width,
             inner: context.inner,
-            directory,
+            drawn,
             cur,
         },
         close,
@@ -49,7 +49,7 @@ pub(super) fn render_bubble_settled(
 }
 pub(super) fn render_bubble_prompt(
     context: &BubbleRenderContext<'_>,
-    directory: &mut Drawn,
+    drawn: &mut Drawn,
     cur: &mut Option<Open>,
     close: &impl Fn(&mut Drawn, &mut Option<Open>),
     gap: &impl Fn(&mut Drawn),
@@ -60,38 +60,35 @@ pub(super) fn render_bubble_prompt(
         return;
     };
 
-    close(directory, cur);
-    gap(directory);
-    let character_2 = color_of(context.colors, from);
-    let border = Style::default().fg(theme::desaturate(character_2, 0.4));
+    close(drawn, cur);
+    gap(drawn);
+    let color = color_of(context.colors, from);
+    let border = Style::default().fg(theme::desaturate(color, 0.4));
     let name = vec![
-        Span::styled(
-            from.clone(),
-            Style::default().fg(character_2).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(from.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
         Span::styled(format!(" → {}", to.join(", ")), theme::muted()),
     ];
-    let (top, _) = top_border(context.width_value, border, Vec::new(), false, &clock(*ts));
+    let (top, _) = top_border(context.width, border, Vec::new(), false, &clock(*ts));
 
     *cur = Some(Open {
-        start: directory.rows.len(),
+        start: drawn.rows.len(),
         border,
         agent: None,
         minute: String::new(),
         name,
         wave: None,
     });
-    directory.rows.push(top);
+    drawn.rows.push(top);
     let bar = [Span::styled("│ ", border)];
 
-    directory
+    drawn
         .rows
         .extend(markdown::plain(text.trim_end(), context.inner, theme::muted(), &bar));
-    close(directory, cur);
+    close(drawn, cur);
 }
 pub(super) fn render_bubble_text_run_sub(
     context: &BubbleRenderContext<'_>,
-    directory: &mut Drawn,
+    drawn: &mut Drawn,
     cur: &mut Option<Open>,
     close: &impl Fn(&mut Drawn, &mut Option<Open>),
     gap: &impl Fn(&mut Drawn),
@@ -102,15 +99,15 @@ pub(super) fn render_bubble_text_run_sub(
         return;
     };
 
-    draw_bubbles_item_text_agent_ts(
+    draw_agent_bubble(
         BubbleAgentContext {
             thread: context.thread,
             colors: context.colors,
             roster: context.roster,
             fold: context.fold,
-            width_value: context.width_value,
+            width: context.width,
             inner: context.inner,
-            directory,
+            drawn,
             cur,
             last_of: context.last_of,
             idx,
@@ -124,7 +121,7 @@ pub(super) fn render_bubble_text_run_sub(
 }
 pub(super) fn render_bubble_kid(
     context: &BubbleRenderContext<'_>,
-    directory: &mut Drawn,
+    drawn: &mut Drawn,
     cur: &mut Option<Open>,
     close: &impl Fn(&mut Drawn, &mut Option<Open>),
     gap: &impl Fn(&mut Drawn),
@@ -143,35 +140,35 @@ pub(super) fn render_bubble_kid(
     };
 
     // a box of its own (0 merge with the agent's own messages)
-    close(directory, cur);
-    gap(directory);
-    let character_6 = color_of(context.colors, agent);
-    let border = Style::default().fg(theme::desaturate(character_6, 0.4));
+    close(drawn, cur);
+    gap(drawn);
+    let color = color_of(context.colors, agent);
+    let border = Style::default().fg(theme::desaturate(color, 0.4));
     let mut name = vec![Span::styled(
         agent.clone(),
-        Style::default().fg(character_6).add_modifier(Modifier::BOLD),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
     )];
 
     name.extend(kid_tag(agent, state));
-    let (top, _) = top_border(context.width_value, border, Vec::new(), false, &clock(*ts));
+    let (top, _) = top_border(context.width, border, Vec::new(), false, &clock(*ts));
 
     *cur = Some(Open {
-        start: directory.rows.len(),
+        start: drawn.rows.len(),
         border,
         agent: None,
         minute: String::new(),
         name,
         wave: None,
     });
-    directory.rows.push(top);
+    drawn.rows.push(top);
     let bar = [Span::styled("│ ", border)];
 
-    directory.rows.extend(kid_rows(title, state, text, context.inner, &bar));
-    close(directory, cur);
+    drawn.rows.extend(kid_rows(title, state, text, context.inner, &bar));
+    close(drawn, cur);
 }
 pub(super) fn render_bubble_shell(
     context: &BubbleRenderContext<'_>,
-    directory: &mut Drawn,
+    drawn: &mut Drawn,
     cur: &mut Option<Open>,
     close: &impl Fn(&mut Drawn, &mut Option<Open>),
     gap: &impl Fn(&mut Drawn),
@@ -189,20 +186,15 @@ pub(super) fn render_bubble_shell(
         return;
     };
 
-    close(directory, cur);
-    gap(directory);
-    directory.rows.extend(shell_rows(
-        command,
-        output,
-        *code,
-        *ts,
-        dir.as_deref(),
-        context.width_value,
-    ));
+    close(drawn, cur);
+    gap(drawn);
+    drawn
+        .rows
+        .extend(shell_rows(command, output, *code, *ts, dir.as_deref(), context.width));
 }
 pub(super) fn render_bubble_edits(
     context: &BubbleRenderContext<'_>,
-    directory: &mut Drawn,
+    drawn: &mut Drawn,
     cur: &mut Option<Open>,
     close: &impl Fn(&mut Drawn, &mut Option<Open>),
     gap: &impl Fn(&mut Drawn),
@@ -211,18 +203,15 @@ pub(super) fn render_bubble_edits(
 ) {
     let Item::Edits { agent, text } = item else { return };
 
-    close(directory, cur);
-    gap(directory);
-    directory.rows.push(edits_row(
-        agent,
-        text,
-        color_of(context.colors, agent),
-        context.width_value,
-    ));
+    close(drawn, cur);
+    gap(drawn);
+    drawn
+        .rows
+        .push(edits_row(agent, text, color_of(context.colors, agent), context.width));
 }
 pub(super) fn render_bubble_note(
     context: &BubbleRenderContext<'_>,
-    directory: &mut Drawn,
+    drawn: &mut Drawn,
     cur: &mut Option<Open>,
     close: &impl Fn(&mut Drawn, &mut Option<Open>),
     gap: &impl Fn(&mut Drawn),
@@ -233,13 +222,13 @@ pub(super) fn render_bubble_note(
         return;
     };
 
-    draw_bubbles_joins_character_(
+    draw_note_bubble(
         BubbleNoteContext {
             thread: context.thread,
             colors: context.colors,
             roster: context.roster,
-            width_value: context.width_value,
-            directory,
+            width: context.width,
+            drawn,
             cur,
         },
         close,

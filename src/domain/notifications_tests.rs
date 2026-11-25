@@ -20,46 +20,46 @@ fn status(agent: &str, ts: u64, text: &str) -> Event {
     )
 }
 
-fn kinds(value: &[(Kind, Vec<String>, u64, String)]) -> Vec<Kind> {
-    value.iter().map(|x| x.0).collect()
+fn kinds(notes: &[(Kind, Vec<String>, u64, String)]) -> Vec<Kind> {
+    notes.iter().map(|note| note.0).collect()
 }
 
 #[test]
 fn done_only_when_every_agent_is_done() {
-    let message = vec!["ada".to_string(), "bob".to_string()];
-    let mut error = vec![ev("ada", 1, Ev::Join), ev("bob", 1, Ev::Join), status("ada", 2, "done")];
+    let members = vec!["ada".to_string(), "bob".to_string()];
+    let mut events = vec![ev("ada", 1, Ev::Join), ev("bob", 1, Ev::Join), status("ada", 2, "done")];
 
-    assert!(!kinds(&derive(&error, &message)).contains(&Kind::Done));
+    assert!(!kinds(&derive(&events, &members)).contains(&Kind::Done));
 
-    error.push(status("bob", 3, "done"));
-    let directory = derive(&error, &message);
+    events.push(status("bob", 3, "done"));
+    let notes = derive(&events, &members);
 
-    assert_eq!(kinds(&directory), vec![Kind::Done]);
-    assert_eq!((directory[0].1.len(), directory[0].2), (2, 3));
+    assert_eq!(kinds(&notes), vec![Kind::Done]);
+    assert_eq!((notes[0].1.len(), notes[0].2), (2, 3));
 
-    error.push(ev("ada", 4, Ev::TurnStart));
+    events.push(ev("ada", 4, Ev::TurnStart));
 
-    assert!(derive(&error, &message).is_empty(), "a turn after done: working again");
+    assert!(derive(&events, &members).is_empty(), "a turn after done: working again");
 }
 
 /// review: a step note, never done (the thread is not shipped); a turn after it clears it.
 #[test]
 fn review_is_a_step_not_done() {
-    let message = vec!["ada".to_string()];
-    let mut error = vec![status("ada", 1, "review")];
+    let members = vec!["ada".to_string()];
+    let mut events = vec![status("ada", 1, "review")];
 
-    assert_eq!(kinds(&derive(&error, &message)), vec![Kind::Step]);
+    assert_eq!(kinds(&derive(&events, &members)), vec![Kind::Step]);
 
-    error.push(ev("ada", 2, Ev::TurnStart));
-    error.push(status("ada", 3, "done"));
+    events.push(ev("ada", 2, Ev::TurnStart));
+    events.push(status("ada", 3, "done"));
 
-    assert_eq!(kinds(&derive(&error, &message)), vec![Kind::Done]);
+    assert_eq!(kinds(&derive(&events, &members)), vec![Kind::Done]);
 }
 
 #[test]
 fn blocked_and_asks_drop_once_resolved() {
-    let message = vec!["ada".to_string()];
-    let mut error = vec![
+    let members = vec!["ada".to_string()];
+    let mut events = vec![
         status("ada", 1, "blocked"),
         ev(
             "ada",
@@ -72,9 +72,9 @@ fn blocked_and_asks_drop_once_resolved() {
         ),
     ];
 
-    assert_eq!(kinds(&derive(&error, &message)), vec![Kind::Ask, Kind::Blocked]);
+    assert_eq!(kinds(&derive(&events, &members)), vec![Kind::Ask, Kind::Blocked]);
 
-    error.push(ev(
+    events.push(ev(
         "",
         3,
         Ev::Answer {
@@ -83,10 +83,10 @@ fn blocked_and_asks_drop_once_resolved() {
             label: "pg".into(),
         },
     ));
-    error.push(ev("ada", 4, Ev::TurnStart));
+    events.push(ev("ada", 4, Ev::TurnStart));
 
     assert_eq!(
-        derive(&error, &message),
+        derive(&events, &members),
         [] as [(
             crate::domain::notifications::Kind,
             std::vec::Vec<std::string::String>,
@@ -98,7 +98,7 @@ fn blocked_and_asks_drop_once_resolved() {
 
 #[test]
 fn limit_gate_context_mention() {
-    let message = vec!["ada".to_string()];
+    let members = vec!["ada".to_string()];
     let end = |ctx| Ev::TurnEnd {
         cost: 0.0,
         input: 0,
@@ -110,7 +110,7 @@ fn limit_gate_context_mention() {
         ms: 0,
         error: None,
     };
-    let error_value = vec![
+    let events = vec![
         ev("ada", 1, end(95)),
         ev("ada", 2, Ev::Resume { at: 9_000 }),
         ev(
@@ -130,18 +130,18 @@ fn limit_gate_context_mention() {
         ),
     ];
 
-    verify_limit_gate_context_mention(&message, end, &error_value);
+    verify_limit_gate_context_mention(&members, end, &events);
 }
 
-fn verify_limit_gate_context_mention(message: &[String], end: impl Fn(u64) -> Ev, error_value: &[Event]) {
+fn verify_limit_gate_context_mention(members: &[String], end: impl Fn(u64) -> Ev, events: &[Event]) {
     assert_eq!(
-        kinds(&derive(error_value, message)),
+        kinds(&derive(events, members)),
         vec![Kind::Gate, Kind::Limit, Kind::Mention, Kind::Context]
     );
 
-    let mut e2 = error_value.to_owned();
+    let mut answered = events.to_owned();
 
-    e2.push(ev(
+    answered.push(ev(
         "",
         5,
         Ev::Prompt {
@@ -150,7 +150,7 @@ fn verify_limit_gate_context_mention(message: &[String], end: impl Fn(u64) -> Ev
             text: "ok".into(),
         },
     ));
-    e2.push(ev(
+    answered.push(ev(
         "",
         6,
         Ev::Flow {
@@ -158,11 +158,11 @@ fn verify_limit_gate_context_mention(message: &[String], end: impl Fn(u64) -> Ev
             text: String::new(),
         },
     ));
-    e2.push(ev("ada", 7, Ev::TurnStart));
-    e2.push(ev("ada", 8, end(10)));
+    answered.push(ev("ada", 7, Ev::TurnStart));
+    answered.push(ev("ada", 8, end(10)));
 
     assert_eq!(
-        derive(&e2, message),
+        derive(&answered, members),
         [] as [(
             crate::domain::notifications::Kind,
             std::vec::Vec<std::string::String>,
@@ -175,12 +175,12 @@ fn verify_limit_gate_context_mention(message: &[String], end: impl Fn(u64) -> Ev
 
 #[test]
 fn errors_skip_usage_limits_and_clear_on_owner_message() {
-    let message = vec!["ada".to_string()];
-    let mut error = vec![ev("ada", 1, Ev::Error { message: "boom".into() })];
+    let members = vec!["ada".to_string()];
+    let mut events = vec![ev("ada", 1, Ev::Error { message: "boom".into() })];
 
-    assert_eq!(kinds(&derive(&error, &message)), vec![Kind::Error]);
+    assert_eq!(kinds(&derive(&events, &members)), vec![Kind::Error]);
 
-    error.push(ev(
+    events.push(ev(
         "",
         2,
         Ev::Prompt {
@@ -191,7 +191,7 @@ fn errors_skip_usage_limits_and_clear_on_owner_message() {
     ));
 
     assert_eq!(
-        derive(&error, &message),
+        derive(&events, &members),
         [] as [(
             crate::domain::notifications::Kind,
             std::vec::Vec<std::string::String>,
@@ -203,24 +203,24 @@ fn errors_skip_usage_limits_and_clear_on_owner_message() {
 
 #[test]
 fn reply_notes_hold_past_the_seen_mark_until_the_reply_is_seen() {
-    let mut thread_value = store::Thread::new("replies", "x", std::path::Path::new("/tmp"), vec!["REV".into()]);
+    let mut thread = store::Thread::new("replies", "x", std::path::Path::new("/tmp"), vec!["REV".into()]);
 
-    thread_value.id = format!("notify-replies-{}", std::process::id());
-    let _ = std::fs::remove_dir_all(store::thread_dir(&thread_value.id));
+    thread.id = format!("notify-replies-{}", std::process::id());
+    let _ = std::fs::remove_dir_all(store::thread_dir(&thread.id));
 
     crate::domain::changes::agent_comments(
-        &thread_value.id,
+        &thread.id,
         "REV",
         None,
         &serde_json::json!([{"file": "a.rs", "line": 3, "severity": "low", "text": "nit"}]),
     )
     .unwrap();
 
-    assert!(reply_notes(&thread_value).is_empty(), "a new comment: 0 reply note");
+    assert!(reply_notes(&thread).is_empty(), "a new comment: 0 reply note");
 
-    crate::domain::changes::threads::reply(&thread_value.id, "REV", "c1", "done in a.rs:4", false).unwrap();
+    crate::domain::changes::threads::reply(&thread.id, "REV", "c1", "done in a.rs:4", false).unwrap();
 
-    let notes = reply_notes(&thread_value);
+    let notes = reply_notes(&thread);
 
     assert_eq!(notes.len(), 1);
     assert_eq!(
@@ -241,26 +241,20 @@ fn reply_notes_hold_past_the_seen_mark_until_the_reply_is_seen() {
     };
 
     *NOTES.lock().unwrap() = vec![notes[0].clone(), done];
-    mark_seen(&thread_value.id, notes[0].ts + 1);
+    mark_seen(&thread.id, notes[0].ts + 1);
     let kinds: Vec<Kind> = unseen(None)
         .into_iter()
-        .filter(|count| count.thread == thread_value.id)
-        .map(|count_value| count_value.kind)
+        .filter(|note| note.thread == thread.id)
+        .map(|note| note.kind)
         .collect();
 
     assert_eq!(kinds, vec![Kind::Reply]);
-    assert_eq!(
-        unseen_of(&thread_value.id),
-        [] as [crate::domain::notifications::Note; 0]
-    );
+    assert_eq!(unseen_of(&thread.id), [] as [crate::domain::notifications::Note; 0]);
 
     // seen in the changes view: 0 note
-    assert!(crate::domain::changes::threads::mark_seen(&thread_value.id, "c1"));
-    assert_eq!(
-        reply_notes(&thread_value),
-        [] as [crate::domain::notifications::Note; 0]
-    );
+    assert!(crate::domain::changes::threads::mark_seen(&thread.id, "c1"));
+    assert_eq!(reply_notes(&thread), [] as [crate::domain::notifications::Note; 0]);
 
     NOTES.lock().unwrap().clear();
-    let _ = std::fs::remove_dir_all(store::thread_dir(&thread_value.id));
+    let _ = std::fs::remove_dir_all(store::thread_dir(&thread.id));
 }

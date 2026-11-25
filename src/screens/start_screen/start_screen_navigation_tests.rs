@@ -11,8 +11,8 @@ fn settings_esc_undoes_the_field_edit_and_never_applies() {
     assert!(app.tab == Tab::Settings && !app.tabs_focus);
 
     // a plain field: typed, esc → the text at entry, 0 write
-    let text = app.settings.as_mut().unwrap();
-    let start = text.form.fields[0].text();
+    let settings = app.settings.as_mut().unwrap();
+    let start = settings.form.fields[0].text();
 
     app.paste("/tmp/elsewhere/");
 
@@ -29,13 +29,10 @@ fn settings_esc_undoes_the_field_edit_and_never_applies() {
     app.run(Act::AddAlias);
     app.paste("project:x");
     key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-    let text_value = app.settings.as_ref().unwrap();
+    let settings = app.settings.as_ref().unwrap();
 
     assert!(
-        text_value.form.editing.is_none()
-            && text_value.form.fields[crate::features::settings::PLAIN]
-                .text()
-                .is_empty()
+        settings.form.editing.is_none() && settings.form.fields[crate::features::settings::PLAIN].text().is_empty()
     );
     assert_eq!(std::fs::read_to_string(&app.settings_path).unwrap_or_default(), before);
 
@@ -61,7 +58,7 @@ fn settings_esc_undoes_the_field_edit_and_never_applies() {
 #[test]
 fn alt_digits_switch_tabs_and_tab_walks_the_regions() {
     let mut app = test_app();
-    let alt = |app_value: &mut App, directory: char| key(app_value, KeyCode::Char(directory), KeyModifiers::ALT);
+    let alt = |app: &mut App, number: char| key(app, KeyCode::Char(number), KeyModifiers::ALT);
 
     alt(&mut app, '2');
 
@@ -85,7 +82,7 @@ fn alt_digits_switch_tabs_and_tab_walks_the_regions() {
     assert!(app.compose.screen == Screen::Compose && app.compose.field == Field::Prompt);
 
     // alt+2..4: threads, agents, settings
-    for (thread, directory_value) in [
+    for (tab, number) in [
         (Tab::Threads, '2'),
         (Tab::Projects, '3'),
         (Tab::Merge, '4'),
@@ -93,9 +90,9 @@ fn alt_digits_switch_tabs_and_tab_walks_the_regions() {
         (Tab::Flows, '6'),
         (Tab::Settings, '7'),
     ] {
-        alt(&mut app, directory_value);
+        alt(&mut app, number);
 
-        assert!(app.compose.screen == Screen::Pick && app.tab == thread);
+        assert!(app.compose.screen == Screen::Pick && app.tab == tab);
     }
 
     alt_digits_switch_tabs_and_tab_walks_the_regions_verify_word(app, alt);
@@ -200,11 +197,11 @@ fn title_is_optional_the_prompt_line_1_names_the_thread() {
     assert_eq!(app.message(), "Fix the deploy script\nit fails on arm64");
 
     app.note_list.selected = vec!["infra/deploy.md".into()];
-    let message_value = app.message();
+    let message = app.message();
 
     assert!(
-        message_value.starts_with("Fix the deploy script\nit fails on arm64\n\nRead these notes first:\n- "),
-        "{message_value}"
+        message.starts_with("Fix the deploy script\nit fails on arm64\n\nRead these notes first:\n- "),
+        "{message}"
     );
 
     key(&mut app, KeyCode::Enter, KeyModifiers::CONTROL);
@@ -215,18 +212,18 @@ fn title_is_optional_the_prompt_line_1_names_the_thread() {
     }
 
     // a title: line 1, the prompt after it
-    let mut app_value = test_app();
+    let mut app = test_app();
 
-    app_value.compose.title.set_text("Deploy");
-    app_value.compose.prompt.set_text("fix it");
+    app.compose.title.set_text("Deploy");
+    app.compose.prompt.set_text("fix it");
 
-    assert_eq!(app_value.message(), "Deploy\n\nfix it");
+    assert_eq!(app.message(), "Deploy\n\nfix it");
 
     // a long 1st line: the title (branch name) cut at 80 chars
-    app_value.compose.title.set_text("");
-    app_value.compose.prompt.set_text(&"x".repeat(120));
+    app.compose.title.set_text("");
+    app.compose.prompt.set_text(&"x".repeat(120));
 
-    assert_eq!(app_value.task_title().chars().count(), 80);
+    assert_eq!(app.task_title().chars().count(), 80);
 }
 
 #[test]
@@ -365,11 +362,11 @@ fn start_threads_tab_shows_cards_in_sections_and_archives_after_a_yes() {
     app.thread_list.worktrees = Some(Vec::new());
     app.thread_list.tlist.set_cards(vec![
         card("settled", |_| {}),
-        card("asking", |character| character.agents.blocked = true),
-        card("working", |character_value| character_value.agents.busy = true),
-        card(&thread.id, |character_2| {
-            character_2.land = Some(crate::domain::landed::Land::Landed);
-            character_2.title = "archive me".into();
+        card("asking", |card| card.agents.blocked = true),
+        card("working", |card| card.agents.busy = true),
+        card(&thread.id, |card| {
+            card.land = Some(crate::domain::landed::Land::Landed);
+            card.title = "archive me".into();
         }),
     ]);
     app.switch_tab(Tab::Threads);
@@ -398,17 +395,14 @@ fn start_threads_tab_shows_cards_in_sections_and_archives_after_a_yes() {
     key(&mut app, KeyCode::Down, KeyModifiers::NONE);
 
     assert_eq!(
-        app.thread_list
-            .tlist
-            .current()
-            .map(|character_3| character_3.id.clone()),
+        app.thread_list.tlist.current().map(|card| card.id.clone()),
         Some(thread.id.clone())
     );
 
     key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
-    let text_value = dump(&mut app, 120, 40);
+    let asked = dump(&mut app, 120, 40);
 
-    assert!(text_value.contains("archive 1 thread(s)?"), "{text_value}");
+    assert!(asked.contains("archive 1 thread(s)?"), "{asked}");
 
     key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
 
@@ -433,7 +427,7 @@ fn start_threads_tab_edits_a_thread() {
     app.thread_list.worktrees = Some(Vec::new());
     app.thread_list
         .tlist
-        .set_cards(vec![card(&thread.id, |character| character.title = "before".into())]);
+        .set_cards(vec![card(&thread.id, |card| card.title = "before".into())]);
     app.switch_tab(Tab::Threads);
     app.tabs_focus = false;
     app.run(Act::Thread(crate::features::thread_list::Act::Edit));
@@ -455,8 +449,8 @@ fn start_threads_tab_edits_a_thread() {
         key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
     }
 
-    for character_value in "after".chars() {
-        key(&mut app, KeyCode::Char(character_value), KeyModifiers::NONE);
+    for letter in "after".chars() {
+        key(&mut app, KeyCode::Char(letter), KeyModifiers::NONE);
     }
 
     key(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);

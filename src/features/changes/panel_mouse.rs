@@ -19,16 +19,16 @@ fn confirm_clear_stash(view: &mut View) {
 }
 
 fn confirm_drop_stash(view: &mut View, id: String) {
-    let thread = view
+    let title = view
         .stash_state
         .stash
         .iter()
-        .find(|error| error.id == id)
+        .find(|entry| entry.id == id)
         .map(crate::features::changes::stash::Entry::title)
         .unwrap_or_default();
 
     view.modal_state.modal = Some(Modal::Confirm {
-        question: format!("remove “{thread}” from the stash? its lines are gone for good"),
+        question: format!("remove “{title}” from the stash? its lines are gone for good"),
         yes: false,
         then: Then::DropStash(id),
     });
@@ -37,8 +37,8 @@ fn confirm_drop_stash(view: &mut View, id: String) {
 fn panel_mouse_commit(view: &mut View, i: usize, shift: bool, ci: usize) {
     view.scm.at = i;
 
-    if shift && let Some(character_value) = view.changes.commits.list.get(ci).filter(|character| !character.pushed) {
-        let oid = character_value.oid.clone();
+    if shift && let Some(commit) = view.changes.commits.list.get(ci).filter(|commit| !commit.pushed) {
+        let oid = commit.oid.clone();
 
         if !view.scm.commit_picks.remove(&oid) {
             view.scm.commit_picks.insert(oid);
@@ -49,8 +49,8 @@ fn panel_mouse_commit(view: &mut View, i: usize, shift: bool, ci: usize) {
 }
 
 fn panel_mouse_file(view: &mut View, i: usize, shift: bool, fi: usize) -> Option<Act> {
-    if shift && let Some(agent) = view.scm.anchor {
-        select_panel_range(view, i, agent);
+    if shift && let Some(anchor) = view.scm.anchor {
+        select_panel_range(view, i, anchor);
 
         view.scm.at = i;
         return Some(Act::None);
@@ -62,12 +62,12 @@ fn panel_mouse_file(view: &mut View, i: usize, shift: bool, fi: usize) -> Option
     None
 }
 
-fn select_panel_range(view: &mut View, i: usize, agent: usize) {
-    for j in agent.min(i)..=agent.max(i) {
-        if let Some(PRow::File(x, _)) = view.scm.rows.get(j)
-            && let Some(path_value) = view.changes.files.get(*x)
+fn select_panel_range(view: &mut View, i: usize, anchor: usize) {
+    for j in anchor.min(i)..=anchor.max(i) {
+        if let Some(PRow::File(fi, _)) = view.scm.rows.get(j)
+            && let Some(file) = view.changes.files.get(*fi)
         {
-            view.scm.picked.insert(path_value.path.clone());
+            view.scm.picked.insert(file.path.clone());
         }
     }
 }
@@ -75,8 +75,8 @@ fn select_panel_range(view: &mut View, i: usize, agent: usize) {
 fn picker_mouse(view: &mut View, at: Position) -> Option<Act> {
     // PR mode: a click in the open commit dropdown picks, outside it closes it
     if view.scm.pick.is_some() {
-        if let Some(&(_, key)) = view.scm.pick_rows.iter().find(|(result, _)| result.contains(at)) {
-            view.pick(key);
+        if let Some(&(_, pick)) = view.scm.pick_rows.iter().find(|(rect, _)| rect.contains(at)) {
+            view.pick(pick);
         } else {
             view.scm.pick = None;
         }
@@ -88,16 +88,10 @@ fn picker_mouse(view: &mut View, at: Position) -> Option<Act> {
 }
 
 fn panel_button_mouse(at: Position, view: &mut View) -> Option<Act> {
-    if let Some((_, bytes)) = view
-        .scm
-        .buttons
-        .iter()
-        .find(|(result_value, _)| result_value.contains(at))
-        .cloned()
-    {
+    if let Some((_, button)) = view.scm.buttons.iter().find(|(rect, _)| rect.contains(at)).cloned() {
         view.scm.msg_focus = false;
 
-        match bytes {
+        match button {
             Btn::Restore(id) => return Some(view.restore(&id)),
             Btn::Drop(id) => confirm_drop_stash(view, id),
             Btn::Clear => confirm_clear_stash(view),
@@ -129,9 +123,9 @@ fn panel_message_mouse(event: MouseEvent, at: Position, view: &mut View) -> Opti
 fn panel_mouse_kind(event: MouseEvent, at: Position, view: &mut View) -> Option<Act> {
     match event.kind {
         MouseEventKind::ScrollDown => {
-            let count_value = view.scm.rows.len();
+            let count = view.scm.rows.len();
 
-            view.scm.top = (view.scm.top + 3).min(count_value.saturating_sub(1));
+            view.scm.top = (view.scm.top + 3).min(count.saturating_sub(1));
             view.scm.at = view.scm.at.max(view.scm.top);
             return Some(Act::None);
         }
@@ -140,8 +134,8 @@ fn panel_mouse_kind(event: MouseEvent, at: Position, view: &mut View) -> Option<
             return Some(Act::None);
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(value) = picker_mouse(view, at) {
-                return Some(value);
+            if let Some(act) = picker_mouse(view, at) {
+                return Some(act);
             }
         }
         _ => {
@@ -162,18 +156,18 @@ fn panel_mouse_view(view: &mut View, event: MouseEvent) -> Act {
         y: event.row,
     };
 
-    if let Some(value) = panel_mouse_kind(event, at, view) {
-        return value;
+    if let Some(act) = panel_mouse_kind(event, at, view) {
+        return act;
     }
 
     view.scm.focus = true;
 
-    if let Some(value) = panel_button_mouse(at, view) {
-        return value;
+    if let Some(act) = panel_button_mouse(at, view) {
+        return act;
     }
 
-    if let Some(value) = panel_message_mouse(event, at, view) {
-        return value;
+    if let Some(act) = panel_message_mouse(event, at, view) {
+        return act;
     }
 
     view.scm.msg_focus = false;
@@ -189,8 +183,8 @@ fn panel_mouse_view(view: &mut View, event: MouseEvent) -> Act {
         return Act::None;
     }
 
-    if let Some(file) = row.as_ref().and_then(PRow::label) {
-        panel_label_mouse(file, i, stuck, view);
+    if let Some(fold) = row.as_ref().and_then(PRow::label) {
+        panel_label_mouse(fold, i, stuck, view);
 
         return Act::None;
     }
@@ -199,8 +193,8 @@ fn panel_mouse_view(view: &mut View, event: MouseEvent) -> Act {
 
     match row {
         Some(PRow::File(fi, _)) => {
-            if let Some(value) = panel_mouse_file(view, i, shift, fi) {
-                return value;
+            if let Some(act) = panel_mouse_file(view, i, shift, fi) {
+                return act;
             }
         }
         Some(PRow::Comment(ci)) => {
@@ -228,7 +222,7 @@ fn panel_mouse_view(view: &mut View, event: MouseEvent) -> Act {
     Act::None
 }
 
-fn panel_label_mouse(file: super::Fold, i: usize, stuck: bool, view: &mut View) {
+fn panel_label_mouse(fold: super::Fold, i: usize, stuck: bool, view: &mut View) {
     view.scm.at = i;
 
     if stuck {
@@ -237,6 +231,6 @@ fn panel_label_mouse(file: super::Fold, i: usize, stuck: bool, view: &mut View) 
 
         view.scm.top = i.saturating_sub(before);
     } else {
-        view.toggle_fold(file, None);
+        view.toggle_fold(fold, None);
     }
 }

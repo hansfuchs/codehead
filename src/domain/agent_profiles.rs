@@ -5,21 +5,21 @@ use std::fmt::Write as _;
 
 /// The system prompt part of agent NAME: its output style, handoff rule, sprite, voice and
 /// instructions. Claude agents skip a style that is already Claude Code's global output style.
-pub(crate) fn session_prompt(result: &roster::Agent) -> String {
+pub(crate) fn session_prompt(agent: &roster::Agent) -> String {
     let profile = Profile {
-        style: result.style.clone(),
-        voice: result.voice.clone().unwrap_or_default(),
-        prompt: result.prompt.clone().unwrap_or_default(),
-        sprite: result
+        style: agent.style.clone(),
+        voice: agent.voice.clone().unwrap_or_default(),
+        prompt: agent.prompt.clone().unwrap_or_default(),
+        sprite: agent
             .sprite
             .as_ref()
-            .and_then(|text| crate::domain::sprites::from_id(&text.id)),
+            .and_then(|sprite| crate::domain::sprites::from_id(&sprite.id)),
     };
     let styles = crate::infra::styles::load(&crate::infra::styles::dir());
     let global = crate::infra::styles::global_name();
 
     // the section marks serve the editor only
-    compose(&profile, &styles, &result.harness, global.as_deref())
+    compose(&profile, &styles, &agent.harness, global.as_deref())
         .lines()
         .filter(|line| !line.starts_with(MARK))
         .collect::<Vec<_>>()
@@ -53,85 +53,92 @@ pub(crate) fn parse_profile(raw: Option<&str>, default_style: Option<&str>) -> P
     let id = after.split(" -->").next().unwrap_or("none").trim();
 
     let strip = |text: &str, heads: &[&str]| {
-        let mut thread = text.trim();
+        let mut rest = text.trim();
 
-        for height in heads {
-            thread = thread.strip_prefix(height).unwrap_or(thread).trim_start();
+        for head in heads {
+            rest = rest.strip_prefix(head).unwrap_or(rest).trim_start();
         }
 
-        thread.trim().to_string()
+        rest.trim().to_string()
     };
 
     Profile {
         style: (id != "none").then(|| id.to_string()),
         voice: section(raw, "<!-- codehead:voice -->")
-            .map(|thread_value| strip(thread_value, &[VOICE_HEAD, VOICE_INTRO]))
+            .map(|body| strip(body, &[VOICE_HEAD, VOICE_INTRO]))
             .unwrap_or_default(),
         prompt: section(raw, "<!-- codehead:prompt -->")
-            .map(|thread_2| strip(thread_2, &[PROMPT_HEAD]))
+            .map(|body| strip(body, &[PROMPT_HEAD]))
             .unwrap_or_default(),
         // an old text sprite (`pcb-042`): None, the agent gets its default avatar
         sprite: section(raw, "<!-- codehead:sprite ")
-            .and_then(|thread_3| crate::domain::sprites::from_id(thread_3.split_once(" -->")?.0.trim())),
+            .and_then(|body| crate::domain::sprites::from_id(body.split_once(" -->")?.0.trim())),
     }
 }
 /// Profile text for PROFILE. The style body goes in only where the harness lacks it already
 /// (Claude agents get the global `outputStyle` from ~/.claude/settings.json).
 pub(crate) fn compose(
-    path: &Profile,
+    profile: &Profile,
     styles: &[crate::infra::styles::Style],
     harness: &str,
     global: Option<&str>,
 ) -> String {
-    let style = path
+    let style = profile
         .style
         .as_deref()
-        .and_then(|id| styles.iter().find(|text| text.id == id));
+        .and_then(|id| styles.iter().find(|candidate| candidate.id == id));
 
-    if style.is_none() && path.sprite.is_none() && path.voice.trim().is_empty() && path.prompt.trim().is_empty() {
+    if style.is_none()
+        && profile.sprite.is_none()
+        && profile.voice.trim().is_empty()
+        && profile.prompt.trim().is_empty()
+    {
         return String::new();
     }
 
-    let mut text_value = format!("<!-- codehead:style {} -->\n", path.style.as_deref().unwrap_or("none"));
+    let mut text = format!(
+        "<!-- codehead:style {} -->\n",
+        profile.style.as_deref().unwrap_or("none")
+    );
 
-    if let Some(st) = style {
+    if let Some(style) = style {
         let claude = harness.split('/').next() == Some("claude");
 
-        if !claude || global != Some(st.name.as_str()) {
-            let _ = write!(text_value, "# Output style: {}\n\n{}\n\n", st.name, st.body);
+        if !claude || global != Some(style.name.as_str()) {
+            let _ = write!(text, "# Output style: {}\n\n{}\n\n", style.name, style.body);
         }
     }
 
-    let _ = write!(text_value, "<!-- codehead:handoff -->\n{HANDOFF}\n\n");
+    let _ = write!(text, "<!-- codehead:handoff -->\n{HANDOFF}\n\n");
 
-    if let Some(sp) = &path.sprite {
+    if let Some(sprite) = &profile.sprite {
         let _ = write!(
-            text_value,
+            text,
             "<!-- codehead:sprite {} -->\n{SPRITE_HEAD}\n\n{SPRITE_INTRO}\n\n```\n{}\n```\n\n",
-            sp.id,
-            sp.rows.join("\n")
+            sprite.id,
+            sprite.rows.join("\n")
         );
     }
 
-    if !path.voice.trim().is_empty() {
+    if !profile.voice.trim().is_empty() {
         let _ = write!(
-            text_value,
+            text,
             "<!-- codehead:voice -->\n{VOICE_HEAD}\n\n{VOICE_INTRO}\n\n{}\n\n",
-            path.voice.trim()
+            profile.voice.trim()
         );
     }
 
-    if !path.prompt.trim().is_empty() {
+    if !profile.prompt.trim().is_empty() {
         let _ = write!(
-            text_value,
+            text,
             "<!-- codehead:prompt -->\n{PROMPT_HEAD}\n\n{}\n\n",
-            path.prompt.trim()
+            profile.prompt.trim()
         );
     }
 
-    text_value.push_str("<!-- codehead:end -->");
+    text.push_str("<!-- codehead:end -->");
 
-    text_value
+    text
 }
 /// Sprite of A: saved in its profile, else the stable pool pick by name.
 pub(crate) fn sprite(agent: &Agent) -> crate::domain::sprites::Sprite {

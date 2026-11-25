@@ -62,22 +62,22 @@ pub(crate) struct Row {
 
 pub(super) type Question = (String, String, Vec<(String, String)>, bool);
 
-fn questions(agent: &Ask) -> Vec<Question> {
-    agent.questions()
+fn questions(ask: &Ask) -> Vec<Question> {
+    ask.questions()
 }
 
 /// K edits a text field with a modifier: ⌫ / Del, ctrl or ⌘ + a letter of the edit keys
 /// (u w h k a e d x z y), alt + a letter (alt+b/f/d), alt / ctrl / ⌘ + ←→ Home End.
 fn text_edit(key: &KeyEvent) -> bool {
-    let message = key.modifiers;
-    let cmd = message.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER);
+    let modifiers = key.modifiers;
+    let cmd = modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER);
 
     match key.code {
         KeyCode::Backspace | KeyCode::Delete | KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => true,
-        KeyCode::Char(character) if cmd && !message.contains(KeyModifiers::ALT) => {
-            "uwhkaedxzy".contains(character.to_ascii_lowercase())
+        KeyCode::Char(letter) if cmd && !modifiers.contains(KeyModifiers::ALT) => {
+            "uwhkaedxzy".contains(letter.to_ascii_lowercase())
         }
-        KeyCode::Char(character_value) if message.contains(KeyModifiers::ALT) => character_value.is_ascii_alphabetic(),
+        KeyCode::Char(letter) if modifiers.contains(KeyModifiers::ALT) => letter.is_ascii_alphabetic(),
         _ => false,
     }
 }
@@ -91,86 +91,86 @@ impl Picker {
     /// As `sync`; FOCUS: a new ask takes the focus. False (the owner types in the prompt): the
     /// ask waits for tab, 0 typed key lands in the ask by surprise.
     pub(crate) fn sync_with(&mut self, ask: Option<&Ask>, focus: bool) {
-        sync_with_picker(self, ask, focus);
+        sync_picker(self, ask, focus);
     }
 
     /// Answers so far: (question, answer) of the answered questions before the shown one.
-    pub(crate) fn answered(&self, agent: &Ask) -> Vec<(String, String)> {
-        questions(agent)
+    pub(crate) fn answered(&self, ask: &Ask) -> Vec<(String, String)> {
+        questions(ask)
             .iter()
             .zip(&self.answers)
-            .filter_map(|((query, ..), ans)| ans.clone().map(|x| (query.clone(), x)))
+            .filter_map(|((question, ..), answer)| answer.clone().map(|answer| (question.clone(), answer)))
             .collect()
     }
 
     /// Row count of the shown question (options + Other), else of the choices.
-    fn rows_n(&self, agent: &Ask) -> usize {
-        let qs = questions(agent);
+    fn rows_n(&self, ask: &Ask) -> usize {
+        let qs = questions(ask);
 
         match qs.get(self.question) {
             Some((_, _, opts, _)) => opts.len() + 1,
-            None if !agent.options().is_empty() => agent.options().len(),
+            None if !ask.options().is_empty() => ask.options().len(),
             None => 2,
         }
     }
 
     /// The rows to draw.
-    pub(crate) fn rows(&self, agent: &Ask) -> Vec<Row> {
-        rows_picker(self, agent)
+    pub(crate) fn rows(&self, ask: &Ask) -> Vec<Row> {
+        picker_rows(self, ask)
     }
 
     /// The hint row under the choices.
-    pub(crate) fn hint(&self, agent: &Ask) -> String {
-        hint_picker(self, agent)
+    pub(crate) fn hint(&self, ask: &Ask) -> String {
+        picker_hint(self, ask)
     }
 
     /// Key K for ask A. Tab moves the focus between the ask and the prompt; with the focus, the
     /// ask takes every plain key but esc, page up / down and F-keys (0 key edits the hidden prompt).
-    pub(crate) fn key(&mut self, agent: &Ask, key_value: KeyEvent) -> Act {
-        key_picker(self, agent, key_value)
+    pub(crate) fn key(&mut self, ask: &Ask, key: KeyEvent) -> Act {
+        picker_key(self, ask, key)
     }
 
     /// A click on row I: multi toggles it, the Other row takes the cursor, else the pick.
-    pub(crate) fn click(&mut self, agent: &Ask, i: usize) -> Act {
-        self.sync(Some(agent));
+    pub(crate) fn click(&mut self, ask: &Ask, i: usize) -> Act {
+        self.sync(Some(ask));
         self.focus = true;
         self.at = i;
 
-        if other_row(agent, self) == Some(i) {
+        if other_row(ask, self) == Some(i) {
             return Act::Changed;
         }
 
-        if multi(agent, self) {
+        if multi(ask, self) {
             toggle(i, self);
             return Act::Changed;
         }
 
-        enter(agent, i, self)
+        enter(ask, i, self)
     }
 }
 
-fn hint_body(agent: &Ask, height: &mut Vec<&str>) {
-    height.push("enter / 1-9: pick");
+fn push_choice_hints(ask: &Ask, hints: &mut Vec<&str>) {
+    hints.push("enter / 1-9: pick");
 
     // a flow's wait: the prompt's text goes along
-    if agent.tool == crate::engine::flows::run::WAIT_TOOL {
-        height.push("text in the prompt: your note");
+    if ask.tool == crate::engine::flows::run::WAIT_TOOL {
+        hints.push("text in the prompt: your note");
     }
 }
 
-fn rows_own(agent: &Ask, row: impl Fn(usize, String, String, bool) -> Row) -> Vec<Row> {
-    let own = agent.options();
+fn choice_rows(ask: &Ask, row: impl Fn(usize, String, String, bool) -> Row) -> Vec<Row> {
+    let own = ask.options();
 
     let labels: Vec<String> = if own.is_empty() {
         vec!["allow".into(), "deny".into()]
     } else {
-        own.into_iter().map(|output| output.1).collect()
+        own.into_iter().map(|option| option.1).collect()
     };
 
     labels
         .into_iter()
         .enumerate()
-        .map(|(i, line_value)| row(i, line_value, String::new(), false))
+        .map(|(i, label)| row(i, label, String::new(), false))
         .collect()
 }
 
@@ -178,128 +178,122 @@ fn rows_own(agent: &Ask, row: impl Fn(usize, String, String, bool) -> Row) -> Ve
 #[path = "chat_ask_tests.rs"]
 mod tests;
 
-fn multi(agent: &Ask, view_state: &Picker) -> bool {
-    questions(agent).get(view_state.question).is_some_and(|query| query.3)
+fn multi(ask: &Ask, picker: &Picker) -> bool {
+    questions(ask).get(picker.question).is_some_and(|question| question.3)
 }
 
 /// The "Other" row of the shown question (None: not a question).
-fn other_row(agent: &Ask, view_state: &Picker) -> Option<usize> {
-    questions(agent).get(view_state.question).map(|query| query.2.len())
+fn other_row(ask: &Ask, picker: &Picker) -> Option<usize> {
+    questions(ask).get(picker.question).map(|question| question.2.len())
 }
 
-fn key_keycode_backspace_keycode_char(view_state: &mut Picker) {
-    if view_state.others[view_state.question].is_empty() {
-        view_state.picks[view_state.question].remove(&view_state.at);
+fn unpick_empty_other(picker: &mut Picker) {
+    if picker.others[picker.question].is_empty() {
+        picker.picks[picker.question].remove(&picker.at);
     }
 }
 
-fn key_keycode_char_character_value(agent: &Ask, other: Option<usize>, character_value: char, view_state: &mut Picker) {
-    if let Some(output) = other {
-        view_state.at = output;
-        view_state.others[view_state.question].push(character_value);
+fn type_other(ask: &Ask, other: Option<usize>, letter: char, picker: &mut Picker) {
+    if let Some(row) = other {
+        picker.at = row;
+        picker.others[picker.question].push(letter);
 
-        if multi(agent, view_state) {
-            view_state.picks[view_state.question].insert(output);
+        if multi(ask, picker) {
+            picker.picks[picker.question].insert(row);
         }
     }
 }
 
-fn show(agent: &Ask, query: usize, view_state: &mut Picker) {
-    view_state.question = query;
+fn show(ask: &Ask, question: usize, picker: &mut Picker) {
+    picker.question = question;
 
     // the cursor on the 1st pick of that question, else its 1st row
-    view_state.at = view_state.picks[query]
+    picker.at = picker.picks[question]
         .iter()
         .next()
         .copied()
         .unwrap_or(0)
-        .min(view_state.rows_n(agent) - 1);
+        .min(picker.rows_n(ask) - 1);
 }
 
-fn toggle(i: usize, view_state: &mut Picker) {
-    let path = &mut view_state.picks[view_state.question];
+fn toggle(i: usize, picker: &mut Picker) {
+    let picks = &mut picker.picks[picker.question];
 
-    if !path.remove(&i) {
-        path.insert(i);
+    if !picks.remove(&i) {
+        picks.insert(i);
     }
 }
 
 /// Enter / a pick on row I: answer the shown question, show the next open one, or send.
-fn enter(agent: &Ask, i: usize, view_state: &mut Picker) -> Act {
-    let qs = questions(agent);
+fn enter(ask: &Ask, i: usize, picker: &mut Picker) -> Act {
+    let qs = questions(ask);
 
-    let Some((_, _, opts, multi)) = qs.get(view_state.question) else {
-        return choice(agent, i, view_state);
+    let Some((_, _, opts, multi)) = qs.get(picker.question) else {
+        return choice(ask, i, picker);
     };
 
-    let other = view_state.others[view_state.question].trim().to_string();
+    let other = picker.others[picker.question].trim().to_string();
 
-    let label = |key: usize| {
-        if key == opts.len() {
+    let label = |row: usize| {
+        if row == opts.len() {
             other.clone()
         } else {
-            opts[key].0.clone()
+            opts[row].0.clone()
         }
     };
 
     let rows: Vec<usize> = if *multi {
-        let path: Vec<usize> = view_state.picks[view_state.question]
+        let chosen: Vec<usize> = picker.picks[picker.question]
             .iter()
             .copied()
-            .filter(|&key_value| key_value < opts.len() || !other.is_empty())
+            .filter(|&row| row < opts.len() || !other.is_empty())
             .collect();
 
         // 0 picks: the cursor row
-        if path.is_empty() { vec![i] } else { path }
+        if chosen.is_empty() { vec![i] } else { chosen }
     } else {
         vec![i]
     };
 
-    if rows.iter().any(|&key_2| key_2 == opts.len() && other.is_empty()) {
+    if rows.iter().any(|&row| row == opts.len() && other.is_empty()) {
         // "Other" with 0 text: 0 answer
         return Act::Changed;
     }
 
     if !*multi {
-        view_state.picks[view_state.question] = rows.iter().copied().collect();
+        picker.picks[picker.question] = rows.iter().copied().collect();
     }
 
-    view_state.answers[view_state.question] = Some(rows.into_iter().map(label).collect::<Vec<_>>().join(", "));
+    picker.answers[picker.question] = Some(rows.into_iter().map(label).collect::<Vec<_>>().join(", "));
 
     // the next open question (after this one first), else send
-    if let Some(next) = (view_state.question + 1..qs.len())
-        .chain(0..view_state.question)
-        .find(|&j| view_state.answers[j].is_none())
+    if let Some(next) = (picker.question + 1..qs.len())
+        .chain(0..picker.question)
+        .find(|&j| picker.answers[j].is_none())
     {
-        show(agent, next, view_state);
+        show(ask, next, picker);
         return Act::Changed;
     }
 
     let answers: serde_json::Map<String, Value> = qs
         .iter()
-        .zip(&view_state.answers)
-        .map(|((query, ..), x)| (query.clone(), Value::String(x.clone().unwrap_or_default())))
+        .zip(&picker.answers)
+        .map(|((question, ..), answer)| (question.clone(), Value::String(answer.clone().unwrap_or_default())))
         .collect();
-    let label = view_state
-        .answers
-        .iter()
-        .flatten()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" · ");
+    let label = picker.answers.iter().flatten().cloned().collect::<Vec<_>>().join(" · ");
 
-    Act::Answer(json!({"op": "answer", "id": agent.id, "allow": true, "answers": answers, "label": label}))
+    Act::Answer(json!({"op": "answer", "id": ask.id, "allow": true, "answers": answers, "label": label}))
 }
 
 /// A permission / ACP choice I.
-fn choice(agent: &Ask, i: usize, _view_state: &Picker) -> Act {
-    let own = agent.options();
+fn choice(ask: &Ask, i: usize, _picker: &Picker) -> Act {
+    let own = ask.options();
 
     if own.is_empty() {
         let allow = i == 0;
 
         return Act::Answer(
-            json!({"op": "answer", "id": agent.id, "allow": allow, "label": if allow { "allow" } else { "deny" }}),
+            json!({"op": "answer", "id": ask.id, "allow": allow, "label": if allow { "allow" } else { "deny" }}),
         );
     }
 
@@ -307,48 +301,46 @@ fn choice(agent: &Ask, i: usize, _view_state: &Picker) -> Act {
         return Act::Changed;
     };
 
-    Act::Answer(
-        json!({"op": "answer", "id": agent.id, "allow": kind.starts_with("allow"), "option": id, "label": name}),
-    )
+    Act::Answer(json!({"op": "answer", "id": ask.id, "allow": kind.starts_with("allow"), "option": id, "label": name}))
 }
 
-fn hint_last(agent: &Ask, qs: &[Question], height: &mut Vec<&str>, view_state: &Picker) {
+fn push_question_hints(ask: &Ask, qs: &[Question], hints: &mut Vec<&str>, picker: &Picker) {
     let last = (0..qs.len())
-        .filter(|&j| j != view_state.question)
-        .all(|j| view_state.answers.get(j).is_some_and(Option::is_some));
+        .filter(|&j| j != picker.question)
+        .all(|j| picker.answers.get(j).is_some_and(Option::is_some));
 
-    if multi(agent, view_state) {
-        height.push("space: pick");
-        height.push(if last { "enter: answer" } else { "enter: next" });
+    if multi(ask, picker) {
+        hints.push("space: pick");
+        hints.push(if last { "enter: answer" } else { "enter: next" });
     } else {
-        height.push(if last {
+        hints.push(if last {
             "space / enter: answer"
         } else {
             "space / enter: next"
         });
     }
 
-    height.push("type: other");
+    hints.push("type: other");
 
     if qs.len() > 1 {
-        height.push("←→ questions");
+        hints.push("←→ questions");
     }
 }
 
-fn sync_with_picker(state: &mut Picker, ask: Option<&Ask>, focus: bool) {
-    let Some(agent) = ask else {
-        *state = Picker::default();
+fn sync_picker(picker: &mut Picker, ask: Option<&Ask>, focus: bool) {
+    let Some(ask) = ask else {
+        *picker = Picker::default();
         return;
     };
 
-    if state.id == agent.id {
+    if picker.id == ask.id {
         return;
     }
 
-    let count = questions(agent).len().max(1);
+    let count = questions(ask).len().max(1);
 
-    *state = Picker {
-        id: agent.id.clone(),
+    *picker = Picker {
+        id: ask.id.clone(),
         focus,
         picks: vec![BTreeSet::new(); count],
         others: vec![String::new(); count],
@@ -357,127 +349,130 @@ fn sync_with_picker(state: &mut Picker, ask: Option<&Ask>, focus: bool) {
     };
 }
 
-fn rows_picker(state: &Picker, agent: &Ask) -> Vec<Row> {
-    let qs = questions(agent);
+fn picker_rows(picker: &Picker, ask: &Ask) -> Vec<Row> {
+    let qs = questions(ask);
     let row = |i: usize, label: String, desc: String, other: bool| Row {
         label,
         desc,
-        cursor: i == state.at,
-        picked: state.picks.get(state.question).is_some_and(|path| path.contains(&i)),
+        cursor: i == picker.at,
+        picked: picker
+            .picks
+            .get(picker.question)
+            .is_some_and(|picks| picks.contains(&i)),
         other,
     };
 
-    if let Some((_, _, opts, _)) = qs.get(state.question) {
-        let mut value: Vec<Row> = opts
+    if let Some((_, _, opts, _)) = qs.get(picker.question) {
+        let mut rows: Vec<Row> = opts
             .iter()
             .enumerate()
-            .map(|(i, (line, directory))| row(i, line.clone(), directory.clone(), false))
+            .map(|(i, (label, desc))| row(i, label.clone(), desc.clone(), false))
             .collect();
 
-        value.push(row(
+        rows.push(row(
             opts.len(),
-            state.others.get(state.question).cloned().unwrap_or_default(),
+            picker.others.get(picker.question).cloned().unwrap_or_default(),
             String::new(),
             true,
         ));
-        value
+        rows
     } else {
-        rows_own(agent, row)
+        choice_rows(ask, row)
     }
 }
 
-fn hint_picker(state: &Picker, agent: &Ask) -> String {
-    if state.sent {
+fn picker_hint(picker: &Picker, ask: &Ask) -> String {
+    if picker.sent {
         return "answer sent…".into();
     }
 
-    if !state.focus && agent.tool == crate::engine::flows::run::WAIT_TOOL {
+    if !picker.focus && ask.tool == crate::engine::flows::run::WAIT_TOOL {
         return "ctrl+enter: your message (the wait stays) · tab: the choices".into();
     }
 
-    if !state.focus {
+    if !picker.focus {
         return "tab: answer the question".into();
     }
 
-    let qs = questions(agent);
-    let mut height: Vec<&str> = vec!["↑↓ move"];
+    let qs = questions(ask);
+    let mut hints: Vec<&str> = vec!["↑↓ move"];
 
     if qs.is_empty() {
-        hint_body(agent, &mut height);
+        push_choice_hints(ask, &mut hints);
     } else {
-        hint_last(agent, &qs, &mut height, state);
+        push_question_hints(ask, &qs, &mut hints, picker);
     }
 
-    height.push("tab: prompt");
+    hints.push("tab: prompt");
 
-    height.join(" · ")
+    hints.join(" · ")
 }
 
-fn key_picker(state: &mut Picker, agent: &Ask, key_value: KeyEvent) -> Act {
+fn picker_key(picker: &mut Picker, ask: &Ask, key: KeyEvent) -> Act {
     // a picker of another ask (0 sync yet): a fresh one for A, the focus stays in the prompt
-    state.sync_with(Some(agent), false);
+    picker.sync_with(Some(ask), false);
 
-    if state.sent {
+    if picker.sent {
         return Act::Pass;
     }
 
-    let none = key_value.modifiers.is_empty();
-    let typed = none || key_value.modifiers == KeyModifiers::SHIFT;
-    let other = other_row(agent, state);
-    let on_other = other == Some(state.at);
+    let plain = key.modifiers.is_empty();
+    let typed = plain || key.modifiers == KeyModifiers::SHIFT;
+    let other = other_row(ask, picker);
+    let on_other = other == Some(picker.at);
 
     // with the focus, a text edit key with a modifier (ctrl+w, alt+⌫, ctrl+u …): the Other
     // text's, else 0 effect (never the hidden prompt's)
-    if state.focus && !typed && text_edit(&key_value) {
+    if picker.focus && !typed && text_edit(&key) {
         if on_other
-            && crate::ui::textarea::delete_key(&mut state.others[state.question], &key_value)
-            && state.others[state.question].is_empty()
+            && crate::ui::textarea::delete_key(&mut picker.others[picker.question], &key)
+            && picker.others[picker.question].is_empty()
         {
-            state.picks[state.question].remove(&state.at);
+            picker.picks[picker.question].remove(&picker.at);
         }
 
         return Act::Changed;
     }
 
-    if !state.focus
+    if !picker.focus
         || !typed
         || matches!(
-            key_value.code,
+            key.code,
             KeyCode::Esc | KeyCode::PageUp | KeyCode::PageDown | KeyCode::F(_)
         )
     {
         return Act::Pass;
     }
 
-    let count = state.rows_n(agent);
-    let qn = questions(agent).len();
+    let count = picker.rows_n(ask);
+    let qn = questions(ask).len();
 
-    match key_value.code {
+    match key.code {
         // shift+↑↓: the view scrolls
-        KeyCode::Up | KeyCode::Down if !none => return Act::Pass,
-        KeyCode::Up => state.at = (state.at + count - 1) % count,
-        KeyCode::Down => state.at = (state.at + 1) % count,
-        KeyCode::Left if state.question > 0 => show(agent, state.question - 1, state),
-        KeyCode::Right if state.question + 1 < qn && state.answers[state.question].is_some() => {
-            show(agent, state.question + 1, state);
+        KeyCode::Up | KeyCode::Down if !plain => return Act::Pass,
+        KeyCode::Up => picker.at = (picker.at + count - 1) % count,
+        KeyCode::Down => picker.at = (picker.at + 1) % count,
+        KeyCode::Left if picker.question > 0 => show(ask, picker.question - 1, picker),
+        KeyCode::Right if picker.question + 1 < qn && picker.answers[picker.question].is_some() => {
+            show(ask, picker.question + 1, picker);
         }
         KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h')
-            if on_other && crate::ui::textarea::delete_key(&mut state.others[state.question], &key_value) =>
+            if on_other && crate::ui::textarea::delete_key(&mut picker.others[picker.question], &key) =>
         {
-            key_keycode_backspace_keycode_char(state);
+            unpick_empty_other(picker);
         }
         // space: in "Other" text a space; multi: toggle; single / choices: pick
-        KeyCode::Char(' ') if on_other && !state.others[state.question].is_empty() => {
-            state.others[state.question].push(' ');
+        KeyCode::Char(' ') if on_other && !picker.others[picker.question].is_empty() => {
+            picker.others[picker.question].push(' ');
         }
-        KeyCode::Char(' ') if multi(agent, state) => toggle(state.at, state),
-        KeyCode::Enter | KeyCode::Char(' ') => return enter(agent, state.at, state),
-        KeyCode::Char(character @ '1'..='9') if !on_other => {
-            return number_key(agent, character as usize - '1' as usize, count, other, state);
+        KeyCode::Char(' ') if multi(ask, picker) => toggle(picker.at, picker),
+        KeyCode::Enter | KeyCode::Char(' ') => return enter(ask, picker.at, picker),
+        KeyCode::Char(digit @ '1'..='9') if !on_other => {
+            return number_key(ask, digit as usize - '1' as usize, count, other, picker);
         }
         // letters: into "Other" (permissions: 0)
-        KeyCode::Char(character_value) => {
-            key_keycode_char_character_value(agent, other, character_value, state);
+        KeyCode::Char(letter) => {
+            type_other(ask, other, letter, picker);
         }
         _ => {}
     }
@@ -485,21 +480,21 @@ fn key_picker(state: &mut Picker, agent: &Ask, key_value: KeyEvent) -> Act {
     Act::Changed
 }
 
-fn number_key(agent: &Ask, index: usize, count: usize, other: Option<usize>, state: &mut Picker) -> Act {
+fn number_key(ask: &Ask, index: usize, count: usize, other: Option<usize>, picker: &mut Picker) -> Act {
     if index >= count {
         return Act::Changed;
     }
 
-    state.at = index;
+    picker.at = index;
 
     if Some(index) == other {
         return Act::Changed;
     }
 
-    if multi(agent, state) {
-        toggle(index, state);
+    if multi(ask, picker) {
+        toggle(index, picker);
         return Act::Changed;
     }
 
-    enter(agent, index, state)
+    enter(ask, index, picker)
 }

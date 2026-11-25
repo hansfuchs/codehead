@@ -107,11 +107,11 @@ impl Default for ProjectsTab {
 impl ProjectsTab {
     /// The tab opens: REPOS (first: the start screen's repo), read the briefs.
     pub(crate) fn enter(&mut self, repos: Vec<PathBuf>) {
-        let cur = self.repo().cloned();
+        let previous = self.repo().cloned();
 
         self.repos = repos;
-        self.repo_i = cur
-            .and_then(|character| self.repos.iter().position(|result| *result == character))
+        self.repo_i = previous
+            .and_then(|previous| self.repos.iter().position(|repo| *repo == previous))
             .unwrap_or(0);
         self.reload();
     }
@@ -121,7 +121,7 @@ impl ProjectsTab {
     }
 
     pub(crate) fn reload(&mut self) {
-        self.items = self.repo().map(|result| projects::list(result)).unwrap_or_default();
+        self.items = self.repo().map(|repo| projects::list(repo)).unwrap_or_default();
         self.cursor = self.cursor.min(self.items.len().saturating_sub(1));
     }
 
@@ -130,25 +130,27 @@ impl ProjectsTab {
         self.form.is_some() || self.del
     }
 
-    fn count(&self, slug: &str) -> usize {
+    fn thread_count(&self, slug: &str) -> usize {
         let repo = self.repo();
 
         self.threads
             .iter()
-            .filter(|(result, ps)| Some(result) == repo && ps.iter().any(|path| path == slug))
+            .filter(|(thread_repo, slugs)| {
+                Some(thread_repo) == repo && slugs.iter().any(|thread_slug| thread_slug == slug)
+            })
             .count()
     }
 
     fn open_editor(&mut self) {
-        let Some(path_value) = self.items.get(self.cursor) else {
+        let Some(project) = self.items.get(self.cursor) else {
             return;
         };
 
-        let text = std::fs::read_to_string(&path_value.path).unwrap_or_default();
+        let text = std::fs::read_to_string(&project.path).unwrap_or_default();
 
         self.form = Some(Form::new(
-            Some(path_value.slug.clone()),
-            &path_value.title,
+            Some(project.slug.clone()),
+            &project.title,
             &projects::body_of(&text),
         ));
         self.esc_at = None;
@@ -164,8 +166,8 @@ impl ProjectsTab {
     }
 
     pub(crate) fn paste(&mut self, text: &str) {
-        if let Some(fm) = self.form.as_mut() {
-            paste_if_fm_on_title(text, fm);
+        if let Some(form) = self.form.as_mut() {
+            paste_into_form(text, form);
         }
     }
 
@@ -189,11 +191,11 @@ impl ProjectsTab {
     }
 }
 
-fn paste_if_fm_on_title(text: &str, fm: &mut Form) {
-    if fm.on_title {
-        fm.title.insert(&text.replace('\n', " "));
+fn paste_into_form(text: &str, form: &mut Form) {
+    if form.on_title {
+        form.title.insert(&text.replace('\n', " "));
     } else {
-        fm.body.paste(text);
+        form.body.paste(text);
     }
 }
 
@@ -214,88 +216,87 @@ impl Form {
     }
 }
 
-fn step_repo(directory: isize, model_state: &mut ProjectsTab) {
-    if model_state.repos.is_empty() {
+fn step_repo(delta: isize, tab: &mut ProjectsTab) {
+    if tab.repos.is_empty() {
         return;
     }
 
-    model_state.repo_i =
-        (model_state.repo_i as isize + directory).rem_euclid(model_state.repos.len() as isize) as usize;
-    model_state.cursor = 0;
-    model_state.reload();
+    tab.repo_i = (tab.repo_i as isize + delta).rem_euclid(tab.repos.len() as isize) as usize;
+    tab.cursor = 0;
+    tab.reload();
 }
 
-fn open_ide(model_state: &mut ProjectsTab) -> Out {
-    let Some(path_value) = model_state.items.get(model_state.cursor) else {
+fn open_ide(tab: &mut ProjectsTab) -> Out {
+    let Some(project) = tab.items.get(tab.cursor) else {
         return Out::None;
     };
 
-    let Some(error) = crate::infra::editor::find() else {
+    let Some(editor) = crate::infra::editor::find() else {
         return Out::Toast("0 editor found (setting `editor`): enter edits here".into());
     };
 
-    if error.kind.in_terminal() {
+    if editor.kind.in_terminal() {
         return Out::Toast("terminal editor: enter edits here".into());
     }
 
-    let dir = path_value.path.parent().map(PathBuf::from).unwrap_or_default();
-    let file = path_value
+    let dir = project.path.parent().map(PathBuf::from).unwrap_or_default();
+    let file = project
         .path
         .file_name()
-        .map(|count| count.to_string_lossy().into_owned())
+        .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    match crate::infra::editor::spawn(&error, &crate::infra::editor::args_at(error.kind, &dir, &file, 1)) {
-        Ok(()) => Out::Toast(format!("{} open in the editor · r: read again", path_value.slug)),
+    match crate::infra::editor::spawn(&editor, &crate::infra::editor::args_at(editor.kind, &dir, &file, 1)) {
+        Ok(()) => Out::Toast(format!("{} open in the editor · r: read again", project.slug)),
         Err(err) => Out::Toast(err),
     }
 }
 
-fn save_projects_tab(receiver_state: &mut ProjectsTab) -> Out {
-    let Some(fm) = receiver_state.form.as_ref() else {
+fn save_projects_tab(tab: &mut ProjectsTab) -> Out {
+    let Some(form) = tab.form.as_ref() else {
         return Out::None;
     };
 
-    let title = fm.title.text().trim().to_string();
+    let title = form.title.text().trim().to_string();
 
     if title.is_empty() {
         return Out::Toast("title: 1 letter or digit at least".into());
     }
 
-    let body = fm.body.text();
+    let body = form.body.text();
 
-    let (path, made) = if let Some(slug) = &fm.slug {
-        match receiver_state.items.iter().find(|x| &x.slug == slug) {
-            Some(path_value) => (path_value.path.clone(), false),
+    let (path, made) = if let Some(slug) = &form.slug {
+        match tab.items.iter().find(|item| &item.slug == slug) {
+            Some(project) => (project.path.clone(), false),
             None => return Out::Toast(format!("{slug}: gone")),
         }
     } else {
-        let Some(repo) = receiver_state.repo().cloned() else {
+        let Some(repo) = tab.repo().cloned() else {
             return Out::None;
         };
 
         match projects::create_in(&projects::dir(&repo), &title) {
-            Ok(path_2) => (path_2.path, true),
+            Ok(created) => (created.path, true),
             Err(error) => return Out::Toast(error),
         }
     };
 
     let old = std::fs::read_to_string(&path).unwrap_or_default();
 
-    if let Err(error_value) = crate::engine::write_atomic(&path, projects::merge(&old, &title, &body).as_bytes()) {
-        return Out::Toast(format!("{}: {error_value}", path.display()));
+    if let Err(error) = crate::engine::write_atomic(&path, projects::merge(&old, &title, &body).as_bytes()) {
+        return Out::Toast(format!("{}: {error}", path.display()));
     }
 
     let slug = path
         .file_stem()
-        .map(|text_value| text_value.to_string_lossy().into_owned())
+        .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    receiver_state.form = None;
-    receiver_state.esc_at = None;
-    receiver_state.reload();
-    receiver_state.cursor = receiver_state.items.iter().position(|x| x.slug == slug).unwrap_or(0);
-    receiver_state.focus = Focus::List;
+    tab.form = None;
+    tab.esc_at = None;
+    tab.reload();
+    tab.cursor = tab.items.iter().position(|item| item.slug == slug).unwrap_or(0);
+    tab.focus = Focus::List;
 
     Out::Toast(if made {
         format!("project {slug} made")
@@ -304,36 +305,36 @@ fn save_projects_tab(receiver_state: &mut ProjectsTab) -> Out {
     })
 }
 
-fn delete_projects_tab(receiver_state: &mut ProjectsTab) -> Out {
-    let Some(path_value) = receiver_state.items.get(receiver_state.cursor).cloned() else {
+fn delete_projects_tab(tab: &mut ProjectsTab) -> Out {
+    let Some(project) = tab.items.get(tab.cursor).cloned() else {
         return Out::None;
     };
 
-    if let Err(error) = std::fs::remove_file(&path_value.path) {
-        return Out::Toast(format!("{}: {error}", path_value.path.display()));
+    if let Err(error) = std::fs::remove_file(&project.path) {
+        return Out::Toast(format!("{}: {error}", project.path.display()));
     }
 
-    receiver_state.reload();
-    let count_value = receiver_state.count(&path_value.slug);
+    tab.reload();
+    let thread_count = tab.thread_count(&project.slug);
 
-    Out::Toast(if count_value > 0 {
+    Out::Toast(if thread_count > 0 {
         format!(
-            "{} deleted · {count_value} thread(s) keep its name until edited",
-            path_value.slug
+            "{} deleted · {thread_count} thread(s) keep its name until edited",
+            project.slug
         )
     } else {
-        format!("{} deleted", path_value.slug)
+        format!("{} deleted", project.slug)
     })
 }
 
-fn hints_projects_tab(receiver_state: &ProjectsTab) -> &'static [(&'static str, &'static str)] {
-    if let Some(fm) = &receiver_state.form {
-        if fm.slug.is_none() {
+fn hints_projects_tab(tab: &ProjectsTab) -> &'static [(&'static str, &'static str)] {
+    if let Some(form) = &tab.form {
+        if form.slug.is_none() {
             &[("tab", "field"), ("ctrl+s", "make"), ("esc", "cancel")]
         } else {
             &[("tab", "field"), ("ctrl+s", "save"), ("esc", "close")]
         }
-    } else if receiver_state.del {
+    } else if tab.del {
         &[("d", "delete"), ("any key", "keep")]
     } else {
         &[

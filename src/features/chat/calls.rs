@@ -12,27 +12,27 @@ pub(super) fn run_summary(calls: &[Call], secs: f64) -> String {
     let labels: Vec<String> = calls
         .iter()
         .take(2)
-        .map(|character| {
-            let text = call_summary(&character.name, &character.input);
+        .map(|call| {
+            let text = call_summary(&call.name, &call.input);
 
             if text.is_empty() {
-                tool_label(&character.name)
+                tool_label(&call.name)
             } else {
-                format!("{}: {text}", tool_label(&character.name))
+                format!("{}: {text}", tool_label(&call.name))
             }
         })
         .collect();
 
-    let mut thread = labels.join(" · ");
+    let mut head = labels.join(" · ");
 
     if calls.len() > 2 {
-        write!(thread, " and {} more", calls.len() - 2).unwrap();
+        write!(head, " and {} more", calls.len() - 2).unwrap();
     }
 
     let count = calls.len();
 
     format!(
-        "{thread} · {count} call{} · {secs:.1}s",
+        "{head} · {count} call{} · {secs:.1}s",
         if count == 1 { "" } else { "s" }
     )
 }
@@ -43,7 +43,7 @@ pub(super) const CALL_OUTPUT_LINES: usize = 12;
 pub(super) fn file_lang(file: &str) -> String {
     std::path::Path::new(file)
         .extension()
-        .and_then(|error| error.to_str())
+        .and_then(|extension| extension.to_str())
         .unwrap_or_default()
         .to_string()
 }
@@ -58,7 +58,7 @@ pub(super) fn head_lines(text: &str) -> (String, usize) {
 pub(super) fn diff(old: &str, new: &str) -> String {
     let mut out: Vec<String> = old.lines().map(|line| format!("-{line}")).collect();
 
-    out.extend(new.lines().map(|line_value| format!("+{line_value}")));
+    out.extend(new.lines().map(|line| format!("+{line}")));
     out.join("\n")
 }
 /// The open rows of CALL below its head row, MARGIN before each: its code (the command of a Bash
@@ -79,38 +79,38 @@ pub(super) fn call_rows(call: &Call, width: usize, margin: &[Span<'static>]) -> 
         }
     };
 
-    let text_value = |key: &str| call.input[key].as_str();
+    let input = |key: &str| call.input[key].as_str();
 
     match call.name.as_str() {
         "Bash" => {
-            if let Some(cmd) = text_value("command") {
+            if let Some(cmd) = input("command") {
                 code(&mut out, cmd, "sh");
             }
         }
         "Write" => {
-            if let (Some(file), Some(text)) = (text_value("file_path"), text_value("content")) {
+            if let (Some(file), Some(text)) = (input("file_path"), input("content")) {
                 code(&mut out, text, &file_lang(file));
             }
         }
         "Edit" => {
-            if let (Some(old), Some(new)) = (text_value("old_string"), text_value("new_string")) {
+            if let (Some(old), Some(new)) = (input("old_string"), input("new_string")) {
                 code(&mut out, &diff(old, new), "diff");
             }
         }
         "MultiEdit" => {
-            call_rows_multiedit(call, &mut out, code);
+            multi_edit_rows(call, &mut out, code);
         }
         _ => {}
     }
 
     if let Some((ok, text)) = &call.output {
-        call_rows_lines(width, margin, &mut out, note, *ok, text);
+        output_rows(width, margin, &mut out, note, *ok, text);
     }
 
     out
 }
 
-fn call_rows_lines(
+fn output_rows(
     width: usize,
     margin: &[Span<'static>],
     out: &mut Vec<Row>,
@@ -140,15 +140,15 @@ fn call_rows_lines(
     }
 }
 
-fn call_rows_multiedit(call: &Call, out: &mut Vec<Row>, code: impl Fn(&mut Vec<Row>, &str, &str)) {
+fn multi_edit_rows(call: &Call, out: &mut Vec<Row>, code: impl Fn(&mut Vec<Row>, &str, &str)) {
     let edits = call.input["edits"].as_array().cloned().unwrap_or_default();
 
     let all: Vec<String> = edits
         .iter()
-        .map(|error_value| {
+        .map(|edit| {
             diff(
-                error_value["old_string"].as_str().unwrap_or_default(),
-                error_value["new_string"].as_str().unwrap_or_default(),
+                edit["old_string"].as_str().unwrap_or_default(),
+                edit["new_string"].as_str().unwrap_or_default(),
             )
         })
         .collect();
@@ -158,43 +158,44 @@ fn call_rows_multiedit(call: &Call, out: &mut Vec<Row>, code: impl Fn(&mut Vec<R
     }
 }
 /// Short label of 1 call for a bubble's run row: `run tests`, `read view.rs`, `search foo`.
-pub(super) fn call_label(character: &Call) -> String {
-    let text = |key: &str| character.input[key].as_str().map(String::from);
+pub(super) fn call_label(call: &Call) -> String {
+    let text = |key: &str| call.input[key].as_str().map(String::from);
     let base = |path: String| path.rsplit('/').next().unwrap_or_default().to_string();
 
-    let lower = |thread: String| {
-        let mut ch = thread.chars();
+    let lower = |text: String| {
+        let mut chars = text.chars();
 
-        ch.next()
-            .map_or_else(String::new, |file| file.to_lowercase().chain(ch).collect())
+        chars
+            .next()
+            .map_or_else(String::new, |first| first.to_lowercase().chain(chars).collect())
     };
 
-    let value = match character.name.as_str() {
+    let label = match call.name.as_str() {
         "Bash" => text("description")
             .map(lower)
-            .or_else(|| text("command").map(|character_value| format!("run {character_value}"))),
-        "Read" => text("file_path").map(|path_value| format!("read {}", base(path_value))),
-        "Write" => text("file_path").map(|path_2| format!("write {}", base(path_2))),
-        "Edit" | "MultiEdit" => text("file_path").map(|path_3| format!("edit {}", base(path_3))),
-        "NotebookEdit" => text("notebook_path").map(|path_4| format!("edit {}", base(path_4))),
-        "Grep" | "Glob" => text("pattern").map(|path_5| format!("search {path_5}")),
-        "WebFetch" => text("url").map(|user| format!("fetch {user}")),
+            .or_else(|| text("command").map(|command| format!("run {command}"))),
+        "Read" => text("file_path").map(|path| format!("read {}", base(path))),
+        "Write" => text("file_path").map(|path| format!("write {}", base(path))),
+        "Edit" | "MultiEdit" => text("file_path").map(|path| format!("edit {}", base(path))),
+        "NotebookEdit" => text("notebook_path").map(|path| format!("edit {}", base(path))),
+        "Grep" | "Glob" => text("pattern").map(|pattern| format!("search {pattern}")),
+        "WebFetch" => text("url").map(|url| format!("fetch {url}")),
         "WebSearch" => text("query").map(|query| format!("search the web for {query}")),
         "Task" | "Agent" => text("description").map(lower),
         "TodoWrite" => Some("update todos".into()),
-        "ToolSearch" => text("query").map(|query_value| {
+        "ToolSearch" => text("query").map(|query| {
             format!(
                 "load {}",
-                query_value
+                query
                     .trim_start_matches("select:")
                     .split(',')
-                    .map(|thread_value| thread_value.rsplit("__").next().unwrap_or(thread_value))
+                    .map(|tool| tool.rsplit("__").next().unwrap_or(tool))
                     .collect::<Vec<_>>()
                     .join(", ")
             )
         }),
-        count if count.starts_with("mcp__") => {
-            let mut parts = count.trim_start_matches("mcp__").splitn(2, "__");
+        name if name.starts_with("mcp__") => {
+            let mut parts = name.trim_start_matches("mcp__").splitn(2, "__");
             let (server, tool) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
 
             Some(format!("{} ({server})", tool.replace('_', " ")))
@@ -202,33 +203,27 @@ pub(super) fn call_label(character: &Call) -> String {
         _ => None,
     };
 
-    let value_value = value.unwrap_or_else(|| tool_label(&character.name));
+    let label = label.unwrap_or_else(|| tool_label(&call.name));
 
-    value_value
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .take(80)
-        .collect()
+    label.lines().next().unwrap_or_default().chars().take(80).collect()
 }
 /// The bubble's run rows: `Load skills_list, run tests, read x.rs and 5 more`, `8 calls · 20.7s`.
 pub(super) fn run_lines(calls: &[Call], secs: f64) -> (String, String) {
     let labels: Vec<String> = calls.iter().take(3).map(call_label).collect();
-    let mut thread = labels.join(", ");
+    let mut joined = labels.join(", ");
 
     if calls.len() > 3 {
-        write!(thread, " and {} more", calls.len() - 3).unwrap();
+        write!(joined, " and {} more", calls.len() - 3).unwrap();
     }
 
-    let mut ch = thread.chars();
-    let thread_value = ch
+    let mut chars = joined.chars();
+    let head = chars
         .next()
-        .map_or_else(String::new, |file| file.to_uppercase().chain(ch).collect());
+        .map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect());
     let count = calls.len();
 
     (
-        thread_value,
+        head,
         format!("{count} call{} · {secs:.1}s", if count == 1 { "" } else { "s" }),
     )
 }

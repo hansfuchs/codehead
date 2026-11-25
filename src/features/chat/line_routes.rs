@@ -1,8 +1,7 @@
 use super::{
     AnswerContent, Color, Drawn, Item, Line, LineMessageContext, LineNoteContext, LineRenderContext, Row, RunContent,
-    RunRenderContext, Span, Style, TextContent, badge, color_of, draw_lines_character_character_,
-    draw_lines_character_item_prompt_from_to, draw_lines_character_item_sub_agent_sub, draw_lines_item_run,
-    draw_lines_item_settled, draw_lines_item_text, edits_row, kid_rows, kid_tag, shell_rows,
+    RunRenderContext, Span, Style, TextContent, badge, color_of, draw_agent_prompt, draw_message_lines, draw_note_line,
+    draw_run_item, draw_settled_line, draw_subagent_end, edits_row, kid_rows, kid_tag, shell_rows,
 };
 
 pub(super) fn render_line_prompt(
@@ -15,7 +14,7 @@ pub(super) fn render_line_prompt(
         return;
     };
 
-    draw_lines_character_item_prompt_from_to(context, &blank, from, to, text, *ts);
+    draw_agent_prompt(context, &blank, from, to, text, *ts);
 }
 pub(super) fn render_line_text(
     context: &mut LineRenderContext<'_>,
@@ -34,13 +33,13 @@ pub(super) fn render_line_text(
         return;
     };
 
-    draw_lines_item_text(
+    draw_message_lines(
         LineMessageContext {
             colors: context.colors,
             roster: context.roster,
             fold: context.fold,
-            width_value: context.width_value,
-            directory: context.directory,
+            width: context.width,
+            drawn: context.drawn,
             last_agent: context.last_agent,
             minute: context.minute,
         },
@@ -73,13 +72,13 @@ pub(super) fn render_line_run(
         return;
     };
 
-    draw_lines_item_run(
+    draw_run_item(
         &mut (RunRenderContext {
             thread: context.thread,
             colors: context.colors,
             fold: context.fold,
-            width_value: context.width_value,
-            directory: context.directory,
+            width: context.width,
+            drawn: context.drawn,
             last_agent: context.last_agent,
             minute: context.minute,
         }),
@@ -105,7 +104,7 @@ pub(super) fn render_line_sub(
         return;
     };
 
-    draw_lines_character_item_sub_agent_sub(context, &blank, agent, *sub, *ts, *key);
+    draw_subagent_end(context, &blank, agent, *sub, *ts, *key);
 }
 pub(super) fn render_line_kid(
     context: &mut LineRenderContext<'_>,
@@ -124,19 +123,19 @@ pub(super) fn render_line_kid(
         return;
     };
 
-    let character_6 = color_of(context.colors, agent);
+    let color = color_of(context.colors, agent);
 
-    blank(context.directory);
-    let mut head = badge(agent, character_6, *ts);
+    blank(context.drawn);
+    let mut head = badge(agent, color, *ts);
 
     head.splice(1..1, kid_tag(agent, state));
-    context.directory.rows.push(Row::plain(Line::from(head)));
-    context.directory.rows.extend(kid_rows(
+    context.drawn.rows.push(Row::plain(Line::from(head)));
+    context.drawn.rows.extend(kid_rows(
         title,
         state,
         text,
-        context.width_value,
-        &[Span::styled("│ ", Style::default().fg(character_6))],
+        context.width,
+        &[Span::styled("│ ", Style::default().fg(color))],
     ));
     *context.last_agent = None;
 }
@@ -157,15 +156,11 @@ pub(super) fn render_line_shell(
         return;
     };
 
-    blank(context.directory);
-    context.directory.rows.extend(shell_rows(
-        command,
-        output,
-        *code,
-        *ts,
-        dir.as_deref(),
-        context.width_value,
-    ));
+    blank(context.drawn);
+    context
+        .drawn
+        .rows
+        .extend(shell_rows(command, output, *code, *ts, dir.as_deref(), context.width));
     *context.last_agent = None;
 }
 pub(super) fn render_line_note(
@@ -178,13 +173,13 @@ pub(super) fn render_line_note(
         return;
     };
 
-    draw_lines_character_character_(
+    draw_note_line(
         LineNoteContext {
             thread: context.thread,
             colors: context.colors,
             roster: context.roster,
-            width_value: context.width_value,
-            directory: context.directory,
+            width: context.width,
+            drawn: context.drawn,
             last_agent: context.last_agent,
         },
         item,
@@ -201,12 +196,10 @@ pub(super) fn render_line_edits(
 ) {
     let Item::Edits { agent, text } = item else { return };
 
-    context.directory.rows.push(edits_row(
-        agent,
-        text,
-        color_of(context.colors, agent),
-        context.width_value,
-    ));
+    context
+        .drawn
+        .rows
+        .push(edits_row(agent, text, color_of(context.colors, agent), context.width));
     *context.last_agent = None;
 }
 pub(super) fn render_line_settled(
@@ -227,10 +220,10 @@ pub(super) fn render_line_settled(
         return;
     };
 
-    draw_lines_item_settled(
+    draw_settled_line(
         context.colors,
-        context.width_value,
-        context.directory,
+        context.width,
+        context.drawn,
         context.last_agent,
         AnswerContent {
             agent,

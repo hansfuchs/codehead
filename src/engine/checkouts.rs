@@ -27,12 +27,12 @@ pub(crate) fn edited(name: &str, input: &Value) -> Vec<PathBuf> {
         out.extend(
             ["file_path", "notebook_path", "path"]
                 .iter()
-                .filter_map(|key_value| path(key_value)),
+                .filter_map(|key| path(key)),
         );
 
         // ACP: the edit's locations
-        for line in input["locations"].as_array().into_iter().flatten() {
-            parse_edited_path(&mut out, line);
+        for location in input["locations"].as_array().into_iter().flatten() {
+            push_location_path(&mut out, location);
         }
     }
 
@@ -42,14 +42,14 @@ pub(crate) fn edited(name: &str, input: &Value) -> Vec<PathBuf> {
         out.extend(work_dirs(cmd));
     }
 
-    out.retain(|path_2| path_2.is_absolute());
+    out.retain(|path| path.is_absolute());
 
     out
 }
 
-fn parse_edited_path(out: &mut Vec<PathBuf>, line: &Value) {
-    if let Some(path_value) = line["path"].as_str() {
-        out.push(PathBuf::from(path_value));
+fn push_location_path(out: &mut Vec<PathBuf>, location: &Value) {
+    if let Some(path) = location["path"].as_str() {
+        out.push(PathBuf::from(path));
     }
 }
 
@@ -100,16 +100,16 @@ fn strip_heredocs(cmd: &str) -> String {
                 .chars()
                 .take_while(|character| !character.is_whitespace() && !matches!(character, ';' | '&' | '|' | ')'))
                 .collect();
-            let word = word.trim_matches(|character_value| character_value == '"' || character_value == '\'');
+            let word = word.trim_matches(|quote| quote == '"' || quote == '\'');
 
-            skip_heredoc_token(&mut end, word);
+            start_heredoc(&mut end, word);
         }
     }
 
     out
 }
 
-fn skip_heredoc_token(end: &mut Option<String>, word: &str) {
+fn start_heredoc(end: &mut Option<String>, word: &str) {
     if !word.is_empty() && !word.starts_with('<') {
         *end = Some(word.to_string());
     }
@@ -121,36 +121,36 @@ fn clear_heredoc_end(end: &mut Option<String>, line: &str) {
     }
 }
 
-/// Word W without its surrounding quotes.
-fn unquote(width: &str) -> &str {
-    for query in ['"', '\''] {
-        if width.len() >= 2 && width.starts_with(query) && width.ends_with(query) {
-            return &width[1..width.len() - 1];
+/// Word WORD without its surrounding quotes.
+fn unquote(word: &str) -> &str {
+    for quote in ['"', '\''] {
+        if word.len() >= 2 && word.starts_with(quote) && word.ends_with(quote) {
+            return &word[1..word.len() - 1];
         }
     }
 
-    width
+    word
 }
 
-/// Path word W, absolute or under CWD (`~/` → home); 0 path: None.
-fn path_of(width: &str, cwd: Option<&Path>) -> Option<PathBuf> {
-    let width_value = unquote(width);
+/// Path WORD, absolute or under CWD (`~/` → home); 0 path: None.
+fn path_of(word: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    let word = unquote(word);
 
-    if width_value.is_empty() || width_value.starts_with('-') || width_value.starts_with('$') {
+    if word.is_empty() || word.starts_with('-') || word.starts_with('$') {
         return None;
     }
 
-    if let Some(result) = width_value.strip_prefix("~/") {
-        return Some(crate::infra::config::home().join(result));
+    if let Some(rest) = word.strip_prefix("~/") {
+        return Some(crate::infra::config::home().join(rest));
     }
 
-    let path = PathBuf::from(width_value);
+    let path = PathBuf::from(word);
 
     if path.is_absolute() {
         return Some(path);
     }
 
-    cwd.map(|character| character.join(path))
+    cwd.map(|dir| dir.join(path))
 }
 
 /// The dirs and files shell command CMD writes in: per segment (`&&`, `;`, `|` …) that writes,
@@ -175,7 +175,7 @@ fn scan_shell_segments(out: &mut Vec<PathBuf>, mut cwd: Option<PathBuf>, segment
 
         // leading `VAR=x` assignments, `sudo`, `command`: not the command
         let Some(at) = words.iter().position(|word| {
-            !(word.contains('=') && !word.starts_with('-')) && !matches!(*word, "sudo" | "command" | "time" | "env")
+            (!word.contains('=') || word.starts_with('-')) && !matches!(*word, "sudo" | "command" | "time" | "env")
         }) else {
             continue;
         };
@@ -183,9 +183,7 @@ fn scan_shell_segments(out: &mut Vec<PathBuf>, mut cwd: Option<PathBuf>, segment
         let (verb, args) = (words[at], &words[at + 1..]);
 
         if verb == "cd" {
-            cwd = args
-                .first()
-                .and_then(|width_value| path_of(width_value, cwd.as_deref()));
+            cwd = args.first().and_then(|arg| path_of(arg, cwd.as_deref()));
             continue;
         }
 
@@ -199,8 +197,8 @@ fn scan_shell_segments(out: &mut Vec<PathBuf>, mut cwd: Option<PathBuf>, segment
             "sed" | "perl" => {
                 collect_script_targets(verb, args, &mut targets, &mut writes);
             }
-            value if SHELL_WRITES.contains(&value) => {
-                collect_command_targets(args, &mut targets, &mut writes, value);
+            verb if SHELL_WRITES.contains(&verb) => {
+                collect_command_targets(args, &mut targets, &mut writes, verb);
             }
             _ => {}
         }
@@ -220,12 +218,12 @@ fn skip_redirect_target(target: &str) -> ControlFlow<()> {
     ControlFlow::Continue(())
 }
 
-fn collect_command_targets(args: &[&str], targets: &mut Vec<PathBuf>, writes: &mut bool, value: &str) {
+fn collect_command_targets(args: &[&str], targets: &mut Vec<PathBuf>, writes: &mut bool, verb: &str) {
     *writes = true;
-    let paths: Vec<PathBuf> = args.iter().filter_map(|width_8| path_of(width_8, None)).collect();
+    let paths: Vec<PathBuf> = args.iter().filter_map(|arg| path_of(arg, None)).collect();
 
     // a copy writes its last argument only, the sources stay
-    match value {
+    match verb {
         "cp" | "install" | "ln" => targets.extend(paths.last().cloned()),
         _ => targets.extend(paths),
     }
@@ -236,38 +234,34 @@ fn collect_git_targets(cwd: Option<&Path>, args: &[&str], dir: &mut Option<PathB
 
     while i < args.len() && args[i].starts_with('-') {
         if args[i] == "-C" {
-            *dir = args.get(i + 1).and_then(|width_3| path_of(width_3, cwd));
+            *dir = args.get(i + 1).and_then(|arg| path_of(arg, cwd));
         }
 
         i += if matches!(args[i], "-C" | "-c") { 2 } else { 1 };
     }
 
-    *writes |= args.get(i).is_some_and(|text| GIT_WRITES.contains(text));
+    *writes |= args.get(i).is_some_and(|subcommand| GIT_WRITES.contains(subcommand));
 }
 
 fn collect_script_targets(verb: &str, args: &[&str], targets: &mut Vec<PathBuf>, writes: &mut bool) {
     // `-i`, `-i.bak`, `--in-place`; perl: `-pi`, `-pie` (lower-case flag clusters)
-    let perl_flags = |width_4: &str| {
-        width_4.len() > 1
-            && width_4[1..]
-                .chars()
-                .all(|character_value| character_value.is_ascii_lowercase())
-            && width_4.contains('i')
+    let perl_flags = |flag: &str| {
+        flag.len() > 1 && flag[1..].chars().all(|letter| letter.is_ascii_lowercase()) && flag.contains('i')
     };
 
-    let in_place = |width_5: &&str| {
-        *width_5 == "--in-place"
-            || (width_5.starts_with('-')
-                && !width_5.starts_with("--")
-                && (width_5.starts_with("-i") || (verb == "perl" && perl_flags(width_5))))
+    let in_place = |arg: &&str| {
+        *arg == "--in-place"
+            || (arg.starts_with('-')
+                && !arg.starts_with("--")
+                && (arg.starts_with("-i") || (verb == "perl" && perl_flags(arg))))
     };
 
     if args.iter().any(in_place) {
         *writes = true;
         targets.extend(
             args.iter()
-                .filter(|width_6| unquote(width_6).starts_with('/') || width_6.starts_with("~/"))
-                .filter_map(|width_7| path_of(width_7, None)),
+                .filter(|arg| unquote(arg).starts_with('/') || arg.starts_with("~/"))
+                .filter_map(|arg| path_of(arg, None)),
         );
     }
 }
@@ -289,21 +283,21 @@ fn toplevel(path: &Path) -> Option<(PathBuf, Option<String>)> {
             .stderr(Stdio::null())
             .output()
             .ok()
-            .filter(|output_value| output_value.status.success())
-            .map(|output_2| String::from_utf8_lossy(&output_2.stdout).trim().to_string())
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
     };
 
     let top = PathBuf::from(git(&["rev-parse", "--show-toplevel"])?);
-    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"]).filter(|bytes| bytes != "HEAD");
+    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"]).filter(|branch| branch != "HEAD");
 
     Some((top, branch))
 }
 
-/// Path P sits in a linked worktree nested inside checkout C (`.claude/worktrees/x`; a submodule
+/// Path P sits in a linked worktree nested inside checkout CHECKOUT (`.claude/worktrees/x`; a submodule
 /// or a nested repo: 0, they stay the checkout's). Filesystem only.
-fn nested(path: &Path, path_value: &Path) -> bool {
+fn nested(path: &Path, checkout: &Path) -> bool {
     path.ancestors()
-        .take_while(|agent| *agent != path_value && agent.starts_with(path_value))
+        .take_while(|ancestor| *ancestor != checkout && ancestor.starts_with(checkout))
         .any(crate::domain::threads::linked_worktree)
 }
 
@@ -314,36 +308,36 @@ pub(crate) fn note(thread: &store::Thread, name: &str, input: &Value) {
     let have: Vec<PathBuf> = thread
         .all_checkouts()
         .iter()
-        .map(|path| PathBuf::from(&path.dir))
+        .map(|checkout| PathBuf::from(&checkout.dir))
         .collect();
     let data = super::data_dir();
 
     // codehead's own files: 0 checkout; its worktrees (`worktrees/<repo>/<task>`): checkouts
-    let own = |path_value: &Path| path_value.starts_with(&data) && !path_value.starts_with(data.join("worktrees"));
+    let own = |path: &Path| path.starts_with(&data) && !path.starts_with(data.join("worktrees"));
 
-    for path_2 in edited(name, input) {
+    for path in edited(name, input) {
         // a worktree / repo inside a checkout (`.claude/worktrees/x`): a checkout of its own
         if have
             .iter()
-            .any(|character| path_2.starts_with(character) && !nested(&path_2, character))
-            || own(&path_2)
+            .any(|checkout| path.starts_with(checkout) && !nested(&path, checkout))
+            || own(&path)
         {
             continue;
         }
 
-        let dir = if path_2.is_dir() {
-            path_2.clone()
+        let dir = if path.is_dir() {
+            path.clone()
         } else {
-            path_2.parent().map(Path::to_path_buf).unwrap_or_default()
+            path.parent().map(Path::to_path_buf).unwrap_or_default()
         };
 
-        let group = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        if let ControlFlow::Break(()) = claim_checkout_path(dir, group) {
+        if let ControlFlow::Break(()) = claim_checkout_path(dir, seen) {
             continue;
         }
 
-        let Some((top, branch)) = toplevel(&path_2) else {
+        let Some((top, branch)) = toplevel(&path) else {
             continue;
         };
 
@@ -351,22 +345,19 @@ pub(crate) fn note(thread: &store::Thread, name: &str, input: &Value) {
             continue;
         }
 
-        let character_value = store::Checkout {
+        let checkout = store::Checkout {
             dir: top.display().to_string(),
             branch,
         };
 
-        let _ = store::update(&thread.id, move |thread_value| {
-            thread_value.add_checkout(character_value);
+        let _ = store::update(&thread.id, move |current| {
+            current.add_checkout(checkout);
         });
     }
 }
 
-fn claim_checkout_path(
-    dir: PathBuf,
-    mut group: std::sync::MutexGuard<'_, Option<HashSet<PathBuf>>>,
-) -> ControlFlow<()> {
-    if !group.get_or_insert_with(HashSet::new).insert(dir) {
+fn claim_checkout_path(dir: PathBuf, mut seen: std::sync::MutexGuard<'_, Option<HashSet<PathBuf>>>) -> ControlFlow<()> {
+    if !seen.get_or_insert_with(HashSet::new).insert(dir) {
         return ControlFlow::Break(());
     }
 
@@ -377,7 +368,7 @@ fn claim_checkout_path(
 fn unedited(thread: &store::Thread, events: &[store::Event]) -> Vec<String> {
     let paths: Vec<PathBuf> = events
         .iter()
-        .filter_map(|error| match &error.kind {
+        .filter_map(|event| match &event.kind {
             store::Kind::Tool { name, input, .. } => Some(edited(name, input)),
             _ => None,
         })
@@ -387,8 +378,8 @@ fn unedited(thread: &store::Thread, events: &[store::Event]) -> Vec<String> {
     thread
         .checkouts
         .iter()
-        .filter(|character| !paths.iter().any(|path| path.starts_with(&character.dir)))
-        .map(|character_value| character_value.dir.clone())
+        .filter(|checkout| !paths.iter().any(|path| path.starts_with(&checkout.dir)))
+        .map(|checkout| checkout.dir.clone())
         .collect()
 }
 
@@ -406,7 +397,7 @@ pub(crate) fn prune(thread: &store::Thread) -> Option<store::Thread> {
 
     while let Some(id) = up.filter(|id| seen.insert(id.clone())) {
         events.extend(store::events(&id));
-        up = store::load(&id).and_then(|path| path.parent);
+        up = store::load(&id).and_then(|loaded| loaded.parent);
     }
 
     let gone = unedited(thread, &events);
@@ -414,14 +405,12 @@ pub(crate) fn prune(thread: &store::Thread) -> Option<store::Thread> {
     // under the thread's lock, not `store::update`: the thread's `updated` time stays (0 jump to
     // the top of the thread list); a checkout added since the read stays, only GONE goes
     super::locked(&store::thread_dir(&thread.id).join("thread.lock"), || {
-        let mut thread_value = store::load(&thread.id)?;
+        let mut saved = store::load(&thread.id)?;
 
-        thread_value
-            .checkouts
-            .retain(|character| !gone.contains(&character.dir));
-        thread_value.checkouts_pruned = true;
-        thread_value.save().ok()?;
-        Some(thread_value)
+        saved.checkouts.retain(|checkout| !gone.contains(&checkout.dir));
+        saved.checkouts_pruned = true;
+        saved.save().ok()?;
+        Some(saved)
     })
     .ok()
     .flatten()
@@ -436,17 +425,14 @@ fn redirect_targets(words: &[&str]) -> (bool, Vec<PathBuf>) {
     let mut targets = Vec::new();
     let mut writes = false;
 
-    for (i, width_2) in words.iter().enumerate() {
-        let Some(result) = width_2.find('>') else { continue };
+    for (i, word) in words.iter().enumerate() {
+        let Some(at) = word.find('>') else { continue };
 
-        if !width_2[..result]
-            .chars()
-            .all(|character| character.is_ascii_digit() || character == '&')
-        {
+        if !word[..at].chars().all(|fd| fd.is_ascii_digit() || fd == '&') {
             continue;
         }
 
-        let rest = width_2[result..].trim_start_matches('>');
+        let rest = word[at..].trim_start_matches('>');
 
         let target = if rest.is_empty() {
             words.get(i + 1).copied().unwrap_or_default()

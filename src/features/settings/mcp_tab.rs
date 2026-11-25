@@ -140,7 +140,7 @@ impl McpTab {
         let mut filter = TextArea::new(true, "filter servers ( / )");
 
         filter.style = Some(theme::text());
-        let mut thread = Self {
+        let mut tab = Self {
             filter,
             filtering: false,
             cursor: 0,
@@ -168,9 +168,9 @@ impl McpTab {
             saving: None,
         };
 
-        thread.load();
+        tab.load();
 
-        thread
+        tab
     }
 
     /// codehead's servers, the cached statuses, the agents: from disk.
@@ -215,10 +215,10 @@ impl McpTab {
 
     pub(crate) fn paste(&mut self, text: &str) {
         match &mut self.modal {
-            Some(Modal::Edit(error)) => match error.field {
-                0 => error.name.insert(&text.replace(['\n', '\r'], "")),
-                2 => error.target.insert(&text.replace(['\n', '\r'], " ")),
-                3 => error.secrets.insert(text),
+            Some(Modal::Edit(form)) => match form.field {
+                0 => form.name.insert(&text.replace(['\n', '\r'], "")),
+                2 => form.target.insert(&text.replace(['\n', '\r'], " ")),
+                3 => form.secrets.insert(text),
                 _ => {}
             },
             None if self.filtering => self.filter.insert(&text.replace(['\n', '\r'], "")),
@@ -257,37 +257,37 @@ impl EditForm {
 
     fn of(server: Option<&Server>) -> EditForm {
         let input = |text: &str, hint: &str, single: bool| {
-            let mut thread = TextArea::new(single, hint);
+            let mut textarea = TextArea::new(single, hint);
 
-            thread.set_text(text);
-            thread.style = Some(theme::text());
-            thread
+            textarea.set_text(text);
+            textarea.style = Some(theme::text());
+            textarea
         };
 
-        let kind = server.map_or(0, |server_value| {
-            KINDS.iter().position(|key| *key == server_value.kind).unwrap_or(0)
+        let kind = server.map_or(0, |server| {
+            KINDS.iter().position(|key| *key == server.kind).unwrap_or(0)
         });
 
         let target = server.map(Server::target).unwrap_or_default();
 
         let pairs = server
             .map(server_secrets)
-            .map(|message| {
-                message
+            .map(|secrets| {
+                secrets
                     .iter()
-                    .map(|(key_value, value)| format!("{key_value}={value}"))
+                    .map(|(name, value)| format!("{name}={value}"))
                     .collect::<Vec<_>>()
                     .join("\n")
             })
             .unwrap_or_default();
 
         EditForm {
-            old: server.map(|server_2| server_2.name.clone()),
+            old: server.map(|server| server.name.clone()),
             kind,
-            name: input(server.map_or("", |server_3| server_3.name.as_str()), "linear", true),
+            name: input(server.map_or("", |server| server.name.as_str()), "linear", true),
             target: input(&target, Self::target_hint(kind), true),
             secrets: input(&pairs, "API_KEY=…", false),
-            auto_allow: server.is_none_or(|server_4| server_4.auto_allow),
+            auto_allow: server.is_none_or(|server| server.auto_allow),
             field: 0,
         }
     }
@@ -334,7 +334,7 @@ use actions::{
 };
 
 fn row(frame: &mut Frame, area: Rect, item: &Item, detail: &str, selected: bool, label_width: usize) {
-    let (mark, style_value) = icon(&item.state);
+    let (mark, icon_style) = icon(&item.state);
     let base = if selected { theme::pill() } else { theme::text() };
 
     let name: String = if item.name.chars().count() > label_width {
@@ -347,7 +347,7 @@ fn row(frame: &mut Frame, area: Rect, item: &Item, detail: &str, selected: bool,
     let room = (area.width as usize).saturating_sub(label_width + 5);
     let detail: String = detail.chars().take(room).collect();
     let line = Line::from(vec![
-        Span::styled(format!(" {mark} "), if selected { base } else { style_value }),
+        Span::styled(format!(" {mark} "), if selected { base } else { icon_style }),
         Span::styled(format!("{name}{} ", " ".repeat(pad)), base),
         Span::styled(detail, if selected { base } else { theme::muted() }),
     ]);
@@ -375,17 +375,17 @@ fn load_mcp_tab(mcp_tab: &mut McpTab) {
         mcp_tab.natives = mcp_tab
             .statuses
             .iter()
-            .filter(|(harness_value, _)| *harness_value != "codehead")
-            .flat_map(|(harness_2, statuses_value)| {
-                statuses_value
+            .filter(|(harness, _)| *harness != "codehead")
+            .flat_map(|(harness, statuses)| {
+                statuses
                     .iter()
-                    .filter(|(_, status_value)| status_value.source != "codehead" && !status_value.source.is_empty())
-                    .map(move |(name_value, status_2)| Native {
-                        harness: harness_2.clone(),
-                        name: name_value.clone(),
-                        source: status_2.source.clone(),
+                    .filter(|(_, status)| status.source != "codehead" && !status.source.is_empty())
+                    .map(move |(name, status)| Native {
+                        harness: harness.clone(),
+                        name: name.clone(),
+                        source: status.source.clone(),
                         target: String::new(),
-                        status: status_2.clone(),
+                        status: status.clone(),
                     })
             })
             .collect();
@@ -395,10 +395,10 @@ fn load_mcp_tab(mcp_tab: &mut McpTab) {
 fn items_mcp_tab(mcp_tab: &McpTab) -> (Vec<Item>, usize) {
     let query = mcp_tab.filter.text().trim().to_lowercase();
 
-    let keep = |i: &Item| {
+    let keep = |item: &Item| {
         query.is_empty()
-            || crate::domain::notes::fuzzy(&query, &i.name).is_some()
-            || crate::domain::notes::fuzzy(&query, i.group).is_some()
+            || crate::domain::notes::fuzzy(&query, &item.name).is_some()
+            || crate::domain::notes::fuzzy(&query, item.group).is_some()
     };
 
     let mut all: Vec<Item> = mcp_tab
@@ -420,26 +420,23 @@ fn items_mcp_tab(mcp_tab: &McpTab) -> (Vec<Item>, usize) {
         .map(|native| native_item(native, mcp_tab))
         .collect();
 
-    natives.sort_by_key(|i| {
+    natives.sort_by_key(|item| {
         (
-            order
-                .iter()
-                .position(|group_value| *group_value == i.group)
-                .unwrap_or(9),
-            i.name.to_lowercase(),
+            order.iter().position(|group| *group == item.group).unwrap_or(9),
+            item.name.to_lowercase(),
         )
     });
 
     all.extend(natives);
-    let all: Vec<Item> = all.into_iter().filter(|i| keep(i)).collect();
+    let all: Vec<Item> = all.into_iter().filter(|item| keep(item)).collect();
 
     let mut out: Vec<Item> = all
         .iter()
-        .filter(|i| !i.action.is_empty())
+        .filter(|item| !item.action.is_empty())
         .cloned()
-        .map(|mut i| {
-            i.group = "needs action";
-            i
+        .map(|mut item| {
+            item.group = "needs action";
+            item
         })
         .collect();
 
@@ -487,22 +484,22 @@ fn run_mcp_tab(mcp_tab: &mut McpTab, then: Then) {
             // its keychain entries go off the UI thread (tens of ms each)
             let refs: Vec<String> = all
                 .iter()
-                .filter(|text| text.name == name)
-                .flat_map(|text_value| text_value.env.values().chain(text_value.headers.values()).cloned())
+                .filter(|server| server.name == name)
+                .flat_map(|server| server.env.values().chain(server.headers.values()).cloned())
                 .filter(|value| value.starts_with("keychain:"))
                 .collect();
 
             forget_secrets(refs);
 
-            all.retain(|text_2| text_2.name != name);
+            all.retain(|server| server.name != name);
 
             if let Err(error) = servers::save(&all) {
                 return self::say(error, true, mcp_tab);
             }
 
-            for mut agent_value in roster::active().into_iter().filter(|agent| agent.mcp.contains(&name)) {
-                agent_value.mcp.retain(|message| *message != name);
-                let _ = roster::save(&agent_value);
+            for mut agent in roster::active().into_iter().filter(|agent| agent.mcp.contains(&name)) {
+                agent.mcp.retain(|listed| *listed != name);
+                let _ = roster::save(&agent);
             }
 
             mcp_tab.servers = all;
@@ -513,8 +510,8 @@ fn run_mcp_tab(mcp_tab: &mut McpTab, then: Then) {
         // the UI thread (tests: at once)
         Then::Import { harness, name, source } => {
             let servers = mcp_tab.servers.clone();
-            let (height, count) = (harness.clone(), name.clone());
-            let run = move || import(&height, &count, &source, servers);
+            let (job_harness, job_name) = (harness.clone(), name.clone());
+            let run = move || import(&job_harness, &job_name, &source, servers);
 
             if cfg!(test) {
                 let result = run();

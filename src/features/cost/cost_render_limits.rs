@@ -22,26 +22,26 @@ pub(super) fn append_plan_limits(
     let multiple_harnesses = snapshot
         .limits
         .iter()
-        .any(|line_value| line_value.harness != snapshot.limits[0].harness);
+        .any(|limit| limit.harness != snapshot.limits[0].harness);
 
     let label_width = snapshot
         .limits
         .iter()
-        .map(|line_3| limit_label(line_3, multiple_harnesses).chars().count())
+        .map(|limit| limit_label(limit, multiple_harnesses).chars().count())
         .max()
         .unwrap_or(0)
         .max(name_w.saturating_sub(1));
 
     // the windows side by side, 2 columns between them (too narrow: 1 per row)
-    let count_value = snapshot.limits.len();
-    let segment_width = width.saturating_sub(2 * (count_value - 1)) / count_value;
+    let count = snapshot.limits.len();
+    let segment_width = width.saturating_sub(2 * (count - 1)) / count;
     let side_by_side = snapshot
         .limits
         .iter()
-        .all(|line_4| segment_width >= limit_label(line_4, multiple_harnesses).chars().count() + 1 + 4 + 9);
+        .all(|limit| segment_width >= limit_label(limit, multiple_harnesses).chars().count() + 1 + 4 + 9);
     let mut row: Vec<Span> = Vec::new();
 
-    for (i, line_5) in snapshot.limits.iter().enumerate() {
+    for (i, limit) in snapshot.limits.iter().enumerate() {
         append_plan_limit(
             now,
             PlanLimitLayout {
@@ -55,7 +55,7 @@ pub(super) fn append_plan_limits(
             cost_next,
             &mut row,
             i,
-            line_5,
+            limit,
         );
     }
 
@@ -71,7 +71,7 @@ pub(super) fn append_plan_limit(
     cost_next: Option<(u64, f64)>,
     row: &mut Vec<Span<'_>>,
     i: usize,
-    line_5: &crate::engine::limits::Window,
+    limit: &crate::engine::limits::Window,
 ) {
     let PlanLimitLayout {
         width,
@@ -82,39 +82,39 @@ pub(super) fn append_plan_limit(
     } = plan_limit_layout;
 
     // window reset since the last report: 0 %
-    let fresh = line_5.resets.is_some_and(|result| result <= now);
-    let pct = if fresh { 0.0 } else { line_5.pct };
+    let fresh = limit.resets.is_some_and(|at| at <= now);
+    let pct = if fresh { 0.0 } else { limit.pct };
 
-    let share = match (cost_next, line_5.usd_per_pct) {
+    let share = match (cost_next, limit.usd_per_pct) {
         (Some((_, usd)), Some(rate)) if rate > 0.0 => usd / rate,
         _ => 0.0,
     };
 
-    let tail = match line_5.resets {
+    let tail = match limit.resets {
         _ if fresh => " new".to_string(),
-        Some(result_value) => format!(" {:>3.0}% {:>3}", pct, until(result_value, now)),
+        Some(at) => format!(" {:>3.0}% {:>3}", pct, until(at, now)),
         None => format!(" {pct:>3.0}%"),
     };
 
     let tail = format!("{tail:<9}");
 
     if side_by_side {
-        let lab = limit_label(line_5, multiple_harnesses);
-        let bw = segment_width - lab.chars().count() - 1 - 9;
+        let label = limit_label(limit, multiple_harnesses);
+        let bar_width = segment_width - label.chars().count() - 1 - 9;
 
         row.extend((i > 0).then_some(Span::raw("  ")));
 
-        row.push(Span::styled(format!("{lab} "), theme::muted()));
-        row.extend(bar(pct, share, bw));
+        row.push(Span::styled(format!("{label} "), theme::muted()));
+        row.extend(bar(pct, share, bar_width));
         row.push(Span::styled(tail, theme::muted()));
     } else {
-        let bw = width.saturating_sub(label_width + 1 + 9).max(4);
+        let bar_width = width.saturating_sub(label_width + 1 + 9).max(4);
         let mut spans = vec![Span::styled(
-            format!("{:label_width$} ", limit_label(line_5, multiple_harnesses)),
+            format!("{:label_width$} ", limit_label(limit, multiple_harnesses)),
             theme::muted(),
         )];
 
-        spans.extend(bar(pct, share, bw));
+        spans.extend(bar(pct, share, bar_width));
         spans.push(Span::styled(tail, theme::muted()));
         lines.push(Line::from(spans));
     }

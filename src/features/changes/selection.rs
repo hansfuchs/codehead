@@ -2,9 +2,9 @@ use super::{Act, Body, Comment, LKey, Op, Row, Spot, View, lines_label, lkey, pa
 use std::fmt::Write as _;
 
 impl View {
-    /// The selection keys of row R: its diff lines.
-    pub(super) fn keys(&self, result: &Row) -> Vec<LKey> {
-        keys_view(self, result)
+    /// The selection keys of row ROW: its diff lines.
+    pub(super) fn keys(&self, row: &Row) -> Vec<LKey> {
+        keys_view(self, row)
     }
 
     /// Row I has a selected line.
@@ -46,9 +46,9 @@ impl View {
             .filter_map(|path| {
                 let file = self.changes.files.iter().find(|file| &file.path == path)?;
                 let set = &self.selection_state.sel[path];
-                let pk = pick_of(file, set);
+                let pick = pick_of(file, set);
 
-                (!pk.is_empty()).then(|| (path.clone(), lines_label(set), pk))
+                (!pick.is_empty()).then(|| (path.clone(), lines_label(set), pick))
             })
             .collect()
     }
@@ -121,22 +121,27 @@ fn append_hidden_spot(spots: &mut Vec<Spot>, path: &str, selected: &std::collect
     });
 }
 
-fn keys_view(view: &View, result: &Row) -> Vec<LKey> {
-    let Some(file) = view.changes.files.get(result.file) else {
+fn keys_view(view: &View, row: &Row) -> Vec<LKey> {
+    let Some(file) = view.changes.files.get(row.file) else {
         return Vec::new();
     };
 
-    let line = |height: usize, key: usize| file.hunks.get(height).and_then(|x| x.lines.get(key)).and_then(lkey);
+    let line = |hunk: usize, index: usize| {
+        file.hunks
+            .get(hunk)
+            .and_then(|hunk_diff| hunk_diff.lines.get(index))
+            .and_then(lkey)
+    };
 
-    match result.body {
-        Body::Diff(height, key) => line(height, key).into_iter().collect(),
-        Body::Side(height, agent, bytes) if agent == bytes => {
-            agent.and_then(|key| line(height, key)).into_iter().collect()
+    match row.body {
+        Body::Diff(hunk, index) => line(hunk, index).into_iter().collect(),
+        Body::Side(hunk, removed, added) if removed == added => {
+            removed.and_then(|index| line(hunk, index)).into_iter().collect()
         }
-        Body::Side(height, agent, bytes) => agent
-            .and_then(|key| line(height, key))
+        Body::Side(hunk, removed, added) => removed
+            .and_then(|index| line(hunk, index))
             .into_iter()
-            .chain(bytes.and_then(|key| line(height, key)))
+            .chain(added.and_then(|index| line(hunk, index)))
             .collect(),
         _ => Vec::new(),
     }
@@ -220,8 +225,8 @@ fn context_view(view: &View) -> Option<String> {
         append_picked_comments(&mut text, picked);
     }
 
-    if let Some(path) = view.peek.as_ref()
-        && let Some(more) = path.context()
+    if let Some(peek) = view.peek.as_ref()
+        && let Some(more) = peek.context()
     {
         text.push_str(more.trim_start_matches("[codehead: context from the changes view]\n"));
     }
@@ -230,18 +235,18 @@ fn context_view(view: &View) -> Option<String> {
 }
 
 fn append_picked_comments(text: &mut String, picked: Vec<&Comment>) {
-    for character in picked {
-        let state = if character.open() { "open" } else { "resolved" };
+    for comment in picked {
+        let state = if comment.open() { "open" } else { "resolved" };
 
         let _ = writeln!(
             text,
             "- {} [{}, {state}] `{}:{}` by {}: {}",
-            character.id,
-            character.level.label(),
-            character.path,
-            character.at(),
-            character.author(),
-            character.text.replace('\n', " / ")
+            comment.id,
+            comment.level.label(),
+            comment.path,
+            comment.at(),
+            comment.author(),
+            comment.text.replace('\n', " / ")
         );
     }
 }

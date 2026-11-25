@@ -1,68 +1,53 @@
 use super::{DH, DW, Fit, Mesh, Motion, P3};
 
-pub(crate) fn rot(path: P3, yaw: f32, pitch: f32, roll: f32) -> P3 {
-    let (text, character) = yaw.sin_cos();
-    let (x, y, value) = (
-        character * path.0 + text * path.2,
-        path.1,
-        -text * path.0 + character * path.2,
-    );
-    let (text_value, character_value) = pitch.sin_cos();
-    let (y, value_value) = (
-        character_value * y - text_value * value,
-        text_value * y + character_value * value,
-    );
-    let (text_2, character_2) = roll.sin_cos();
+pub(crate) fn rot(point: P3, yaw: f32, pitch: f32, roll: f32) -> P3 {
+    let (sin, cos) = yaw.sin_cos();
+    let (x, y, depth) = (cos * point.0 + sin * point.2, point.1, -sin * point.0 + cos * point.2);
+    let (pitch_sin, pitch_cos) = pitch.sin_cos();
+    let (y, pitched_depth) = (pitch_cos * y - pitch_sin * depth, pitch_sin * y + pitch_cos * depth);
+    let (roll_sin, roll_cos) = roll.sin_cos();
 
-    (character_2 * x - text_2 * y, text_2 * x + character_2 * y, value_value)
+    (roll_cos * x - roll_sin * y, roll_sin * x + roll_cos * y, pitched_depth)
 }
-pub(crate) fn sub(agent: P3, bytes: P3) -> P3 {
-    (agent.0 - bytes.0, agent.1 - bytes.1, agent.2 - bytes.2)
+pub(crate) fn sub(left: P3, right: P3) -> P3 {
+    (left.0 - right.0, left.1 - right.1, left.2 - right.2)
 }
-pub(crate) fn cross(agent: P3, bytes: P3) -> P3 {
+pub(crate) fn cross(left: P3, right: P3) -> P3 {
     (
-        agent.1 * bytes.2 - agent.2 * bytes.1,
-        agent.2 * bytes.0 - agent.0 * bytes.2,
-        agent.0 * bytes.1 - agent.1 * bytes.0,
+        left.1 * right.2 - left.2 * right.1,
+        left.2 * right.0 - left.0 * right.2,
+        left.0 * right.1 - left.1 * right.0,
     )
 }
-pub(crate) fn unit(agent: P3) -> P3 {
-    let line = (agent.0 * agent.0 + agent.1 * agent.1 + agent.2 * agent.2)
+pub(crate) fn unit(vector: P3) -> P3 {
+    let length = (vector.0 * vector.0 + vector.1 * vector.1 + vector.2 * vector.2)
         .sqrt()
         .max(1e-6);
 
-    (agent.0 / line, agent.1 / line, agent.2 / line)
+    (vector.0 / length, vector.1 / length, vector.2 / length)
 }
 /// The pose of MOTION at T, slowed or stopped by status S: pitch, roll, bob (dots).
-pub(crate) fn pose(message: Motion, text: usize, thread: f32) -> (f32, f32, f32) {
-    let thread_value = match text {
-        0 => thread,
-        1 => thread * 0.6,
-        2 => thread * 0.3,
+pub(crate) fn pose(motion: Motion, status: usize, time: f32) -> (f32, f32, f32) {
+    let local = match status {
+        0 => time,
+        1 => time * 0.6,
+        2 => time * 0.3,
         _ => 1.3,
     };
 
-    match message {
-        Motion::Nod => (0.3 + 0.25 * (thread_value * 1.6).sin(), 0.0, 0.0),
-        Motion::Float => (0.25, 0.0, 0.9 * (thread_value * 1.8).sin()),
-        Motion::Hover => (
-            0.25 + 0.06 * (thread_value * 0.9 + 1.0).sin(),
-            0.0,
-            1.5 * (thread_value * 0.9).sin(),
-        ),
-        Motion::Drift => (
-            0.25,
-            0.07 * (thread_value * 0.8).sin(),
-            0.7 * (thread_value * 1.3).sin(),
-        ),
-        Motion::Bob => (0.25, 0.0, 0.45 * (thread_value * 3.6).sin()),
+    match motion {
+        Motion::Nod => (0.3 + 0.25 * (local * 1.6).sin(), 0.0, 0.0),
+        Motion::Float => (0.25, 0.0, 0.9 * (local * 1.8).sin()),
+        Motion::Hover => (0.25 + 0.06 * (local * 0.9 + 1.0).sin(), 0.0, 1.5 * (local * 0.9).sin()),
+        Motion::Drift => (0.25, 0.07 * (local * 0.8).sin(), 0.7 * (local * 1.3).sin()),
+        Motion::Bob => (0.25, 0.0, 0.45 * (local * 3.6).sin()),
     }
 }
 /// Perspective: a camera 40 dots away. P relative to the canvas center, y up → (x, y) right, down.
-pub(crate) fn persp(path: P3, bob: f32) -> (f32, f32) {
-    let key = 40.0 / (40.0 - path.2);
+pub(crate) fn persp(point: P3, bob: f32) -> (f32, f32) {
+    let scale = 40.0 / (40.0 - point.2);
 
-    (path.0 * key, -(path.1 + bob) * key)
+    (point.0 * scale, -(point.1 + bob) * scale)
 }
 /// The fit of MESH in MOTION at turn YAW: every vertex over 1 whole motion (pitch, roll, bob,
 /// the blocked shake) inside the canvas, the swept area centered; a smaller scale only when that
@@ -71,8 +56,8 @@ pub(crate) fn fit(mesh: &Mesh, motion: Motion, yaw: f32) -> Fit {
     let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
 
     let mut take = |yaw: f32, (pitch, roll, bob): (f32, f32, f32)| {
-        for &value in &mesh.verts {
-            let (x, y) = persp(rot(value, yaw, pitch, roll), bob);
+        for &vertex in &mesh.verts {
+            let (x, y) = persp(rot(vertex, yaw, pitch, roll), bob);
 
             (x0, x1, y0, y1) = (x0.min(x), x1.max(x), y0.min(y), y1.max(y));
         }
@@ -84,8 +69,8 @@ pub(crate) fn fit(mesh: &Mesh, motion: Motion, yaw: f32) -> Fit {
     }
 
     // blocked: its fixed pose, the shake ±0.1 rad
-    for directory in [-0.1, 0.0, 0.1] {
-        take(yaw + directory, pose(motion, 3, 0.0));
+    for shake in [-0.1, 0.0, 0.1] {
+        take(yaw + shake, pose(motion, 3, 0.0));
     }
 
     let (width, height) = ((DW - 1) as f32, (DH - 1) as f32);
@@ -98,17 +83,17 @@ pub(crate) fn fit(mesh: &Mesh, motion: Motion, yaw: f32) -> Fit {
     }
 }
 /// Distance of P to the segment A B.
-pub(crate) fn seg_dist(path: (f32, f32), agent: (f32, f32), bytes: (f32, f32)) -> f32 {
-    let (dx, dy) = (bytes.0 - agent.0, bytes.1 - agent.1);
-    let line = dx * dx + dy * dy;
+pub(crate) fn seg_dist(point: (f32, f32), start: (f32, f32), end: (f32, f32)) -> f32 {
+    let (dx, dy) = (end.0 - start.0, end.1 - start.1);
+    let length_squared = dx * dx + dy * dy;
 
-    let user = if line < 1e-6 {
+    let along = if length_squared < 1e-6 {
         0.0
     } else {
-        (((path.0 - agent.0) * dx + (path.1 - agent.1) * dy) / line).clamp(0.0, 1.0)
+        (((point.0 - start.0) * dx + (point.1 - start.1) * dy) / length_squared).clamp(0.0, 1.0)
     };
 
-    (path.0 - agent.0 - dx * user).hypot(path.1 - agent.1 - dy * user)
+    (point.0 - start.0 - dx * along).hypot(point.1 - start.1 - dy * along)
 }
 /// [`draw3d_in`] and the line coverage of each line dot (1 elsewhere). The lines: a 1-dot-wide
 /// strip along each float segment; a dot on where the strip covers 6/16 of its square (4x4
@@ -123,27 +108,27 @@ pub(crate) fn draw3d_cov(
     bob: f32,
     fit: Fit,
 ) -> (Vec<u8>, Vec<f32>) {
-    let vr: Vec<P3> = mesh.verts.iter().map(|&path| rot(path, yaw, pitch, roll)).collect();
+    let vr: Vec<P3> = mesh.verts.iter().map(|&vertex| rot(vertex, yaw, pitch, roll)).collect();
 
-    let proj = |path_value: P3| -> (f32, f32) {
-        let (x, y) = persp(path_value, bob);
+    let proj = |vertex: P3| -> (f32, f32) {
+        let (x, y) = persp(vertex, bob);
 
         (fit.cx + x * fit.scale, fit.cy + y * fit.scale)
     };
 
-    let normal = |file: &[usize]| unit(cross(sub(vr[file[1]], vr[file[0]]), sub(vr[file[2]], vr[file[0]])));
-    let norms: Vec<P3> = mesh.faces.iter().map(|file_value| normal(file_value)).collect();
-    let vis: Vec<bool> = norms.iter().map(|count_value| count_value.2 > 0.0).collect();
+    let normal = |face: &[usize]| unit(cross(sub(vr[face[1]], vr[face[0]]), sub(vr[face[2]], vr[face[0]])));
+    let norms: Vec<P3> = mesh.faces.iter().map(|face| normal(face)).collect();
+    let vis: Vec<bool> = norms.iter().map(|norm| norm.2 > 0.0).collect();
 
     // the segments in view: the silhouette, the creases, the wires
     let mut segs: Vec<((f32, f32), (f32, f32))> = Vec::new();
     let mut edges: Vec<(usize, usize, usize)> = Vec::new();
 
-    for (fi, file_2) in mesh.faces.iter().enumerate() {
-        for i in 0..file_2.len() {
+    for (fi, face) in mesh.faces.iter().enumerate() {
+        for i in 0..face.len() {
             edges.push((
-                file_2[i].min(file_2[(i + 1) % file_2.len()]),
-                file_2[i].max(file_2[(i + 1) % file_2.len()]),
+                face[i].min(face[(i + 1) % face.len()]),
+                face[i].max(face[(i + 1) % face.len()]),
                 fi,
             ));
         }
@@ -152,7 +137,7 @@ pub(crate) fn draw3d_cov(
     edges.sort_unstable();
 
     for pair in edges.chunks(2) {
-        let [(agent, bytes, fa), (_, _, fb)] = [pair[0], *pair.get(1).unwrap_or(&pair[0])];
+        let [(start, end, fa), (_, _, fb)] = [pair[0], *pair.get(1).unwrap_or(&pair[0])];
         let (na, nb) = (norms[fa], norms[fb]);
         let crease = na.0 * nb.0 + na.1 * nb.1 + na.2 * nb.2 < 0.8;
 
@@ -160,14 +145,11 @@ pub(crate) fn draw3d_cov(
             continue;
         }
 
-        segs.push((proj(vr[agent]), proj(vr[bytes])));
+        segs.push((proj(vr[start]), proj(vr[end])));
     }
 
-    for &(agent_value, bytes_value) in wires {
-        segs.push((
-            proj(rot(agent_value, yaw, pitch, roll)),
-            proj(rot(bytes_value, yaw, pitch, roll)),
-        ));
+    for &(start, end) in wires {
+        segs.push((proj(rot(start, yaw, pitch, roll)), proj(rot(end, yaw, pitch, roll))));
     }
 
     let hit = raster_segment_hits(&segs);
@@ -188,19 +170,19 @@ fn raster_segment_hits(segs: &[Segment]) -> Vec<bool> {
     let (sw, sh) = (DW * 4, DH * 4);
     let mut hit = vec![false; sw * sh];
 
-    for &(agent_2, bytes_2) in segs {
-        let span = |lo: f32, hi: f32, count_2: usize| {
+    for &(start, end) in segs {
+        let span = |lo: f32, hi: f32, limit: usize| {
             (
                 (4.0 * (lo - 0.5) + 1.5).ceil().max(0.0) as usize,
-                ((4.0 * (hi + 0.5) + 1.5).floor().max(-1.0) + 1.0).min(count_2 as f32) as usize,
+                ((4.0 * (hi + 0.5) + 1.5).floor().max(-1.0) + 1.0).min(limit as f32) as usize,
             )
         };
 
-        let (x0, x1) = span(agent_2.0.min(bytes_2.0), agent_2.0.max(bytes_2.0), sw);
-        let (y0, y1) = span(agent_2.1.min(bytes_2.1), agent_2.1.max(bytes_2.1), sh);
+        let (x0, x1) = span(start.0.min(end.0), start.0.max(end.0), sw);
+        let (y0, y1) = span(start.1.min(end.1), start.1.max(end.1), sh);
 
         for gy in y0..y1 {
-            raster_segment_row(sw, &mut hit, agent_2, bytes_2, x0, x1, gy);
+            raster_segment_row(sw, &mut hit, start, end, x0, x1, gy);
         }
     }
 
@@ -214,9 +196,9 @@ fn raster_dots(hit: &[bool]) -> (Vec<u8>, Vec<f32>) {
 
     for index in 0..DW * DH {
         let (x, y) = (index % DW, index / DW);
-        let key = (0..16).filter(|j| hit[(y * 4 + j / 4) * sw + x * 4 + j % 4]).count();
+        let covered = (0..16).filter(|j| hit[(y * 4 + j / 4) * sw + x * 4 + j % 4]).count();
 
-        set_covered_dot(&mut dots, &mut cov, y, x, key);
+        set_covered_dot(&mut dots, &mut cov, y, x, covered);
     }
 
     (dots, cov)
@@ -238,57 +220,57 @@ fn draw_marks(
     ));
     let (ax, ay) = (ax.round() as i32, ay.round() as i32);
 
-    for &(x, y, value) in marks {
+    for &(x, y, mark) in marks {
         let (x, y) = (ax + x, ay + y);
 
-        set_eye_dot(dots, value, x, y);
+        set_eye_dot(dots, mark, x, y);
     }
 }
 
 fn raster_segment_row(
     sw: usize,
     hit: &mut [bool],
-    agent_2: (f32, f32),
-    bytes_2: (f32, f32),
+    start: (f32, f32),
+    end: (f32, f32),
     x0: usize,
     x1: usize,
     gy: usize,
 ) {
     for gx in x0..x1 {
-        if !hit[gy * sw + gx] && seg_dist(((gx as f32 - 1.5) / 4.0, (gy as f32 - 1.5) / 4.0), agent_2, bytes_2) <= 0.5 {
+        if !hit[gy * sw + gx] && seg_dist(((gx as f32 - 1.5) / 4.0, (gy as f32 - 1.5) / 4.0), start, end) <= 0.5 {
             hit[gy * sw + gx] = true;
         }
     }
 }
 
-fn set_eye_dot(dots: &mut [u8], value: u8, x: i32, y: i32) {
+fn set_eye_dot(dots: &mut [u8], mark: u8, x: i32, y: i32) {
     if x >= 0 && y >= 0 && (x as usize) < DW && (y as usize) < DH {
         let i = y as usize * DW + x as usize;
 
-        dots[i] = dots[i].max(value);
+        dots[i] = dots[i].max(mark);
     }
 }
 
-fn set_covered_dot(dots: &mut [u8], cov: &mut [f32], y: usize, x: usize, key: usize) {
-    if key >= 6 {
+fn set_covered_dot(dots: &mut [u8], cov: &mut [f32], y: usize, x: usize, covered: usize) {
+    if covered >= 6 {
         dots[y * DW + x] = 1;
-        cov[y * DW + x] = key as f32 / 16.0;
+        cov[y * DW + x] = covered as f32 / 16.0;
     }
 }
 /// [`clean`] on a DW x DH grid of dots.
 pub(crate) fn clean_in(dots: &mut [u8], dw: usize, dh: usize, spurs: bool) {
-    let on = |directory: &[u8], x: i32, y: i32| {
-        x >= 0 && y >= 0 && (x as usize) < dw && (y as usize) < dh && directory[y as usize * dw + x as usize] == 1
+    let on = |grid: &[u8], x: i32, y: i32| {
+        x >= 0 && y >= 0 && (x as usize) < dw && (y as usize) < dh && grid[y as usize * dw + x as usize] == 1
     };
 
-    let around = |directory_value: &[u8], x: i32, y: i32| -> Vec<(i32, i32)> {
-        let mut value = Vec::new();
+    let around = |grid: &[u8], x: i32, y: i32| -> Vec<(i32, i32)> {
+        let mut neighbors = Vec::new();
 
         for (ox, oy) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
-            append_neighbor(on, directory_value, x, y, &mut value, ox, oy);
+            append_neighbor(on, grid, x, y, &mut neighbors, ox, oy);
         }
 
-        value
+        neighbors
     };
 
     remove_loose_dots(dots, dw, dh, spurs, on, around);
@@ -329,9 +311,9 @@ fn remove_loose_row(
             continue;
         }
 
-        let count = around(dots, x, y);
-        let lone = count.is_empty();
-        let spur = spurs && count.len() == 1 && around(dots, count[0].0, count[0].1).len() >= 4;
+        let neighbors = around(dots, x, y);
+        let lone = neighbors.is_empty();
+        let spur = spurs && neighbors.len() == 1 && around(dots, neighbors[0].0, neighbors[0].1).len() >= 4;
 
         if lone || spur {
             dots[y as usize * dw + x as usize] = 0;
@@ -342,14 +324,14 @@ fn remove_loose_row(
 
 fn append_neighbor(
     on: impl Fn(&[u8], i32, i32) -> bool,
-    directory_value: &[u8],
+    grid: &[u8],
     x: i32,
     y: i32,
-    value: &mut Vec<(i32, i32)>,
+    neighbors: &mut Vec<(i32, i32)>,
     ox: i32,
     oy: i32,
 ) {
-    if on(directory_value, x + ox, y + oy) {
-        value.push((x + ox, y + oy));
+    if on(grid, x + ox, y + oy) {
+        neighbors.push((x + ox, y + oy));
     }
 }

@@ -10,11 +10,7 @@ impl View {
 
         // members set elsewhere (a reload, tests): the box order follows
         if self.agents.order.len() != self.agents.members.len()
-            || !self
-                .agents
-                .members
-                .iter()
-                .all(|message| self.agents.order.contains(message))
+            || !self.agents.members.iter().all(|name| self.agents.order.contains(name))
         {
             self.sync_order();
         }
@@ -39,7 +35,7 @@ impl View {
         let sep = u16::from(below.height > 8);
 
         if sep > 0 {
-            draw_bounds_buf_state(frame, below);
+            draw_bar_separator(frame, below);
         }
 
         let area = Rect {
@@ -57,7 +53,7 @@ impl View {
         self.layout.wide_split = wide;
 
         let (area, changes_left) = if wide {
-            draw_bounds_buf(frame, area)
+            split_changes_left(frame, area)
         } else {
             (area, None)
         };
@@ -66,7 +62,7 @@ impl View {
     }
 }
 
-fn draw_bounds_buf_state(frame: &mut Frame<'_>, below: Rect) {
+fn draw_bar_separator(frame: &mut Frame<'_>, below: Rect) {
     let buf = frame.buffer_mut();
 
     for x in below.x..below.right() {
@@ -74,20 +70,20 @@ fn draw_bounds_buf_state(frame: &mut Frame<'_>, below: Rect) {
     }
 }
 
-fn draw_bounds_buf(frame: &mut Frame<'_>, area: Rect) -> (Rect, Option<Rect>) {
-    let lw = area.width * 3 / 5;
+fn split_changes_left(frame: &mut Frame<'_>, area: Rect) -> (Rect, Option<Rect>) {
+    let left_w = area.width * 3 / 5;
     let buf = frame.buffer_mut();
 
     for y in area.y..area.bottom() {
-        buf[(area.x + lw, y)].set_symbol("│").set_style(theme::line());
+        buf[(area.x + left_w, y)].set_symbol("│").set_style(theme::line());
     }
 
     (
         Rect {
-            x: area.x + lw + 1,
-            width: area.width - lw - 1,
+            x: area.x + left_w + 1,
+            width: area.width - left_w - 1,
             ..area
         },
-        Some(Rect { width: lw, ..area }),
+        Some(Rect { width: left_w, ..area }),
     )
 }

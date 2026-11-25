@@ -92,7 +92,7 @@ fn run_session(mut session: TutorialSession<'_>) -> i32 {
         // each stage (and each resize): the layout of the size now, the chrome drawn whole
         let (width, height) = size();
         let (view, side) = layout(width, height);
-        let frame = StageLayout {
+        let stage = StageLayout {
             width,
             height,
             view,
@@ -111,7 +111,7 @@ fn run_session(mut session: TutorialSession<'_>) -> i32 {
             StageChoice::Quit => break QUIT,
         };
 
-        let result = run_thread(&mut session, &id, frame);
+        let result = run_thread(&mut session, &id, stage);
 
         if let Some(code) = apply_exit(&mut session, id, result) {
             break code;
@@ -172,11 +172,11 @@ fn apply_exit(
     None
 }
 
-fn run_thread(session: &mut TutorialSession<'_>, id: &str, frame: StageLayout) -> Result<Option<ThreadExit>, String> {
+fn run_thread(session: &mut TutorialSession<'_>, id: &str, stage: StageLayout) -> Result<Option<ThreadExit>, String> {
     let Ok(mut term) = Terminal::with_options(
         crate::ui::frames::backend(),
         TerminalOptions {
-            viewport: Viewport::Fixed(frame.view),
+            viewport: Viewport::Fixed(stage.view),
         },
     ) else {
         return Err(String::new());
@@ -197,11 +197,11 @@ fn run_thread(session: &mut TutorialSession<'_>, id: &str, frame: StageLayout) -
         let events = tail.read();
 
         if coach.see(&events) | coach.see_view(peek) | coach.see_repo(context.repo) {
-            let _ = top.draw(|canvas| chrome(canvas, &*coach, context.spec.dry, frame.view, frame.side));
+            let _ = top.draw(|canvas| chrome(canvas, &*coach, context.spec.dry, stage.view, stage.side));
         }
 
         // a resize: the view ends, the loop lays the screen out again
-        size() != (frame.width, frame.height)
+        size() != (stage.width, stage.height)
     };
 
     crate::screens::thread_view::run_with(&mut term, id, &dir, &title, None, context.main, Some(&mut hook))
@@ -209,13 +209,10 @@ fn run_thread(session: &mut TutorialSession<'_>, id: &str, frame: StageLayout) -
 
 /// `codehead tutorial [--check] <spec json>`.
 pub(crate) fn run(args: &[String]) -> ! {
-    let check = args.first().is_some_and(|agent| agent == "--check");
-    let arg = args
-        .iter()
-        .find(|agent_value| agent_value.starts_with('{'))
-        .map(String::as_str);
+    let check = args.first().is_some_and(|arg| arg == "--check");
+    let arg = args.iter().find(|arg| arg.starts_with('{')).map(String::as_str);
     let spec: Spec = arg
-        .and_then(|agent_2| serde_json::from_str(agent_2).ok())
+        .and_then(|arg| serde_json::from_str(arg).ok())
         .unwrap_or_else(|| crate::infra::terminal::fail("codehead tutorial: spec json required", 2));
 
     if spec.crew.is_empty() {
@@ -224,7 +221,7 @@ pub(crate) fn run(args: &[String]) -> ! {
 
     // the owner's look before the env moves to the sandbox
     let look = crate::infra::config::read_layers(&crate::infra::config::path())
-        .map(|line| line.merged())
+        .map(|layers| layers.merged())
         .unwrap_or_default();
 
     sweep();
@@ -259,12 +256,8 @@ pub(crate) fn run(args: &[String]) -> ! {
                 show(&id, &seeded, &repo, &spec, &root)
             };
 
-            for thread_value in store::all() {
-                let _ = crate::engine::client::send_within(
-                    &thread_value.id,
-                    &json!({"op": "stop"}),
-                    Duration::from_secs(2),
-                );
+            for thread in store::all() {
+                let _ = crate::engine::client::send_within(&thread.id, &json!({"op": "stop"}), Duration::from_secs(2));
             }
 
             std::thread::sleep(Duration::from_millis(300));

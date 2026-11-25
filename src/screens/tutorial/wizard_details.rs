@@ -26,7 +26,7 @@ impl Wizard {
             ("esc", "back")
         };
 
-        let mut value = match SCREENS[self.screen] {
+        let mut keys = match SCREENS[self.screen] {
             Screen::Harness => vec![
                 ("↑↓", "pick"),
                 ("c", "copy install"),
@@ -48,12 +48,12 @@ impl Wizard {
             Screen::Next => vec![("enter", "start screen")],
         };
 
-        value.insert(0, esc);
-        value
+        keys.insert(0, esc);
+        keys
     }
     /// The 13x6 canvas of member M: the spawn while it runs, then the live sprite at `SPAWN_AT`.
-    pub(super) fn canvas(message: &Member, status: Status) -> [String; avatar::SPAWN_H] {
-        avatar_canvas(message, status)
+    pub(super) fn canvas(member: &Member, status: Status) -> [String; avatar::SPAWN_H] {
+        avatar_canvas(member, status)
     }
     /// What a real run does, 1 line each.
     pub(crate) fn plan(&self) -> Vec<String> {
@@ -73,13 +73,13 @@ impl Wizard {
             .crew_state
             .crew
             .iter()
-            .map(|message| {
+            .map(|member| {
                 format!(
                     "{} ({}, {}, {})",
-                    message.name,
-                    message.role.name(),
-                    message.harness,
-                    message.avatar.id()
+                    member.name,
+                    member.role.name(),
+                    member.harness,
+                    member.avatar.id()
                 )
             })
             .collect();
@@ -91,46 +91,46 @@ impl Wizard {
     }
 }
 
-fn header_line(widget_state: &Wizard, width: u16) -> Line<'static> {
+fn header_line(wizard: &Wizard, width: u16) -> Line<'static> {
     let mut spans = vec![Span::styled("  codehead", theme::bold())];
 
-    if widget_state.dry {
+    if wizard.dry {
         spans.push(Span::styled("  dry run", theme::muted()));
     }
 
-    let used: usize = spans.iter().map(|text_value| text_value.content.chars().count()).sum();
+    let used: usize = spans.iter().map(|span| span.content.chars().count()).sum();
     let pad = (width as usize).saturating_sub(used + SCREENS.len() * 2 + 1);
 
     spans.push(Span::raw(" ".repeat(pad)));
 
     for i in 0..SCREENS.len() {
-        let st = match i.cmp(&widget_state.screen) {
+        let st = match i.cmp(&wizard.screen) {
             std::cmp::Ordering::Equal => theme::accent(),
             std::cmp::Ordering::Less => theme::text(),
             std::cmp::Ordering::Greater => theme::muted(),
         };
 
-        spans.push(Span::styled(if i <= widget_state.screen { "● " } else { "○ " }, st));
+        spans.push(Span::styled(if i <= wizard.screen { "● " } else { "○ " }, st));
     }
 
     Line::from(spans)
 }
 
-fn avatar_canvas(message: &Member, status: Status) -> [String; avatar::SPAWN_H] {
-    if let Some(rows) = message.spawn.rows(&message.avatar, status) {
+fn avatar_canvas(member: &Member, status: Status) -> [String; avatar::SPAWN_H] {
+    if let Some(rows) = member.spawn.rows(&member.avatar, status) {
         return rows;
     }
 
-    let live = message.avatar.rows(status, avatar::now());
+    let live = member.avatar.rows(status, avatar::now());
 
-    std::array::from_fn(|result| {
+    std::array::from_fn(|row| {
         let blank = " ".repeat(avatar::SPAWN_W);
 
-        if result >= avatar::SPAWN_AT.1 && result < avatar::SPAWN_AT.1 + avatar::HEIGHT {
+        if row >= avatar::SPAWN_AT.1 && row < avatar::SPAWN_AT.1 + avatar::HEIGHT {
             format!(
                 "{}{}{}",
                 " ".repeat(avatar::SPAWN_AT.0),
-                live[result - avatar::SPAWN_AT.1],
+                live[row - avatar::SPAWN_AT.1],
                 " ".repeat(avatar::SPAWN_W - avatar::SPAWN_AT.0 - avatar::WIDTH)
             )
         } else {

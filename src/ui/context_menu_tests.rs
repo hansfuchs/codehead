@@ -1,7 +1,7 @@
 use super::*;
 
-fn key_event(code: KeyCode, message: KeyModifiers) -> KeyEvent {
-    KeyEvent::new(code, message)
+fn key_event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+    KeyEvent::new(code, modifiers)
 }
 
 #[test]
@@ -21,29 +21,17 @@ fn enter_a_digit_or_a_hint_key_runs_a_row() {
         Item::new("delete", "d d", 2),
         Item::new("resolve", "", 3),
     ];
-    let mut message = Menu::new("file", items).expect("items");
+    let mut menu = Menu::new("file", items).expect("items");
 
-    assert_eq!(message.key(key_event(KeyCode::Down, KeyModifiers::NONE)), Out::None);
-    assert_eq!(message.key(key_event(KeyCode::Enter, KeyModifiers::NONE)), Out::Run(2));
+    assert_eq!(menu.key(key_event(KeyCode::Down, KeyModifiers::NONE)), Out::None);
+    assert_eq!(menu.key(key_event(KeyCode::Enter, KeyModifiers::NONE)), Out::Run(2));
+    assert_eq!(menu.key(key_event(KeyCode::Char('3'), KeyModifiers::NONE)), Out::Run(3));
+    assert_eq!(menu.key(key_event(KeyCode::Char('e'), KeyModifiers::NONE)), Out::Run(1));
+    assert_eq!(menu.key(key_event(KeyCode::Char('d'), KeyModifiers::NONE)), Out::Run(2));
+    assert_eq!(menu.key(key_event(KeyCode::Char('z'), KeyModifiers::NONE)), Out::None);
+    assert_eq!(menu.key(key_event(KeyCode::Esc, KeyModifiers::NONE)), Out::Close);
     assert_eq!(
-        message.key(key_event(KeyCode::Char('3'), KeyModifiers::NONE)),
-        Out::Run(3)
-    );
-    assert_eq!(
-        message.key(key_event(KeyCode::Char('e'), KeyModifiers::NONE)),
-        Out::Run(1)
-    );
-    assert_eq!(
-        message.key(key_event(KeyCode::Char('d'), KeyModifiers::NONE)),
-        Out::Run(2)
-    );
-    assert_eq!(
-        message.key(key_event(KeyCode::Char('z'), KeyModifiers::NONE)),
-        Out::None
-    );
-    assert_eq!(message.key(key_event(KeyCode::Esc, KeyModifiers::NONE)), Out::Close);
-    assert_eq!(
-        message.key(key_event(KeyCode::Char('.'), KeyModifiers::CONTROL)),
+        menu.key(key_event(KeyCode::Char('.'), KeyModifiers::CONTROL)),
         Out::Close
     );
     assert!(Menu::<u8>::new("x", Vec::new()).is_none());
@@ -57,27 +45,27 @@ fn an_outward_row_asks_a_2nd_enter_a_grayed_one_never_runs() {
     let mut off = Item::new("merge", "", 2).in_section("ship");
 
     off.off = true;
-    let mut message = Menu::new("panel", vec![Item::new("commit message", "m", 0), push, off]).expect("items");
+    let mut menu = Menu::new("panel", vec![Item::new("commit message", "m", 0), push, off]).expect("items");
     let enter = key_event(KeyCode::Enter, KeyModifiers::NONE);
 
-    message.key(key_event(KeyCode::Down, KeyModifiers::NONE));
+    menu.key(key_event(KeyCode::Down, KeyModifiers::NONE));
 
-    assert_eq!(message.key(enter), Out::None, "1st enter: armed");
-    assert_eq!(message.key(enter), Out::Run(1));
+    assert_eq!(menu.key(enter), Out::None, "1st enter: armed");
+    assert_eq!(menu.key(enter), Out::Run(1));
 
-    message.key(key_event(KeyCode::Down, KeyModifiers::NONE));
+    menu.key(key_event(KeyCode::Down, KeyModifiers::NONE));
 
-    assert_eq!(message.key(enter), Out::None, "grayed");
+    assert_eq!(menu.key(enter), Out::None, "grayed");
 
     // a move between disarms
-    message.key(key_event(KeyCode::Up, KeyModifiers::NONE));
-    message.key(enter);
-    message.key(key_event(KeyCode::Down, KeyModifiers::NONE));
-    message.key(key_event(KeyCode::Up, KeyModifiers::NONE));
+    menu.key(key_event(KeyCode::Up, KeyModifiers::NONE));
+    menu.key(enter);
+    menu.key(key_event(KeyCode::Down, KeyModifiers::NONE));
+    menu.key(key_event(KeyCode::Up, KeyModifiers::NONE));
 
-    assert_eq!(message.key(enter), Out::None);
+    assert_eq!(menu.key(enter), Out::None);
     assert_eq!(
-        message.lines(),
+        menu.lines(),
         vec![Some(0), None, Some(1), Some(2)],
         "a rule before the ship section"
     );
@@ -85,8 +73,8 @@ fn an_outward_row_asks_a_2nd_enter_a_grayed_one_never_runs() {
 
 #[test]
 fn beside_opens_right_of_the_panel_at_opens_above_its_row() {
-    let mut message = Menu::new("x", vec![Item::new("a", "", 0), Item::new("b", "", 1)]).expect("items");
-    let mut thread = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+    let mut menu = Menu::new("x", vec![Item::new("a", "", 0), Item::new("b", "", 1)]).expect("items");
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
     let panel = Rect {
         x: 0,
         y: 2,
@@ -94,11 +82,10 @@ fn beside_opens_right_of_the_panel_at_opens_above_its_row() {
         height: 26,
     };
 
-    thread
-        .draw(|file| message.render(file, Place::Beside(panel, 10), file.area()))
+    term.draw(|frame| menu.render(frame, Place::Beside(panel, 10), frame.area()))
         .unwrap();
 
-    assert_eq!((message.area.x, message.area.y), (30, 10));
+    assert_eq!((menu.area.x, menu.area.y), (30, 10));
 
     let row = Rect {
         x: 40,
@@ -107,15 +94,10 @@ fn beside_opens_right_of_the_panel_at_opens_above_its_row() {
         height: 1,
     };
 
-    thread
-        .draw(|file_value| message.render(file_value, Place::At(row), file_value.area()))
+    term.draw(|frame| menu.render(frame, Place::At(row), frame.area()))
         .unwrap();
 
-    assert!(
-        message.area.bottom() <= 20 && message.area.x == 40,
-        "{:?}",
-        message.area
-    );
+    assert!(menu.area.bottom() <= 20 && menu.area.x == 40, "{:?}", menu.area);
 
     let row = Rect {
         x: 40,
@@ -124,9 +106,8 @@ fn beside_opens_right_of_the_panel_at_opens_above_its_row() {
         height: 1,
     };
 
-    thread
-        .draw(|file_2| message.render(file_2, Place::At(row), file_2.area()))
+    term.draw(|frame| menu.render(frame, Place::At(row), frame.area()))
         .unwrap();
 
-    assert!(message.area.y >= 2, "0 room above: below the row {:?}", message.area);
+    assert!(menu.area.y >= 2, "0 room above: below the row {:?}", menu.area);
 }

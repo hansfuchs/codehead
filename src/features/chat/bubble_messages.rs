@@ -5,7 +5,7 @@ use super::{
 };
 use std::fmt::Write as FormatWrite;
 
-pub(super) fn draw_bubbles_item_settled(
+pub(super) fn draw_settled_bubble(
     layout: BubbleAnswerLayout<'_>,
     close: impl Fn(&mut Drawn, &mut Option<Open>),
     gap: impl Fn(&mut Drawn),
@@ -13,9 +13,9 @@ pub(super) fn draw_bubbles_item_settled(
 ) {
     let BubbleAnswerLayout {
         colors,
-        width_value,
+        width,
         inner,
-        directory,
+        drawn,
         cur,
     } = layout;
 
@@ -30,25 +30,23 @@ pub(super) fn draw_bubbles_item_settled(
     } = content;
 
     // the question as the agent's message, the answer as the owner's
-    close(directory, cur);
-    gap(directory);
-    let border = open_answer_box(directory, cur, width_value, colors, agent, permission, asked);
+    close(drawn, cur);
+    gap(drawn);
+    let border = open_answer_box(drawn, cur, width, colors, agent, permission, asked);
     let bar = [Span::styled("│ ", border)];
 
-    directory
-        .rows
-        .extend(markdown::plain(question, inner, theme::bold(), &bar));
+    drawn.rows.extend(markdown::plain(question, inner, theme::bold(), &bar));
 
     if !allow {
-        let st = if permission { "denied" } else { "declined" };
+        let refusal = if permission { "denied" } else { "declined" };
 
-        directory.rows.push(Row::plain(Line::from(bar.to_vec())));
-        directory
+        drawn.rows.push(Row::plain(Line::from(bar.to_vec())));
+        drawn
             .rows
-            .extend(markdown::plain(st, inner, theme::fg(theme::pal().caution()), &bar));
+            .extend(markdown::plain(refusal, inner, theme::fg(theme::pal().caution()), &bar));
     }
 
-    close(directory, cur);
+    close(drawn, cur);
 
     if allow {
         let answer = if permission && answer.is_empty() {
@@ -57,12 +55,12 @@ pub(super) fn draw_bubbles_item_settled(
             answer
         };
 
-        gap(directory);
-        owner_bubble(directory, width_value, answer, "", ts);
+        gap(drawn);
+        owner_bubble(drawn, width, answer, "", ts);
     }
 }
 
-pub(super) fn draw_bubbles_item_text_agent_ts(
+pub(super) fn draw_agent_bubble(
     mut context: BubbleAgentContext<'_>,
     close: impl Fn(&mut Drawn, &mut Option<Open>),
     gap: impl Fn(&mut Drawn),
@@ -75,20 +73,20 @@ pub(super) fn draw_bubbles_item_text_agent_ts(
     draw_agent_content(&mut context, item, agent, border);
 }
 
-fn draw_bubbles_item_text_agent_ts_item_sub_sub_key(
+fn draw_sub_rows(
     thread: &Thread,
     fold: &Fold<'_>,
     inner: usize,
-    directory: &mut Drawn,
+    drawn: &mut Drawn,
     bar: &[Span<'static>; 1],
     sub: usize,
     key: usize,
 ) {
-    if let Some(text_value) = thread.subs.get(sub) {
-        sub_rows(directory, text_value, sub, key, fold, inner, bar);
+    if let Some(subagent) = thread.subs.get(sub) {
+        sub_rows(drawn, subagent, sub, key, fold, inner, bar);
     }
 }
-pub(super) fn draw_bubbles_item_text_agent_ts_item_text(
+pub(super) fn draw_message(
     context: BubbleTextContext<'_>,
     agent: &String,
     text: &str,
@@ -99,19 +97,19 @@ pub(super) fn draw_bubbles_item_text_agent_ts_item_text(
         roster,
         fold,
         inner,
-        directory,
+        drawn,
         bar,
     } = context;
 
     // the thoughts before the message: a folded line on its top
-    thought_rows(directory, thoughts, key, fold, inner, bar);
+    thought_rows(drawn, thoughts, key, fold, inner, bar);
 
     if !text.trim().is_empty() {
-        directory.rows.extend(memo::markdown(text, inner, bar));
+        drawn.rows.extend(memo::markdown(text, inner, bar));
     }
 
-    if let Some((height, what)) = needs_harness(text) {
-        let label = crate::engine::harnesses::get(&height).map_or(height.as_str(), |x| x.label);
+    if let Some((harness, what)) = needs_harness(text) {
+        let label = crate::engine::harnesses::get(&harness).map_or(harness.as_str(), |known| known.label);
 
         let what = if what.is_empty() {
             String::new()
@@ -119,29 +117,30 @@ pub(super) fn draw_bubbles_item_text_agent_ts_item_text(
             format!(" for {what}")
         };
 
-        let cap = agents_on(roster, &height, true, agent);
+        let capable = agents_on(roster, &harness, true, agent);
 
-        directory.rows.push(Row::plain(Line::from(bar.to_vec())));
+        drawn.rows.push(Row::plain(Line::from(bar.to_vec())));
         let pre = [bar[0].clone(), Span::styled("● ", theme::fg(theme::pal().attention()))];
 
-        directory.rows.extend(markdown::plain(
+        drawn.rows.extend(markdown::plain(
             &format!("{agent} needs a {label} agent{what}."),
             inner,
             theme::fg(theme::pal().attention()),
             &pre,
         ));
 
-        let list = if cap.is_empty() {
+        let list = if capable.is_empty() {
             "none".to_string()
         } else {
-            cap.iter()
-                .map(|(count_value, _)| format!("@{count_value}"))
+            capable
+                .iter()
+                .map(|(name, _)| format!("@{name}"))
                 .collect::<Vec<_>>()
                 .join(", ")
                 + " · @agent → + adds it"
         };
 
-        directory.rows.extend(markdown::plain(
+        drawn.rows.extend(markdown::plain(
             &format!("Agents on {label}: {list}"),
             inner,
             theme::muted(),
@@ -149,7 +148,7 @@ pub(super) fn draw_bubbles_item_text_agent_ts_item_text(
         ));
     }
 }
-pub(super) fn draw_bubbles_item_text_agent_ts_item_run(
+pub(super) fn draw_run(
     context: BubbleRunContext<'_>,
     agent: &String,
     key: usize,
@@ -162,12 +161,12 @@ pub(super) fn draw_bubbles_item_text_agent_ts_item_run(
         thread,
         fold,
         inner,
-        directory,
+        drawn,
         bar,
     } = context;
 
     let shown = fold.run(key);
-    let running = calls.iter().any(|character_4| character_4.output.is_none()) && thread.busy.contains(agent);
+    let running = calls.iter().any(|call| call.output.is_none()) && thread.busy.contains(agent);
 
     let mark = if shown {
         "▾ "
@@ -179,7 +178,7 @@ pub(super) fn draw_bubbles_item_text_agent_ts_item_run(
 
     let failed = calls
         .iter()
-        .filter(|character_5| matches!(character_5.output, Some((false, _))))
+        .filter(|call| matches!(call.output, Some((false, _))))
         .count();
     let (head, mut stats) = run_lines(calls, end.saturating_sub(start) as f64 / 1000.0);
     let think = fold.thoughts != Thoughts::Hidden && (shown || fold.thoughts == Thoughts::Open);
@@ -194,62 +193,62 @@ pub(super) fn draw_bubbles_item_text_agent_ts_item_run(
         write!(stats, " · {failed} failed").unwrap();
     }
 
-    let row_at = directory.rows.len();
+    let row_at = drawn.rows.len();
     let pre = [bar[0].clone(), Span::styled(mark, theme::accent())];
     let rest = [bar[0].clone(), Span::raw("  ")];
     let mut rows = markdown::plain(&head, inner, theme::text(), &pre);
 
-    for row_value in rows.iter_mut().skip(1) {
-        row_value.line.spans[1] = Span::raw("  ");
+    for row in rows.iter_mut().skip(1) {
+        row.line.spans[1] = Span::raw("  ");
     }
 
     rows.extend(markdown::plain(&stats, inner, theme::muted(), &rest));
 
     for i in 0..rows.len() {
-        directory.hits.insert(row_at + i, Hit::Run(key));
+        drawn.hits.insert(row_at + i, Hit::Run(key));
     }
 
-    directory.rows.extend(rows);
+    drawn.rows.extend(rows);
 
     if think && !shown {
-        for count_2 in 0..=calls.len() {
-            run_thought_rows(directory, thoughts, count_2, inner, &tbar);
+        for calls_before in 0..=calls.len() {
+            run_thought_rows(drawn, thoughts, calls_before, inner, &tbar);
         }
     }
 
     if shown {
-        draw_bubbles_item_text_agent_ts_item_run_head(inner, directory, bar, calls, thoughts, think, &tbar);
+        draw_run_calls(inner, drawn, bar, calls, thoughts, think, &tbar);
     }
 }
-pub(super) fn draw_bubbles_item_text_agent_ts_item_run_head(
+pub(super) fn draw_run_calls(
     inner: usize,
-    directory: &mut Drawn,
+    drawn: &mut Drawn,
     bar: &[Span<'static>; 1],
     calls: &[Call],
     thoughts: &[(usize, String)],
     think: bool,
     tbar: &[Span<'static>; 2],
 ) {
-    for (count_3, call) in calls.iter().enumerate() {
+    for (i, call) in calls.iter().enumerate() {
         if think {
-            run_thought_rows(directory, thoughts, count_3, inner, tbar);
+            run_thought_rows(drawn, thoughts, i, inner, tbar);
         }
 
         let head = format!("{} {}", tool_label(&call.name), call_summary(&call.name, &call.input));
 
-        directory.rows.extend(markdown::plain(
+        drawn.rows.extend(markdown::plain(
             &head,
             inner,
             theme::text(),
             &[bar[0].clone(), Span::raw("  ")],
         ));
-        directory
+        drawn
             .rows
             .extend(memo::call(call, inner, &[bar[0].clone(), Span::raw("    ")]));
     }
 
     if think {
-        run_thought_rows(directory, thoughts, calls.len(), inner, tbar);
+        run_thought_rows(drawn, thoughts, calls.len(), inner, tbar);
     }
 }
 
@@ -266,9 +265,9 @@ pub(super) struct BubbleAnswerContent<'render> {
 
 pub(super) struct BubbleAnswerLayout<'render> {
     pub(super) colors: &'render HashMap<String, Color>,
-    pub(super) width_value: usize,
+    pub(super) width: usize,
     pub(super) inner: usize,
-    pub(super) directory: &'render mut Drawn,
+    pub(super) drawn: &'render mut Drawn,
     pub(super) cur: &'render mut Option<Open>,
 }
 
@@ -277,9 +276,9 @@ pub(super) struct BubbleAgentContext<'render> {
     pub(super) colors: &'render HashMap<String, Color>,
     pub(super) roster: &'render [(String, String)],
     pub(super) fold: &'render Fold<'render>,
-    pub(super) width_value: usize,
+    pub(super) width: usize,
     pub(super) inner: usize,
-    pub(super) directory: &'render mut Drawn,
+    pub(super) drawn: &'render mut Drawn,
     pub(super) cur: &'render mut Option<Open>,
     pub(super) last_of: &'render HashMap<&'render str, usize>,
     pub(super) idx: usize,
@@ -289,7 +288,7 @@ pub(super) struct BubbleTextContext<'render> {
     pub(super) roster: &'render [(String, String)],
     pub(super) fold: &'render Fold<'render>,
     pub(super) inner: usize,
-    pub(super) directory: &'render mut Drawn,
+    pub(super) drawn: &'render mut Drawn,
     pub(super) bar: &'render [Span<'static>; 1],
 }
 
@@ -297,7 +296,7 @@ pub(super) struct BubbleRunContext<'render> {
     pub(super) thread: &'render Thread,
     pub(super) fold: &'render Fold<'render>,
     pub(super) inner: usize,
-    pub(super) directory: &'render mut Drawn,
+    pub(super) drawn: &'render mut Drawn,
     pub(super) bar: &'render [Span<'static>; 1],
 }
 
@@ -305,51 +304,63 @@ fn prepare_agent_bubble(
     context: &mut BubbleAgentContext<'_>,
     close: &impl Fn(&mut Drawn, &mut Option<Open>),
     gap: &impl Fn(&mut Drawn),
-    agent: &String,
+    agent: &str,
     ts: u64,
 ) -> Style {
-    let character_3 = color_of(context.colors, agent);
-    let border = Style::default().fg(theme::desaturate(character_3, 0.4));
+    let color = color_of(context.colors, agent);
+    let border = Style::default().fg(theme::desaturate(color, 0.4));
     let bar = [Span::styled("│ ", border)];
 
-    if context.cur.as_ref().and_then(|output_3| output_3.agent.as_deref()) != Some(agent.as_str()) {
-        close(context.directory, context.cur);
-        gap(context.directory);
+    if context.cur.as_ref().and_then(|open| open.agent.as_deref()) != Some(agent) {
+        close(context.drawn, context.cur);
+        gap(context.drawn);
+
+        let busy = at_work_to_the_end(context, agent);
+        let name = vec![Span::styled(
+            agent.to_owned(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )];
 
         // the box's time: its 1st item's (a later minute: a divider with its time)
-        let busy = context.thread.working(agent) && context.last_of.get(agent.as_str()).is_some_and(|&line_2| line_2 >= context.idx && context.thread.items[context.idx..=line_2].iter().all(|it| matches!(it, Item::Text { agent: agent_value, .. } | Item::Run { agent: agent_value, .. } | Item::Sub { agent: agent_value, .. } if agent_value == agent)));
-        let name = vec![Span::styled(
-            agent.clone(),
-            Style::default().fg(character_3).add_modifier(Modifier::BOLD),
-        )];
-        let (top, _) = top_border(context.width_value, border, Vec::new(), false, &clock(ts));
+        let (top, _) = top_border(context.width, border, Vec::new(), false, &clock(ts));
 
         *context.cur = Some(Open {
-            start: context.directory.rows.len(),
+            start: context.drawn.rows.len(),
             border,
-            agent: Some(agent.clone()),
+            agent: Some(agent.to_owned()),
             minute: clock(ts),
             name,
-            wave: busy.then_some(character_3),
+            wave: busy.then_some(color),
         });
-        context.directory.rows.push(top);
-    } else if let Some(output_4) = context.cur.as_mut()
-        && output_4.minute != clock(ts)
+        context.drawn.rows.push(top);
+    } else if let Some(open) = context.cur.as_mut()
+        && open.minute != clock(ts)
     {
         // a new minute in the same box: blank, `── 13:42`, blank (the item's own)
-        output_4.minute = clock(ts);
-        context.directory.rows.push(Row::plain(Line::from(bar.to_vec())));
+        open.minute = clock(ts);
+        context.drawn.rows.push(Row::plain(Line::from(bar.to_vec())));
         context
-            .directory
+            .drawn
             .rows
-            .push(minute_divider(context.width_value, border, &output_4.minute));
-        context.directory.rows.push(Row::plain(Line::from(bar.to_vec())));
+            .push(minute_divider(context.width, border, &open.minute));
+        context.drawn.rows.push(Row::plain(Line::from(bar.to_vec())));
     } else {
         // the next item of the box: 1 blank row between (0 below the top border)
-        context.directory.rows.push(Row::plain(Line::from(bar.to_vec())));
+        context.drawn.rows.push(Row::plain(Line::from(bar.to_vec())));
     }
 
     border
+}
+
+/// AGENT works and every item from this one on is its own: its box gets the wave.
+fn at_work_to_the_end(context: &BubbleAgentContext<'_>, agent: &str) -> bool {
+    let own = |item: &Item| matches!(item, Item::Text { agent: owner, .. } | Item::Run { agent: owner, .. } | Item::Sub { agent: owner, .. } if owner == agent);
+
+    context.thread.working(agent)
+        && context
+            .last_of
+            .get(agent)
+            .is_some_and(|&last| last >= context.idx && context.thread.items[context.idx..=last].iter().all(own))
 }
 
 fn draw_agent_content(context: &mut BubbleAgentContext<'_>, item: &Item, agent: &String, border: Style) {
@@ -359,12 +370,12 @@ fn draw_agent_content(context: &mut BubbleAgentContext<'_>, item: &Item, agent: 
         Item::Text {
             text, thoughts, key, ..
         } => {
-            draw_bubbles_item_text_agent_ts_item_text(
+            draw_message(
                 BubbleTextContext {
                     roster: context.roster,
                     fold: context.fold,
                     inner: context.inner,
-                    directory: context.directory,
+                    drawn: context.drawn,
                     bar: &bar,
                 },
                 agent,
@@ -381,12 +392,12 @@ fn draw_agent_content(context: &mut BubbleAgentContext<'_>, item: &Item, agent: 
             thoughts,
             ..
         } => {
-            draw_bubbles_item_text_agent_ts_item_run(
+            draw_run(
                 BubbleRunContext {
                     thread: context.thread,
                     fold: context.fold,
                     inner: context.inner,
-                    directory: context.directory,
+                    drawn: context.drawn,
                     bar: &bar,
                 },
                 agent,
@@ -398,11 +409,11 @@ fn draw_agent_content(context: &mut BubbleAgentContext<'_>, item: &Item, agent: 
             );
         }
         Item::Sub { sub, key, .. } => {
-            draw_bubbles_item_text_agent_ts_item_sub_sub_key(
+            draw_sub_rows(
                 context.thread,
                 context.fold,
                 context.inner,
-                context.directory,
+                context.drawn,
                 &bar,
                 *sub,
                 *key,
@@ -413,36 +424,36 @@ fn draw_agent_content(context: &mut BubbleAgentContext<'_>, item: &Item, agent: 
 }
 
 fn open_answer_box(
-    directory: &mut Drawn,
+    drawn: &mut Drawn,
     cur: &mut Option<Open>,
-    width_value: usize,
+    width: usize,
     colors: &HashMap<String, Color>,
     agent: &str,
     permission: bool,
     asked: u64,
 ) -> Style {
-    let character_value = color_of(colors, agent);
-    let border = Style::default().fg(theme::desaturate(character_value, 0.4));
+    let color = color_of(colors, agent);
+    let border = Style::default().fg(theme::desaturate(color, 0.4));
     let what = if permission { " asked to run" } else { " asked" };
     let name = vec![
         Span::styled(
             agent.to_owned(),
-            Style::default().fg(character_value).add_modifier(Modifier::BOLD),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(what, theme::muted()),
     ];
 
-    let (top, _) = top_border(width_value, border, Vec::new(), false, &clock(asked));
+    let (top, _) = top_border(width, border, Vec::new(), false, &clock(asked));
 
     *cur = Some(Open {
-        start: directory.rows.len(),
+        start: drawn.rows.len(),
         border,
         agent: None,
         minute: String::new(),
         name,
         wave: None,
     });
-    directory.rows.push(top);
+    drawn.rows.push(top);
 
     border
 }

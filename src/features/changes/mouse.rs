@@ -10,7 +10,7 @@ impl View {
     }
 }
 
-fn select_mouse_row(event: MouseEvent, last: usize, event_value: MouseButton, view: &mut View) -> Option<Act> {
+fn select_mouse_row(event: MouseEvent, last: usize, button: MouseButton, view: &mut View) -> Option<Act> {
     view.filter_state.filtering = false;
     view.scm.focus = false;
     let row = view
@@ -20,12 +20,12 @@ fn select_mouse_row(event: MouseEvent, last: usize, event_value: MouseButton, vi
 
     view.at = row;
 
-    if event_value == MouseButton::Right {
+    if button == MouseButton::Right {
         // 2 right clicks in a row: the whole selection clears
         if view
             .selection_state
             .right_at
-            .is_some_and(|thread| thread.elapsed() < DOUBLE_CLICK)
+            .is_some_and(|clicked| clicked.elapsed() < DOUBLE_CLICK)
         {
             view.selection_state.right_at = None;
             view.selection_state.sel.clear();
@@ -38,15 +38,15 @@ fn select_mouse_row(event: MouseEvent, last: usize, event_value: MouseButton, vi
         return Some(Act::None);
     }
 
-    if view.layout.rows.get(row).is_some_and(|result| result.comment.is_some()) {
+    if view.layout.rows.get(row).is_some_and(|row| row.comment.is_some()) {
         view.at = row;
         return Some(view.open_comment_row(row, true));
     }
 
     if event.modifiers.contains(KeyModifiers::SHIFT)
-        && let Some(agent) = view.selection_state.anchor
+        && let Some(anchor) = view.selection_state.anchor
     {
-        for i in agent.min(row)..=agent.max(row) {
+        for i in anchor.min(row)..=anchor.max(row) {
             view.select_row(i, true);
         }
 
@@ -115,12 +115,12 @@ fn mouse_view(view: &mut View, event: MouseEvent) -> Act {
     }
 
     // the panel's commit in the review's place: the review's mouse is its
-    if let Some(path) = view.peek.as_mut() {
+    if let Some(peek) = view.peek.as_mut() {
         if matches!(event.kind, MouseEventKind::Down(_)) {
             view.scm.focus = false;
         }
 
-        return path.mouse(event);
+        return peek.mouse(event);
     }
 
     let click = matches!(event.kind, MouseEventKind::Down(MouseButton::Left));
@@ -141,8 +141,8 @@ fn mouse_view(view: &mut View, event: MouseEvent) -> Act {
     let last = view.layout.rows.len().saturating_sub(1);
 
     // a drag past the rows' top / bottom: the row there, the view scrolls 1
-    if let Some(value) = drag_mouse(event, last, view) {
-        return value;
+    if let Some(act) = drag_mouse(event, last, view) {
+        return act;
     }
 
     if matches!(event.kind, MouseEventKind::Up(_)) {
@@ -162,9 +162,9 @@ fn mouse_view(view: &mut View, event: MouseEvent) -> Act {
                 .at
                 .min(view.top + usize::from(view.layout.area.height).saturating_sub(2));
         }
-        MouseEventKind::Down(event_value @ (MouseButton::Left | MouseButton::Right)) => {
-            if let Some(value) = select_mouse_row(event, last, event_value, view) {
-                return value;
+        MouseEventKind::Down(button @ (MouseButton::Left | MouseButton::Right)) => {
+            if let Some(act) = select_mouse_row(event, last, button, view) {
+                return act;
             }
         }
         _ => {}

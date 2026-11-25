@@ -46,8 +46,8 @@ fn thoughts_fold_into_runs_and_messages_verify_none(thread: Thread) {
 
     let none = HashSet::new();
 
-    let fold = |thread_value: &Thread, mode: Thoughts, open: &HashSet<usize>| -> String {
-        let file = Fold {
+    let fold = |thread: &Thread, mode: Thoughts, open: &HashSet<usize>| -> String {
+        let folds = Fold {
             runs: &none,
             all_runs: false,
             thoughts: mode,
@@ -56,65 +56,61 @@ fn thoughts_fold_into_runs_and_messages_verify_none(thread: Thread) {
         };
 
         text(&draw(
-            thread_value,
+            thread,
             Look::Bubbles,
             50,
             &Colors::new(),
             &[],
-            &file,
+            &folds,
             &Picker::default(),
         ))
     };
 
     // hidden: 0 thought rows, 0 count
-    let text_value = fold(&thread, Thoughts::Hidden, &none);
+    let hidden = fold(&thread, Thoughts::Hidden, &none);
 
-    assert!(
-        !text_value.contains('∴') && !text_value.contains("thought"),
-        "{text_value}"
-    );
+    assert!(!hidden.contains('∴') && !hidden.contains("thought"), "{hidden}");
 
     // folded: a count on the run, 1 folded line on the message (cut to the box)
-    let text_2 = fold(&thread, Thoughts::Folded, &none);
+    let folded = fold(&thread, Thoughts::Folded, &none);
 
-    assert!(text_2.contains("1 call · 1 thought · "), "{text_2}");
+    assert!(folded.contains("1 call · 1 thought · "), "{folded}");
 
-    let line = text_2.lines().find(|result| result.contains("▸ ∴")).expect(&text_2);
+    let line = folded.lines().find(|row| row.contains("▸ ∴")).expect(&folded);
 
     assert!(
         line.starts_with("│ ▸ ∴ Cause found") && line.contains('…') && line.ends_with('│'),
-        "{text_2}"
+        "{folded}"
     );
-    thoughts_fold_into_runs_and_messages_verify_open(thread, &none, fold, &text_2);
+    thoughts_fold_into_runs_and_messages_verify_open(thread, &none, fold, &folded);
 }
 
 fn thoughts_fold_into_runs_and_messages_verify_open(
     mut thread: Thread,
     none: &HashSet<usize>,
     fold: impl Fn(&Thread, Thoughts, &HashSet<usize>) -> String,
-    text_2: &str,
+    folded: &str,
 ) {
     assert!(
-        text_2.lines().position(|result_value| result_value.contains("▸ ∴"))
-            < text_2.lines().position(|result_2| result_2.contains("Fixed.")),
-        "{text_2}"
+        folded.lines().position(|row| row.contains("▸ ∴")) < folded.lines().position(|row| row.contains("Fixed.")),
+        "{folded}"
     );
 
     // a click opens it: the full text, wrapped
     let open: HashSet<usize> = [1].into();
-    let text_3 = fold(&thread, Thoughts::Folded, &open);
+    let clicked = fold(&thread, Thoughts::Folded, &open);
 
     assert!(
-        text_3.contains("▾ ∴ Cause found") && text_3.contains("now."),
-        "{text_3}"
+        clicked.contains("▾ ∴ Cause found") && clicked.contains("now."),
+        "{clicked}"
     );
 
     // open: every thought, the run's too (under its folded row)
-    let text_4 = fold(&thread, Thoughts::Open, none);
+    let all_open = fold(&thread, Thoughts::Open, none);
 
     assert!(
-        text_4.contains("∴ Look at the logs first.") && text_4.contains("now."),
-        "{text_4}"
+        all_open.contains("∴ Look at the logs first.") && all_open.contains("now."),
+        "{all_open}"
     );
 
     // a turn that ends on a thought, 0 text: a message of its own; hidden: 0 rows

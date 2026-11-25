@@ -42,13 +42,13 @@ fn profile_change_needs_a_restart() {
     ));
 
     // busy session: left alone (0 host calls)
-    let user = Use {
+    let usage = Use {
         thread_id: "t".into(),
         live: vec!["lilith".into()],
         busy: vec!["lilith".into()],
         ..Default::default()
     };
-    let result = restart(&agent, true, &[user], Path::new("/tmp"));
+    let result = restart(&agent, true, &[usage], Path::new("/tmp"));
 
     assert_eq!(
         result,

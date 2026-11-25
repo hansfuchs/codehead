@@ -7,11 +7,11 @@ impl McpTab {
 }
 
 fn left_click(event: MouseEvent, at: Position, mcp_tab: &mut McpTab) {
-    if let Some(Modal::Agents(path)) = &mut mcp_tab.modal {
-        if let Some(&(_, i)) = mcp_tab.modal_hits.iter().find(|(result, _)| result.contains(at)) {
-            path.cursor = i;
+    if let Some(Modal::Agents(pick)) = &mut mcp_tab.modal {
+        if let Some(&(_, i)) = mcp_tab.modal_hits.iter().find(|(rect, _)| rect.contains(at)) {
+            pick.cursor = i;
 
-            toggle_selected_agent(i, path);
+            toggle_selected_agent(i, pick);
         }
 
         return;
@@ -27,7 +27,7 @@ fn left_click(event: MouseEvent, at: Position, mcp_tab: &mut McpTab) {
         return;
     }
 
-    if let Some(&(_, i)) = mcp_tab.hits.iter().find(|(result_value, _)| result_value.contains(at)) {
+    if let Some(&(_, i)) = mcp_tab.hits.iter().find(|(rect, _)| rect.contains(at)) {
         mcp_tab.filtering = false;
 
         if mcp_tab.cursor == i {
@@ -39,8 +39,8 @@ fn left_click(event: MouseEvent, at: Position, mcp_tab: &mut McpTab) {
 }
 
 fn toggle_selected_agent(i: usize, selection: &mut super::Pick) {
-    if let Some(row_value) = selection.rows.get_mut(i) {
-        row_value.1 = !row_value.1;
+    if let Some(row) = selection.rows.get_mut(i) {
+        row.1 = !row.1;
     }
 }
 
@@ -52,8 +52,8 @@ fn mouse_mcp_tab(mcp_tab: &mut McpTab, event: MouseEvent) {
 
     // the edit form: a click on a text field focuses it; the field takes its mouse
     // (cursor, selection + copy)
-    if let Some(Modal::Edit(error)) = &mut mcp_tab.modal {
-        edit_form_mouse(error, event, at);
+    if let Some(Modal::Edit(form)) = &mut mcp_tab.modal {
+        edit_form_mouse(form, event, at);
 
         return;
     }

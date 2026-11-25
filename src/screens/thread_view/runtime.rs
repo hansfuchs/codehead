@@ -9,7 +9,7 @@ pub(crate) fn run<B: Backend>(
     note: Option<&str>,
     first: &str,
 ) -> Result<Exit, String> {
-    run_with(term, id, cwd, title, note, first, None).map(|error| error.unwrap_or(Exit::Back))
+    run_with(term, id, cwd, title, note, first, None).map(|exit| exit.unwrap_or(Exit::Back))
 }
 
 /// Perf suite: the view of thread ID up to its 1st frame on TERM, as `run_with` opens it.
@@ -22,7 +22,7 @@ pub(crate) fn open_1st_frame<B: Backend>(term: &mut Terminal<B>, id: &str, cwd: 
     view.save_prompt();
     crate::ui::thread_card::mark_seen_now(id);
 
-    term.draw(|file| view.draw(file))
+    term.draw(|frame| view.draw(frame))
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -37,7 +37,7 @@ pub(super) fn to_main(exit: Exit, main: Option<&str>) -> Exit {
             title: thread.title.clone(),
             note: String::new(),
         },
-        (error, _) => error,
+        (exit, _) => exit,
     }
 }
 

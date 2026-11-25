@@ -2,18 +2,18 @@ use super::*;
 
 #[test]
 fn initialize_and_list() {
-    let result = handle(
+    let initialized = handle(
         "t",
         "a",
         &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}),
     )
     .unwrap();
 
-    assert_eq!(result["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(initialized["result"]["protocolVersion"], "2025-03-26");
 
-    let result_value = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
+    let listed = handle("t", "a", &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).unwrap();
 
-    assert_eq!(result_value["result"]["tools"].as_array().unwrap().len(), 13);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 13);
     assert!(
         handle(
             "t",

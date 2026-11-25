@@ -6,54 +6,54 @@ impl ThreadList {
     }
 }
 
-fn list_key_keycode_up_keycode_char(view_state: &mut ThreadList) {
-    if view_state.cursor == 0 {
-        view_state.focus = if view_state.has_stats() {
+fn cursor_up_or_tabs(thread_list: &mut ThreadList) {
+    if thread_list.cursor == 0 {
+        thread_list.focus = if thread_list.has_stats() {
             Focus::Status
         } else {
             Focus::Views
         };
     } else {
-        view_state.cursor -= 1;
+        thread_list.cursor -= 1;
     }
 }
 
-fn list_key_keycode_char(count: usize, view_state: &mut ThreadList) {
-    if let Some(id) = view_state.current().map(|character| character.id.clone()) {
-        if !view_state.sel.remove(&id) {
-            view_state.sel.insert(id);
+fn toggle_selected(count: usize, thread_list: &mut ThreadList) {
+    if let Some(id) = thread_list.current().map(|card| card.id.clone()) {
+        if !thread_list.sel.remove(&id) {
+            thread_list.sel.insert(id);
         }
 
-        if view_state.cursor + 1 < count {
-            view_state.cursor += 1;
+        if thread_list.cursor + 1 < count {
+            thread_list.cursor += 1;
         }
     }
 }
 
-fn list_key_body(key: KeyEvent, view_state: &mut ThreadList) -> Out {
+fn host_view_key(key: KeyEvent, thread_list: &mut ThreadList) -> Out {
     match key.code {
-        KeyCode::Esc if !view_state.filter.text().is_empty() => {
-            view_state.filter.set_text("");
+        KeyCode::Esc if !thread_list.filter.text().is_empty() => {
+            thread_list.filter.set_text("");
             Out::None
         }
         _ => Out::Pass,
     }
 }
 
-fn list_key_keycode_down_keycode_char(count: usize, view_state: &mut ThreadList) {
-    if view_state.cursor + 1 < count {
-        view_state.cursor += 1;
+fn cursor_down(count: usize, thread_list: &mut ThreadList) {
+    if thread_list.cursor + 1 < count {
+        thread_list.cursor += 1;
     }
 }
 
-fn list_key_branch(view_state: &mut ThreadList) {
-    if !view_state.acts().is_empty() {
-        view_state.job_state.actions = Some(0);
+fn open_actions(thread_list: &mut ThreadList) {
+    if !thread_list.acts().is_empty() {
+        thread_list.job_state.actions = Some(0);
     }
 }
 
-fn list_key_body_state(key: KeyEvent, view_state: &mut ThreadList) -> Out {
-    view_state.step_repo(if key.code == KeyCode::Right { 1 } else { -1 });
+fn step_repo_key(key: KeyEvent, thread_list: &mut ThreadList) -> Out {
+    thread_list.step_repo(if key.code == KeyCode::Right { 1 } else { -1 });
     Out::None
 }
 
@@ -64,7 +64,7 @@ fn list_key_thread_list(state: &mut ThreadList, key: KeyEvent) -> Out {
 
     match key.code {
         KeyCode::Left | KeyCode::Right if !ctrl => {
-            return list_key_body_state(key, state);
+            return step_repo_key(key, state);
         }
         KeyCode::Char('f') if ctrl && state.mode == Mode::Manage => {
             state.filtering = true;
@@ -75,25 +75,25 @@ fn list_key_thread_list(state: &mut ThreadList, key: KeyEvent) -> Out {
 
     // the host's views: the host moves its rows (↑ on its top row: `focus_views`)
     if !cards {
-        return list_key_body(key, state);
+        return host_view_key(key, state);
     }
 
     match key.code {
         KeyCode::Up | KeyCode::Char('k') if key.code == KeyCode::Up || state.mode == Mode::Manage => {
-            list_key_keycode_up_keycode_char(state);
+            cursor_up_or_tabs(state);
         }
         KeyCode::Down | KeyCode::Char('j') if key.code == KeyCode::Down || state.mode == Mode::Manage => {
-            list_key_keycode_down_keycode_char(count, state);
+            cursor_down(count, state);
         }
         KeyCode::PageUp => state.cursor = state.cursor.saturating_sub(5),
         KeyCode::PageDown if count > 0 => state.cursor = (state.cursor + 5).min(count - 1),
         KeyCode::Enter => return state.run(Act::Open),
         _ if crate::ui::context_menu::is_key(&key) => {
-            list_key_branch(state);
+            open_actions(state);
         }
         _ if state.mode == Mode::Switch => state.type_filter(key),
         KeyCode::Char(' ') => {
-            list_key_keycode_char(count, state);
+            toggle_selected(count, state);
         }
         KeyCode::Char('a') if !ctrl => return state.run(Act::Archive),
         KeyCode::Char('u') if !ctrl => return state.run(Act::Unarchive),

@@ -215,9 +215,9 @@ fn idle(topics: &Receiver<Topic>) -> (usize, u64) {
 
 fn install(root: &std::path::Path) {
     for i in 0..20_000 {
-        let directory = root.join(format!("p{}", i / 100));
-        let _ = std::fs::create_dir_all(&directory);
-        let _ = std::fs::write(directory.join(format!("f{i}.js")), "x");
+        let dir = root.join(format!("p{}", i / 100));
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(format!("f{i}.js")), "x");
     }
 }
 

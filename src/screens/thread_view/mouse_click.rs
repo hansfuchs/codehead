@@ -22,13 +22,13 @@ fn toggle_fold(folds: &mut HashSet<usize>, key: usize) {
 }
 
 fn mouse_link(view: &mut View, row: usize, col: u16) -> bool {
-    let row_value = &view.stream.drawn.rows[row];
+    let drawn_row = &view.stream.drawn.rows[row];
 
-    if let Some(url) = row_value
+    if let Some(url) = drawn_row
         .links
         .iter()
-        .find(|(agent, bytes, _)| col >= *agent && col < *bytes)
-        .map(|line| line.2.clone())
+        .find(|(start, end, _)| col >= *start && col < *end)
+        .map(|(_, _, url)| url.clone())
     {
         // a file of a message: the files view on it
         if let Some(file) = url.strip_prefix("file://") {
@@ -48,15 +48,15 @@ fn mouse_link(view: &mut View, row: usize, col: u16) -> bool {
 }
 
 fn mouse_copy(view: &mut View, row: usize, col: u16) -> bool {
-    let row_value = &view.stream.drawn.rows[row];
+    let drawn_row = &view.stream.drawn.rows[row];
 
-    if let Some(thread) = row_value
+    if let Some(text) = drawn_row
         .copies
         .iter()
-        .find(|(agent, bytes, _)| col >= *agent && col < *bytes)
-        .map(|character| character.2.clone())
+        .find(|(start, end, _)| col >= *start && col < *end)
+        .map(|(_, _, text)| text.clone())
     {
-        view.copy(&thread);
+        view.copy(&text);
         return true;
     }
 
@@ -92,10 +92,10 @@ fn mouse_hit(view: &mut View, row: usize) -> bool {
 }
 
 fn mouse_choice(view: &mut View, i: usize) {
-    if let Some(agent) = view.thread.asks.first().cloned()
+    if let Some(ask) = view.thread.asks.first().cloned()
         && !view.ask.sent
     {
-        let act = view.ask.click(&agent, i);
+        let act = view.ask.click(&ask, i);
 
         view.ask_act(act);
     }
@@ -103,9 +103,7 @@ fn mouse_choice(view: &mut View, i: usize) {
 
 fn mouse_select(view: &mut View, row: usize, col: u16) {
     let count = match view.selection.clicks {
-        Some((thread, path, count)) if thread.elapsed() < Duration::from_millis(400) && path == (row, col) => {
-            count % 3 + 1
-        }
+        Some((at, cell, clicks)) if at.elapsed() < Duration::from_millis(400) && cell == (row, col) => clicks % 3 + 1,
         _ => 1,
     };
 
@@ -114,25 +112,24 @@ fn mouse_select(view: &mut View, row: usize, col: u16) {
         .line
         .spans
         .iter()
-        .map(|text| text.content.as_ref())
+        .map(|span| span.content.as_ref())
         .collect();
 
+    // selection: 1 click starts it, 2 select the word, 3 the row
     view.selection.sel = match count {
         2 => {
-            let (agent, bytes) = word_at(&text, col);
+            let (start, end) = word_at(&text, col);
 
-            Some(((row, agent), (row, bytes)))
+            Some(((row, start), (row, end)))
         }
         3 => Some(((row, 0), (row, text.chars().count().saturating_sub(1) as u16))),
         _ => None,
     };
 
-    if let Some(thread) = view.selection.sel.and_then(|_| view.selected()) {
-        view.copy(&thread);
+    if let Some(selected) = view.selection.sel.and_then(|_| view.selected()) {
+        view.copy(&selected);
     }
 
     view.selection.dragging = count == 1;
     view.selection.drag_from = Some((row, col));
-
-    // selection: 1 click starts it, 2 select the word, 3 the row
 }

@@ -7,7 +7,7 @@ use std::path::Path;
 pub(super) fn run(mut watcher: notify::RecommendedWatcher, threads: &Path, rx: &Receiver<Msg>) {
     let threads = canon(threads);
     let _ = std::fs::create_dir_all(&threads);
-    let mut width = Watch {
+    let mut watch = Watch {
         threads: threads.clone(),
         gits: Vec::new(),
         works: Vec::new(),
@@ -23,11 +23,11 @@ pub(super) fn run(mut watcher: notify::RecommendedWatcher, threads: &Path, rx: &
     let mut roots_due = true;
 
     loop {
-        if let ControlFlow::Break(()) = run_list(WatchLoop {
+        if let ControlFlow::Break(()) = run_once(WatchLoop {
             watcher: &mut watcher,
             rx,
             threads: &threads,
-            width: &mut width,
+            watch: &mut watch,
             roots_watched: &mut roots_watched,
             shown: &mut shown,
             all: &mut all,
@@ -38,12 +38,12 @@ pub(super) fn run(mut watcher: notify::RecommendedWatcher, threads: &Path, rx: &
     }
 }
 
-fn run_list(settings: WatchLoop<'_>) -> ControlFlow<()> {
+fn run_once(settings: WatchLoop<'_>) -> ControlFlow<()> {
     let WatchLoop {
         watcher,
         rx,
         threads,
-        width,
+        watch,
         roots_watched,
         shown,
         all,
@@ -52,7 +52,7 @@ fn run_list(settings: WatchLoop<'_>) -> ControlFlow<()> {
 
     if *roots_due {
         *roots_due = false;
-        update_watch_roots(watcher, threads, width, roots_watched, shown, all);
+        update_watch_roots(watcher, threads, watch, roots_watched, shown, all);
     }
 
     let Ok(first) = rx.recv() else {
@@ -67,7 +67,7 @@ fn run_list(settings: WatchLoop<'_>) -> ControlFlow<()> {
         WatchEvents {
             rx,
             threads,
-            width,
+            watch,
             roots_watched,
             shown,
             all,
@@ -80,7 +80,7 @@ fn handle_events(first: Msg, mut paths: Vec<PathBuf>, settings: WatchEvents<'_>)
     let WatchEvents {
         rx,
         threads,
-        width,
+        watch,
         roots_watched,
         shown,
         all,
@@ -89,11 +89,11 @@ fn handle_events(first: Msg, mut paths: Vec<PathBuf>, settings: WatchEvents<'_>)
 
     for message in std::iter::once(first).chain(std::iter::from_fn(|| rx.try_recv().ok())) {
         match message {
-            Msg::Paths(path_3) => paths.extend(path_3),
+            Msg::Paths(changed) => paths.extend(changed),
             Msg::Rescan => {
                 *all = store::all_in(threads)
                     .into_iter()
-                    .map(|thread_value| (thread_value.id.clone(), thread_value))
+                    .map(|thread| (thread.id.clone(), thread))
                     .collect();
                 *roots_due = true;
 
@@ -105,19 +105,19 @@ fn handle_events(first: Msg, mut paths: Vec<PathBuf>, settings: WatchEvents<'_>)
         }
     }
 
-    for thread_2 in width.topics(&paths, &mut check_ignore) {
+    for topic in watch.topics(&paths, &mut check_ignore) {
         // a thread's checkouts or a branch switch: other roots
-        if let Topic::Thread(id, Part::Meta) = &thread_2 {
+        if let Topic::Thread(id, Part::Meta) = &topic {
             match store::load_in(threads, id) {
-                Some(count) => all.insert(id.clone(), count),
+                Some(thread) => all.insert(id.clone(), thread),
                 None => all.remove(id),
             };
 
             *roots_due = true;
         }
 
-        *roots_due |= matches!(thread_2, Topic::Git(_, Git::Worktree(_)));
-        bus::publish(&(thread_2));
+        *roots_due |= matches!(topic, Topic::Git(_, Git::Worktree(_)));
+        bus::publish(&(topic));
     }
 
     ControlFlow::Continue(())
@@ -127,7 +127,7 @@ struct WatchLoop<'context> {
     watcher: &'context mut notify::RecommendedWatcher,
     rx: &'context Receiver<Msg>,
     threads: &'context PathBuf,
-    width: &'context mut Watch,
+    watch: &'context mut Watch,
     roots_watched: &'context mut HashSet<PathBuf>,
     shown: &'context mut HashMap<u64, PathBuf>,
     all: &'context mut HashMap<String, store::Thread>,
@@ -137,7 +137,7 @@ struct WatchLoop<'context> {
 struct WatchEvents<'context> {
     rx: &'context Receiver<Msg>,
     threads: &'context Path,
-    width: &'context mut Watch,
+    watch: &'context mut Watch,
     roots_watched: &'context mut HashSet<PathBuf>,
     shown: &'context mut HashMap<u64, PathBuf>,
     all: &'context mut HashMap<String, store::Thread>,
@@ -147,7 +147,7 @@ struct WatchEvents<'context> {
 fn update_watch_roots(
     watcher: &mut notify::RecommendedWatcher,
     threads: &Path,
-    width: &mut Watch,
+    watch: &mut Watch,
     roots_watched: &mut HashSet<PathBuf>,
     shown: &HashMap<u64, PathBuf>,
     all: &HashMap<String, store::Thread>,
@@ -156,10 +156,10 @@ fn update_watch_roots(
     let views: Vec<PathBuf> = shown.values().cloned().collect();
     let (gits, works) = roots(&list, &views);
 
-    width.set(gits, works);
+    watch.set(gits, works);
     let want: HashSet<PathBuf> = std::iter::once(threads.to_path_buf())
-        .chain(width.gits.iter().cloned())
-        .chain(width.works.iter().cloned())
+        .chain(watch.gits.iter().cloned())
+        .chain(watch.works.iter().cloned())
         .collect();
     let mut ops: Vec<notify::PathOp> = roots_watched
         .difference(&want)
@@ -167,11 +167,7 @@ fn update_watch_roots(
         .collect();
     let added: Vec<PathBuf> = want.difference(&*roots_watched).cloned().collect();
 
-    ops.extend(
-        added
-            .iter()
-            .map(|path_value| notify::PathOp::watch_recursive(path_value.clone())),
-    );
+    ops.extend(added.iter().map(|path| notify::PathOp::watch_recursive(path.clone())));
 
     if !ops.is_empty() {
         if let Err(error) = watcher.update_paths(ops) {
@@ -188,12 +184,9 @@ fn update_watch_roots(
     }
 }
 
-fn update_shown(shown: &mut HashMap<u64, PathBuf>, token: u64, directory: Option<PathBuf>) -> bool {
-    match directory {
-        Some(directory_value) => shown
-            .insert(token, directory_value.clone())
-            .as_ref()
-            .is_none_or(|output| *output != directory_value),
+fn update_shown(shown: &mut HashMap<u64, PathBuf>, token: u64, dir: Option<PathBuf>) -> bool {
+    match dir {
+        Some(dir) => shown.insert(token, dir.clone()).as_ref().is_none_or(|old| *old != dir),
         None => shown.remove(&token).is_some(),
     }
 }

@@ -9,11 +9,11 @@ impl TextArea {
         self.vis.clear();
         self.layout();
         let width = area.width.saturating_sub(1) as usize;
-        let height_value = area.height as usize;
+        let height = area.height as usize;
         let (crow, cx) = self.visual_of(self.cur);
 
         if self.follow {
-            self.follow_cursor(height_value, crow);
+            self.follow_cursor(height, crow);
         }
 
         self.scroll = self.scroll.min(self.vis.len().saturating_sub(1));
@@ -27,10 +27,10 @@ impl TextArea {
                 area,
             );
         } else {
-            draw_text_rows(frame, area, height_value, base, self);
+            draw_text_rows(frame, area, height, base, self);
         }
 
-        if focused && crow >= self.scroll && crow < self.scroll + height_value {
+        if focused && crow >= self.scroll && crow < self.scroll + height {
             frame.set_cursor_position(Position {
                 x: area.x + cx.min(width) as u16,
                 y: area.y + (crow - self.scroll) as u16,
@@ -38,37 +38,31 @@ impl TextArea {
         }
     }
 
-    fn follow_cursor(&mut self, height_value: usize, crow: usize) {
+    fn follow_cursor(&mut self, height: usize, crow: usize) {
         if crow < self.scroll {
             self.scroll = crow;
-        } else if crow >= self.scroll + height_value {
-            self.scroll = crow + 1 - height_value;
+        } else if crow >= self.scroll + height {
+            self.scroll = crow + 1 - height;
         }
     }
 }
 
-fn draw_text_rows(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    height_value: usize,
-    base: ratatui::prelude::Style,
-    widget_state: &mut TextArea,
-) {
-    let sel = widget_state.range();
+fn draw_text_rows(frame: &mut Frame<'_>, area: Rect, height: usize, base: ratatui::prelude::Style, ta: &mut TextArea) {
+    let sel = ta.range();
     let sel_style = theme::pill();
     let mut lines = Vec::new();
 
-    let (code, fence) = if widget_state.single {
+    let (code, fence) = if ta.single {
         (Vec::new(), Vec::new())
     } else {
-        fence_colors(&widget_state.lines)
+        fence_colors(&ta.lines)
     };
 
-    for text in widget_state.vis.iter().skip(widget_state.scroll).take(height_value) {
+    for seg in ta.vis.iter().skip(ta.scroll).take(height) {
         draw_text_row(
-            widget_state,
+            ta,
             &mut lines,
-            text,
+            seg,
             TextRowStyles {
                 base,
                 sel,
@@ -82,7 +76,7 @@ fn draw_text_rows(
     frame.render_widget(Paragraph::new(lines).style(base), area);
 }
 
-fn draw_text_row(widget_state: &TextArea, lines: &mut Vec<Line<'_>>, text: &super::Seg, settings: TextRowStyles<'_>) {
+fn draw_text_row(ta: &TextArea, lines: &mut Vec<Line<'_>>, seg: &super::Seg, settings: TextRowStyles<'_>) {
     let TextRowStyles {
         base,
         sel,
@@ -91,28 +85,28 @@ fn draw_text_row(widget_state: &TextArea, lines: &mut Vec<Line<'_>>, text: &supe
         fence,
     } = settings;
 
-    let line = &widget_state.lines[text.row];
-    let colors = mention_colors(line, &widget_state.marks);
-    let code_row = code.get(text.row).and_then(|character| character.as_ref());
-    let fence_row = fence.get(text.row).copied().unwrap_or(false);
+    let line = &ta.lines[seg.row];
+    let colors = mention_colors(line, &ta.marks);
+    let code_row = code.get(seg.row).and_then(|row_colors| row_colors.as_ref());
+    let fence_row = fence.get(seg.row).copied().unwrap_or(false);
 
     // `- ` / `* ` / `+ ` items outside code show as `•` (the text keeps the marker)
-    let bullet = (code_row.is_none() && !fence_row && !widget_state.single)
+    let bullet = (code_row.is_none() && !fence_row && !ta.single)
         .then(|| bullet_column(line))
         .flatten();
 
     let mut spans: Vec<Span> = Vec::new();
     let (mut buf, mut buf_style) = (String::new(), base);
 
-    for (col, &ch) in line.iter().enumerate().take(text.end).skip(text.start) {
-        let path = Pos { row: text.row, col };
+    for (col, &ch) in line.iter().enumerate().take(seg.end).skip(seg.start) {
+        let pos = Pos { row: seg.row, col };
 
-        let st = if sel.is_some_and(|(agent, bytes)| path >= agent && path < bytes) {
+        let st = if sel.is_some_and(|(start, end)| pos >= start && pos < end) {
             sel_style
-        } else if let Some(character_2) = colors[col] {
-            base.fg(character_2).add_modifier(Modifier::BOLD)
-        } else if let Some(character_3) = code_row.and_then(|result| result.get(col)) {
-            base.fg(*character_3)
+        } else if let Some(color) = colors[col] {
+            base.fg(color).add_modifier(Modifier::BOLD)
+        } else if let Some(color) = code_row.and_then(|row_colors| row_colors.get(col)) {
+            base.fg(*color)
         } else if fence_row {
             base.fg(theme::pal().subtext0)
         } else {
@@ -128,16 +122,16 @@ fn draw_text_row(widget_state: &TextArea, lines: &mut Vec<Line<'_>>, text: &supe
     }
 
     // a selected line break shows as 1 selected cell
-    let nl_selected = text.last
-        && sel.is_some_and(|(agent_value, bytes_value)| {
+    let nl_selected = seg.last
+        && sel.is_some_and(|(start, end)| {
             Pos {
-                row: text.row,
-                col: text.end,
-            } >= agent_value
+                row: seg.row,
+                col: seg.end,
+            } >= start
                 && Pos {
-                    row: text.row,
-                    col: text.end,
-                } < bytes_value
+                    row: seg.row,
+                    col: seg.end,
+                } < end
         });
 
     if !buf.is_empty() {
@@ -153,14 +147,10 @@ fn draw_text_row(widget_state: &TextArea, lines: &mut Vec<Line<'_>>, text: &supe
 
 fn bullet_column(line: &[char]) -> Option<usize> {
     list_item(line)
-        .filter(|(_, width_value, _)| {
-            *width_value <= 6
+        .filter(|(_, width, _)| {
+            *width <= 6
                 && matches!(
-                    line.get(
-                        line.iter()
-                            .take_while(|character_value| **character_value == ' ')
-                            .count()
-                    ),
+                    line.get(line.iter().take_while(|ch| **ch == ' ').count()),
                     Some('-' | '*' | '+')
                 )
         })

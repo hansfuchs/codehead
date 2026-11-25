@@ -5,43 +5,39 @@ impl FlowsTab {
         mouse_flows_tab(self, event)
     }
 
-    fn mouse_body(&mut self, text: super::Sub) {
+    fn switch_sub(&mut self, sub: super::Sub) {
         self.editor = None;
-        self.sub = text;
+        self.sub = sub;
         self.at = 0;
         self.focus = Focus::List;
         self.reload();
     }
 }
 
-fn mouse_body_state(i: usize, view_state: &mut FlowsTab) {
-    view_state.editor = None;
-    view_state.at = i;
-    view_state.focus = Focus::List;
-    view_state.load_flow();
+fn select_list_row(i: usize, tab: &mut FlowsTab) {
+    tab.editor = None;
+    tab.at = i;
+    tab.focus = Focus::List;
+    tab.load_flow();
 }
 
 fn mouse_flows_tab(state: &mut FlowsTab, event: MouseEvent) -> Out {
-    let path = Position {
+    let at = Position {
         x: event.column,
         y: event.row,
     };
     let click = matches!(event.kind, MouseEventKind::Down(MouseButton::Left));
 
-    if let Some(ed) = state.editor.as_mut()
-        && let Some(&(result_value, i)) = state
-            .hit_regions
-            .field_rects
-            .iter()
-            .find(|(result, _)| result.contains(path))
+    if let Some(editor) = state.editor.as_mut()
+        && let Some(&(field_rect, i)) = state.hit_regions.field_rects.iter().find(|(area, _)| area.contains(at))
     {
-        let _ = result_value;
+        let _ = field_rect;
 
         if click {
-            ed.field = i;
+            editor.field = i;
         }
 
-        ed.fields[i].1.mouse(event);
+        editor.fields[i].1.mouse(event);
         return Out::None;
     }
 
@@ -49,37 +45,23 @@ fn mouse_flows_tab(state: &mut FlowsTab, event: MouseEvent) -> Out {
         return Out::None;
     }
 
-    if let Some(&(_, text)) = state
-        .hit_regions
-        .sub_rects
-        .iter()
-        .find(|(result_2, _)| result_2.contains(path))
-    {
-        if text != state.sub && state.store_editor() {
-            state.mouse_body(text);
+    if let Some(&(_, sub)) = state.hit_regions.sub_rects.iter().find(|(area, _)| area.contains(at)) {
+        if sub != state.sub && state.store_editor() {
+            state.switch_sub(sub);
         }
 
         return Out::None;
     }
 
-    if let Some(&(_, i)) = state
-        .hit_regions
-        .rows
-        .iter()
-        .find(|(result_3, _)| result_3.contains(path))
-    {
+    if let Some(&(_, i)) = state.hit_regions.rows.iter().find(|(area, _)| area.contains(at)) {
         if state.store_editor() {
-            mouse_body_state(i, state);
+            select_list_row(i, state);
         }
 
         return Out::None;
     }
 
-    if let Some(&(_, i)) = state
-        .hit_regions
-        .rail_rows
-        .iter()
-        .find(|(result_4, _)| result_4.contains(path))
+    if let Some(&(_, i)) = state.hit_regions.rail_rows.iter().find(|(area, _)| area.contains(at))
         && state.store_editor()
     {
         state.editor = None;

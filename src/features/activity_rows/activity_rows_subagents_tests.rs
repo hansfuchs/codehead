@@ -26,7 +26,7 @@ fn order_groups_by_master_with_nested_ones_under_their_parent() {
     ];
     let output: Vec<(&str, usize)> = order(&subs)
         .into_iter()
-        .map(|(text, directory)| (text.id.as_str(), directory))
+        .map(|(sub, depth)| (sub.id.as_str(), depth))
         .collect();
 
     assert_eq!(output, [("a", 0), ("c", 1), ("d", 0), ("e", 0), ("b", 0)]);

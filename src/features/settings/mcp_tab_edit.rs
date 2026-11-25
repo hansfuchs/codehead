@@ -3,8 +3,6 @@ use super::{
     say, servers,
 };
 
-/// The env / header values of S in the keychain: plain values move in (OLD's entries a new value
-/// replaces go). 0 keychain: Err, the owner writes `${VAR}` instead.
 /// Import HARNESS's server NAME (from SOURCE) into codehead's SERVERS: saved, secrets in the
 /// keychain, gone from the harness. (the server, the toast).
 pub(super) fn import(
@@ -20,7 +18,7 @@ pub(super) fn import(
         server.name = server.name.chars().map(server_name_character).collect();
     }
 
-    if servers.iter().any(|x| x.name == server.name) {
+    if servers.iter().any(|existing| existing.name == server.name) {
         return Err(format!("{}: codehead has a server with this name", server.name));
     }
 
@@ -59,23 +57,26 @@ pub(super) fn commit_edit(
     servers: Vec<Server>,
 ) -> Result<(Server, Vec<Server>), String> {
     secure(&mut server, old)?;
-    let mut all: Vec<Server> = servers.into_iter().filter(|x| Some(&x.name) != old_name).collect();
+    let mut all: Vec<Server> = servers
+        .into_iter()
+        .filter(|existing| Some(&existing.name) != old_name)
+        .collect();
 
     all.push(server.clone());
-    all.sort_by(|agent, bytes| agent.name.cmp(&bytes.name));
+    all.sort_by(|left, right| left.name.cmp(&right.name));
     servers::save(&all)?;
 
     // a rename: the agents follow
-    if let Some(output) = &old_name
-        && **output != server.name
+    if let Some(previous_name) = &old_name
+        && **previous_name != server.name
     {
-        for mut agent_4 in roster::active()
+        for mut agent in roster::active()
             .into_iter()
-            .filter(|agent_3| agent_3.mcp.contains(output))
+            .filter(|agent| agent.mcp.contains(previous_name))
         {
-            rename_agent_server(&server, &mut agent_4, output);
+            rename_agent_server(&server, &mut agent, previous_name);
 
-            let _ = roster::save(&agent_4);
+            let _ = roster::save(&agent);
         }
     }
 
@@ -83,20 +84,22 @@ pub(super) fn commit_edit(
 }
 
 fn rename_agent_server(server: &Server, agent: &mut roster::Agent, old_name: &String) {
-    for name_2 in agent.mcp.iter_mut().filter(|name_value| **name_value == *old_name) {
-        name_2.clone_from(&server.name);
+    for listed in agent.mcp.iter_mut().filter(|listed| **listed == *old_name) {
+        listed.clone_from(&server.name);
     }
 }
 
+/// The env / header values of S in the keychain: plain values move in (OLD's entries a new value
+/// replaces go). 0 keychain: Err, the owner writes `${VAR}` instead.
 pub(super) fn secure(server: &mut Server, old: Option<&Server>) -> Result<(), String> {
     let name = server.name.clone();
 
     let olds: Vec<String> = old
-        .map(|server_value| {
-            server_value
+        .map(|previous| {
+            previous
                 .env
                 .values()
-                .chain(server_value.headers.values())
+                .chain(previous.headers.values())
                 .cloned()
                 .collect()
         })
@@ -108,8 +111,8 @@ pub(super) fn secure(server: &mut Server, old: Option<&Server>) -> Result<(), St
 
     let now: Vec<&String> = server.env.values().chain(server.headers.values()).collect();
 
-    for reference_value in olds.iter().filter(|reference| !now.contains(reference)) {
-        servers::forget_secret(reference_value);
+    for stale in olds.iter().filter(|reference| !now.contains(reference)) {
+        servers::forget_secret(stale);
     }
 
     Ok(())
@@ -134,27 +137,27 @@ pub(super) fn save_edit(edit_form: Box<EditForm>, mcp_tab: &mut McpTab) -> Optio
     let old = edit_form
         .old
         .as_ref()
-        .and_then(|count| mcp_tab.servers.iter().find(|text_value| &text_value.name == count))
+        .and_then(|old_name| mcp_tab.servers.iter().find(|server| &server.name == old_name))
         .cloned();
 
-    let server_2 = match self::server(&edit_form) {
-        Ok(server_value) => server_value,
+    let server = match self::server(&edit_form) {
+        Ok(server) => server,
         Err(why) => {
             self::say(why, true, mcp_tab);
             return Some(Modal::Edit(edit_form));
         }
     };
 
-    if let Err(why) = server_2.check() {
+    if let Err(why) = server.check() {
         self::say(why, true, mcp_tab);
         return Some(Modal::Edit(edit_form));
     }
 
-    if edit_form.old.as_deref() != Some(server_2.name.as_str())
-        && mcp_tab.servers.iter().any(|x| x.name == server_2.name)
+    if edit_form.old.as_deref() != Some(server.name.as_str())
+        && mcp_tab.servers.iter().any(|existing| existing.name == server.name)
     {
         self::say(
-            format!("{}: codehead has a server with this name", server_2.name),
+            format!("{}: codehead has a server with this name", server.name),
             true,
             mcp_tab,
         );
@@ -165,7 +168,7 @@ pub(super) fn save_edit(edit_form: Box<EditForm>, mcp_tab: &mut McpTab) -> Optio
     // thread (tests: at once); the form comes back on an error
     let servers = mcp_tab.servers.clone();
     let old_name = edit_form.old.clone();
-    let run = move || commit_edit(server_2, old.as_ref(), old_name.as_ref(), servers);
+    let run = move || commit_edit(server, old.as_ref(), old_name.as_ref(), servers);
 
     if cfg!(test) {
         let result = run();
@@ -203,37 +206,35 @@ pub(super) fn server(edit_form: &EditForm) -> Result<Server, String> {
     let target = edit_form.target.text().trim().to_string();
     let mut map = BTreeMap::new();
 
-    for line_value in edit_form
+    for line in edit_form
         .secrets
         .text()
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
-        let (key, value) = line_value
-            .split_once('=')
-            .ok_or_else(|| format!("{line_value:?}: KEY=value"))?;
+        let (key, value) = line.split_once('=').ok_or_else(|| format!("{line:?}: KEY=value"))?;
 
         map.insert(key.trim().to_string(), value.trim().to_string());
     }
 
-    let mut text_value = Server {
+    let mut server = Server {
         name: edit_form.name.text().trim().to_string(),
         kind,
         auto_allow: edit_form.auto_allow,
         ..Default::default()
     };
 
-    if text_value.kind == "stdio" {
+    if server.kind == "stdio" {
         let mut parts = harnesses::split(&target).into_iter();
 
-        text_value.command = parts.next();
-        text_value.args = parts.collect();
-        text_value.env = map;
+        server.command = parts.next();
+        server.args = parts.collect();
+        server.env = map;
     } else {
-        text_value.url = (!target.is_empty()).then_some(target);
-        text_value.headers = map;
+        server.url = (!target.is_empty()).then_some(target);
+        server.headers = map;
     }
 
-    Ok(text_value)
+    Ok(server)
 }

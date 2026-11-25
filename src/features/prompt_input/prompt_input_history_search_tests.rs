@@ -14,39 +14,39 @@ fn history_files_parse() {
 
 #[test]
 fn the_thread_comes_first_dupes_go_and_enter_picks() {
-    let mut height = HistSearch {
+    let mut search = HistSearch {
         fzf: false,
         ..Default::default()
     };
 
-    height.open(vec!["cargo test".into(), "just build".into()], "");
-    height.poll();
+    search.open(vec!["cargo test".into(), "just build".into()], "");
+    search.poll();
 
     assert_eq!(
-        &height.matches[..2],
+        &search.matches[..2],
         &["just build".to_string(), "cargo test".to_string()]
     );
 
-    height.input_changed("!cargo");
-    height.poll();
+    search.input_changed("!cargo");
+    search.poll();
 
-    assert_eq!(height.matches.first().map(String::as_str), Some("cargo test"));
-    assert!(height.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-    assert_eq!(height.picked.as_deref(), Some("! cargo test"));
-    assert!(!height.is_open());
+    assert_eq!(search.matches.first().map(String::as_str), Some("cargo test"));
+    assert!(search.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    assert_eq!(search.picked.as_deref(), Some("! cargo test"));
+    assert!(!search.is_open());
 }
 
 #[test]
 fn out_of_shell_mode_closes() {
-    let mut height = HistSearch {
+    let mut search = HistSearch {
         fzf: false,
         ..Default::default()
     };
 
-    height.open(vec![], "x");
-    height.input_changed("no bang");
+    search.open(vec![], "x");
+    search.input_changed("no bang");
 
-    assert!(!height.is_open());
+    assert!(!search.is_open());
 }
 
 #[test]
@@ -58,8 +58,8 @@ fn fzf_ranks_when_present() {
     let all: Vec<String> = ["git push", "cargo build --release", "echo cbr"]
         .map(String::from)
         .to_vec();
-    let message = fzf_filter(&all, "cargo rel").unwrap();
+    let matches = fzf_filter(&all, "cargo rel").unwrap();
 
-    assert_eq!(message, vec!["cargo build --release"]);
+    assert_eq!(matches, vec!["cargo build --release"]);
     assert_eq!(fzf_filter(&all, "zzzz").unwrap(), Vec::<String>::new());
 }

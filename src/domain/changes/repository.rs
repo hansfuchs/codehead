@@ -31,11 +31,11 @@ pub(crate) fn base(dir: &Path) -> (String, String) {
     let def = git(dir, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
         .ok()
         .map(|text| text.trim().to_string())
-        .filter(|text_value| !text_value.is_empty())
+        .filter(|name| !name.is_empty())
         .or_else(|| {
             ["origin/main", "origin/master"]
                 .into_iter()
-                .find(|result| git(dir, &["rev-parse", "--verify", "--quiet", result]).is_ok())
+                .find(|candidate| git(dir, &["rev-parse", "--verify", "--quiet", candidate]).is_ok())
                 .map(String::from)
         });
 
@@ -53,20 +53,20 @@ pub(crate) fn base(dir: &Path) -> (String, String) {
 }
 /// A rebase / merge of DIR stopped (its state dir or `MERGE_HEAD` exists).
 pub(crate) fn stopped(dir: &Path) -> bool {
-    ["rebase-merge", "rebase-apply", "MERGE_HEAD"].iter().any(|path| {
-        git(dir, &["rev-parse", "--git-path", path]).is_ok_and(|path_value| {
-            let path_2 = PathBuf::from(path_value.trim());
+    ["rebase-merge", "rebase-apply", "MERGE_HEAD"].iter().any(|state| {
+        git(dir, &["rev-parse", "--git-path", state]).is_ok_and(|output| {
+            let state_path = PathBuf::from(output.trim());
 
-            absolute_conflict_path(dir, path_2)
+            state_exists(dir, state_path)
         })
     })
 }
 
-fn absolute_conflict_path(dir: &Path, path_2: PathBuf) -> bool {
-    if path_2.is_absolute() {
-        path_2.exists()
+fn state_exists(dir: &Path, state_path: PathBuf) -> bool {
+    if state_path.is_absolute() {
+        state_path.exists()
     } else {
-        dir.join(path_2).exists()
+        dir.join(state_path).exists()
     }
 }
 /// The uncommitted changes of DIR (staged + unstaged + untracked, against HEAD); the base,
@@ -94,9 +94,9 @@ pub(crate) fn load_from(dir: &Path, all: bool) -> Result<Changes, String> {
     let others = git(dir, &["ls-files", "--others", "--exclude-standard", "-z"]).unwrap_or_default();
     let mut fresh = HashSet::new();
 
-    for path_value in others.split('\0').filter(|path| !path.is_empty()).take(MAX_UNTRACKED) {
-        files.push(untracked(dir, path_value));
-        fresh.insert(path_value.to_string());
+    for path in others.split('\0').filter(|path| !path.is_empty()).take(MAX_UNTRACKED) {
+        files.push(untracked(dir, path));
+        fresh.insert(path.to_string());
     }
 
     order(&mut files);
@@ -106,7 +106,7 @@ pub(crate) fn load_from(dir: &Path, all: bool) -> Result<Changes, String> {
     let unstaged = z_paths(&git(dir, &["diff", "--name-only", "-z"]).unwrap_or_default());
     let staged = cached
         .into_iter()
-        .map(|path_2| (path_2.clone(), !unstaged.contains(&path_2)))
+        .map(|path| (path.clone(), !unstaged.contains(&path)))
         .collect();
     let stopped =
         stopped(dir).then(|| z_paths(&git(dir, &["diff", "--name-only", "--diff-filter=U", "-z"]).unwrap_or_default()));
@@ -119,7 +119,7 @@ pub(crate) fn load_from(dir: &Path, all: bool) -> Result<Changes, String> {
             &["rev-list", "--left-right", "--count", &format!("HEAD...{label}")],
         )
         .unwrap_or_default();
-        let mut it = lr.split_whitespace().map(|x| x.parse::<usize>().unwrap_or(0));
+        let mut it = lr.split_whitespace().map(|count| count.parse::<usize>().unwrap_or(0));
 
         (it.next().unwrap_or(0), it.next().unwrap_or(0))
     };
@@ -167,12 +167,12 @@ pub(crate) fn parse_pr(value: &serde_json::Value) -> Option<Pr> {
         ..Default::default()
     };
 
-    for character in value["statusCheckRollup"].as_array().into_iter().flatten() {
+    for check in value["statusCheckRollup"].as_array().into_iter().flatten() {
         // check runs: status + conclusion; status contexts: state
-        let verdict = character["conclusion"]
+        let verdict = check["conclusion"]
             .as_str()
-            .filter(|text| !text.is_empty())
-            .or_else(|| character["state"].as_str())
+            .filter(|conclusion| !conclusion.is_empty())
+            .or_else(|| check["state"].as_str())
             .unwrap_or_default()
             .to_ascii_uppercase();
 
@@ -189,17 +189,17 @@ pub(crate) fn parse_pr(value: &serde_json::Value) -> Option<Pr> {
 /// the lead.
 pub(crate) fn ci_fix_message(dir: &Path) -> Result<String, String> {
     let gh = |args: &[&str]| -> Result<String, String> {
-        let output_value = Command::new("gh")
+        let output = Command::new("gh")
             .current_dir(dir)
             .args(args)
             .stdin(Stdio::null())
             .output()
             .map_err(|error| format!("gh: {error}"))?;
 
-        if output_value.status.success() {
-            Ok(String::from_utf8_lossy(&output_value.stdout).into_owned())
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
-            Err(String::from_utf8_lossy(&output_value.stderr)
+            Err(String::from_utf8_lossy(&output.stderr)
                 .lines()
                 .next()
                 .unwrap_or("gh failed")
@@ -218,12 +218,12 @@ pub(crate) fn ci_fix_message(dir: &Path) -> Result<String, String> {
         "--json",
         "databaseId,conclusion,name,url",
     ])?)
-    .map_err(|error_value| error_value.to_string())?;
+    .map_err(|error| error.to_string())?;
     let run = runs
         .as_array()
         .into_iter()
         .flatten()
-        .find(|result| result["conclusion"] == "failure")
+        .find(|run| run["conclusion"] == "failure")
         .ok_or("0 failed CI runs on this branch")?;
     let id = run["databaseId"].as_u64().ok_or("0 run id")?.to_string();
     let log = gh(&["run", "view", &id, "--log-failed"])?;
@@ -257,28 +257,28 @@ pub(crate) fn pick_hunk(diff: &str, line: u32) -> Option<String> {
     let mut head = String::new();
     let mut hunks: Vec<(u32, u32, String)> = Vec::new();
 
-    for line_value in diff.lines() {
-        if let Some(height) = line_value.strip_prefix("@@ ") {
-            let new = height.split(' ').find(|width| width.starts_with('+'))?;
+    for diff_line in diff.lines() {
+        if let Some(header) = diff_line.strip_prefix("@@ ") {
+            let new = header.split(' ').find(|range| range.starts_with('+'))?;
             let mut it = new[1..].split(',');
-            let character: u32 = it.next()?.parse().ok()?;
-            let directory: u32 = it.next().and_then(|x| x.parse().ok()).unwrap_or(1);
+            let start: u32 = it.next()?.parse().ok()?;
+            let count: u32 = it.next().and_then(|text| text.parse().ok()).unwrap_or(1);
 
-            hunks.push((character, directory, format!("{line_value}\n")));
+            hunks.push((start, count, format!("{diff_line}\n")));
         } else if let Some(hunk) = hunks.last_mut() {
-            hunk.2.push_str(line_value);
+            hunk.2.push_str(diff_line);
             hunk.2.push('\n');
         } else {
-            head.push_str(line_value);
+            head.push_str(diff_line);
             head.push('\n');
         }
     }
 
-    let hit = hunks.into_iter().find(|(character_value, directory_value, _)| {
-        if *directory_value == 0 {
-            line == *character_value || line == *character_value + 1
+    let hit = hunks.into_iter().find(|(start, count, _)| {
+        if *count == 0 {
+            line == *start || line == *start + 1
         } else {
-            line >= *character_value && line < character_value + directory_value
+            line >= *start && line < start + count
         }
     })?;
 

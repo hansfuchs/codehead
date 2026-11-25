@@ -33,10 +33,10 @@ pub(super) fn start_table_cell(state: &mut MarkdownState<'_>) {
 }
 
 pub(super) fn end_table_cell(state: &mut MarkdownState<'_>) {
-    if let (Some((rows, _)), Some(bytes_6)) = (state.table.as_mut(), state.block.take())
+    if let (Some((rows, _)), Some(block)) = (state.table.as_mut(), state.block.take())
         && let Some(row) = rows.last_mut()
     {
-        row.push(bytes_6.pieces);
+        row.push(block.pieces);
     }
 }
 

@@ -80,9 +80,9 @@ struct Morph {
 impl Morph {
     /// The box now: the changed cells on their way from FROM to TO (`dissolve::mix`).
     fn shown(&self) -> Buffer {
-        let path = (self.start.elapsed().as_secs_f32() / MORPH_TIME.as_secs_f32()).min(1.0);
+        let progress = (self.start.elapsed().as_secs_f32() / MORPH_TIME.as_secs_f32()).min(1.0);
 
-        crate::ui::dissolve::mix(&self.from, &self.to, path)
+        crate::ui::dissolve::mix(&self.from, &self.to, progress)
     }
 }
 

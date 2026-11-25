@@ -5,8 +5,8 @@ fn typed(ta: &mut TextArea, text: &str) {
     ta.move_end();
 }
 
-fn key(character: &mut ShellComp, ta: &mut TextArea, dir: &Path, code: KeyCode) -> bool {
-    character.key(KeyEvent::new(code, KeyModifiers::NONE), ta, dir, &[])
+fn key(completion: &mut ShellComp, ta: &mut TextArea, dir: &Path, code: KeyCode) -> bool {
+    completion.key(KeyEvent::new(code, KeyModifiers::NONE), ta, dir, &[])
 }
 
 /// A project with a justfile, a package.json (pnpm) and a Makefile; 0 fish (deterministic).
@@ -24,7 +24,7 @@ fn project(name: &str) -> (PathBuf, ShellComp) {
     .unwrap();
     std::fs::write(dir.join("pnpm-lock.yaml"), "").unwrap();
     std::fs::write(dir.join("Makefile"), ".PHONY: all clean\nCC := cc\n# make it all\nall: main.o\n\tcc\nclean: ## remove the build\n\trm -rf out\n%.o: %.c\n\tcc\n").unwrap();
-    let character = ShellComp {
+    let completion = ShellComp {
         fish: false,
         catalog: crate::features::prompt_input::shell_completion::CommandCatalog {
             commands: Some(Arc::new(vec!["bunx".into(), "busybox".into(), "cargo".into()])),
@@ -35,16 +35,16 @@ fn project(name: &str) -> (PathBuf, ShellComp) {
         ..Default::default()
     };
 
-    (dir, character)
+    (dir, completion)
 }
 
 #[test]
 fn project_files_parse() {
     let (dir, _) = project("parse");
-    let thread = tasks(&dir.join("sub"));
-    let runs: Vec<(&str, &str)> = thread
+    let found = tasks(&dir.join("sub"));
+    let runs: Vec<(&str, &str)> = found
         .iter()
-        .map(|thread_value| (thread_value.run.as_str(), thread_value.doc.as_str()))
+        .map(|task| (task.run.as_str(), task.doc.as_str()))
         .collect();
 
     assert_eq!(
@@ -65,8 +65,8 @@ fn project_files_parse() {
     assert_eq!(
         tasks(&dir)
             .iter()
-            .find(|thread_2| thread_2.name == "dev")
-            .map(|thread_3| thread_3.run.as_str()),
+            .find(|task| task.name == "dev")
+            .map(|task| task.run.as_str()),
         Some("npm run dev")
     );
 
@@ -75,52 +75,52 @@ fn project_files_parse() {
 
 #[test]
 fn the_first_word_offers_tasks_then_commands_and_tab_takes_one() {
-    let (dir, mut character) = project("first");
+    let (dir, mut completion) = project("first");
     let mut ta = TextArea::new(false, "");
 
     // `! `: 0 dropdown (↑ stays the history's); tab opens the tasks
     typed(&mut ta, "! ");
 
-    assert_eq!(super::texts(&ta, &dir, &mut character), [] as [std::string::String; 0]);
-    assert!(key(&mut character, &mut ta, &dir, KeyCode::Tab));
-    assert_eq!(super::texts(&ta, &dir, &mut character).len(), 7);
+    assert_eq!(super::texts(&ta, &dir, &mut completion), [] as [std::string::String; 0]);
+    assert!(key(&mut completion, &mut ta, &dir, KeyCode::Tab));
+    assert_eq!(super::texts(&ta, &dir, &mut completion).len(), 7);
     assert_eq!(ta.text(), "! just build", "the 1st row in the text");
 
     // a word: tasks by name, then the commands on PATH
     typed(&mut ta, "! bu");
 
     assert_eq!(
-        super::texts(&ta, &dir, &mut character),
+        super::texts(&ta, &dir, &mut completion),
         ["just build ", "pnpm build:web ", "bunx ", "busybox "]
     );
 
     // passive: enter, ↑↓ stay the input's; tab: active on the 1st row, tab / ↓ the next
-    assert!(!key(&mut character, &mut ta, &dir, KeyCode::Enter));
-    assert!(!key(&mut character, &mut ta, &dir, KeyCode::Down));
-    assert!(key(&mut character, &mut ta, &dir, KeyCode::Tab));
+    assert!(!key(&mut completion, &mut ta, &dir, KeyCode::Enter));
+    assert!(!key(&mut completion, &mut ta, &dir, KeyCode::Down));
+    assert!(key(&mut completion, &mut ta, &dir, KeyCode::Tab));
     assert_eq!(ta.text(), "! just build");
-    assert!(key(&mut character, &mut ta, &dir, KeyCode::Tab));
+    assert!(key(&mut completion, &mut ta, &dir, KeyCode::Tab));
     assert_eq!(ta.text(), "! pnpm build:web");
     assert_eq!(
-        super::texts(&ta, &dir, &mut character).len(),
+        super::texts(&ta, &dir, &mut completion).len(),
         4,
         "the typed word stays the filter"
     );
-    assert!(key(&mut character, &mut ta, &dir, KeyCode::Enter));
+    assert!(key(&mut completion, &mut ta, &dir, KeyCode::Enter));
     assert_eq!(ta.text(), "! pnpm build:web ");
 
     // esc: closed for this word
     typed(&mut ta, "! bu");
 
-    assert!(key(&mut character, &mut ta, &dir, KeyCode::Esc));
-    assert_eq!(super::texts(&ta, &dir, &mut character), [] as [std::string::String; 0]);
-    assert!(!key(&mut character, &mut ta, &dir, KeyCode::Down));
+    assert!(key(&mut completion, &mut ta, &dir, KeyCode::Esc));
+    assert_eq!(super::texts(&ta, &dir, &mut completion), [] as [std::string::String; 0]);
+    assert!(!key(&mut completion, &mut ta, &dir, KeyCode::Down));
 
     // a path word: the path dropdown's; out of shell mode: 0 dropdown
-    for thread in ["! ./bu", "bu", "! cargo \"bu"] {
-        typed(&mut ta, thread);
+    for input in ["! ./bu", "bu", "! cargo \"bu"] {
+        typed(&mut ta, input);
 
-        assert!(super::texts(&ta, &dir, &mut character).is_empty(), "{thread}");
+        assert!(super::texts(&ta, &dir, &mut completion).is_empty(), "{input}");
     }
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -128,67 +128,67 @@ fn the_first_word_offers_tasks_then_commands_and_tab_takes_one() {
 
 #[test]
 fn a_runner_offers_its_tasks_at_once() {
-    let (dir, mut character) = project("runner");
+    let (dir, mut completion) = project("runner");
     let mut ta = TextArea::new(false, "");
 
     typed(&mut ta, "! just ");
 
-    assert_eq!(super::texts(&ta, &dir, &mut character), ["build ", "test "]);
-    assert!(key(&mut character, &mut ta, &dir, KeyCode::Tab));
-    assert!(key(&mut character, &mut ta, &dir, KeyCode::Enter));
+    assert_eq!(super::texts(&ta, &dir, &mut completion), ["build ", "test "]);
+    assert!(key(&mut completion, &mut ta, &dir, KeyCode::Tab));
+    assert!(key(&mut completion, &mut ta, &dir, KeyCode::Enter));
     assert_eq!(ta.text(), "! just build ");
 
     typed(&mut ta, "! pnpm run b");
 
-    assert_eq!(super::texts(&ta, &dir, &mut character), ["build:web "]);
+    assert_eq!(super::texts(&ta, &dir, &mut completion), ["build:web "]);
 
     // 1 row: tab takes it
     typed(&mut ta, "! make c");
 
-    assert_eq!(super::texts(&ta, &dir, &mut character), ["clean "]);
-    assert!(key(&mut character, &mut ta, &dir, KeyCode::Tab));
+    assert_eq!(super::texts(&ta, &dir, &mut completion), ["clean "]);
+    assert!(key(&mut completion, &mut ta, &dir, KeyCode::Tab));
     assert_eq!(ta.text(), "! make clean ");
 
     // after `&&`: a new command (its 1st word)
     typed(&mut ta, "! make clean && just t");
 
-    assert_eq!(super::texts(&ta, &dir, &mut character), ["test "]);
+    assert_eq!(super::texts(&ta, &dir, &mut completion), ["test "]);
 
     typed(&mut ta, "! cd sub && te");
 
-    assert_eq!(super::texts(&ta, &dir, &mut character), ["just test "]);
+    assert_eq!(super::texts(&ta, &dir, &mut completion), ["just test "]);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn the_history_suggests_the_rest_and_right_takes_it() {
-    let (dir, mut character) = project("suggest");
+    let (dir, mut completion) = project("suggest");
     let mut ta = TextArea::new(false, "");
 
     typed(&mut ta, "! cargo t");
 
-    assert_eq!(character.suggestion(&ta, &[]).as_deref(), Some("est --release"));
+    assert_eq!(completion.suggestion(&ta, &[]).as_deref(), Some("est --release"));
 
     // the thread's own commands first (newest first)
-    let thread = vec!["cargo tree".to_string()];
+    let commands = vec!["cargo tree".to_string()];
 
-    assert_eq!(character.suggestion(&ta, &thread).as_deref(), Some("ree"));
+    assert_eq!(completion.suggestion(&ta, &commands).as_deref(), Some("ree"));
 
     // alt+→: 1 word; →: the rest
     typed(&mut ta, "! cargo");
 
-    assert!(character.accept(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT), &mut ta, &[]));
+    assert!(completion.accept(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT), &mut ta, &[]));
     assert_eq!(ta.text(), "! cargo test");
-    assert!(character.accept(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &mut ta, &[]));
+    assert!(completion.accept(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &mut ta, &[]));
     assert_eq!(ta.text(), "! cargo test --release");
-    assert!(!character.accept(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &mut ta, &[]));
+    assert!(!completion.accept(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &mut ta, &[]));
 
     // the cursor not at the end: 0 suggestion
     typed(&mut ta, "! cargo t");
     ta.move_start();
 
-    assert!(character.suggestion(&ta, &[]).is_none());
+    assert!(completion.suggestion(&ta, &[]).is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -203,18 +203,18 @@ fn fish_completes_arguments_with_descriptions() {
 
     assert!(
         rows.iter()
-            .any(|(thread, directory)| thread == "checkout" && !directory.is_empty()),
+            .any(|(word, description)| word == "checkout" && !description.is_empty()),
         "{rows:?}"
     );
 
-    let (dir, mut character) = project("fish");
+    let (dir, mut completion) = project("fish");
 
-    character.fish = true;
+    completion.fish = true;
     let mut ta = TextArea::new(false, "");
 
     typed(&mut ta, "! git chec");
 
-    assert!(super::texts(&ta, &dir, &mut character).contains(&"checkout ".to_string()));
+    assert!(super::texts(&ta, &dir, &mut completion).contains(&"checkout ".to_string()));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

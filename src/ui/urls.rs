@@ -6,21 +6,21 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 
 /// Chars of a URL (RFC 3986 unreserved + reserved, `%`).
-fn url_char(character: char) -> bool {
-    character.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(character)
+fn url_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(ch)
 }
 
 /// The text of row Y of BUF as chars, 1 per cell (wide chars: their 2nd cell skipped).
 fn row(buf: &Buffer, y: u16) -> Vec<char> {
-    let agent = buf.area;
+    let area = buf.area;
 
-    (agent.x..agent.right())
+    (area.x..area.right())
         .map(|x| {
             let text = buf[(x, y)].symbol();
             let mut it = text.chars();
 
             match (it.next(), it.next()) {
-                (Some(character), None) => character,
+                (Some(ch), None) => ch,
                 (None, _) => ' ',
                 // a grapheme of 2+ chars: 0 URL char
                 _ => '\u{fffd}',
@@ -30,68 +30,66 @@ fn row(buf: &Buffer, y: u16) -> Vec<char> {
 }
 
 /// The run of URL chars in CHARS around column C: (start, end), end exclusive.
-fn run(chars: &[char], character: usize) -> Option<(usize, usize)> {
-    if !chars.get(character).copied().is_some_and(url_char) {
+fn run(chars: &[char], col: usize) -> Option<(usize, usize)> {
+    if !chars.get(col).copied().is_some_and(url_char) {
         return None;
     }
 
-    let mut agent = character;
+    let mut start = col;
 
-    while agent > 0 && url_char(chars[agent - 1]) {
-        agent -= 1;
+    while start > 0 && url_char(chars[start - 1]) {
+        start -= 1;
     }
 
-    let mut bytes = character + 1;
+    let mut end = col + 1;
 
-    while bytes < chars.len() && url_char(chars[bytes]) {
-        bytes += 1;
+    while end < chars.len() && url_char(chars[end]) {
+        end += 1;
     }
 
-    Some((agent, bytes))
+    Some((start, end))
 }
 
 /// The 1st run of URL chars of CHARS (a wrapped row's start: after its margin).
 fn first_run(chars: &[char]) -> Option<(usize, usize)> {
-    let agent = chars
-        .iter()
-        .position(|character| url_char(*character) && !matches!(character, '│' | '┆'))?;
+    let start = chars.iter().position(|ch| url_char(*ch) && !matches!(ch, '│' | '┆'))?;
 
-    run(chars, agent)
+    run(chars, start)
 }
 
 /// The last run of CHARS (a row that goes on below).
 fn last_run(chars: &[char]) -> Option<(usize, usize)> {
-    let bytes = chars.iter().rposition(|character| url_char(*character))?;
+    let end = chars.iter().rposition(|ch| url_char(*ch))?;
 
-    run(chars, bytes)
+    run(chars, end)
 }
 
 /// The run touches the row's text end (0 non-blank cell after it but a frame / scroll bar).
-fn at_end(chars: &[char], bytes: usize) -> bool {
-    chars[bytes..]
+fn at_end(chars: &[char], end: usize) -> bool {
+    chars[end..]
         .iter()
-        .all(|character| character.is_whitespace() || matches!(character, '│' | '┃' | '▐' | '█' | '░' | '┆'))
+        .all(|ch| ch.is_whitespace() || matches!(ch, '│' | '┃' | '▐' | '█' | '░' | '┆'))
 }
 
 /// The URL at AT in BUF: a run of URL chars with `http://` / `https://` in it, its parts on the
 /// rows above / below joined when the run is cut at a row end. Trailing `.,;:)'` drop.
 pub(crate) fn at(buf: &Buffer, at: Position) -> Option<String> {
-    let agent = buf.area;
+    let area = buf.area;
 
-    if !agent.contains(at) {
+    if !area.contains(at) {
         return None;
     }
 
     let y = at.y;
     let chars = row(buf, y);
-    let (text_value, error) = run(&chars, (at.x - agent.x) as usize)?;
-    let mut text: String = chars[text_value..error].iter().collect();
+    let (start, end) = run(&chars, (at.x - area.x) as usize)?;
+    let mut text: String = chars[start..end].iter().collect();
 
     // the rows above: while the run starts its row and the row above ends in a run
     let mut yy = y;
-    let mut start_of_row = first_run(&chars).is_some_and(|result| result.0 == text_value);
+    let mut start_of_row = first_run(&chars).is_some_and(|first| first.0 == start);
 
-    while start_of_row && yy > agent.y && !text.contains("://") {
+    while start_of_row && yy > area.y && !text.contains("://") {
         let up = row(buf, yy - 1);
         let Some((ps, pe)) = last_run(&up) else { break };
 
@@ -103,14 +101,14 @@ pub(crate) fn at(buf: &Buffer, at: Position) -> Option<String> {
 
         text = piece + &text;
         yy -= 1;
-        start_of_row = first_run(&up).is_some_and(|result_value| result_value.0 == ps);
+        start_of_row = first_run(&up).is_some_and(|first| first.0 == ps);
     }
 
     // the rows below: while the run ends its row
     let mut yy = y;
-    let mut end = at_end(&chars, error);
+    let mut ends_row = at_end(&chars, end);
 
-    while end && yy + 1 < agent.bottom() {
+    while ends_row && yy + 1 < area.bottom() {
         let down = row(buf, yy + 1);
         let Some((ns, ne)) = first_run(&down) else { break };
         let piece: String = down[ns..ne].iter().collect();
@@ -126,7 +124,7 @@ pub(crate) fn at(buf: &Buffer, at: Position) -> Option<String> {
 
         text.push_str(&piece);
         yy += 1;
-        end = at_end(&down, ne);
+        ends_row = at_end(&down, ne);
     }
 
     let i = text.find("https://").or_else(|| text.find("http://"))?;

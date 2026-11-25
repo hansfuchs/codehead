@@ -8,7 +8,7 @@ impl App {
             .note_list
             .rows
             .get(self.note_list.cursor)
-            .map(|result| result.path().to_string());
+            .map(|row| row.path().to_string());
 
         self.note_list.rows = match &self.note_list.filter {
             Some(query) => self.note_list.notes.search(query),
@@ -16,11 +16,7 @@ impl App {
         };
 
         if let Some(path) = keep
-            && let Some(i) = self
-                .note_list
-                .rows
-                .iter()
-                .position(|result_value| result_value.path() == path)
+            && let Some(i) = self.note_list.rows.iter().position(|row| row.path() == path)
         {
             self.note_list.cursor = i;
         }
@@ -98,9 +94,9 @@ impl App {
     /// Run 1-off action RUN off the UI thread; its Job comes back in `tick` (tests: at once).
     pub(super) fn job(&mut self, run: impl FnOnce() -> Job + Send + 'static) {
         if cfg!(test) {
-            let j = run();
+            let job = run();
 
-            self.job_done(j);
+            self.job_done(job);
             return;
         }
 
@@ -108,8 +104,8 @@ impl App {
         self.jobs.request(self.job_n, run);
     }
 
-    pub(super) fn job_done(&mut self, j: Job) {
-        match j {
+    pub(super) fn job_done(&mut self, job: Job) {
+        match job {
             Job::Threads(lines) => {
                 self.load_threads();
                 self.overlays.modal = Some(Modal::Info {
@@ -127,10 +123,10 @@ impl App {
                     scroll: 0,
                 });
             }
-            Job::Restarted(msg) => {
+            Job::Restarted(message) => {
                 self.agent_list.usage = None;
                 self.load_agents();
-                self.toast(msg, false);
+                self.toast(message, false);
             }
         }
     }
@@ -170,53 +166,47 @@ impl App {
     }
 }
 
-fn poll_controls(app_state: &mut App, dirty: &mut bool) {
-    for (repo, character) in app_state.repository.where_reads.poll() {
-        if app_state.cfg.repo.as_ref() != Some(&repo)
-            || app_state
-                .repository
-                .repo
-                .as_ref()
-                .is_some_and(|result| result.url.is_some())
-        {
+fn poll_controls(app: &mut App, dirty: &mut bool) {
+    for (repo, branches) in app.repository.where_reads.poll() {
+        if app.cfg.repo.as_ref() != Some(&repo) || app.repository.repo.as_ref().is_some_and(|repo| repo.url.is_some()) {
             continue;
         }
 
-        let picked = app_state.repository.wheres.get(app_state.repository.where_i).cloned();
+        let picked = app.repository.wheres.get(app.repository.where_i).cloned();
 
-        app_state.repository.wheres = character.wheres;
-        app_state.repository.checkouts = character.checkouts;
-        app_state.repository.repo_branch = character.repo_branch;
-        app_state.repository.here_branch = character.here_branch;
-        app_state.repository.here_dir = character.here_dir;
-        app_state.repository.where_i = picked
-            .and_then(|path| app_state.repository.wheres.iter().position(|width| *width == path))
+        app.repository.wheres = branches.wheres;
+        app.repository.checkouts = branches.checkouts;
+        app.repository.repo_branch = branches.repo_branch;
+        app.repository.here_branch = branches.here_branch;
+        app.repository.here_dir = branches.here_dir;
+        app.repository.where_i = picked
+            .and_then(|old| app.repository.wheres.iter().position(|choice| *choice == old))
             .unwrap_or(0);
         *dirty = true;
     }
 
     // the new-thread view opens: the plan windows start now, the task can take its time
-    if app_state.compose.screen == Screen::Pick && app_state.tab == Tab::Merge {
-        *dirty |= app_state.merge_tab.poll();
+    if app.compose.screen == Screen::Pick && app.tab == Tab::Merge {
+        *dirty |= app.merge_tab.poll();
 
-        if let Some(count) = app_state.merge_tab.take_note() {
-            app_state.toast(count, false);
+        if let Some(note) = app.merge_tab.take_note() {
+            app.toast(note, false);
             *dirty = true;
         }
     }
 
-    let compose = app_state.compose.screen == Screen::Compose && !app_state.cfg.copy_mode;
+    let compose = app.compose.screen == Screen::Compose && !app.cfg.copy_mode;
 
-    if compose && !app_state.warmed {
+    if compose && !app.warmed {
         crate::engine::warm::warm();
     }
 
-    app_state.warmed = compose;
+    app.warmed = compose;
 
     // avatars on screen (agents tab, agent form, picker, menu): a frame every 150 ms
-    if matches!(app_state.overlays.modal, Some(Modal::Agent(_)))
-        || app_state.cur_tab() == Tab::Agents
-        || app_state.overlays.menu.is_some()
+    if matches!(app.overlays.modal, Some(Modal::Agent(_)))
+        || app.cur_tab() == Tab::Agents
+        || app.overlays.menu.is_some()
     {
         use std::sync::atomic::{AtomicU64, Ordering};
         static LAST: AtomicU64 = AtomicU64::new(0);
@@ -229,219 +219,192 @@ fn poll_controls(app_state: &mut App, dirty: &mut bool) {
     }
 
     // the settings' MCP tab: harness lists, probes, sign-ins in the background
-    if let Some(text) = app_state.settings.as_mut() {
-        *dirty |= text.poll();
+    if let Some(settings) = app.settings.as_mut() {
+        *dirty |= settings.poll();
     }
 }
 
-fn poll_thread_list(app_state: &mut App, dirty: &mut bool) -> bool {
-    let shown = app_state.compose.screen == Screen::Pick && app_state.tab == Tab::Threads;
-    let busy = app_state.thread_list.tlist.waiting();
+fn poll_thread_list(app: &mut App, dirty: &mut bool) -> bool {
+    let shown = app.compose.screen == Screen::Pick && app.tab == Tab::Threads;
+    let busy = app.thread_list.tlist.waiting();
 
-    app_state.thread_list.tlist.poll(shown);
-    let menu_job = app_state
-        .overlays
-        .menu
-        .as_mut()
-        .is_some_and(|message| message.list.take_changed());
+    app.thread_list.tlist.poll(shown);
+    let menu_job = app.overlays.menu.as_mut().is_some_and(|menu| menu.list.take_changed());
 
-    if app_state.thread_list.tlist.take_changed() || menu_job {
-        app_state.load_threads();
-        app_state.thread_list.tlist.reload();
+    if app.thread_list.tlist.take_changed() || menu_job {
+        app.load_threads();
+        app.thread_list.tlist.reload();
     }
 
-    *dirty |= busy || app_state.thread_list.tlist.waiting();
+    *dirty |= busy || app.thread_list.tlist.waiting();
 
     shown
 }
 
-fn poll_thread_rows(app_state: &mut App, dirty: &mut bool, shown: bool) {
-    if app_state.thread_list.tlist.roster.len() != app_state.agent_list.agents.len() {
-        app_state.thread_list.tlist.roster = app_state
-            .agent_list
-            .agents
-            .iter()
-            .map(|agent| agent.name.clone())
-            .collect();
+fn poll_thread_rows(app: &mut App, dirty: &mut bool, shown: bool) {
+    if app.thread_list.tlist.roster.len() != app.agent_list.agents.len() {
+        app.thread_list.tlist.roster = app.agent_list.agents.iter().map(|agent| agent.name.clone()).collect();
     }
 
-    let keep = if app_state.thread_list.tlist.view.cards() {
+    let keep = if app.thread_list.tlist.view.cards() {
         None
     } else {
-        app_state
-            .current_wt()
-            .map(|width_value| width_value.key())
-            .or_else(|| app_state.current_session().map(crate::infra::claude::Session::key))
+        app.current_wt()
+            .map(|worktree| worktree.key())
+            .or_else(|| app.current_session().map(crate::infra::claude::Session::key))
     };
 
     let mut changed = false;
 
-    for ((), rows) in app_state.thread_list.thread_reads.poll() {
-        if app_state.thread_list.worktrees.as_ref() == Some(&rows) {
+    for ((), rows) in app.thread_list.thread_reads.poll() {
+        if app.thread_list.worktrees.as_ref() == Some(&rows) {
             continue;
         }
 
-        app_state.thread_list.threads_version += 1;
-        app_state.thread_list.worktrees = Some(rows);
+        app.thread_list.threads_version += 1;
+        app.thread_list.worktrees = Some(rows);
         changed = true;
     }
 
-    for ((), rows) in app_state.thread_list.session_reads.poll() {
-        if app_state.thread_list.sessions == rows {
+    for ((), rows) in app.thread_list.session_reads.poll() {
+        if app.thread_list.sessions == rows {
             continue;
         }
 
-        app_state.thread_list.threads_version += 1;
-        app_state.thread_list.sessions = rows;
+        app.thread_list.threads_version += 1;
+        app.thread_list.sessions = rows;
         changed = true;
     }
 
     *dirty |= changed;
 
-    if changed || (shown && app_state.thread_list.tlist.extra[1].0 != app_state.thread_list.sessions.len()) {
+    if changed || (shown && app.thread_list.tlist.extra[1].0 != app.thread_list.sessions.len()) {
         // the thread list's tabs: the counts and repos of this screen's rows
-        let wts = app_state.thread_list.worktrees.as_deref().unwrap_or(&[]);
-        let orphans: Vec<Option<PathBuf>> = wts
+        let worktrees = app.thread_list.worktrees.as_deref().unwrap_or(&[]);
+        let orphans: Vec<Option<PathBuf>> = worktrees
             .iter()
-            .filter(|width_2| width_2.thread.is_none())
-            .map(|width_3| width_3.repo.clone())
+            .filter(|worktree| worktree.thread.is_none())
+            .map(|worktree| worktree.repo.clone())
             .collect();
-        let sessions: Vec<Option<PathBuf>> = app_state
+        let sessions: Vec<Option<PathBuf>> = app
             .thread_list
             .sessions
             .iter()
-            .map(|text_value| text_value.repo.clone())
+            .map(|session| session.repo.clone())
             .collect();
 
-        app_state.thread_list.tlist.extra = [(orphans.len(), orphans), (sessions.len(), sessions)];
+        app.thread_list.tlist.extra = [(orphans.len(), orphans), (sessions.len(), sessions)];
     }
 
     if changed {
-        poll_thread_rows_vis(app_state, keep);
+        restore_thread_cursor(app, keep);
     }
 }
 
-fn poll_thread_rows_vis(app_state: &mut App, keep: Option<String>) {
-    let vis = app_state.tvisible();
-    let nw = app_state.n_worktrees();
+fn restore_thread_cursor(app: &mut App, keep: Option<String>) {
+    let vis = app.tvisible();
+    let nw = app.n_worktrees();
 
-    app_state.thread_list.tcursor = keep
-        .and_then(|key| poll_thread_rows_vis_body(app_state, &vis, nw, &key))
-        .unwrap_or_else(|| app_state.thread_list.tcursor.min(vis.len().saturating_sub(1)));
+    app.thread_list.tcursor = keep
+        .and_then(|key| visible_position_of(app, &vis, nw, &key))
+        .unwrap_or_else(|| app.thread_list.tcursor.min(vis.len().saturating_sub(1)));
 }
 
-fn poll_thread_rows_vis_body(app_state: &mut App, vis: &[usize], nw: usize, key: &str) -> Option<usize> {
+fn visible_position_of(app: &mut App, vis: &[usize], nw: usize, key: &str) -> Option<usize> {
     vis.iter().position(|&i| {
         if i < nw {
-            app_state.thread_list.worktrees.as_ref().unwrap()[i].key() == key
+            app.thread_list.worktrees.as_ref().unwrap()[i].key() == key
         } else {
-            app_state.thread_list.sessions[i - nw].key() == key
+            app.thread_list.sessions[i - nw].key() == key
         }
     })
 }
 
-fn poll_agent_jobs(app_state: &mut App, dirty: &mut bool) {
-    for (_, j) in app_state.jobs.poll() {
+fn poll_agent_jobs(app: &mut App, dirty: &mut bool) {
+    for (_, job) in app.jobs.poll() {
         *dirty = true;
-        app_state.job_done(j);
+        app.job_done(job);
     }
 
-    for ((), (rows, effort, usage)) in app_state.agent_list.agent_reads.poll() {
+    for ((), (rows, effort, usage)) in app.agent_list.agent_reads.poll() {
         *dirty = true;
-        let keep = app_state.current_agent().map(|agent_value| agent_value.name.clone());
+        let keep = app.current_agent().map(|agent| agent.name.clone());
 
-        app_state.agent_list.agents = rows;
-        app_state.agent_list.effort = effort;
-        app_state.agent_list.usage = Some(usage);
+        app.agent_list.agents = rows;
+        app.agent_list.effort = effort;
+        app.agent_list.usage = Some(usage);
 
-        app_state.agent_list.acursor = keep
-            .and_then(|name| {
-                app_state
-                    .agent_list
-                    .agents
-                    .iter()
-                    .position(|agent_2| agent_2.name == name)
-            })
+        app.agent_list.acursor = keep
+            .and_then(|name| app.agent_list.agents.iter().position(|agent| agent.name == name))
             .unwrap_or_else(|| {
-                app_state
-                    .agent_list
+                app.agent_list
                     .acursor
-                    .min(app_state.agent_list.agents.len().saturating_sub(1))
+                    .min(app.agent_list.agents.len().saturating_sub(1))
             });
 
-        let names: HashSet<String> = app_state
-            .agent_list
-            .agents
-            .iter()
-            .map(|agent_3| agent_3.name.clone())
-            .collect();
+        let names: HashSet<String> = app.agent_list.agents.iter().map(|agent| agent.name.clone()).collect();
 
-        app_state.compose.picks.retain(|path_value| names.contains(path_value));
+        app.compose.picks.retain(|pick| names.contains(pick));
 
-        if app_state.compose.picks.is_empty() && names.contains(&app_state.cfg.agent) {
-            app_state.compose.picks.push(app_state.cfg.agent.clone());
+        if app.compose.picks.is_empty() && names.contains(&app.cfg.agent) {
+            app.compose.picks.push(app.cfg.agent.clone());
         }
     }
 }
 
-fn poll_previews(app_state: &mut App, dirty: &mut bool) {
-    let (details, extras) = (
-        app_state.thread_list.detail_reads.poll(),
-        app_state.thread_list.extra_reads.poll(),
-    );
+fn poll_previews(app: &mut App, dirty: &mut bool) {
+    let (details, extras) = (app.thread_list.detail_reads.poll(), app.thread_list.extra_reads.poll());
 
     *dirty |= !details.is_empty() || !extras.is_empty();
-    app_state.thread_list.tpreview.extend(details);
-    app_state.agent_list.apreview.extend(extras);
+    app.thread_list.tpreview.extend(details);
+    app.agent_list.apreview.extend(extras);
 
-    for ((), notes) in app_state.note_list.note_reads.poll() {
+    for ((), notes) in app.note_list.note_reads.poll() {
         *dirty = true;
-        app_state.note_list.notes = notes;
-        app_state
-            .note_list
+        app.note_list.notes = notes;
+        app.note_list
             .selected
-            .retain(|text_2| app_state.note_list.notes.files.contains(text_2));
-        app_state.rebuild();
+            .retain(|file| app.note_list.notes.files.contains(file));
+        app.rebuild();
     }
 
-    match app_state.cur_tab() {
-        Tab::Threads => app_state.refresh_threads(),
-        Tab::Agents => app_state.refresh_agents(),
+    match app.cur_tab() {
+        Tab::Threads => app.refresh_threads(),
+        Tab::Agents => app.refresh_agents(),
         Tab::Notes => {
-            let root = app_state.cfg.notes.clone();
+            let root = app.cfg.notes.clone();
 
-            app_state.note_list.note_reads.request((), move || Notes::load(&root));
+            app.note_list.note_reads.request((), move || Notes::load(&root));
         }
         _ => {}
     }
 }
 
-fn poll_models(app_state: &mut App, dirty: &mut bool) {
-    for (height, res) in app_state.model_catalog.model_reads.poll() {
+fn poll_models(app: &mut App, dirty: &mut bool) {
+    for (harness, result) in app.model_catalog.model_reads.poll() {
         *dirty = true;
 
-        match res {
-            Ok(error) => {
-                app_state.model_catalog.model_errors.remove(&height);
-                app_state
-                    .model_catalog
+        match result {
+            Ok(models) => {
+                app.model_catalog.model_errors.remove(&harness);
+                app.model_catalog
                     .models
                     .get_or_insert_with(HashMap::new)
-                    .insert(height, error);
+                    .insert(harness, models);
             }
-            Err(error_value) => {
-                app_state.model_catalog.model_errors.insert(height, error_value);
+            Err(error) => {
+                app.model_catalog.model_errors.insert(harness, error);
             }
         }
     }
 
-    if app_state
+    if app
         .overlays
         .toast
         .as_ref()
-        .is_some_and(|thread| thread.1.elapsed() > Duration::from_secs(3))
+        .is_some_and(|toast| toast.1.elapsed() > Duration::from_secs(3))
     {
-        app_state.overlays.toast = None;
+        app.overlays.toast = None;
         *dirty = true;
     }
 }

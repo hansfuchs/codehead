@@ -4,25 +4,25 @@ use super::{Item, MAX_FILES, Path, PathBuf, age, secs};
 /// (Codex: `$name`).
 pub(crate) fn skills(harnesses: &[String], cwd: &Path) -> Vec<Item> {
     let all = crate::infra::skills::load(harnesses, cwd);
-    let many = all.iter().any(|text| text.harness != all[0].harness);
+    let many = all.iter().any(|skill| skill.harness != all[0].harness);
 
     all.into_iter()
         .enumerate()
-        .map(|(i, text_value)| {
-            let sigil = if text_value.harness == "codex" { '$' } else { '/' };
+        .map(|(i, skill)| {
+            let sigil = if skill.harness == "codex" { '$' } else { '/' };
 
             let label = if many {
-                format!("{} · {}", text_value.name, text_value.harness)
+                format!("{} · {}", skill.name, skill.harness)
             } else {
-                text_value.name.clone()
+                skill.name.clone()
             };
 
             Item {
                 label,
-                detail: text_value.description.clone(),
-                insert: format!("{sigil}{}", text_value.name),
+                detail: skill.description.clone(),
+                insert: format!("{sigil}{}", skill.name),
                 time: i as u64,
-                info: text_value.description,
+                info: skill.description,
             }
         })
         .collect()
@@ -40,15 +40,14 @@ pub(crate) fn files(cwd: &Path) -> Vec<Item> {
             crate::domain::threads::git(&root, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
 
         for rel in out.split('\0').filter(|path| !path.is_empty()) {
-            // a deleted, not yet committed file: listed by git, gone on disk
-            append_file_metadata(&mut paths, &root, rel);
+            push_existing_file(&mut paths, &root, rel);
         }
     } else {
         walk(cwd, cwd, 0, &mut paths);
     }
 
     paths.sort();
-    paths.dedup_by(|agent, bytes| agent.1 == bytes.1);
+    paths.dedup_by(|left, right| left.1 == right.1);
     let skip = paths.len().saturating_sub(MAX_FILES);
 
     paths
@@ -64,22 +63,23 @@ pub(crate) fn files(cwd: &Path) -> Vec<Item> {
         .collect()
 }
 
-fn append_file_metadata(paths: &mut Vec<(u64, String)>, root: &Path, rel: &str) {
-    if let Ok(message) = std::fs::metadata(root.join(rel)) {
-        paths.push((message.modified().map_or(0, secs), rel.to_string()));
+fn push_existing_file(paths: &mut Vec<(u64, String)>, root: &Path, rel: &str) {
+    // a deleted, not yet committed file: listed by git, gone on disk
+    if let Ok(metadata) = std::fs::metadata(root.join(rel)) {
+        paths.push((metadata.modified().map_or(0, secs), rel.to_string()));
     }
 }
 
 /// 0 git: files below DIR (hidden entries and build dirs left out, max. 6 levels).
 pub(super) fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<(u64, String)>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
 
-    for error in rd.flatten() {
+    for entry in entries.flatten() {
         if out.len() >= MAX_FILES {
             return;
         }
 
-        let name = error.file_name().to_string_lossy().into_owned();
+        let name = entry.file_name().to_string_lossy().into_owned();
 
         if name.starts_with('.')
             || matches!(
@@ -90,8 +90,8 @@ pub(super) fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<(u64, St
             continue;
         }
 
-        let Ok(meta) = error.metadata() else { continue };
-        let path = error.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        let path = entry.path();
 
         if meta.is_dir() {
             walk_child_directory(root, depth, out, &path);
@@ -111,51 +111,51 @@ fn walk_child_directory(root: &Path, depth: usize, out: &mut Vec<(u64, String)>,
 
 /// Notes of the notes root: shown relative, inserted as the full path. Oldest first.
 pub(crate) fn notes(root: &Path) -> Vec<Item> {
-    let count = crate::domain::notes::Notes::load(root);
+    let loaded = crate::domain::notes::Notes::load(root);
 
-    let mut value: Vec<Item> = count
+    let mut items: Vec<Item> = loaded
         .files
         .iter()
         .map(|rel| {
-            let time = secs(count.mtime(rel));
+            let time = secs(loaded.mtime(rel));
 
             Item {
                 label: rel.clone(),
                 detail: age(time),
-                insert: count.abs(rel).display().to_string(),
+                insert: loaded.abs(rel).display().to_string(),
                 time,
                 info: String::new(),
             }
         })
         .collect();
 
-    value.sort_by_key(|i| i.time);
-    value
+    items.sort_by_key(|item| item.time);
+    items
 }
 
 /// Every thread: its name (1st line of the title). Oldest first.
 pub(super) fn threads() -> Vec<Item> {
-    let mut value: Vec<Item> = crate::domain::threads::all_threads_lite()
+    let mut items: Vec<Item> = crate::domain::threads::all_threads_lite()
         .into_iter()
         .filter(|thread| !thread.title.trim().is_empty())
-        .map(|thread_value| {
-            let name = thread_value.title.lines().next().unwrap_or_default().trim().to_string();
+        .map(|thread| {
+            let name = thread.title.lines().next().unwrap_or_default().trim().to_string();
 
-            let place = thread_value
+            let place = thread
                 .branch
                 .clone()
                 .or_else(|| {
-                    thread_value
+                    thread
                         .dir
                         .as_deref()
-                        .and_then(|directory| Path::new(directory).file_name())
-                        .map(|count| count.to_string_lossy().into_owned())
+                        .and_then(|dir| Path::new(dir).file_name())
+                        .map(|file_name| file_name.to_string_lossy().into_owned())
                 })
                 .unwrap_or_default();
 
-            let detail = [place, age(thread_value.updated)]
+            let detail = [place, age(thread.updated)]
                 .into_iter()
-                .filter(|text| !text.is_empty())
+                .filter(|part| !part.is_empty())
                 .collect::<Vec<_>>()
                 .join(" · ");
 
@@ -163,12 +163,12 @@ pub(super) fn threads() -> Vec<Item> {
                 label: name.clone(),
                 detail,
                 insert: name,
-                time: thread_value.updated,
+                time: thread.updated,
                 info: String::new(),
             }
         })
         .collect();
 
-    value.sort_by_key(|i| i.time);
-    value
+    items.sort_by_key(|item| item.time);
+    items
 }

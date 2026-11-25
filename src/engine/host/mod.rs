@@ -130,29 +130,29 @@ pub(crate) const RESUME_TEXT: &str = "[codehead: your usage limit window reset. 
 pub(crate) fn resume_at(err: &str, now: u64) -> u64 {
     let full = crate::engine::limits::read()
         .into_iter()
-        .filter(|width| width.harness == "claude" && width.pct >= 99.5)
-        .filter_map(|width_value| width_value.resets)
-        .map(|result| result * 1000)
-        .filter(|&result_value| result_value > now)
+        .filter(|window| window.harness == "claude" && window.pct >= 99.5)
+        .filter_map(|window| window.resets)
+        .map(|seconds| seconds * 1000)
+        .filter(|&reset_ms| reset_ms > now)
         .max();
 
     let parsed = || {
         static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
-        let character = RE
+        let captures = RE
             .get_or_init(|| {
                 regex::Regex::new(r"(?i)resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?").expect("valid regex")
             })
             .captures(err)?;
 
-        let mut height: i32 = character[1].parse().ok()?;
-        let message_value: i32 = character
+        let mut hour: i32 = captures[1].parse().ok()?;
+        let minute: i32 = captures
             .get(2)
-            .map_or(Some(0), |message| message.as_str().parse().ok())?;
+            .map_or(Some(0), |matched| matched.as_str().parse().ok())?;
 
-        match character.get(3).map(|x| x.as_str().to_ascii_lowercase()) {
-            Some(ap) if ap == "pm" && height < 12 => height += 12,
-            Some(ap) if ap == "am" && height == 12 => height = 0,
+        match captures.get(3).map(|meridiem| meridiem.as_str().to_ascii_lowercase()) {
+            Some(meridiem) if meridiem == "pm" && hour < 12 => hour += 12,
+            Some(meridiem) if meridiem == "am" && hour == 12 => hour = 0,
             _ => {}
         }
 
@@ -162,8 +162,8 @@ pub(crate) fn resume_at(err: &str, now: u64) -> u64 {
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
 
         unsafe { libc::localtime_r(&raw const secs, &raw mut tm) };
-        tm.tm_hour = height;
-        tm.tm_min = message_value;
+        tm.tm_hour = hour;
+        tm.tm_min = minute;
         tm.tm_sec = 0;
         let mut at = unsafe { libc::mktime(&raw mut tm) } as i64 * 1000;
 
@@ -186,22 +186,20 @@ pub(crate) fn mentions(text: &str, names: &[String]) -> Vec<String> {
             && text[..i]
                 .chars()
                 .next_back()
-                .is_some_and(|character| character.is_alphanumeric() || character == '`')
+                .is_some_and(|before| before.is_alphanumeric() || before == '`')
         {
             continue;
         }
 
         let word: String = text[i + 1..]
             .chars()
-            .take_while(|character_value| {
-                character_value.is_ascii_alphanumeric() || *character_value == '-' || *character_value == '_'
-            })
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '-' || *character == '_')
             .collect();
 
-        if let Some(count_value) = names.iter().find(|count| count.eq_ignore_ascii_case(&word))
-            && !out.contains(count_value)
+        if let Some(name) = names.iter().find(|name| name.eq_ignore_ascii_case(&word))
+            && !out.contains(name)
         {
-            out.push(count_value.clone());
+            out.push(name.clone());
         }
     }
 
@@ -238,65 +236,66 @@ extern "C" fn on_signal(_: libc::c_int) {
 }
 
 fn catch_signals() {
-    for text in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         // SAFETY: the handler only stores to an atomic (async-signal-safe).
-        unsafe { libc::signal(text, on_signal as *const () as libc::sighandler_t) };
+        unsafe { libc::signal(signal, on_signal as *const () as libc::sighandler_t) };
     }
 }
 
 fn serve(conn: UnixStream, tx: &Sender<Input>) {
-    let Ok(mut width) = conn.try_clone() else { return };
+    let Ok(mut writer) = conn.try_clone() else { return };
 
     for line in BufReader::new(conn).lines().map_while(Result::ok) {
         let reply = match serde_json::from_str::<Value>(&line) {
             // a view subscribes: this connection carries the host's lines from now on
-            Ok(character) if character["op"] == "subscribe" => {
-                serve_subscription(tx, &mut width);
+            Ok(request) if request["op"] == "subscribe" => {
+                serve_subscription(tx, &mut writer);
                 return;
             }
-            Ok(character_value) => match serve_ok_character_value(tx, character_value) {
-                Some(value) => value,
+            Ok(request) => match forward_command(tx, request) {
+                Some(reply) => reply,
                 None => return,
             },
             Err(error) => json!({"ok": false, "error": format!("bad json: {error}")}),
         };
 
-        if writeln!(width, "{reply}").is_err() {
+        if writeln!(writer, "{reply}").is_err() {
             return;
         }
     }
 }
 
-fn serve_ok_character_value(tx: &Sender<Input>, character_value: Value) -> Option<Value> {
-    let (rtx, rrx) = mpsc::channel();
+fn forward_command(tx: &Sender<Input>, request: Value) -> Option<Value> {
+    let (reply_tx, reply_rx) = mpsc::channel();
 
-    if let ControlFlow::Break(()) = send_command_input(tx, character_value, rtx) {
+    if let ControlFlow::Break(()) = send_command_input(tx, request, reply_tx) {
         return None;
     }
 
     Some(
-        rrx.recv()
+        reply_rx
+            .recv()
             .unwrap_or_else(|_| json!({"ok": false, "error": "host stopped"})),
     )
 }
 
-fn send_command_input(tx: &Sender<Input>, character_value: Value, rtx: Sender<Value>) -> ControlFlow<()> {
-    if tx.send(Input::Cmd(character_value, rtx)).is_err() {
+fn send_command_input(tx: &Sender<Input>, request: Value, reply_tx: Sender<Value>) -> ControlFlow<()> {
+    if tx.send(Input::Cmd(request, reply_tx)).is_err() {
         return ControlFlow::Break(());
     }
 
     ControlFlow::Continue(())
 }
 
-fn serve_subscription(tx: &Sender<Input>, width: &mut UnixStream) {
-    let (stx, srx) = mpsc::channel::<String>();
+fn serve_subscription(tx: &Sender<Input>, writer: &mut UnixStream) {
+    let (line_tx, line_rx) = mpsc::channel::<String>();
 
-    if tx.send(Input::Subscribe(stx)).is_err() || writeln!(width, "{}", json!({"ok": true})).is_err() {
+    if tx.send(Input::Subscribe(line_tx)).is_err() || writeln!(writer, "{}", json!({"ok": true})).is_err() {
         return;
     }
 
-    for line_value in srx {
-        if writeln!(width, "{line_value}").is_err() {
+    for line in line_rx {
+        if writeln!(writer, "{line}").is_err() {
             return;
         }
     }
@@ -316,12 +315,11 @@ fn bind(id: &str) -> Result<(UnixListener, std::fs::File), String> {
     }
 
     let _ = std::fs::remove_file(&path);
-    let line = UnixListener::bind(&path).map_err(|error_value| format!("{}: {error_value}", path.display()))?;
+    let listener = UnixListener::bind(&path).map_err(|error| format!("{}: {error}", path.display()))?;
 
-    Ok((line, lock))
+    Ok((listener, lock))
 }
 
-/// Run the host of thread ID until idle or `stop`.
 /// Worktree WT stays on BRANCH (`crate::infra::branch_pin`); a failure: in the host's log.
 fn pin_branch(wt: &Path, branch: &str) {
     if let Err(error) = crate::infra::branch_pin::pin(wt, branch) {

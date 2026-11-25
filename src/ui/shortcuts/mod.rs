@@ -21,38 +21,40 @@ use crate::ui::theme;
 
 /// The shortcuts for query Q: names that start with it, then names that hold it.
 fn matches(list: &[Shortcut], query: &str) -> Vec<usize> {
-    let query_value = query.to_lowercase();
-    let mut value: Vec<usize> = (0..list.len())
-        .filter(|&i| list[i].name.to_lowercase().starts_with(&query_value))
+    let query = query.to_lowercase();
+    let mut found: Vec<usize> = (0..list.len())
+        .filter(|&i| list[i].name.to_lowercase().starts_with(&query))
         .collect();
 
-    value.extend((0..list.len()).filter(|&i| {
-        !list[i].name.to_lowercase().starts_with(&query_value) && list[i].name.to_lowercase().contains(&query_value)
-    }));
+    found.extend(
+        (0..list.len()).filter(|&i| {
+            !list[i].name.to_lowercase().starts_with(&query) && list[i].name.to_lowercase().contains(&query)
+        }),
+    );
 
-    value
+    found
 }
 
 /// Rows of TEXT wrapped to W columns (max. MAX rows; more: `…` on the last).
-fn wrap(text: &str, width_value: usize, max: usize) -> Vec<String> {
+fn wrap(text: &str, width: usize, max: usize) -> Vec<String> {
     let mut rows = Vec::new();
 
     for line in text.lines() {
-        wrap_cur(width_value, &mut rows, line);
+        wrap_cur(width, &mut rows, line);
     }
 
     if rows.len() > max {
         rows.truncate(max);
 
-        if let Some(line_value) = rows.last_mut() {
-            line_value.push('…');
+        if let Some(last) = rows.last_mut() {
+            last.push('…');
         }
     }
 
     rows
 }
 
-fn wrap_cur(width_value: usize, rows: &mut Vec<String>, line: &str) {
+fn wrap_cur(width: usize, rows: &mut Vec<String>, line: &str) {
     if line.is_empty() {
         rows.push(String::new());
         return;
@@ -61,7 +63,7 @@ fn wrap_cur(width_value: usize, rows: &mut Vec<String>, line: &str) {
     let mut cur = String::new();
 
     for word in line.split(' ') {
-        if !cur.is_empty() && cur.width() + 1 + word.width() > width_value {
+        if !cur.is_empty() && cur.width() + 1 + word.width() > width {
             rows.push(std::mem::take(&mut cur));
         }
 
@@ -71,10 +73,10 @@ fn wrap_cur(width_value: usize, rows: &mut Vec<String>, line: &str) {
 
         cur.push_str(word);
 
-        while cur.width() > width_value {
-            let head: String = cur.chars().take(width_value).collect();
+        while cur.width() > width {
+            let head: String = cur.chars().take(width).collect();
 
-            cur = cur.chars().skip(width_value).collect();
+            cur = cur.chars().skip(width).collect();
             rows.push(head);
         }
     }
@@ -83,9 +85,9 @@ fn wrap_cur(width_value: usize, rows: &mut Vec<String>, line: &str) {
 }
 
 /// A box with TEXT (a shortcut's text) in R: frame with LABEL, the text wrapped.
-pub(crate) fn text_box(frame_value: &mut Frame, area: Rect, label: &str, text: &str) {
+pub(crate) fn text_box(frame: &mut Frame, area: Rect, label: &str, text: &str) {
     let inner = dropdown::frame(
-        frame_value,
+        frame,
         area,
         label,
         "",
@@ -105,22 +107,22 @@ pub(crate) fn text_box(frame_value: &mut Frame, area: Rect, label: &str, text: &
         .map(|line| Line::styled(format!(" {line}"), theme::text()))
         .collect();
 
-    frame_value.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Width and rows of the text box for TEXT: max. 64 columns, 12 rows.
 pub(crate) fn box_size(text: &str, bounds: Rect) -> (u16, usize) {
-    let width_value = text
+    let wanted = text
         .lines()
         .map(UnicodeWidthStr::width)
         .max()
         .unwrap_or(0)
         .clamp(24, 62) as u16
         + 4;
-    let width_2 = width_value.min(bounds.width);
-    let rows = wrap(text, usize::from(width_2.saturating_sub(4)), 12).len().max(1);
+    let width = wanted.min(bounds.width);
+    let rows = wrap(text, usize::from(width.saturating_sub(4)), 12).len().max(1);
 
-    (width_2, rows)
+    (width, rows)
 }
 
 /// The `#` dropdown of a prompt.
@@ -158,8 +160,8 @@ impl Pick {
         let found = ta.shortcut();
 
         let (at, query) = match self.preview.typed(ta) {
-            Some((path, thread)) if found.as_ref().is_some_and(|file| file.0 == path) => {
-                (path, thread.chars().skip(1).collect())
+            Some((pos, typed)) if found.as_ref().is_some_and(|shortcut| shortcut.0 == pos) => {
+                (pos, typed.chars().skip(1).collect())
             }
             _ => found?,
         };
@@ -170,9 +172,9 @@ impl Pick {
 
         self.closed = None;
         let list = all();
-        let message = matches(&list, &query);
+        let matched = matches(&list, &query);
 
-        if message.is_empty() {
+        if matched.is_empty() {
             return None;
         }
 
@@ -182,23 +184,23 @@ impl Pick {
             self.offset = 0;
         }
 
-        self.cursor = self.cursor.min(message.len() - 1);
+        self.cursor = self.cursor.min(matched.len() - 1);
 
         Some(Open {
             at,
             query,
             list,
-            matches: message,
+            matches: matched,
         })
     }
 
     /// The shortcut's text in place of `#query`.
-    fn pick(&mut self, ta: &mut TextArea, output: &Open, i: usize) {
-        let Some(text_value) = output.matches.get(i).map(|&key| &output.list[key]) else {
+    fn pick(&mut self, ta: &mut TextArea, open: &Open, i: usize) {
+        let Some(shortcut) = open.matches.get(i).map(|&index| &open.list[index]) else {
             return;
         };
 
-        ta.replace_to_cursor(output.at, &text_value.text);
+        ta.replace_to_cursor(open.at, &shortcut.text);
         self.preview.clear();
         self.cursor = 0;
         self.hover = None;
@@ -210,11 +212,8 @@ impl Pick {
     }
 
     /// Row of the last draw at P (hover).
-    pub(crate) fn row_at(&self, path: Position) -> Option<Rect> {
-        self.rows
-            .iter()
-            .map(|(result, _)| *result)
-            .find(|result_value| result_value.contains(path))
+    pub(crate) fn row_at(&self, at: Position) -> Option<Rect> {
+        self.rows.iter().map(|(rect, _)| *rect).find(|rect| rect.contains(at))
     }
 }
 
@@ -234,20 +233,20 @@ pub(crate) fn render_popup(
     }
 
     let hit = at
-        .and_then(|agent| ta.shortcut_at(Some(agent)))
+        .and_then(|pos_at| ta.shortcut_at(Some(pos_at)))
         .or_else(|| if cursor { ta.shortcut_at(None) } else { None });
     let Some((pos, name)) = hit else { return };
     let Some(text) = get(&name) else { return };
-    let Some(path) = ta.screen_pos(pos) else { return };
-    let (width_value, rows) = box_size(&text, bounds);
+    let Some(cursor_pos) = ta.screen_pos(pos) else { return };
+    let (width, rows) = box_size(&text, bounds);
     let anchor = Rect {
-        x: path.x,
-        y: path.y,
+        x: cursor_pos.x,
+        y: cursor_pos.y,
         width: 1,
         height: 1,
     };
 
-    let Some(row) = dropdown::place_max(anchor, width_value, rows, 12, bounds, true) else {
+    let Some(row) = dropdown::place_max(anchor, width, rows, 12, bounds, true) else {
         return;
     };
 
@@ -294,7 +293,7 @@ impl Tab {
         let mut text = TextArea::new(false, "the text #name stands for");
 
         text.style = Some(theme::panel());
-        let mut area = Tab {
+        let mut tab = Tab {
             list: Vec::new(),
             at: 0,
             focus: Focus::List,
@@ -309,9 +308,9 @@ impl Tab {
             rows: Vec::new(),
         };
 
-        area.enter();
+        tab.enter();
 
-        area
+        tab
     }
 
     /// The tab shows: the file read again.
@@ -324,14 +323,14 @@ impl Tab {
 
     /// The inputs show the picked shortcut.
     fn load(&mut self) {
-        let (count, thread) = self
+        let (name, text) = self
             .list
             .get(self.at)
-            .map(|text_value| (text_value.name.clone(), text_value.text.clone()))
+            .map(|shortcut| (shortcut.name.clone(), shortcut.text.clone()))
             .unwrap_or_default();
 
-        self.name.set_text(&count);
-        self.text.set_text(&thread);
+        self.name.set_text(&name);
+        self.text.set_text(&text);
         self.error = None;
     }
 
@@ -349,7 +348,7 @@ impl Tab {
             return false;
         }
 
-        if name != cur.name && self.list.iter().any(|text_value| text_value.name == name) {
+        if name != cur.name && self.list.iter().any(|shortcut| shortcut.name == name) {
             self.error = Some(format!("#{name} exists already"));
             return false;
         }
@@ -363,31 +362,31 @@ impl Tab {
             text,
         };
 
-        if let Err(error_value) = save(&self.list) {
-            self.error = Some(format!("save: {error_value}"));
+        if let Err(error) = save(&self.list) {
+            self.error = Some(format!("save: {error}"));
             return false;
         }
 
         self.list = all();
-        self.at = self.list.iter().position(|text_2| text_2.name == name).unwrap_or(0);
+        self.at = self.list.iter().position(|shortcut| shortcut.name == name).unwrap_or(0);
         self.error = None;
 
         true
     }
 
     fn add(&mut self) {
-        let mut key = 1;
+        let mut number = 1;
 
         while self
             .list
             .iter()
-            .any(|text_value| text_value.name == format!("new-{key}"))
+            .any(|shortcut| shortcut.name == format!("new-{number}"))
         {
-            key += 1;
+            number += 1;
         }
 
         self.list.push(Shortcut {
-            name: format!("new-{key}"),
+            name: format!("new-{number}"),
             text: String::new(),
         });
         self.at = self.list.len() - 1;
@@ -403,8 +402,8 @@ impl Tab {
 
         self.list.remove(self.at);
 
-        if let Err(error_value) = save(&self.list) {
-            self.error = Some(format!("save: {error_value}"));
+        if let Err(error) = save(&self.list) {
+            self.error = Some(format!("save: {error}"));
         }
 
         self.at = self.at.min(self.list.len().saturating_sub(1));
@@ -419,11 +418,8 @@ impl Tab {
         }
     }
 
-    pub(crate) fn row_at(&self, path: Position) -> Option<Rect> {
-        self.rows
-            .iter()
-            .map(|(result, _)| *result)
-            .find(|result_value| result_value.contains(path))
+    pub(crate) fn row_at(&self, at: Position) -> Option<Rect> {
+        self.rows.iter().map(|(rect, _)| *rect).find(|rect| rect.contains(at))
     }
 
     pub(crate) fn help(&self) -> &'static [(&'static str, &'static str)] {

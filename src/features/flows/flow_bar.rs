@@ -60,7 +60,7 @@ pub(crate) struct FlowBar {
     updated: u64,
     read_at: Option<Instant>,
     lib_at: Option<Instant>,
-    popup_state: PopupStateState,
+    popup_state: PopupState,
 }
 
 impl Default for FlowBar {
@@ -77,7 +77,7 @@ impl Default for FlowBar {
             updated: 0,
             read_at: None,
             lib_at: None,
-            popup_state: PopupStateState {
+            popup_state: PopupState {
                 open: false,
                 del_armed: false,
                 mode: Mode::Steps,
@@ -93,9 +93,9 @@ impl Default for FlowBar {
 }
 
 /// Choices of wait W at node N: (choice sent, label).
-fn choices(width: &Wait, count: Option<&Resolved>) -> Vec<(String, String)> {
-    match width {
-        Wait::Gate => choices_wait_gate(count),
+fn choices(wait: &Wait, node: Option<&Resolved>) -> Vec<(String, String)> {
+    match wait {
+        Wait::Gate => gate_choices(node),
         Wait::LoopMax => vec![
             ("again".into(), "1 more round".into()),
             ("next".into(), "move on".into()),
@@ -103,16 +103,16 @@ fn choices(width: &Wait, count: Option<&Resolved>) -> Vec<(String, String)> {
     }
 }
 
-fn choices_wait_gate(count: Option<&Resolved>) -> Vec<(String, String)> {
-    let mut value = vec![("approve".to_string(), "approve · go on".to_string())];
+fn gate_choices(node: Option<&Resolved>) -> Vec<(String, String)> {
+    let mut choices = vec![("approve".to_string(), "approve · go on".to_string())];
 
-    if let Some(count_value) = count {
-        for (key, _) in &count_value.edges {
-            value.push((key.clone(), key.clone()));
+    if let Some(node) = node {
+        for (key, _) in &node.edges {
+            choices.push((key.clone(), key.clone()));
         }
     }
 
-    value
+    choices
 }
 
 impl FlowBar {
@@ -126,7 +126,7 @@ impl FlowBar {
 
     /// The flow waits at a gate.
     pub(crate) fn waits_gate(&self) -> bool {
-        self.state.as_ref().is_some_and(|text| text.wait == Some(Wait::Gate))
+        self.state.as_ref().is_some_and(|run| run.wait == Some(Wait::Gate))
     }
 
     /// The flow's wait as an ask for the question picker under the stream: a gate (approve or an
@@ -138,10 +138,10 @@ impl FlowBar {
 
     /// The answer OPTION (an id of `wait_ask`): the flow's step to send, the wait gone here.
     pub(crate) fn wait_answer(&mut self, option: &str) -> Option<Act> {
-        let st = self.state.as_mut()?;
+        let run = self.state.as_mut()?;
 
-        st.wait.as_ref()?;
-        st.wait = None;
+        run.wait.as_ref()?;
+        run.wait = None;
         Some(Act::Answer(option.to_string()))
     }
 
@@ -184,8 +184,8 @@ impl FlowBar {
         match &self.state {
             None => self.pick(),
             // the steps (a wait: the question picker under the stream answers it; a: here)
-            Some(st) => {
-                self.popup_state.cur = st.node;
+            Some(run) => {
+                self.popup_state.cur = run.node;
                 self.popup_state.mode = Mode::Steps;
             }
         }
@@ -198,7 +198,7 @@ impl FlowBar {
         self.popup_state.cur = self
             .state
             .as_ref()
-            .and_then(|text| self.lib.flows.iter().position(|file| file.slug == text.flow))
+            .and_then(|run| self.lib.flows.iter().position(|flow| flow.slug == run.flow))
             .unwrap_or(0);
         self.popup_state.offset = 0;
     }
@@ -216,7 +216,7 @@ impl FlowBar {
     }
 
     fn running(&self) -> bool {
-        self.state.as_ref().is_some_and(|text| !text.finished)
+        self.state.as_ref().is_some_and(|run| !run.finished)
     }
 
     fn len(&self) -> usize {
@@ -224,7 +224,7 @@ impl FlowBar {
             Mode::Steps => self.nodes.len(),
             Mode::Pick(query) => self.picks(query).len(),
             Mode::How(_) => 3,
-            Mode::Start(slug) => self.lib.flow(slug).map_or(0, |file| file.steps.len()),
+            Mode::Start(slug) => self.lib.flow(slug).map_or(0, |flow| flow.steps.len()),
         }
     }
 
@@ -242,7 +242,7 @@ impl FlowBar {
 
     fn frame_text(&self) -> (String, &'static str) {
         match &self.popup_state.mode {
-            Mode::Steps if self.state.as_ref().is_some_and(|text| text.wait.is_some()) => (
+            Mode::Steps if self.state.as_ref().is_some_and(|run| run.wait.is_some()) => (
                 format!("flow · {} · @{}", self.name, self.agent),
                 "the wait: answer below the stream · ↑↓ · enter text · s skip · j jump · c change · e edit · esc",
             ),
@@ -250,7 +250,7 @@ impl FlowBar {
                 if self
                     .state
                     .as_ref()
-                    .is_some_and(|text_value| text_value.pending.is_some() || text_value.queued.is_some()) =>
+                    .is_some_and(|run| run.pending.is_some() || run.queued.is_some()) =>
             {
                 (
                     format!("flow · {} · @{}", self.name, self.agent),
@@ -278,50 +278,50 @@ impl FlowBar {
             usize::from(area.height),
         );
 
-        for (key, (label, detail)) in rows
+        for (row, (label, detail)) in rows
             .iter()
             .enumerate()
             .skip(self.popup_state.offset)
             .take(usize::from(area.height))
         {
-            list_area_value(frame, area, focus, key, label, detail, self);
+            draw_list_row(frame, area, focus, row, label, detail, self);
         }
     }
 }
 
-fn wait_ask_body(back: impl Fn(&str) -> String, character_value: &str, line: &str) -> (String, String) {
-    (character_value.to_string(), format!("{line}{}", back(character_value)))
+fn gate_choice(back: impl Fn(&str) -> String, choice: &str, label: &str) -> (String, String) {
+    (choice.to_string(), format!("{label}{}", back(choice)))
 }
 
 /// A rail row of node N: MARK, its title, its tags (gate, one-off).
-pub(crate) fn rail_row(count: &Resolved, mark: &str, ms: Style) -> flow_rail::Row {
+pub(crate) fn rail_row(node: &Resolved, mark: &str, mark_style: Style) -> flow_rail::Row {
     let mut tags = Vec::new();
 
-    if count.gate {
+    if node.gate {
         tags.push(("⏸".to_string(), theme::fg(theme::pal().attention())));
     }
 
-    if count.step.is_none() {
+    if node.step.is_none() {
         tags.push(("◇".to_string(), theme::muted()));
     }
 
     flow_rail::Row {
-        mark: (mark.to_string(), ms),
-        title: count.title.clone(),
+        mark: (mark.to_string(), mark_style),
+        title: node.title.clone(),
         title_style: Style::default(),
         tags,
     }
 }
 
 fn dur(ms: u64) -> String {
-    let text = ms / 1000;
+    let secs = ms / 1000;
 
-    if text < 60 {
-        format!("{text}s")
-    } else if text < 3600 {
-        format!("{}m", text / 60)
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
     } else {
-        format!("{}h{:02}", text / 3600, text / 60 % 60)
+        format!("{}h{:02}", secs / 3600, secs / 60 % 60)
     }
 }
 
@@ -342,50 +342,50 @@ mod render;
 #[path = "flow_bar_tick.rs"]
 mod tick;
 
-fn reload_lib(force: bool, view_state: &mut FlowBar) {
+fn reload_lib(force: bool, bar: &mut FlowBar) {
     if force
-        || view_state
+        || bar
             .lib_at
-            .is_none_or(|thread| thread.elapsed() > Duration::from_secs(5))
+            .is_none_or(|loaded| loaded.elapsed() > Duration::from_secs(5))
     {
-        view_state.lib = Library::load(Some(&view_state.dir));
-        view_state.lib_at = Some(Instant::now());
+        bar.lib = Library::load(Some(&bar.dir));
+        bar.lib_at = Some(Instant::now());
     }
 
-    view_state.nodes.clear();
-    view_state.warnings.clear();
-    view_state.name.clear();
+    bar.nodes.clear();
+    bar.warnings.clear();
+    bar.name.clear();
 
-    if let Some(st) = &view_state.state {
-        view_state.name = st.title.clone();
+    if let Some(run) = &bar.state {
+        bar.name = run.title.clone();
 
-        if let Some(file) = view_state.lib.flow(&st.flow) {
-            view_state.name = file.name.clone();
-            view_state.nodes = flows::resolve(file, &view_state.lib);
+        if let Some(flow) = bar.lib.flow(&run.flow) {
+            bar.name = flow.name.clone();
+            bar.nodes = flows::resolve(flow, &bar.lib);
             let roster = crate::engine::roster::active();
 
-            view_state.warnings = flows::run::warnings(&view_state.nodes, &view_state.agent, &roster, &view_state.dir);
+            bar.warnings = flows::run::warnings(&bar.nodes, &bar.agent, &roster, &bar.dir);
         }
     }
 }
 
-fn list_area_value(
+fn draw_list_row(
     frame: &mut Frame<'_>,
     area: Rect,
     focus: bool,
-    key: usize,
+    row: usize,
     label: &str,
     detail: &str,
-    view_state: &mut FlowBar,
+    bar: &mut FlowBar,
 ) {
-    let area_value = Rect {
-        y: area.y + (key - view_state.popup_state.offset) as u16,
+    let row_area = Rect {
+        y: area.y + (row - bar.popup_state.offset) as u16,
         height: 1,
         ..area
     };
-    let on = key == view_state.popup_state.cur;
+    let on = row == bar.popup_state.cur;
 
-    let st = if on {
+    let style = if on {
         if focus {
             theme::pill().add_modifier(Modifier::BOLD)
         } else {
@@ -395,26 +395,29 @@ fn list_area_value(
         theme::text()
     };
 
-    let lw = 28.min(usize::from(area_value.width) / 2);
+    let label_width = 28.min(usize::from(row_area.width) / 2);
     let line = Line::from(vec![
-        Span::styled(format!(" {:<lw$} ", crate::ui::thread_card::fit(label, lw)), st),
         Span::styled(
-            crate::ui::thread_card::fit(detail, usize::from(area_value.width).saturating_sub(lw + 3)),
-            if on { st } else { theme::muted() },
+            format!(" {:<label_width$} ", crate::ui::thread_card::fit(label, label_width)),
+            style,
+        ),
+        Span::styled(
+            crate::ui::thread_card::fit(detail, usize::from(row_area.width).saturating_sub(label_width + 3)),
+            if on { style } else { theme::muted() },
         ),
     ]);
 
     frame.render_widget(
-        Paragraph::new(line).style(if on { st } else { Style::default() }),
-        area_value,
+        Paragraph::new(line).style(if on { style } else { Style::default() }),
+        row_area,
     );
-    view_state.popup_state.rows.push((area_value, key));
+    bar.popup_state.rows.push((row_area, row));
 }
 
 #[path = "flow_bar_text.rs"]
 mod text;
 
-struct PopupStateState {
+struct PopupState {
     open: bool,
     /// `d d`: the 1st `d` armed the flow's removal.
     del_armed: bool,
@@ -427,68 +430,68 @@ struct PopupStateState {
     hover: bool,
 }
 
-fn wait_ask_flow_bar(receiver_state: &FlowBar) -> Option<crate::domain::chat::Ask> {
-    let st = receiver_state.state.as_ref()?;
-    let width = st.wait.as_ref()?;
-    let node = receiver_state.nodes.get(st.node);
-    let step = node.map_or_else(|| format!("step {}", st.node + 1), |count| count.title.clone());
+fn wait_ask_flow_bar(bar: &FlowBar) -> Option<crate::domain::chat::Ask> {
+    let run = bar.state.as_ref()?;
+    let wait = run.wait.as_ref()?;
+    let node = bar.nodes.get(run.node);
+    let step = node.map_or_else(|| format!("step {}", run.node + 1), |node| node.title.clone());
 
-    let flow = if st.title.is_empty() {
-        st.flow.clone()
+    let flow = if run.title.is_empty() {
+        run.flow.clone()
     } else {
-        st.title.clone()
+        run.title.clone()
     };
 
     // an outcome: where it goes back to
-    let back = |character: &str| {
-        node.and_then(|count_value| count_value.edges.iter().find(|(key, _)| key == character))
-            .and_then(|(_, j)| receiver_state.nodes.get(*j))
-            .map(|thread| format!(" · back to {}", thread.title))
+    let back = |choice: &str| {
+        node.and_then(|node| node.edges.iter().find(|(key, _)| key == choice))
+            .and_then(|(_, j)| bar.nodes.get(*j))
+            .map(|target| format!(" · back to {}", target.title))
             .unwrap_or_default()
     };
 
-    let (kind, question, options): (&str, String, Vec<(String, String)>) = match width {
+    let (kind, question, options): (&str, String, Vec<(String, String)>) = match wait {
         Wait::Gate => {
-            let mut value: Vec<(String, String)> = choices(width, node)
+            let mut choices: Vec<(String, String)> = choices(wait, node)
                 .into_iter()
-                .map(|(character_value, line)| wait_ask_body(back, &character_value, &line))
+                .map(|(choice, label)| gate_choice(back, &choice, &label))
                 .collect();
 
-            value.push((
+            choices.push((
                 REPLY.into(),
                 "reply · the prompt's text to the agent, the gate stays open".into(),
             ));
             (
                 "gate",
                 format!("gate after “{step}”: go on? (text in the prompt: your note)"),
-                value,
+                choices,
             )
         }
         Wait::LoopMax => {
-            let mut value_value = choices(width, node);
+            let mut choices = choices(wait, node);
 
-            value_value.push((
+            choices.push((
                 REPLY.into(),
                 "reply · the prompt's text to the agent, the wait stays".into(),
             ));
             (
                 "loop",
                 format!("“{step}” ran its max rounds (text in the prompt: your note)"),
-                value_value,
+                choices,
             )
         }
     };
 
-    let opts: Vec<Value> = options
+    let options_json: Vec<Value> = options
         .into_iter()
         .map(|(id, name)| json!({"id": id, "name": name, "kind": "flow"}))
         .collect();
 
     Some(crate::domain::chat::Ask {
-        id: format!("flow:{}:{}:{}:{kind}", receiver_state.agent, st.flow, st.node),
-        agent: format!("flow {flow} of {}", receiver_state.agent),
+        id: format!("flow:{}:{}:{}:{kind}", bar.agent, run.flow, run.node),
+        agent: format!("flow {flow} of {}", bar.agent),
         tool: WAIT_TOOL.into(),
-        input: json!({"question": question, "_options": opts}),
-        ts: st.node_started,
+        input: json!({"question": question, "_options": options_json}),
+        ts: run.node_started,
     })
 }

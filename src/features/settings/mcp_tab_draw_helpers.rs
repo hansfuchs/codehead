@@ -4,20 +4,20 @@ use super::{
 };
 
 pub(super) fn draw_modal(frame: &mut Frame, area: Rect, mcp_tab: &mut McpTab) {
-    let width_value = area.width.saturating_sub(8).min(90);
-    let place = |height_2: u16| Rect {
-        x: area.x + (area.width - width_value) / 2,
+    let width = area.width.saturating_sub(8).min(90);
+    let place = |height: u16| Rect {
+        x: area.x + (area.width - width) / 2,
         y: area.y + 2,
-        width: width_value,
-        height: height_2.min(area.height.saturating_sub(2)),
+        width,
+        height: height.min(area.height.saturating_sub(2)),
     };
 
     let boxed = |frame: &mut Frame, place: Rect, title: &str| modal_box(frame, area, place, title);
 
     match mcp_tab.modal.as_mut() {
         Some(Modal::Info { title, lines, login }) => {
-            let result = place(lines.len() as u16 + 4);
-            let inner = boxed(frame, result, title);
+            let info_area = place(lines.len() as u16 + 4);
+            let inner = boxed(frame, info_area, title);
 
             let mut text: Vec<Line> = lines.iter().map(|line| info_line(line)).collect();
 
@@ -33,8 +33,8 @@ pub(super) fn draw_modal(frame: &mut Frame, area: Rect, mcp_tab: &mut McpTab) {
             frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner);
         }
         Some(Modal::Confirm { text, .. }) => {
-            let result_value = place(6);
-            let inner = boxed(frame, result_value, "confirm");
+            let confirm_area = place(6);
+            let inner = boxed(frame, confirm_area, "confirm");
 
             frame.render_widget(
                 Paragraph::new(vec![
@@ -46,11 +46,11 @@ pub(super) fn draw_modal(frame: &mut Frame, area: Rect, mcp_tab: &mut McpTab) {
                 inner,
             );
         }
-        Some(Modal::Agents(path)) => {
-            mcp_tab.modal_hits = draw_agent_selection(frame, place, boxed, path);
+        Some(Modal::Agents(pick)) => {
+            mcp_tab.modal_hits = draw_agent_selection(frame, place, boxed, pick);
         }
-        Some(Modal::Edit(error)) => {
-            draw_server_form(frame, place, boxed, error);
+        Some(Modal::Edit(form)) => {
+            draw_server_form(frame, place, boxed, form);
         }
         None => {}
     }
@@ -71,8 +71,8 @@ fn draw_agent_selection(
     selection: &mut super::Pick,
 ) -> Vec<(Rect, usize)> {
     let count = selection.rows.len();
-    let result_2 = place(count as u16 + 6);
-    let inner = boxed(frame, result_2, &format!("{} · which agents get it", selection.name));
+    let pick_area = place(count as u16 + 6);
+    let inner = boxed(frame, pick_area, &format!("{} · which agents get it", selection.name));
     let mut y = inner.y;
     let mut last = "";
     let view = inner.height.saturating_sub(1) as usize;
@@ -93,14 +93,14 @@ fn draw_agent_selection(
             width: inner.width.saturating_sub(2),
         };
         let highlighted = i == selection.cursor;
-        let style_value = if highlighted { theme::pill() } else { theme::text() };
+        let style = if highlighted { theme::pill() } else { theme::text() };
 
         frame.render_widget(
             Paragraph::new(Line::styled(
                 format!("{} {}", if *selected { "☑" } else { "☐" }, agent.name),
-                style_value,
+                style,
             ))
-            .style(style_value),
+            .style(style),
             row,
         );
         hits.push((row, i));
@@ -142,7 +142,7 @@ fn draw_harness_heading<'agent>(
             .rows
             .iter()
             .filter(|row| row.0.harness == agent.harness)
-            .all(|row_value| row_value.1);
+            .all(|row| row.1);
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
@@ -173,7 +173,7 @@ fn draw_server_form(
     boxed: impl Fn(&mut Frame<'_>, Rect, &str) -> Rect,
     edit_form: &mut Box<super::EditForm>,
 ) {
-    let result_5 = place(16);
+    let form_area = place(16);
 
     let title = if edit_form.old.is_some() {
         "edit MCP server"
@@ -181,7 +181,7 @@ fn draw_server_form(
         "add MCP server"
     };
 
-    let inner = boxed(frame, result_5, title);
+    let inner = boxed(frame, form_area, title);
     let label_width = 10u16;
     let rows = [
         ("name", 1u16),
@@ -214,7 +214,7 @@ fn draw_server_fields(
     rows: [(&str, u16); 5],
     mut y: u16,
 ) {
-    for (i, (label, height_2)) in rows.iter().enumerate() {
+    for (i, (label, height)) in rows.iter().enumerate() {
         let focused = edit_form.field == i;
         let label_area = Rect {
             y,
@@ -234,7 +234,7 @@ fn draw_server_fields(
             x: inner.x + label_width,
             y,
             width: inner.width.saturating_sub(label_width),
-            height: *height_2,
+            height: *height,
         };
 
         match i {
@@ -256,7 +256,7 @@ fn draw_server_fields(
             _ => draw_auto_allow(frame, input_area, focused, edit_form.auto_allow),
         }
 
-        y += height_2 + 1;
+        y += height + 1;
     }
 }
 
@@ -264,25 +264,25 @@ fn draw_server_kind(frame: &mut Frame<'_>, edit_form: &mut Box<super::EditForm>,
     let spans: Vec<Span> = KINDS
         .iter()
         .enumerate()
-        .map(|(key, kind_value)| Span::styled(format!(" {kind_value} "), kind_style(key == edit_form.kind, focused)))
+        .map(|(index, kind)| Span::styled(format!(" {kind} "), kind_style(index == edit_form.kind, focused)))
         .collect();
 
     frame.render_widget(Paragraph::new(Line::from(spans)), input_area);
 }
 
-fn modal_box(frame_value: &mut Frame, area: Rect, area_value: Rect, title: &str) -> Rect {
+fn modal_box(frame: &mut Frame, area: Rect, modal_area: Rect, title: &str) -> Rect {
     // a modal: the screen behind it fades
-    theme::dim(frame_value.buffer_mut(), area);
-    frame_value.render_widget(Clear, area_value);
+    theme::dim(frame.buffer_mut(), area);
+    frame.render_widget(Clear, modal_area);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(theme::accent())
         .title(Span::styled(format!(" {title} "), theme::accent_bold()))
         .style(Style::default().bg(theme::pal().on_accent).fg(theme::pal().text));
-    let inner = block.inner(area_value);
+    let inner = block.inner(modal_area);
 
-    frame_value.render_widget(block, area_value);
+    frame.render_widget(block, modal_area);
 
     Rect {
         x: inner.x + 1,

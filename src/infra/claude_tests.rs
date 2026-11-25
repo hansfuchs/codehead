@@ -24,7 +24,7 @@ fn session_file_takes_the_newest_copy() {
 
 #[test]
 fn last_response_after_last_tool_result() {
-    let thread = [
+    let transcript = [
         r#"{"type":"user","cwd":"/p","gitBranch":"main","message":{"content":"do it"}}"#,
         r#"{"type":"assistant","message":{"content":[{"type":"text","text":"checking"},{"type":"tool_use"}]}}"#,
         r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#,
@@ -33,14 +33,14 @@ fn last_response_after_last_tool_result() {
         r#"{"type":"ai-title","aiTitle":"Fix it"}"#,
     ]
     .join("\n");
-    let mut text = Session::default();
+    let mut session = Session::default();
 
-    parse(&thread, &mut text);
+    parse(&transcript, &mut session);
 
-    assert_eq!(text.last, "DONE. part 1\n\npart 2");
-    assert_eq!(text.title, "Fix it");
-    assert_eq!(text.cwd, "/p");
-    assert_eq!(text.branch, "main");
+    assert_eq!(session.last, "DONE. part 1\n\npart 2");
+    assert_eq!(session.title, "Fix it");
+    assert_eq!(session.cwd, "/p");
+    assert_eq!(session.branch, "main");
 }
 
 /// Live check: `CODEHEAD_THREAD`=<id> cargo test `live_of_thread` -- --ignored --nocapture
@@ -48,11 +48,11 @@ fn last_response_after_last_tool_result() {
 #[ignore = "requires CODEHEAD_THREAD with a live Claude session"]
 fn live_of_thread() {
     let id = std::env::var("CODEHEAD_THREAD").unwrap();
-    let text = of_thread(&id, "live").expect("0 responses");
+    let session = of_thread(&id, "live").expect("0 responses");
 
     println!(
         "{}\n{}",
-        text.path.display(),
-        text.last.chars().take(300).collect::<String>()
+        session.path.display(),
+        session.last.chars().take(300).collect::<String>()
     );
 }

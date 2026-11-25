@@ -4,6 +4,7 @@
 
 mod blank_lines;
 mod imports;
+mod names;
 mod sizes;
 mod tree;
 
@@ -123,6 +124,13 @@ fn layers() {
 
     findings.extend(sources.iter().flat_map(tree::tests));
     findings.extend(sources.iter().flat_map(imports::check));
+
+    report(&findings);
+}
+
+#[test]
+fn names() {
+    let findings: Vec<Finding> = sources().iter().flat_map(names::check).collect();
 
     report(&findings);
 }

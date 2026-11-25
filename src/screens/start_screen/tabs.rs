@@ -18,7 +18,7 @@ impl App {
 
         // leaving the settings: their last edit applies
         if tab != Tab::Settings && self.compose.screen == Screen::Pick && self.tab == Tab::Settings {
-            switch_tab_text(self);
+            commit_settings(self);
         }
 
         if tab == Tab::New {
@@ -85,7 +85,7 @@ impl App {
         };
 
         {
-            apply_settings_notes(self, file);
+            apply_config(self, file);
         }
     }
 
@@ -93,7 +93,7 @@ impl App {
         let action = self
             .settings
             .as_mut()
-            .map_or(crate::features::settings::Action::None, |text| text.key(key));
+            .map_or(crate::features::settings::Action::None, |settings| settings.key(key));
 
         self.settings_action(action);
     }
@@ -124,7 +124,7 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') => self.switch_tab(self.cur_tab().next()),
             KeyCode::Left | KeyCode::Char('h') => self.switch_tab(self.cur_tab().prev()),
             KeyCode::Down | KeyCode::Enter | KeyCode::Char('j') => {
-                tabs_key_settings(self, key);
+                focus_content(self, key);
             }
             // esc: the top level already (esc esc quits); q: 0 quit (menu → quit codehead)
             KeyCode::Up | KeyCode::Esc => {}
@@ -156,60 +156,60 @@ impl App {
             Tab::Agents | Tab::New => self.agents_key(key),
             Tab::Settings => self.settings_key(key),
             Tab::Flows => {
-                let output_value = self.flows_tab.key(key);
+                let output = self.flows_tab.key(key);
 
-                self.flows_out(output_value);
+                self.flows_out(output);
             }
             Tab::Projects => {
-                let output_2 = self.project_selection.projects_tab.key(key);
+                let output = self.project_selection.projects_tab.key(key);
 
-                self.projects_out(output_2);
+                self.projects_out(output);
             }
         }
     }
 }
 
-fn tabs_key_settings(app_state: &mut App, key: KeyEvent) {
-    app_state.tabs_focus = false;
+fn focus_content(app: &mut App, key: KeyEvent) {
+    app.tabs_focus = false;
 
-    if app_state.compose.screen == Screen::Compose {
-        app_state.compose.field = app_state.fields()[0];
-    } else if app_state.tab == Tab::Settings
-        && let Some(settings) = &mut app_state.settings
+    if app.compose.screen == Screen::Compose {
+        app.compose.field = app.fields()[0];
+    } else if app.tab == Tab::Settings
+        && let Some(settings) = &mut app.settings
     {
         settings.focus_input();
     }
 
     // the threads tab: its repo tabs first (↓↓: the view tabs, the list)
-    if app_state.compose.screen == Screen::Pick && app_state.tab == Tab::Threads && key.code == KeyCode::Down {
-        app_state.thread_list.tlist.focus = crate::features::thread_list::Focus::Repos;
+    if app.compose.screen == Screen::Pick && app.tab == Tab::Threads && key.code == KeyCode::Down {
+        app.thread_list.tlist.focus = crate::features::thread_list::Focus::Repos;
     }
 }
 
-fn apply_settings_notes(app_state: &mut App, file: crate::infra::config::File) {
+fn apply_config(app: &mut App, file: crate::infra::config::File) {
     // tests: 0 change to the process-wide config other tests read
     if !cfg!(test) {
         crate::infra::config::apply(file);
     }
 
-    app_state.cfg.prefix = crate::infra::config::prefix();
-    app_state.cfg.agent = crate::domain::agents::default_agent(&app_state.agent_list.agents).unwrap_or_default();
+    app.cfg.prefix = crate::infra::config::prefix();
+    app.cfg.agent = crate::domain::agents::default_agent(&app.agent_list.agents).unwrap_or_default();
     let notes = crate::infra::config::notes();
 
-    if app_state.cfg.notes != notes {
-        app_state.cfg.notes = notes;
-        app_state.note_list.selected.clear();
-        app_state.reload_notes();
+    if app.cfg.notes != notes {
+        app.cfg.notes = notes;
+        app.note_list.selected.clear();
+        app.reload_notes();
     }
 
-    app_state.agent_list.styles = styles::load(&styles::dir());
-    app_state.agent_list.global_style = styles::global_name();
+    app.agent_list.styles = styles::load(&styles::dir());
+    app.agent_list.global_style = styles::global_name();
 }
 
-fn switch_tab_text(app_state: &mut App) {
-    if let Some(text) = app_state.settings.as_mut() {
-        text.commit();
+fn commit_settings(app: &mut App) {
+    if let Some(settings) = app.settings.as_mut() {
+        settings.commit();
     }
 
-    app_state.apply_settings();
+    app.apply_settings();
 }

@@ -50,16 +50,16 @@ thread_local! {
 
 /// The agents whose `@name` mentions rows drawn from now on color (the stream's roster).
 pub(crate) fn set_marks(marks: Vec<(String, Color)>) {
-    MARKS.with_borrow_mut(|message| *message = marks);
+    MARKS.with_borrow_mut(|current| *current = marks);
 }
 
 /// A hash of the marks: cached rows of another roster are stale.
 pub(crate) fn marks_hash() -> u64 {
     use std::hash::{Hash, Hasher};
-    let mut height = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
 
-    MARKS.with_borrow(|message| message.hash(&mut height));
-    height.finish()
+    MARKS.with_borrow(|current| current.hash(&mut hasher));
+    hasher.finish()
 }
 
 /// TEXT in STYLE as spans, each `@name` of MARKS in its agent's color, bold. The matcher of the
@@ -71,16 +71,16 @@ pub(crate) fn mention_spans(text: &str, style: Style, marks: &[(String, Color)])
     let mut run = String::new();
     let mut cur: Option<Color> = None;
     let st = |color: Option<Color>| match color {
-        Some(character) => style.fg(character).add_modifier(Modifier::BOLD),
+        Some(color) => style.fg(color).add_modifier(Modifier::BOLD),
         None => style,
     };
 
-    for (ch, character_value) in chars.into_iter().zip(colors) {
-        if character_value != cur && !run.is_empty() {
+    for (ch, color) in chars.into_iter().zip(colors) {
+        if color != cur && !run.is_empty() {
             out.push(Span::styled(std::mem::take(&mut run), st(cur)));
         }
 
-        cur = character_value;
+        cur = color;
         run.push(ch);
     }
 
@@ -99,7 +99,7 @@ fn mention_pieces(pieces: &[Piece]) -> Vec<Piece> {
             return pieces.to_vec();
         }
 
-        pieces.iter().flat_map(|path| mention_piece(path, marks)).collect()
+        pieces.iter().flat_map(|piece| mention_piece(piece, marks)).collect()
     })
 }
 
@@ -112,42 +112,38 @@ struct Block {
 /// `file://<abs path>#L<line>` for inline code T that names an existing file: absolute, `~/…`,
 /// or relative to the current dir (the thread view runs in the worktree), with an optional
 /// `:line` / `:line:col`. None: 0 file (a word, a command, a dir).
-pub(crate) fn file_link(thread: &str) -> Option<String> {
-    let thread_value = thread.trim();
+pub(crate) fn file_link(text: &str) -> Option<String> {
+    let trimmed = text.trim();
 
-    if thread_value.is_empty()
-        || thread_value.contains(char::is_whitespace)
-        || thread_value.contains("://")
-        || thread_value.len() > 300
-    {
+    if trimmed.is_empty() || trimmed.contains(char::is_whitespace) || trimmed.contains("://") || trimmed.len() > 300 {
         return None;
     }
 
     // `path:12` / `path:12:3`
-    let mut parts = thread_value.splitn(3, ':');
+    let mut parts = trimmed.splitn(3, ':');
     let path = parts.next()?;
-    let line: Option<u32> = parts.next().and_then(|line_value| line_value.parse().ok());
+    let line: Option<u32> = parts.next().and_then(|number| number.parse().ok());
 
     if !(path.contains('/') || path.contains('.')) {
         return None;
     }
 
-    let path_value = match path.strip_prefix("~/") {
+    let resolved = match path.strip_prefix("~/") {
         Some(rest) => crate::infra::config::home().join(rest),
         None => std::path::PathBuf::from(path),
     };
 
-    let abs = if path_value.is_absolute() {
-        path_value
+    let abs = if resolved.is_absolute() {
+        resolved
     } else {
-        std::env::current_dir().ok()?.join(path_value)
+        std::env::current_dir().ok()?.join(resolved)
     };
 
     abs.is_file().then(|| {
         format!(
             "file://{}{}",
             abs.display(),
-            line.map_or(String::new(), |line_2| format!("#L{line_2}"))
+            line.map_or(String::new(), |line| format!("#L{line}"))
         )
     })
 }
@@ -175,17 +171,17 @@ mod wrap;
 pub(crate) use wrap::plain;
 use wrap::wrap;
 
-fn mention_piece(path: &Piece, marks: &[(String, Color)]) -> Vec<Piece> {
-    if path.copy.is_some() || path.link.is_some() || path.style.fg == Some(code_fg()) || !path.text.contains('@') {
-        return vec![path.clone()];
+fn mention_piece(piece: &Piece, marks: &[(String, Color)]) -> Vec<Piece> {
+    if piece.copy.is_some() || piece.link.is_some() || piece.style.fg == Some(code_fg()) || !piece.text.contains('@') {
+        return vec![piece.clone()];
     }
 
-    mention_spans(&path.text, path.style, marks)
+    mention_spans(&piece.text, piece.style, marks)
         .into_iter()
-        .map(|text_value| Piece {
-            text: text_value.content.into_owned(),
-            style: text_value.style,
-            ..path.clone()
+        .map(|span| Piece {
+            text: span.content.into_owned(),
+            style: span.style,
+            ..piece.clone()
         })
         .collect()
 }

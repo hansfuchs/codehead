@@ -13,10 +13,10 @@ pub(crate) fn agent_comments(
     let items = list.as_array().ok_or("comments: an array required")?;
     let mut add = Vec::new();
 
-    for character in items {
-        let file = character["file"].as_str().unwrap_or_default().trim();
-        let text = character["text"].as_str().unwrap_or_default().trim();
-        let line = character["line"].as_u64().unwrap_or(0) as u32;
+    for item in items {
+        let file = item["file"].as_str().unwrap_or_default().trim();
+        let text = item["text"].as_str().unwrap_or_default().trim();
+        let line = item["line"].as_u64().unwrap_or(0) as u32;
 
         if file.is_empty() || text.is_empty() {
             return Err("each comment needs file and text".into());
@@ -24,33 +24,33 @@ pub(crate) fn agent_comments(
 
         // an absolute path: relative to its checkout (the work dir, a linked worktree of an
         // agent); a relative one: relative to the work dir
-        let path_value = Path::new(file);
+        let path = Path::new(file);
 
-        let at = if path_value.is_absolute() {
-            root.filter(|result| path_value.starts_with(result))
+        let at = if path.is_absolute() {
+            root.filter(|worktree| path.starts_with(worktree))
                 .map(Path::to_path_buf)
-                .or_else(|| path_value.parent().and_then(checkout_of))
+                .or_else(|| path.parent().and_then(checkout_of))
         } else {
             root.map(Path::to_path_buf)
         };
 
         let rel = at
             .as_deref()
-            .and_then(|result_value| path_value.strip_prefix(result_value).ok())
-            .unwrap_or(path_value)
+            .and_then(|checkout| path.strip_prefix(checkout).ok())
+            .unwrap_or(path)
             .to_string_lossy()
             .trim_start_matches("./")
             .to_string();
-        let level = rank::Level::parse(character["severity"].as_str().unwrap_or_default()).unwrap_or_default();
+        let level = rank::Level::parse(item["severity"].as_str().unwrap_or_default()).unwrap_or_default();
         let root = at
-            .map(|result_2| result_2.to_string_lossy().into_owned())
+            .map(|checkout| checkout.to_string_lossy().into_owned())
             .unwrap_or_default();
 
         add.push(Comment {
             path: rel,
             line,
             text: text.to_string(),
-            lines: character["lines"].as_str().unwrap_or_default().to_string(),
+            lines: item["lines"].as_str().unwrap_or_default().to_string(),
             level,
             by: agent.to_string(),
             root,
@@ -60,8 +60,8 @@ pub(crate) fn agent_comments(
 
     let at = crate::engine::now_ms();
 
-    for character_value in &mut add {
-        character_value.at = at;
+    for comment in &mut add {
+        comment.at = at;
     }
 
     Ok(update_comments(thread, |all| {
@@ -69,26 +69,26 @@ pub(crate) fn agent_comments(
 
         all.extend(add);
         give_ids(all);
-        all[from..].iter().map(|character_2| character_2.id.clone()).collect()
+        all[from..].iter().map(|comment| comment.id.clone()).collect()
     }))
 }
 /// MCP `comments`: THREAD's comments in STATE (`open`, `resolved`, `all`) as JSON for an agent.
 pub(crate) fn list_comments(thread: &str, state: &str) -> String {
     let rows: Vec<serde_json::Value> = read_comments(thread)
         .iter()
-        .filter(|character| match state {
-            "resolved" => !character.open(),
+        .filter(|comment| match state {
+            "resolved" => !comment.open(),
             "all" => true,
-            _ => character.open(),
+            _ => comment.open(),
         })
-        .map(|character_value| {
+        .map(|comment| {
             serde_json::json!({
-                "id": character_value.id, "file": character_value.path, "line": character_value.line, "lines": character_value.lines, "severity": character_value.level.label(),
-                "author": if character_value.by.is_empty() { "owner" } else { character_value.by.as_str() },
-                "state": if character_value.open() { "open" } else { "resolved" },
-                "resolved_by": character_value.resolved_by, "note": character_value.note, "text": character_value.text,
-                "replies": character_value.replies.iter().map(|reply| serde_json::json!({"author": if reply.by.is_empty() { "owner" } else { reply.by.as_str() }, "text": reply.text})).collect::<Vec<_>>(),
-                "last_by": character_value.replies.last().map_or(if character_value.by.is_empty() { "owner" } else { character_value.by.as_str() }, |reply| if reply.by.is_empty() { "owner" } else { reply.by.as_str() }),
+                "id": comment.id, "file": comment.path, "line": comment.line, "lines": comment.lines, "severity": comment.level.label(),
+                "author": if comment.by.is_empty() { "owner" } else { comment.by.as_str() },
+                "state": if comment.open() { "open" } else { "resolved" },
+                "resolved_by": comment.resolved_by, "note": comment.note, "text": comment.text,
+                "replies": comment.replies.iter().map(|reply| serde_json::json!({"author": if reply.by.is_empty() { "owner" } else { reply.by.as_str() }, "text": reply.text})).collect::<Vec<_>>(),
+                "last_by": comment.replies.last().map_or(if comment.by.is_empty() { "owner" } else { comment.by.as_str() }, |reply| if reply.by.is_empty() { "owner" } else { reply.by.as_str() }),
             })
         })
         .collect();
@@ -113,28 +113,25 @@ pub(crate) fn set_comment_state(
     update_comments(thread, |all| {
         let unknown: Vec<&String> = ids
             .iter()
-            .filter(|id| !all.iter().any(|character| &character.id == *id))
+            .filter(|id| !all.iter().any(|comment| &comment.id == *id))
             .collect();
 
         if !unknown.is_empty() {
             return Err(format!(
                 "unknown comment ids: {} (the `comments` tool lists them)",
-                unknown.iter().map(|text| text.as_str()).collect::<Vec<_>>().join(", ")
+                unknown.iter().map(|id| id.as_str()).collect::<Vec<_>>().join(", ")
             ));
         }
 
-        for character_2 in all
-            .iter_mut()
-            .filter(|character_value| ids.contains(&character_value.id))
-        {
-            character_2.state = to;
+        for comment in all.iter_mut().filter(|comment| ids.contains(&comment.id)) {
+            comment.state = to;
 
-            character_2.resolved_by = record_comment_resolution(agent, to);
+            comment.resolved_by = resolver(agent, to);
 
-            character_2.note = note.trim().to_string();
+            comment.note = note.trim().to_string();
 
             // reopened: the next batch takes it again
-            update_comment_note(to, character_2);
+            requeue_reopened(to, comment);
         }
 
         Ok(format!(
@@ -145,7 +142,7 @@ pub(crate) fn set_comment_state(
     })
 }
 
-fn record_comment_resolution(agent: &str, to: CState) -> String {
+fn resolver(agent: &str, to: CState) -> String {
     if to == CState::Resolved {
         agent.to_string()
     } else {
@@ -153,9 +150,9 @@ fn record_comment_resolution(agent: &str, to: CState) -> String {
     }
 }
 
-fn update_comment_note(to: CState, character_2: &mut Comment) {
+fn requeue_reopened(to: CState, comment: &mut Comment) {
     if to == CState::Open {
-        character_2.sent = false;
+        comment.sent = false;
     }
 }
 /// The batch message of COMMENTS (0 comments: None): each with its id, severity, author.
@@ -164,13 +161,13 @@ pub(crate) fn batch(comments: &[&Comment]) -> Option<String> {
         return None;
     }
 
-    let mut text_value = String::from(
+    let mut message = String::from(
         "Review comments on the changes (file:line, new side). Address each one. After a fix, or with a reason not to fix, call the `comment_status` tool (codehead MCP) with its id, state `resolved` and a 1-line note:\n",
     );
 
-    if comments.iter().any(|character| !character.replies.is_empty()) {
-        text_value.insert_str(
-            text_value.len() - 2,
+    if comments.iter().any(|comment| !comment.replies.is_empty()) {
+        message.insert_str(
+            message.len() - 2,
             ". A question in a thread (↳ replies): answer it with the `comment_reply` tool",
         );
     }
@@ -188,7 +185,7 @@ pub(crate) fn batch(comments: &[&Comment]) -> Option<String> {
         let mut lines = comment.text.lines();
 
         let _ = writeln!(
-            text_value,
+            message,
             "- {} [{}] `{}:{}` by {}: {}",
             comment.id,
             comment.level.label(),
@@ -199,28 +196,23 @@ pub(crate) fn batch(comments: &[&Comment]) -> Option<String> {
         );
 
         for line in lines {
-            let _ = writeln!(text_value, "  {line}");
+            let _ = writeln!(message, "  {line}");
         }
 
-        for result in &comment.replies {
-            let mut lines = result.text.lines();
+        for reply in &comment.replies {
+            let mut lines = reply.text.lines();
 
-            let _ = writeln!(
-                text_value,
-                "  ↳ {}: {}",
-                who(&result.by),
-                lines.next().unwrap_or_default()
-            );
+            let _ = writeln!(message, "  ↳ {}: {}", who(&reply.by), lines.next().unwrap_or_default());
 
-            append_batch_prompts(&mut text_value, lines);
+            append_reply_lines(&mut message, lines);
         }
     }
 
-    Some(text_value.trim_end().to_string())
+    Some(message.trim_end().to_string())
 }
 
-fn append_batch_prompts(text_value: &mut String, lines: std::str::Lines<'_>) {
-    for line_value in lines {
-        let _ = writeln!(text_value, "    {line_value}");
+fn append_reply_lines(message: &mut String, lines: std::str::Lines<'_>) {
+    for line in lines {
+        let _ = writeln!(message, "    {line}");
     }
 }

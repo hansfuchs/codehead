@@ -40,8 +40,8 @@ fn read_marks(id: &str) -> HashMap<String, u64> {
         .unwrap_or_default()
 }
 
-fn write_marks(id: &str, message: &HashMap<String, u64>) {
-    if let Ok(bytes) = serde_json::to_vec_pretty(message) {
+fn write_marks(id: &str, marks: &HashMap<String, u64>) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(marks) {
         let _ = crate::engine::write_atomic(&marks_path(id), &bytes);
     }
 }
@@ -139,8 +139,8 @@ struct Row {
 impl Row {
     fn new(body: Body, file: usize, at: Option<u32>) -> Row {
         let (comment, finding) = match body {
-            Body::Comment(comment_value, _) => (Some(comment_value), None),
-            Body::Finding(x, _) => (None, Some(x)),
+            Body::Comment(index, _) => (Some(index), None),
+            Body::Finding(index, _) => (None, Some(index)),
             _ => (None, None),
         };
 
@@ -162,15 +162,15 @@ type LKey = (bool, u32);
 
 fn lkey(line: &DLine) -> Option<LKey> {
     match line.kind {
-        Kind::Del => line.old.map(|count| (true, count)),
-        _ => line.new.map(|count_value| (false, count_value)),
+        Kind::Del => line.old.map(|number| (true, number)),
+        _ => line.new.map(|number| (false, number)),
     }
 }
 
 /// `11-13, 15 · removed 14` of KEYS (sorted).
 fn lines_label(keys: &std::collections::BTreeSet<LKey>) -> String {
-    let new: Vec<u32> = keys.iter().filter(|key| !key.0).map(|key_value| key_value.1).collect();
-    let old: Vec<u32> = keys.iter().filter(|key_2| key_2.0).map(|key_3| key_3.1).collect();
+    let new: Vec<u32> = keys.iter().filter(|key| !key.0).map(|key| key.1).collect();
+    let old: Vec<u32> = keys.iter().filter(|key| key.0).map(|key| key.1).collect();
 
     match (new.is_empty(), old.is_empty()) {
         (_, true) => line_runs(&new),
@@ -265,7 +265,6 @@ mod selection;
 mod ship;
 mod view;
 
-/// The comment modal's text input with TEXT.
 /// A key of a commit view (read only): it moves, folds, filters, reads again.
 fn read_only_key(key: KeyEvent) -> bool {
     let plain = !key
@@ -304,8 +303,8 @@ fn thread_lines(comment: &Comment, upto: Option<usize>) -> Vec<QLine> {
 
     add(format!("{} · {}", comment.author(), comment.id), &comment.text);
 
-    for result in comment.replies.iter().take(upto.unwrap_or(usize::MAX)) {
-        add(format!("↳ {} · {}", result.author(), stamp(result.at)), &result.text);
+    for reply in comment.replies.iter().take(upto.unwrap_or(usize::MAX)) {
+        add(format!("↳ {} · {}", reply.author(), stamp(reply.at)), &reply.text);
     }
 
     out
@@ -330,21 +329,22 @@ enum CLine {
     RText(usize, usize),
 }
 
+/// The comment modal's text input with TEXT.
 fn comment_area(text: &str) -> Box<crate::ui::textarea::TextArea> {
-    let mut thread = crate::ui::textarea::TextArea::new(false, "the comment · ctrl+⏎ save");
+    let mut area = crate::ui::textarea::TextArea::new(false, "the comment · ctrl+⏎ save");
 
-    thread.style = Some(theme::panel());
-    thread.set_text(text);
-    thread.move_end();
-    Box::new(thread)
+    area.style = Some(theme::panel());
+    area.set_text(text);
+    area.move_end();
+    Box::new(area)
 }
 
 /// The text of a new reply.
 fn reply_area() -> Box<crate::ui::textarea::TextArea> {
-    let mut thread = comment_area("");
+    let mut area = comment_area("");
 
-    thread.placeholder = "the reply · @agent: it gets the thread at once · ctrl+⏎ save".into();
-    thread
+    area.placeholder = "the reply · @agent: it gets the thread at once · ctrl+⏎ save".into();
+    area
 }
 
 /// The code's background inside the boxes: the panel color, darker.
@@ -357,59 +357,57 @@ const PANEL_MIN: u16 = 90;
 /// 2 right clicks within this time: the selection clears.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
-/// The patch pick of KEYS (selected lines) in F: added lines by number, removed lines by (the
-/// new-side line they sit before, their text).
 /// The worktree line of each line of hunk H: added and context lines their own, a removed line
 /// the line it sat before.
 fn worktree_lines(hunk: &Hunk) -> Vec<u32> {
-    let mut count = hunk.new.max(1);
+    let mut next = hunk.new.max(1);
 
     hunk.lines
         .iter()
         .map(|line| {
             if line.kind == Kind::Del {
-                count
+                next
             } else {
-                let at = line.new.unwrap_or(count);
+                let at = line.new.unwrap_or(next);
 
-                count = at + 1;
+                next = at + 1;
                 at
             }
         })
         .collect()
 }
 
+/// The patch pick of KEYS (selected lines) in FILE: added lines by number, removed lines by (the
+/// new-side line they sit before, their text).
 fn pick_of(file: &FileDiff, keys: &std::collections::BTreeSet<LKey>) -> patch::Pick {
-    let mut path = patch::Pick::default();
+    let mut pick = patch::Pick::default();
 
     for hunk in &file.hunks {
-        let count = hunk.new;
-
-        pick_hunk(keys, &mut path, hunk, count);
+        pick_hunk(keys, &mut pick, hunk, hunk.new);
     }
 
-    path
+    pick
 }
 
-fn pick_hunk(keys: &std::collections::BTreeSet<(bool, u32)>, path: &mut patch::Pick, hunk: &Hunk, mut count: u32) {
+fn pick_hunk(keys: &std::collections::BTreeSet<(bool, u32)>, pick: &mut patch::Pick, hunk: &Hunk, mut new_line: u32) {
     for line in &hunk.lines {
-        pick_line(keys, path, &mut count, line);
+        pick_line(keys, pick, &mut new_line, line);
     }
 }
 
-fn pick_line(keys: &std::collections::BTreeSet<(bool, u32)>, path: &mut patch::Pick, count: &mut u32, line: &DLine) {
+fn pick_line(keys: &std::collections::BTreeSet<(bool, u32)>, pick: &mut patch::Pick, new_line: &mut u32, line: &DLine) {
     match line.kind {
         Kind::Add => {
             if keys.contains(&(false, line.new.unwrap_or(0))) {
-                path.adds.insert(*count);
+                pick.adds.insert(*new_line);
             }
 
-            *count += 1;
+            *new_line += 1;
         }
-        Kind::Ctx => *count += 1,
+        Kind::Ctx => *new_line += 1,
         Kind::Del => {
-            if line.old.is_some_and(|output| keys.contains(&(true, output))) {
-                path.dels.insert((*count, line.text.clone()));
+            if line.old.is_some_and(|old| keys.contains(&(true, old))) {
+                pick.dels.insert((*new_line, line.text.clone()));
             }
         }
     }

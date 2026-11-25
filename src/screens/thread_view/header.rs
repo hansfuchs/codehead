@@ -107,7 +107,7 @@ impl View {
     /// Who a message without @name goes to: the agents of the owner's last message (still on the
     /// thread), else the lead.
     pub(super) fn default_to(&self) -> Vec<String> {
-        let last = self.thread.items.iter().rev().find_map(|i| match i {
+        let last = self.thread.items.iter().rev().find_map(|item| match item {
             chat::Item::Prompt { from, to, .. } if from == "owner" => Some(
                 to.iter()
                     .filter(|agent| self.agents.members.contains(agent))
@@ -211,7 +211,7 @@ fn card_tech(view: &View, name: &str) -> String {
 
     [harness, model]
         .into_iter()
-        .filter(|text| !text.is_empty())
+        .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(" · ")
 }

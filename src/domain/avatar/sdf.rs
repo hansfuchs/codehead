@@ -5,20 +5,20 @@ pub(crate) struct Vector(pub f32, pub f32, pub f32);
 
 impl Add for Vector {
     type Output = Vector;
-    fn add(self, output: Vector) -> Vector {
-        Vector(self.0 + output.0, self.1 + output.1, self.2 + output.2)
+    fn add(self, other: Vector) -> Vector {
+        Vector(self.0 + other.0, self.1 + other.1, self.2 + other.2)
     }
 }
 impl Sub for Vector {
     type Output = Vector;
-    fn sub(self, output: Vector) -> Vector {
-        Vector(self.0 - output.0, self.1 - output.1, self.2 - output.2)
+    fn sub(self, other: Vector) -> Vector {
+        Vector(self.0 - other.0, self.1 - other.1, self.2 - other.2)
     }
 }
 impl Mul<f32> for Vector {
     type Output = Vector;
-    fn mul(self, key: f32) -> Vector {
-        Vector(self.0 * key, self.1 * key, self.2 * key)
+    fn mul(self, factor: f32) -> Vector {
+        Vector(self.0 * factor, self.1 * factor, self.2 * factor)
     }
 }
 impl Neg for Vector {
@@ -29,16 +29,16 @@ impl Neg for Vector {
 }
 
 impl Vector {
-    pub(crate) fn dot(self, output: Vector) -> f32 {
-        self.0 * output.0 + self.1 * output.1 + self.2 * output.2
+    pub(crate) fn dot(self, other: Vector) -> f32 {
+        self.0 * other.0 + self.1 * other.1 + self.2 * other.2
     }
     pub(crate) fn len(self) -> f32 {
         self.dot(self).sqrt()
     }
     pub(crate) fn norm(self) -> Vector {
-        let line = self.len().max(1e-6);
+        let length = self.len().max(1e-6);
 
-        self * (1.0 / line)
+        self * (1.0 / length)
     }
     pub(crate) fn abs(self) -> Vector {
         Vector(self.0.abs(), self.1.abs(), self.2.abs())
@@ -47,49 +47,37 @@ impl Vector {
         Vector(self.0.max(0.0), self.1.max(0.0), self.2.max(0.0))
     }
     /// Rotation about the y axis by A radians.
-    pub(crate) fn rot_y(self, agent: f32) -> Vector {
-        let (text, character) = agent.sin_cos();
+    pub(crate) fn rot_y(self, angle: f32) -> Vector {
+        let (sin, cos) = angle.sin_cos();
 
-        Vector(
-            character * self.0 + text * self.2,
-            self.1,
-            -text * self.0 + character * self.2,
-        )
+        Vector(cos * self.0 + sin * self.2, self.1, -sin * self.0 + cos * self.2)
     }
     /// Rotation about the x axis by A radians.
-    pub(crate) fn rot_x(self, agent: f32) -> Vector {
-        let (text, character) = agent.sin_cos();
+    pub(crate) fn rot_x(self, angle: f32) -> Vector {
+        let (sin, cos) = angle.sin_cos();
 
-        Vector(
-            self.0,
-            character * self.1 - text * self.2,
-            text * self.1 + character * self.2,
-        )
+        Vector(self.0, cos * self.1 - sin * self.2, sin * self.1 + cos * self.2)
     }
     /// Rotation about the z axis by A radians.
-    pub(crate) fn rot_z(self, agent: f32) -> Vector {
-        let (text, character) = agent.sin_cos();
+    pub(crate) fn rot_z(self, angle: f32) -> Vector {
+        let (sin, cos) = angle.sin_cos();
 
-        Vector(
-            character * self.0 - text * self.1,
-            text * self.0 + character * self.1,
-            self.2,
-        )
+        Vector(cos * self.0 - sin * self.1, sin * self.0 + cos * self.1, self.2)
     }
 }
 
-fn rbox(path: Vector, bytes: Vector, result: f32) -> f32 {
-    let query = path.abs() - bytes;
+fn rbox(point: Vector, half: Vector, radius: f32) -> f32 {
+    let offset = point.abs() - half;
 
-    query.max0().len() + query.0.max(query.1).max(query.2).min(0.0) - result
+    offset.max0().len() + offset.0.max(offset.1).max(offset.2).min(0.0) - radius
 }
 pub(crate) const STONE: u8 = 0;
 pub(crate) const EYE: u8 = 1;
 
 /// Square pyramid (iq): base 1x1 on y 0, apex at y H.
-fn pyramid(path: Vector, height: f32) -> f32 {
+fn pyramid(point: Vector, height: f32) -> f32 {
     let m2 = height * height + 0.25;
-    let (mut px, mut pz) = (path.0.abs(), path.2.abs());
+    let (mut px, mut pz) = (point.0.abs(), point.2.abs());
 
     if pz > px {
         std::mem::swap(&mut px, &mut pz);
@@ -97,32 +85,32 @@ fn pyramid(path: Vector, height: f32) -> f32 {
 
     px -= 0.5;
     pz -= 0.5;
-    let query = Vector(pz, height * path.1 - 0.5 * px, height * px + 0.5 * path.1);
-    let text = (-query.0).max(0.0);
-    let thread = ((query.1 - 0.5 * pz) / (m2 + 0.25)).clamp(0.0, 1.0);
-    let agent = m2 * (query.0 + text) * (query.0 + text) + query.1 * query.1;
-    let bytes =
-        m2 * (query.0 + 0.5 * thread) * (query.0 + 0.5 * thread) + (query.1 - m2 * thread) * (query.1 - m2 * thread);
+    let local = Vector(pz, height * point.1 - 0.5 * px, height * px + 0.5 * point.1);
+    let outside = (-local.0).max(0.0);
+    let along = ((local.1 - 0.5 * pz) / (m2 + 0.25)).clamp(0.0, 1.0);
+    let to_edge = m2 * (local.0 + outside) * (local.0 + outside) + local.1 * local.1;
+    let to_apex =
+        m2 * (local.0 + 0.5 * along) * (local.0 + 0.5 * along) + (local.1 - m2 * along) * (local.1 - m2 * along);
 
-    let d2 = if query.1.min(-query.0 * m2 - query.1 * 0.5) > 0.0 {
+    let d2 = if local.1.min(-local.0 * m2 - local.1 * 0.5) > 0.0 {
         0.0
     } else {
-        agent.min(bytes)
+        to_edge.min(to_apex)
     };
 
-    ((d2 + query.2 * query.2) / m2).sqrt() * query.2.max(-path.1).signum()
+    ((d2 + local.2 * local.2) / m2).sqrt() * local.2.max(-point.1).signum()
 }
 
 /// Hexagonal prism (iq), the hexagon in xz: radius R, half height H.
-fn hex_prism(path: Vector, result: f32, height: f32) -> f32 {
+fn hex_prism(point: Vector, radius: f32, height: f32) -> f32 {
     const TRIANGLE: (f32, f32, f32) = (-0.866_025_4, 0.5, 0.577_350_3);
-    let (mut x, mut y) = (path.0.abs(), path.2.abs());
-    let directory = 2.0 * (TRIANGLE.0 * x + TRIANGLE.1 * y).min(0.0);
+    let (mut x, mut y) = (point.0.abs(), point.2.abs());
+    let fold = 2.0 * (TRIANGLE.0 * x + TRIANGLE.1 * y).min(0.0);
 
-    x -= directory * TRIANGLE.0;
-    y -= directory * TRIANGLE.1;
-    let dx = (x - x.clamp(-TRIANGLE.2 * result, TRIANGLE.2 * result)).hypot(y - result) * (y - result).signum();
-    let dy = path.1.abs() - height;
+    x -= fold * TRIANGLE.0;
+    y -= fold * TRIANGLE.1;
+    let dx = (x - x.clamp(-TRIANGLE.2 * radius, TRIANGLE.2 * radius)).hypot(y - radius) * (y - radius).signum();
+    let dy = point.1.abs() - height;
 
     dx.max(dy).min(0.0) + dx.max(0.0).hypot(dy.max(0.0))
 }
@@ -164,35 +152,35 @@ impl Shape {
     }
 
     /// Distance, material.
-    pub(crate) fn map(self, path: Vector, thread: f32) -> (f32, u8) {
-        let directory = match self {
-            Shape::Geo(i) => super::geo::all()[i as usize].dist(path, thread),
+    pub(crate) fn map(self, point: Vector, time: f32) -> (f32, u8) {
+        let distance = match self {
+            Shape::Geo(i) => super::geo::all()[i as usize].dist(point, time),
             Shape::Pyramid => {
                 // apex down, the base on top
-                let text = 1.7;
+                let scale = 1.7;
 
-                pyramid(Vector(path.0 / text, (0.75 - path.1) / text, path.2 / text), 0.9) * text
+                pyramid(Vector(point.0 / scale, (0.75 - point.1) / scale, point.2 / scale), 0.9) * scale
             }
             Shape::Torus => {
-                let query = (Vector(path.0, 0.0, path.2).len() - 0.8, path.1);
+                let ring = (Vector(point.0, 0.0, point.2).len() - 0.8, point.1);
 
-                (query.0 * query.0 + query.1 * query.1).sqrt() - 0.3
+                (ring.0 * ring.0 + ring.1 * ring.1).sqrt() - 0.3
             }
             Shape::Octa => {
-                let query_value = path.abs();
+                let folded = point.abs();
 
-                (query_value.0 + query_value.1 + query_value.2 - 1.15) * 0.577
+                (folded.0 + folded.1 + folded.2 - 1.15) * 0.577
             }
-            Shape::Monolith => rbox(path, Vector(0.44, 1.0, 0.1), 0.005),
-            Shape::Pillar => hex_prism(path, 0.5, 0.95),
+            Shape::Monolith => rbox(point, Vector(0.44, 1.0, 0.1), 0.005),
+            Shape::Pillar => hex_prism(point, 0.5, 0.95),
             Shape::Corner => rbox(
-                path.rot_x(0.615_5).rot_z(-std::f32::consts::FRAC_PI_4),
+                point.rot_x(0.615_5).rot_z(-std::f32::consts::FRAC_PI_4),
                 Vector(0.6, 0.6, 0.6),
                 0.005,
             ),
         };
 
-        (directory, STONE)
+        (distance, STONE)
     }
 
     /// Framing: look-at y, half height of the view, camera distance, bounding radius.
@@ -255,106 +243,106 @@ impl View {
         }
     }
 
-    fn obj(self, value: Vector) -> Vector {
-        value.rot_z(-self.roll).rot_x(-self.pitch).rot_y(-self.yaw)
+    fn obj(self, world: Vector) -> Vector {
+        world.rot_z(-self.roll).rot_x(-self.pitch).rot_y(-self.yaw)
     }
 
     /// Sample at screen point (U, V): -1..1 on y, x scaled the same (square units).
-    pub(crate) fn sample(&self, user: f32, value: f32) -> Px {
+    pub(crate) fn sample(&self, screen_x: f32, screen_y: f32) -> Px {
         let (cy, half, dist, bound) = self.shape.frame();
         let cy = cy + self.focus;
 
         // perspective camera at DIST, field of view to fit HALF at the origin
-        let key = half / self.zoom / dist;
+        let scale = half / self.zoom / dist;
         let ro = self.obj(Vector(0.0, cy, dist));
-        let rd = self.obj(Vector(user * key, value * key, -1.0).norm());
+        let rd = self.obj(Vector(screen_x * scale, screen_y * scale, -1.0).norm());
 
         // bounding sphere
-        let bytes = ro.dot(rd);
+        let along = ro.dot(rd);
         let sphere_offset = ro.dot(ro) - bound * bound;
-        let discriminant = bytes * bytes - sphere_offset;
+        let discriminant = along * along - sphere_offset;
 
         if discriminant < 0.0 {
             return Px::default();
         }
 
-        let thread = (-bytes - discriminant.sqrt()).max(0.0);
-        let far = -bytes + discriminant.sqrt();
+        let near = (-along - discriminant.sqrt()).max(0.0);
+        let far = -along + discriminant.sqrt();
 
-        if let Some(value) = trace_surface(ro, rd, thread, far, self) {
-            return value;
+        if let Some(sample) = trace_surface(ro, rd, near, far, self) {
+            return sample;
         }
 
         Px::default()
     }
 }
 
-fn missed_ray(thread: f32, far: f32) -> ControlFlow<()> {
-    if thread > far {
+fn missed_ray(depth: f32, far: f32) -> ControlFlow<()> {
+    if depth > far {
         return ControlFlow::Break(());
     }
 
     ControlFlow::Continue(())
 }
 
-fn normal(path: Vector, model_state: &View) -> Vector {
-    let error = 0.002;
-    let file = |query: Vector| model_state.shape.map(query, model_state.time).0;
+fn normal(point: Vector, view: &View) -> Vector {
+    let step = 0.002;
+    let distance = |probe: Vector| view.shape.map(probe, view.time).0;
 
     Vector(
-        file(path + Vector(error, 0.0, 0.0)) - file(path - Vector(error, 0.0, 0.0)),
-        file(path + Vector(0.0, error, 0.0)) - file(path - Vector(0.0, error, 0.0)),
-        file(path + Vector(0.0, 0.0, error)) - file(path - Vector(0.0, 0.0, error)),
+        distance(point + Vector(step, 0.0, 0.0)) - distance(point - Vector(step, 0.0, 0.0)),
+        distance(point + Vector(0.0, step, 0.0)) - distance(point - Vector(0.0, step, 0.0)),
+        distance(point + Vector(0.0, 0.0, step)) - distance(point - Vector(0.0, 0.0, step)),
     )
     .norm()
 }
 
-fn shade(path: Vector, rd: Vector, thread: f32, mat: u8, model_state: &View) -> Px {
-    let count = normal(path, model_state);
-    let line = model_state.obj(model_state.light);
-    let diff = count.dot(line).max(0.0);
+fn shade(point: Vector, rd: Vector, depth: f32, mat: u8, view: &View) -> Px {
+    let normal = normal(point, view);
+    let light = view.obj(view.light);
+    let diff = normal.dot(light).max(0.0);
 
     // ambient occlusion: 4 steps along the normal
     let mut occ = 0.0;
-    let mut width = 1.0;
+    let mut weight = 1.0;
 
     for i in 1..=4 {
-        let height = 0.05 * i as f32;
+        let offset = 0.05 * i as f32;
 
-        occ += (height - model_state.shape.map(path + count * height, model_state.time).0) * width;
-        width *= 0.6;
+        occ += (offset - view.shape.map(point + normal * offset, view.time).0) * weight;
+        weight *= 0.6;
     }
 
     let ao = (1.0 - 3.5 * occ).clamp(0.0, 1.0);
-    let rim = (1.0 - count.dot(-rd).max(0.0)).powi(3);
+    let rim = (1.0 - normal.dot(-rd).max(0.0)).powi(3);
 
     let lum = if mat == EYE {
-        0.08 + 0.92 * model_state.glow
+        0.08 + 0.92 * view.glow
     } else {
-        ((0.04 + 0.96 * diff * diff.sqrt()) * ao + model_state.rim * rim).clamp(0.0, 1.0)
+        ((0.04 + 0.96 * diff * diff.sqrt()) * ao + view.rim * rim).clamp(0.0, 1.0)
     };
 
     Px {
         hit: true,
         lum,
         mat,
-        depth: thread,
-        normal: count,
+        depth,
+        normal,
     }
 }
 
-fn trace_surface(ro: Vector, rd: Vector, mut thread: f32, far: f32, model_state: &View) -> Option<Px> {
+fn trace_surface(ro: Vector, rd: Vector, mut depth: f32, far: f32, view: &View) -> Option<Px> {
     for _ in 0..110 {
-        let path = ro + rd * thread;
-        let (directory, mat) = model_state.shape.map(path, model_state.time);
+        let point = ro + rd * depth;
+        let (distance, mat) = view.shape.map(point, view.time);
 
-        if let Some(value) = finish_ray_sample(rd, thread, path, directory, mat, model_state) {
-            return Some(value);
+        if let Some(sample) = finish_ray_sample(rd, depth, point, distance, mat, view) {
+            return Some(sample);
         }
 
-        thread += directory * 0.9;
+        depth += distance * 0.9;
 
-        if let ControlFlow::Break(()) = missed_ray(thread, far) {
+        if let ControlFlow::Break(()) = missed_ray(depth, far) {
             break;
         }
     }
@@ -362,9 +350,9 @@ fn trace_surface(ro: Vector, rd: Vector, mut thread: f32, far: f32, model_state:
     None
 }
 
-fn finish_ray_sample(rd: Vector, thread: f32, path: Vector, directory: f32, mat: u8, model_state: &View) -> Option<Px> {
-    if directory < 0.0015 {
-        return Some(shade(path, rd, thread, mat, model_state));
+fn finish_ray_sample(rd: Vector, depth: f32, point: Vector, distance: f32, mat: u8, view: &View) -> Option<Px> {
+    if distance < 0.0015 {
+        return Some(shade(point, rd, depth, mat, view));
     }
 
     None

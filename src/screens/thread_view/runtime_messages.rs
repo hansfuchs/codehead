@@ -7,14 +7,14 @@ impl Runtime {
         match message {
             Msg::Done(command, result) => self.command_done(command, result),
             Msg::Cost(snapshot) => self.view.cost = Some(*snapshot),
-            Msg::Shell(command, output, code, directory) => {
-                self.view.shell_done(command, output, code, &directory);
+            Msg::Shell(command, output, code, dir) => {
+                self.view.shell_done(command, output, code, &dir);
                 self.wake = true;
             }
-            Msg::Head(head) => self.view.take_head(&(head)),
-            Msg::Toast(message) => self.view.toast(message),
-            Msg::ShellCwd(directory) => {
-                self.view.shell_state.shell_cwd = directory;
+            Msg::Head(head) => self.view.take_head(&head),
+            Msg::Toast(toast) => self.view.toast(toast),
+            Msg::ShellCwd(dir) => {
+                self.view.shell_state.shell_cwd = dir;
                 self.view.stream.dirty = true;
             }
             Msg::Wake => self.wake = true,

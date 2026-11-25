@@ -6,40 +6,40 @@ impl ProjectsTab {
     }
 }
 
-fn click_project_tab(at: Position, model_state: &mut ProjectsTab) {
-    if model_state.tabs.click(at) {
-        model_state.focus = Focus::Repos;
-        model_state.repo_i = model_state.tabs.i;
-        model_state.cursor = 0;
-        model_state.reload();
-    } else if model_state.list.contains(at) {
-        let i = (at.y - model_state.list.y) as usize;
+fn click_project_tab(at: Position, tab: &mut ProjectsTab) {
+    if tab.tabs.click(at) {
+        tab.focus = Focus::Repos;
+        tab.repo_i = tab.tabs.i;
+        tab.cursor = 0;
+        tab.reload();
+    } else if tab.list.contains(at) {
+        let i = (at.y - tab.list.y) as usize;
 
-        if i < model_state.items.len() {
-            model_state.focus = Focus::List;
+        if i < tab.items.len() {
+            tab.focus = Focus::List;
 
-            open_selected_project(model_state, i);
+            open_selected_project(tab, i);
 
-            model_state.cursor = i;
+            tab.cursor = i;
         }
     }
 }
 
-fn open_selected_project(model_state: &mut ProjectsTab, i: usize) {
-    if model_state.cursor == i {
-        model_state.open_editor();
+fn open_selected_project(tab: &mut ProjectsTab, i: usize) {
+    if tab.cursor == i {
+        tab.open_editor();
     }
 }
 
-fn mouse_projects_tab(receiver_state: &mut ProjectsTab, event: MouseEvent) -> Out {
+fn mouse_projects_tab(tab: &mut ProjectsTab, event: MouseEvent) -> Out {
     let at = Position {
         x: event.column,
         y: event.row,
     };
 
-    if receiver_state.typing() {
-        if let Some(fm) = receiver_state.form.as_mut() {
-            fm.mouse(event, at);
+    if tab.typing() {
+        if let Some(form) = tab.form.as_mut() {
+            form.mouse(event, at);
         }
 
         return Out::None;
@@ -47,12 +47,12 @@ fn mouse_projects_tab(receiver_state: &mut ProjectsTab, event: MouseEvent) -> Ou
 
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            self::click_project_tab(at, receiver_state);
+            self::click_project_tab(at, tab);
         }
         MouseEventKind::ScrollDown => {
-            receiver_state.cursor = (receiver_state.cursor + 1).min(receiver_state.items.len().saturating_sub(1));
+            tab.cursor = (tab.cursor + 1).min(tab.items.len().saturating_sub(1));
         }
-        MouseEventKind::ScrollUp => receiver_state.cursor = receiver_state.cursor.saturating_sub(1),
+        MouseEventKind::ScrollUp => tab.cursor = tab.cursor.saturating_sub(1),
         _ => {}
     }
 

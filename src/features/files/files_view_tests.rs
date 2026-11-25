@@ -4,28 +4,28 @@ use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::KeyModifiers;
 
 fn screen(view: &mut View) -> (Vec<String>, ratatui::buffer::Buffer) {
-    let mut thread = Terminal::new(TestBackend::new(100, 16)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
 
-    thread.draw(|file| view.draw(file, file.area())).unwrap();
-    let bytes = thread.backend().buffer().clone();
+    terminal.draw(|frame| view.draw(frame, frame.area())).unwrap();
+    let buffer = terminal.backend().buffer().clone();
 
     (
         (0..16)
             .map(|y| {
                 (0..40)
-                    .map(|x| bytes[(x, y)].symbol().to_string())
+                    .map(|x| buffer[(x, y)].symbol().to_string())
                     .collect::<String>()
                     .trim_end()
                     .to_string()
             })
             .collect(),
-        bytes,
+        buffer,
     )
 }
 
 fn press(view: &mut View, keys: &str) {
-    for character in keys.chars() {
-        view.key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    for letter in keys.chars() {
+        view.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
     }
 }
 
@@ -41,12 +41,12 @@ fn letters_with_a_modifier_do_nothing_and_the_context_menu_opens_yazi_on_the_dir
         Act::None
     );
 
-    for character in ['f', '/'] {
+    for letter in ['f', '/'] {
         assert_eq!(
-            view.key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+            view.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE)),
             Act::None
         );
-        assert!(!view.filter_input.filtering, "{character}: 0 filter (ctrl+f is)");
+        assert!(!view.filter_input.filtering, "{letter}: 0 filter (ctrl+f is)");
     }
 
     assert_eq!(
@@ -75,23 +75,23 @@ fn attachments_get_their_own_section_last_once_per_file() {
     let _env = crate::engine::ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let directory = std::env::temp_dir().join(format!("codehead-fattach-{}", std::process::id()));
-    let paste = directory.join("paste");
-    let _ = std::fs::remove_dir_all(&directory);
+    let dir = std::env::temp_dir().join(format!("codehead-fattach-{}", std::process::id()));
+    let paste = dir.join("paste");
+    let _ = std::fs::remove_dir_all(&dir);
 
-    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::create_dir_all(&paste).unwrap();
-    std::fs::write(directory.join("src/a.rs"), "fn a() {}").unwrap();
+    std::fs::write(dir.join("src/a.rs"), "fn a() {}").unwrap();
     std::fs::write(paste.join("image-1.png"), b"\x89PNG").unwrap();
     std::fs::write(paste.join("pasted-text-1.txt"), "long").unwrap();
-    let thread = store::Thread::new("f", "t", &directory, vec!["ada".into()]);
+    let thread = store::Thread::new("f", "t", &dir, vec!["ada".into()]);
 
     std::fs::create_dir_all(store::thread_dir(&thread.id)).unwrap();
     thread.save().unwrap();
     let (img, txt, code) = (
         paste.join("image-1.png"),
         paste.join("pasted-text-1.txt"),
-        directory.join("src/a.rs"),
+        dir.join("src/a.rs"),
     );
 
     let prompt = |text: String| {
@@ -105,11 +105,11 @@ fn attachments_get_their_own_section_last_once_per_file() {
         )
     };
 
-    attachments_get_their_own_section_last_once_per_file_verify_state(&directory, &thread, &img, &txt, &code, prompt);
+    append_attachment_events(&dir, &thread, &img, &txt, &code, prompt);
 }
 
-fn attachments_get_their_own_section_last_once_per_file_verify_state(
-    directory: &PathBuf,
+fn append_attachment_events(
+    dir: &PathBuf,
     thread: &store::Thread,
     img: &PathBuf,
     txt: &Path,
@@ -148,69 +148,60 @@ fn attachments_get_their_own_section_last_once_per_file_verify_state(
     .unwrap();
 
     // the agent's file stays in its section; the 2 attachments once each, after it
-    attachments_get_their_own_section_last_once_per_file_verify_files(directory, thread, img, code);
+    assert_attachments_last(dir, thread, img, code);
 }
 
-fn attachments_get_their_own_section_last_once_per_file_verify_files(
-    directory: &PathBuf,
-    thread: &store::Thread,
-    img: &PathBuf,
-    code: &PathBuf,
-) {
-    let files = load(&thread.id, directory);
+fn assert_attachments_last(dir: &PathBuf, thread: &store::Thread, img: &PathBuf, code: &PathBuf) {
+    let files = load(&thread.id, dir);
 
     assert_eq!(files.len(), 3, "{files:?}");
     assert_eq!(
         files
             .iter()
-            .find(|error_value| error_value.path == *code)
-            .map(|error_2| &error_2.source),
+            .find(|entry| entry.path == *code)
+            .map(|entry| &entry.source),
         Some(&Source::Agent)
     );
     assert_eq!(
-        files
-            .iter()
-            .find(|error_3| error_3.path == *img)
-            .map(|error_4| &error_4.source),
+        files.iter().find(|entry| entry.path == *img).map(|entry| &entry.source),
         Some(&Source::Attached(Some("[Image #1]".into())))
     );
 
     // on screen: the section last, marker + name per row
-    let mut view = View::new(&thread.id, directory);
-    let (text_value, _) = screen(&mut view);
+    let mut view = View::new(&thread.id, dir);
+    let (rows, _) = screen(&mut view);
 
-    let at = |text_2: &[String], x: &str| {
-        text_2
-            .iter()
-            .position(|result| result.contains(x))
-            .unwrap_or_else(|| panic!("{x}: {text_2:#?}"))
+    let at = |rows: &[String], x: &str| {
+        rows.iter()
+            .position(|row| row.contains(x))
+            .unwrap_or_else(|| panic!("{x}: {rows:#?}"))
     };
 
-    let (repo, att) = (at(&text_value, "repo changes"), at(&text_value, "attachments"));
+    let (repo, att) = (at(&rows, "repo changes"), at(&rows, "attachments"));
 
-    assert!(repo < att && at(&text_value, "src/a.rs") < att, "{text_value:#?}");
+    assert!(repo < att && at(&rows, "src/a.rs") < att, "{rows:#?}");
     assert!(
-        at(&text_value, "[Image #1] image-1.png") > att && at(&text_value, "pasted-text-1.txt") > att,
-        "{text_value:#?}"
+        at(&rows, "[Image #1] image-1.png") > att && at(&rows, "pasted-text-1.txt") > att,
+        "{rows:#?}"
     );
 
     let _ = std::fs::remove_dir_all(store::thread_dir(&thread.id));
-    let _ = std::fs::remove_dir_all(directory);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A thread in a temp dir whose agent wrote NAMES (png: an image of 2000×1000 px).
 fn image_thread(tag: &str, names: &[&str]) -> (store::Thread, PathBuf) {
-    let directory = std::env::temp_dir().join(format!("codehead-fimage-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
+    let dir = std::env::temp_dir().join(format!("codehead-fimage-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
 
-    std::fs::create_dir_all(&directory).unwrap();
-    let thread = store::Thread::new("f", "t", &directory, vec!["ada".into()]);
+    std::fs::create_dir_all(&dir).unwrap();
+    let thread = store::Thread::new("f", "t", &dir, vec!["ada".into()]);
 
     std::fs::create_dir_all(store::thread_dir(&thread.id)).unwrap();
     thread.save().unwrap();
 
     for (i, name) in names.iter().enumerate() {
-        let path = directory.join(name);
+        let path = dir.join(name);
 
         if std::path::Path::new(name)
             .extension()
@@ -237,7 +228,7 @@ fn image_thread(tag: &str, names: &[&str]) -> (store::Thread, PathBuf) {
         .unwrap();
     }
 
-    (thread, directory)
+    (thread, dir)
 }
 
 fn iterm2() -> crate::ui::graphics::Picker {
@@ -249,12 +240,17 @@ fn iterm2() -> crate::ui::graphics::Picker {
 
 /// All 100 cols (the `screen` helper: the list's 40).
 fn full(view: &mut View) -> (Vec<String>, ratatui::buffer::Buffer) {
-    let (_, bytes) = screen(view);
+    let (_, buffer) = screen(view);
+
     let text: Vec<String> = (0..16)
-        .map(|y| (0..100).map(|x| bytes[(x, y)].symbol().to_string()).collect::<String>())
+        .map(|y| {
+            (0..100)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
         .collect();
 
-    (text, bytes)
+    (text, buffer)
 }
 
 /// Polls until an encode is in (max 10 s).
@@ -272,8 +268,8 @@ fn an_image_previews_as_an_image_encoded_off_the_ui_thread_once() {
     let _env = crate::engine::ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (thread, directory) = image_thread("once", &["shot.png"]);
-    let mut view = View::new(&thread.id, &directory);
+    let (thread, dir) = image_thread("once", &["shot.png"]);
+    let mut view = View::new(&thread.id, &dir);
 
     view.image_cache.picker = || Some(iterm2());
 
@@ -282,25 +278,24 @@ fn an_image_previews_as_an_image_encoded_off_the_ui_thread_once() {
 
     assert!(
         text.iter()
-            .any(|result| result.contains("shot.png") && result.contains("reading…")),
+            .any(|row| row.contains("shot.png") && row.contains("reading…")),
         "{text:#?}"
     );
 
     // the encode in: the size line, 1 image (the iTerm2 sequence in the buffer)
     encoded(&mut view);
-    let (text_value, bytes) = full(&mut view);
+    let (rows, buffer) = full(&mut view);
 
     assert!(
-        text_value
-            .iter()
-            .any(|result_value| result_value.contains("2000×1000 px") && result_value.contains("ctrl+.: yazi")),
-        "{text_value:#?}"
+        rows.iter()
+            .any(|row| row.contains("2000×1000 px") && row.contains("ctrl+.: yazi")),
+        "{rows:#?}"
     );
     assert!(
-        bytes
+        buffer
             .content()
             .iter()
-            .any(|character| character.symbol().contains("\x1b]1337;File=")),
+            .any(|cell| cell.symbol().contains("\x1b]1337;File=")),
         "an iTerm2 image"
     );
 
@@ -323,16 +318,13 @@ fn an_image_previews_as_an_image_encoded_off_the_ui_thread_once() {
     }
 
     // the next draw: encoded again, at once (0 wait for the 5 s read throttle)
-    let (text_2, _) = full(&mut view);
+    let (rows, _) = full(&mut view);
 
-    assert!(
-        text_2.iter().any(|result_2| result_2.contains("reading…")),
-        "{text_2:#?}"
-    );
+    assert!(rows.iter().any(|row| row.contains("reading…")), "{rows:#?}");
     assert_eq!(view.image_cache.image_reads.pending(), 1);
 
     let _ = std::fs::remove_dir_all(store::thread_dir(&thread.id));
-    let _ = std::fs::remove_dir_all(&directory);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -340,8 +332,8 @@ fn an_image_without_a_graphics_terminal_keeps_the_text_preview() {
     let _env = crate::engine::ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (thread, directory) = image_thread("text", &["shot.png"]);
-    let mut view = View::new(&thread.id, &directory);
+    let (thread, dir) = image_thread("text", &["shot.png"]);
+    let mut view = View::new(&thread.id, &dir);
 
     // the tests' default: 0 graphics terminal
     assert!((view.image_cache.picker)().is_none());
@@ -351,19 +343,17 @@ fn an_image_without_a_graphics_terminal_keeps_the_text_preview() {
     // the head of the text preview (`N lines`), 0 encode
     assert!(
         text.iter()
-            .any(|result| result.contains("shot.png") && result.contains("lines ·")),
+            .any(|row| row.contains("shot.png") && row.contains("lines ·")),
         "{text:#?}"
     );
     assert!(
-        !text
-            .iter()
-            .any(|result_value| result_value.contains("reading…") || result_value.contains(" px ·")),
+        !text.iter().any(|row| row.contains("reading…") || row.contains(" px ·")),
         "{text:#?}"
     );
     assert_eq!(view.image_cache.image_reads.pending(), 0);
 
     let _ = std::fs::remove_dir_all(store::thread_dir(&thread.id));
-    let _ = std::fs::remove_dir_all(&directory);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -372,8 +362,8 @@ fn at_most_4_encodes_stay_and_the_shown_one_is_never_dropped() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let names = ["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"];
-    let (thread, directory) = image_thread("lru", &names);
-    let mut view = View::new(&thread.id, &directory);
+    let (thread, dir) = image_thread("lru", &names);
+    let mut view = View::new(&thread.id, &dir);
 
     view.image_cache.picker = || Some(iterm2());
     full(&mut view);
@@ -394,7 +384,7 @@ fn at_most_4_encodes_stay_and_the_shown_one_is_never_dropped() {
         .image_cache
         .image_want
         .as_ref()
-        .map(|(key_value, _)| key_value.clone())
+        .map(|(key, _)| key.clone())
         .unwrap();
 
     assert!(view.image_cache.images.contains_key(&shown));
@@ -406,7 +396,7 @@ fn at_most_4_encodes_stay_and_the_shown_one_is_never_dropped() {
         .image_cache
         .image_want
         .as_ref()
-        .map(|(key_2, _)| key_2.clone())
+        .map(|(key, _)| key.clone())
         .unwrap();
 
     assert_ne!(back, shown);
@@ -425,7 +415,7 @@ fn at_most_4_encodes_stay_and_the_shown_one_is_never_dropped() {
     assert_eq!(view.image_cache.image_reads.pending(), 1);
 
     let _ = std::fs::remove_dir_all(store::thread_dir(&thread.id));
-    let _ = std::fs::remove_dir_all(&directory);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -433,23 +423,23 @@ fn sections_with_gaps_then_a_ranked_filter() {
     let _env = crate::engine::ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let directory = std::env::temp_dir().join(format!("codehead-fview-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("codehead-fview-{}", std::process::id()));
     let other = std::env::temp_dir().join(format!("codehead-fother-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
+    let _ = std::fs::remove_dir_all(&dir);
 
-    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::create_dir_all(&other).unwrap();
-    std::fs::write(directory.join("src/view.rs"), "fn draw() {}").unwrap();
-    std::fs::write(directory.join("src/app.rs"), "// opens the view\nfn main() {}").unwrap();
+    std::fs::write(dir.join("src/view.rs"), "fn draw() {}").unwrap();
+    std::fs::write(dir.join("src/app.rs"), "// opens the view\nfn main() {}").unwrap();
     std::fs::write(other.join("scratch.txt"), "nothing").unwrap();
-    let thread = store::Thread::new("f", "t", &directory, vec!["ada".into()]);
+    let thread = store::Thread::new("f", "t", &dir, vec!["ada".into()]);
 
     std::fs::create_dir_all(store::thread_dir(&thread.id)).unwrap();
     thread.save().unwrap();
 
     for path in [
-        directory.join("src/view.rs"),
-        directory.join("src/app.rs"),
+        dir.join("src/view.rs"),
+        dir.join("src/app.rs"),
         other.join("scratch.txt"),
     ] {
         store::append(
@@ -466,21 +456,20 @@ fn sections_with_gaps_then_a_ranked_filter() {
         .unwrap();
     }
 
-    let mut view = View::new(&thread.id, &directory);
+    let mut view = View::new(&thread.id, &dir);
     let (text, _) = screen(&mut view);
 
-    let at = |text_value: &[String], x: &str| {
-        text_value
-            .iter()
-            .position(|result| result.contains(x))
-            .unwrap_or_else(|| panic!("{x}: {text_value:#?}"))
+    let at = |rows: &[String], x: &str| {
+        rows.iter()
+            .position(|row| row.contains(x))
+            .unwrap_or_else(|| panic!("{x}: {rows:#?}"))
     };
 
-    sections_with_gaps_then_a_ranked_filter_verify_state(&directory, &other, &thread, view, &text, at);
+    assert_sections_then_filter(&dir, &other, &thread, view, &text, at);
 }
 
-fn sections_with_gaps_then_a_ranked_filter_verify_state(
-    directory: &PathBuf,
+fn assert_sections_then_filter(
+    dir: &PathBuf,
     other: &PathBuf,
     thread: &store::Thread,
     mut view: View,
@@ -501,25 +490,25 @@ fn sections_with_gaps_then_a_ranked_filter_verify_state(
     assert!(view.typing());
 
     press(&mut view, "view");
-    let (text_2, bytes) = screen(&mut view);
-    let (agent, character) = (at(&text_2, "src/view.rs"), at(&text_2, "src/app.rs"));
+    let (rows, buffer) = screen(&mut view);
+    let (name_match, cell) = (at(&rows, "src/view.rs"), at(&rows, "src/app.rs"));
 
     assert!(
-        agent < character
-            && !text_2
+        name_match < cell
+            && !rows
                 .iter()
-                .any(|result_value| result_value.contains("repo changes") || result_value.contains("scratch")),
-        "{text_2:#?}"
+                .any(|row| row.contains("repo changes") || row.contains("scratch")),
+        "{rows:#?}"
     );
 
     // the marked chars: `view` of view.rs
-    let x = text_2[agent]
+    let x = rows[name_match]
         .find("view.rs")
-        .map(|i| text_2[agent][..i].chars().count())
+        .map(|i| rows[name_match][..i].chars().count())
         .unwrap() as u16;
 
     assert!(
-        bytes[(x, agent as u16)]
+        buffer[(x, name_match as u16)]
             .modifier
             .contains(ratatui::style::Modifier::UNDERLINED),
         "marks"
@@ -530,10 +519,10 @@ fn sections_with_gaps_then_a_ranked_filter_verify_state(
 
     assert!(!view.typing());
 
-    let (text_3, _) = screen(&mut view);
+    let (rows, _) = screen(&mut view);
 
-    at(&text_3, "scratch.txt");
+    at(&rows, "scratch.txt");
     let _ = std::fs::remove_dir_all(store::thread_dir(&thread.id));
-    let _ = std::fs::remove_dir_all(directory);
+    let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(other);
 }

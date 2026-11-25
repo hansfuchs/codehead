@@ -3,13 +3,13 @@ use super::{Host, Input, Kind, Path, PathBuf, Sender, json, pin_branch, store};
 impl Host {
     /// Thread T's setup is pending: it runs on a thread (a `setup` tool run in the log); the
     /// messages wait until it ends.
-    pub(crate) fn start_setup(&mut self, thread_value: &store::Thread, tx: Sender<Input>) {
-        let Some(wt) = thread_value.worktree.as_deref() else {
+    pub(crate) fn start_setup(&mut self, thread: &store::Thread, tx: Sender<Input>) {
+        let Some(wt) = thread.worktree.as_deref() else {
             return;
         };
 
         let Some((_, label, _)) = crate::infra::worktree_setup::script(Path::new(wt), "setup") else {
-            let _ = store::update(&self.id, |thread_2| thread_2.setup = None);
+            let _ = store::update(&self.id, |stored| stored.setup = None);
 
             return;
         };
@@ -23,10 +23,10 @@ impl Host {
                 input: json!({"command": label, "description": "worktree setup: the 1st turn waits for it"}),
             },
         );
-        let thread_3 = thread_value.clone();
+        let thread = thread.clone();
 
         std::thread::spawn(move || {
-            let (label, ok, out) = crate::infra::worktree_setup::run_setup(&thread_3)
+            let (label, ok, out) = crate::infra::worktree_setup::run_setup(&thread)
                 .unwrap_or_else(|| ("setup".into(), true, String::new()));
             let _ = tx.send(Input::Setup(label, ok, out));
         });
@@ -57,7 +57,7 @@ impl Host {
         }
 
         // off first: a host that dies after this line never sends the task twice
-        let _ = store::update(&self.id, |thread_value| thread_value.kickoff = false);
+        let _ = store::update(&self.id, |stored| stored.kickoff = false);
 
         if let Err(error) = self.cmd(&json!({"op": "prompt", "to": thread.agents, "text": thread.task})) {
             self.log(
@@ -72,14 +72,14 @@ impl Host {
     }
     /// A new thread's worktree (`worktree_pending`): `git fetch` + `git worktree add`, the local
     /// files, a port, off the host loop; messages wait for its end.
-    pub(crate) fn start_worktree(&mut self, thread_value: &store::Thread, tx: Sender<Input>) {
-        let Some(branch) = thread_value.worktree_pending.clone() else {
+    pub(crate) fn start_worktree(&mut self, thread: &store::Thread, tx: Sender<Input>) {
+        let Some(branch) = thread.worktree_pending.clone() else {
             return;
         };
 
         self.setup_running = true;
         self.log(Some("setup"), Kind::Tool { id: "worktree".into(), name: "Bash".into(), input: json!({"command": format!("git worktree add {branch}"), "description": "the thread's worktree: the 1st turn waits for it"}) });
-        let repo = PathBuf::from(&thread_value.dir);
+        let repo = PathBuf::from(&thread.dir);
 
         std::thread::spawn(move || {
             let result = prepare_worktree(&repo, &branch);
@@ -89,16 +89,16 @@ impl Host {
     }
     /// The worktree is there (or failed): in thread.json, then its setup script, else the waiting
     /// messages go out (a failed worktree: with a note, the agents are in the main checkout).
-    pub(crate) fn worktree_done(&mut self, path_value: Result<(PathBuf, u16), String>, tx: Sender<Input>) {
+    pub(crate) fn worktree_done(&mut self, created: Result<(PathBuf, u16), String>, tx: Sender<Input>) {
         let branch = self
             .thread()
             .ok()
-            .and_then(|thread_value| thread_value.worktree_pending)
+            .and_then(|thread| thread.worktree_pending)
             .unwrap_or_default();
 
-        match path_value {
-            Ok((path_2, port)) => {
-                finish_worktree_setup(tx, &branch, &path_2, port, self);
+        match created {
+            Ok((path, port)) => {
+                finish_worktree_setup(tx, &branch, &path, port, self);
             }
             Err(error) => {
                 self.log(
@@ -109,8 +109,8 @@ impl Host {
                         output: error.clone(),
                     },
                 );
-                let dir = self.thread().map(|thread_5| thread_5.dir).unwrap_or_default();
-                let _ = store::update(&self.id, |thread_6| thread_6.worktree_pending = None);
+                let dir = self.thread().map(|thread| thread.dir).unwrap_or_default();
+                let _ = store::update(&self.id, |stored| stored.worktree_pending = None);
 
                 self.setup_running = false;
                 let note = format!(
@@ -125,10 +125,7 @@ impl Host {
     /// The agents of the waiting messages: their sessions start now (a harness boots for seconds),
     /// the messages still wait. 0 boot while the worktree is not there (the session's dir).
     pub(crate) fn boot_queued(&mut self) {
-        if self
-            .thread()
-            .is_ok_and(|thread_value| thread_value.worktree_pending.is_some())
-        {
+        if self.thread().is_ok_and(|thread| thread.worktree_pending.is_some()) {
             return;
         }
 
@@ -137,21 +134,21 @@ impl Host {
         agents.sort();
         agents.dedup();
 
-        for agent_value in agents {
+        for agent in agents {
             // an error shows at the delivery (the message's own error event)
-            let _ = self.ensure(&agent_value);
+            let _ = self.ensure(&agent);
         }
     }
     /// A thread on main: `git pull --ff-only` off the host loop; messages wait for its end.
-    pub(crate) fn start_pull(&mut self, thread_value: &store::Thread, tx: Sender<Input>) {
+    pub(crate) fn start_pull(&mut self, thread: &store::Thread, tx: Sender<Input>) {
         self.setup_running = true;
         self.log(Some("setup"), Kind::Tool { id: "pull".into(), name: "Bash".into(), input: json!({"command": "git pull --ff-only", "description": "main up to date: the 1st turn waits for it"}) });
-        let dir = thread_value.work_dir();
+        let dir = thread.work_dir();
 
         std::thread::spawn(move || {
             let (ok, out) = match crate::domain::threads::update_default(&dir) {
                 None => (true, "0 pull: not on main / master with an upstream".to_string()),
-                Some(Ok(bytes)) => (true, format!("{bytes} up to date")),
+                Some(Ok(branch)) => (true, format!("{branch} up to date")),
                 Some(Err(error)) => (false, error),
             };
 
@@ -179,48 +176,48 @@ impl Host {
     }
 }
 
-fn set_pending_setup(setup: bool, thread_2: &mut store::Thread) {
+fn set_pending_setup(setup: bool, thread: &mut store::Thread) {
     if setup {
-        thread_2.setup = Some("pending".into());
+        thread.setup = Some("pending".into());
     }
 }
 
-fn finish_worktree_setup(tx: Sender<Input>, branch: &String, path_2: &Path, port: u16, model_state: &mut Host) {
-    model_state.log(
+fn finish_worktree_setup(tx: Sender<Input>, branch: &String, worktree: &Path, port: u16, host: &mut Host) {
+    host.log(
         Some("setup"),
         Kind::ToolResult {
             id: "worktree".into(),
             ok: true,
-            output: format!("{} on {branch}", path_2.display()),
+            output: format!("{} on {branch}", worktree.display()),
         },
     );
-    let setup = crate::infra::worktree_setup::script(path_2, "setup").is_some();
-    let path = path_2.display().to_string();
+    let setup = crate::infra::worktree_setup::script(worktree, "setup").is_some();
+    let path = worktree.display().to_string();
 
-    let thread_3 = store::update(&model_state.id, |thread_2| {
-        thread_2.worktree = Some(path);
-        thread_2.branch = Some(branch.clone());
-        thread_2.port = Some(port);
-        thread_2.worktree_pending = None;
+    let updated = store::update(&host.id, |thread| {
+        thread.worktree = Some(path);
+        thread.branch = Some(branch.clone());
+        thread.port = Some(port);
+        thread.worktree_pending = None;
 
-        set_pending_setup(setup, thread_2);
+        set_pending_setup(setup, thread);
     });
 
-    match thread_3 {
-        Ok(thread_4) if setup => {
-            model_state.setup_running = false;
-            model_state.start_setup(&thread_4, tx);
+    match updated {
+        Ok(thread) if setup => {
+            host.setup_running = false;
+            host.start_setup(&thread, tx);
 
-            if model_state.setup_running {
+            if host.setup_running {
                 // the sessions boot during the setup (the worktree is there)
-                model_state.boot_queued();
+                host.boot_queued();
             } else {
-                model_state.release_queue(None);
+                host.release_queue(None);
             }
         }
         _ => {
-            model_state.setup_running = false;
-            model_state.release_queue(None);
+            host.setup_running = false;
+            host.release_queue(None);
         }
     }
 }

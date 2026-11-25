@@ -28,8 +28,8 @@ impl View {
     }
 
     /// A context menu command with 0 key of its own.
-    pub(crate) fn ctx_cmd(&mut self, character: &str) -> Act {
-        ctx_cmd_view(self, character)
+    pub(crate) fn ctx_cmd(&mut self, command: &str) -> Act {
+        ctx_cmd_view(self, command)
     }
 }
 
@@ -104,10 +104,10 @@ fn ctx_items_view(view: &mut View) -> (String, Vec<crate::ui::context_menu::Item
     }
 
     let row = view.layout.rows.get(view.at);
-    let mut value = Vec::new();
-    let title = row_context_items(row, &mut value, view);
+    let mut items = Vec::new();
+    let title = row_context_items(row, &mut items, view);
 
-    value.extend([
+    items.extend([
         Item::new(
             "send the comment batch",
             "ctrl+enter",
@@ -119,7 +119,7 @@ fn ctx_items_view(view: &mut View) -> (String, Vec<crate::ui::context_menu::Item
         Item::new("read git again", "r", key('r')),
     ]);
 
-    (title, value)
+    (title, items)
 }
 
 fn ctx_place_view(view: &View) -> crate::ui::context_menu::Place {
@@ -130,8 +130,8 @@ fn ctx_place_view(view: &View) -> crate::ui::context_menu::Place {
             .scm
             .lines
             .iter()
-            .find(|line| line.1 == view.scm.at)
-            .map_or(view.scm.rect.y + 1, |line| line.0);
+            .find(|&&(_, row, _)| row == view.scm.at)
+            .map_or(view.scm.rect.y + 1, |&(screen_y, _, _)| screen_y);
 
         return Place::Beside(view.scm.rect, y);
     }
@@ -146,8 +146,8 @@ fn ctx_place_view(view: &View) -> crate::ui::context_menu::Place {
     })
 }
 
-fn ctx_cmd_view(view: &mut View, character: &str) -> Act {
-    match character {
+fn ctx_cmd_view(view: &mut View, command: &str) -> Act {
+    match command {
         "classify" => view.classify_again(),
         "uncommit" => view.ask_uncommit(),
         "clear stash" if !view.stash_state.stash.is_empty() => {

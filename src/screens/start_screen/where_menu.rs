@@ -4,9 +4,9 @@ use super::{
 };
 
 impl App {
-    /// Text + detail of where choice W: a row of the where dropdown.
-    pub(super) fn where_label(&self, width: &Where) -> (String, String) {
-        match width {
+    /// Text + detail of where choice CHOICE: a row of the where dropdown.
+    pub(super) fn where_label(&self, choice: &Where) -> (String, String) {
+        match choice {
             Where::Current => (
                 "current branch".into(),
                 if self.repository.here_branch.is_empty() {
@@ -17,11 +17,11 @@ impl App {
             ),
             Where::NewBranch => ("+ new branch".into(), "git switch -c · 0 worktrees".into()),
             Where::NewWorktree => ("+ new branch + worktree".into(), "git worktree add".into()),
-            Where::Branch(bytes) => (
-                bytes.clone(),
+            Where::Branch(branch) => (
+                branch.clone(),
                 self.repository
                     .checkouts
-                    .get(bytes)
+                    .get(branch)
                     .map_or_else(|| "branch".into(), |path| format!("worktree {}", tilde(path))),
             ),
         }
@@ -31,30 +31,30 @@ impl App {
     /// main or the newest, right above the rest), new branch + worktree, new branch, current
     /// branch at the bottom. With Q: the matches in that order by score, the best at the bottom.
     pub(super) fn where_rows(&self, query: &str) -> Vec<usize> {
-        let mut value: Vec<usize> = (0..self.repository.wheres.len())
+        let mut rows: Vec<usize> = (0..self.repository.wheres.len())
             .filter(|&i| matches!(self.repository.wheres[i], Where::Branch(_)))
             .rev()
             .collect();
 
-        for worktree in [Where::NewWorktree, Where::NewBranch, Where::Current] {
-            value.extend(self.repository.wheres.iter().position(|x| *x == worktree));
+        for choice in [Where::NewWorktree, Where::NewBranch, Where::Current] {
+            rows.extend(self.repository.wheres.iter().position(|x| *x == choice));
         }
 
-        let query_value = query.trim().to_lowercase();
+        let needle = query.trim().to_lowercase();
 
-        if query_value.is_empty() {
-            return value;
+        if needle.is_empty() {
+            return rows;
         }
 
-        let mut message: Vec<(i64, usize, usize)> = value
+        let mut scored: Vec<(i64, usize, usize)> = rows
             .into_iter()
             .enumerate()
-            .filter_map(|(pos, i)| where_rows_text(self, &query_value, pos, i))
+            .filter_map(|(pos, i)| where_row_score(self, &needle, pos, i))
             .collect();
 
-        message.sort_by_key(|&(text_2, pos, _)| (text_2, pos));
+        scored.sort_by_key(|&(score, pos, _)| (score, pos));
 
-        message.into_iter().map(|(_, _, i)| i).collect()
+        scored.into_iter().map(|(_, _, i)| i).collect()
     }
 
     /// Enter / space / click on the where row: the dropdown, its cursor on the current choice.
@@ -87,43 +87,43 @@ impl App {
 
     /// Keys of the open where dropdown: ↑↓ move, type: filter, enter: pick, esc: close.
     pub(super) fn where_key(&mut self, key: KeyEvent) {
-        let Some(query_value) = self.repository.where_menu.as_ref().map(|message| message.query.clone()) else {
+        let Some(current) = self.repository.where_menu.as_ref().map(|menu| menu.query.clone()) else {
             return;
         };
 
-        let rows = self.where_rows(&query_value);
+        let rows = self.where_rows(&current);
         let count = rows.len();
         let typed = !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
         let mut query = None;
 
-        let Some(message_value) = self.repository.where_menu.as_mut() else {
+        let Some(menu) = self.repository.where_menu.as_mut() else {
             return;
         };
 
         match key.code {
             KeyCode::Esc => self.repository.where_menu = None,
-            KeyCode::Up if count > 0 => message_value.cursor = (message_value.cursor + count - 1) % count,
-            KeyCode::Down if count > 0 => message_value.cursor = (message_value.cursor + 1) % count,
-            KeyCode::PageUp => message_value.cursor = message_value.cursor.saturating_sub(dropdown::MAX_ROWS),
+            KeyCode::Up if count > 0 => menu.cursor = (menu.cursor + count - 1) % count,
+            KeyCode::Down if count > 0 => menu.cursor = (menu.cursor + 1) % count,
+            KeyCode::PageUp => menu.cursor = menu.cursor.saturating_sub(dropdown::MAX_ROWS),
             KeyCode::PageDown if count > 0 => {
-                message_value.cursor = (message_value.cursor + dropdown::MAX_ROWS).min(count - 1);
+                menu.cursor = (menu.cursor + dropdown::MAX_ROWS).min(count - 1);
             }
             KeyCode::Enter => {
-                let cursor = message_value.cursor;
+                let cursor = menu.cursor;
 
-                where_key_branch(self, &rows, cursor);
+                pick_where_row(self, &rows, cursor);
             }
-            KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h')
-                if { where_key_text(key, &query_value, &mut query) } => {}
-            KeyCode::Char(character) if typed => query = Some(format!("{query_value}{character}")),
+            KeyCode::Backspace | KeyCode::Char('u' | 'w' | 'h') if { delete_from_query(key, &current, &mut query) } => {
+            }
+            KeyCode::Char(character) if typed => query = Some(format!("{current}{character}")),
             _ => {}
         }
 
         // new filter: the cursor on the best match (bottom); 0 filter: on the current choice
-        if let Some(query_2) = query {
-            where_key_rows(self, query_2);
+        if let Some(edited) = query {
+            filter_where_menu(self, edited);
         }
     }
 
@@ -136,7 +136,7 @@ impl App {
 
         match self.repository.wheres.get(self.repository.where_i) {
             Some(Where::Current) => (true, false),
-            Some(Where::Branch(bytes)) if self.repository.checkouts.contains_key(bytes) => (true, false),
+            Some(Where::Branch(branch)) if self.repository.checkouts.contains_key(branch) => (true, false),
             Some(Where::Branch(_)) => (self.repository.checkout, true),
             _ => (false, false),
         }
@@ -164,13 +164,13 @@ impl App {
 
     pub(super) fn where_text(&self) -> String {
         if let Some((url, path)) = self.clone_first() {
-            let bytes_value = match self.target() {
-                Ok(Target::Branch(bytes)) => bytes,
+            let branch = match self.target() {
+                Ok(Target::Branch(branch)) => branch,
                 _ => "…".into(),
             };
 
             return format!(
-                "clones {url} into {}, then a new worktree · branch {bytes_value}",
+                "clones {url} into {}, then a new worktree · branch {branch}",
                 tilde(&path.display().to_string())
             );
         }
@@ -181,31 +181,27 @@ impl App {
         }
 
         match self.target() {
-            Ok(Target::Branch(bytes_2)) => format!("new worktree · branch {bytes_2}"),
-            Ok(Target::Checkout {
-                branch: bytes_3,
-                switch,
-                stash,
-            }) => match self.repository.checkouts.get(&bytes_3) {
-                Some(path_value) => format!("works in {} (checked out there)", tilde(path_value)),
+            Ok(Target::Branch(branch)) => format!("new worktree · branch {branch}"),
+            Ok(Target::Checkout { branch, switch, stash }) => match self.repository.checkouts.get(&branch) {
+                Some(path) => format!("works in {} (checked out there)", tilde(path)),
                 None if !switch => format!(
                     "works in {} on {} · 0 checkout",
                     self.repo_text(),
                     self.repository.repo_branch
                 ),
                 None if stash => format!(
-                    "switches {} from {} to {bytes_3} · conflicting changes → git stash",
+                    "switches {} from {} to {branch} · conflicting changes → git stash",
                     self.repo_text(),
                     self.repository.repo_branch
                 ),
                 None => format!(
-                    "switches {} from {} to {bytes_3}",
+                    "switches {} from {} to {branch}",
                     self.repo_text(),
                     self.repository.repo_branch
                 ),
             },
-            Ok(Target::NewBranch(bytes_4)) => format!(
-                "git switch -c {bytes_4} in {} (from {}) · 0 worktrees",
+            Ok(Target::NewBranch(branch)) => format!(
+                "git switch -c {branch} in {} (from {}) · 0 worktrees",
                 self.repo_text(),
                 self.repository.repo_branch
             ),
@@ -226,7 +222,7 @@ impl App {
             .repository
             .where_menu
             .as_ref()
-            .map(|message| (message.query.clone(), message.cursor, message.offset))
+            .map(|menu| (menu.query.clone(), menu.cursor, menu.offset))
         else {
             return;
         };
@@ -238,12 +234,12 @@ impl App {
 
         let width = items
             .iter()
-            .map(|result| result.text.width() + result.detail.width() + 8)
+            .map(|row| row.text.width() + row.detail.width() + 8)
             .max()
             .unwrap_or(0)
             .clamp(40, 96) as u16;
 
-        let Some(result_value) = dropdown::place(self.preview.regions.where_chip, width, count, bounds, true) else {
+        let Some(area) = dropdown::place(self.preview.regions.where_chip, width, count, bounds, true) else {
             return;
         };
 
@@ -263,7 +259,7 @@ impl App {
 
         let (off, drawn) = dropdown::list(
             frame,
-            result_value,
+            area,
             dropdown::List {
                 label: &label,
                 note: &note,
@@ -274,9 +270,9 @@ impl App {
             },
         );
 
-        if let Some(message_value) = self.repository.where_menu.as_mut() {
-            message_value.cursor = cur;
-            message_value.offset = off;
+        if let Some(menu) = self.repository.where_menu.as_mut() {
+            menu.cursor = cur;
+            menu.offset = off;
         }
 
         self.preview.regions.where_rows = drawn.into_iter().map(|(row, j)| (row, rows[j])).collect();
@@ -301,8 +297,8 @@ impl App {
     }
 }
 
-fn where_key_text(key: KeyEvent, query_value: &str, query: &mut Option<String>) -> bool {
-    let mut text = query_value.to_owned();
+fn delete_from_query(key: KeyEvent, current: &str, query: &mut Option<String>) -> bool {
+    let mut text = current.to_owned();
 
     crate::ui::textarea::delete_key(&mut text, &key) && {
         *query = Some(text);
@@ -310,36 +306,36 @@ fn where_key_text(key: KeyEvent, query_value: &str, query: &mut Option<String>) 
     }
 }
 
-fn where_key_rows(app_state: &mut App, query_2: String) {
-    let rows = app_state.where_rows(&query_2);
-    let cursor = if query_2.is_empty() {
-        rows.iter().position(|&i| i == app_state.repository.where_i)
+fn filter_where_menu(app: &mut App, query: String) {
+    let rows = app.where_rows(&query);
+    let cursor = if query.is_empty() {
+        rows.iter().position(|&i| i == app.repository.where_i)
     } else {
         None
     }
     .unwrap_or(rows.len().saturating_sub(1));
 
-    app_state.repository.where_menu = Some(WhereMenu {
+    app.repository.where_menu = Some(WhereMenu {
         cursor,
         offset: 0,
-        query: query_2,
+        query,
     });
 }
 
-fn where_rows_text(app_state: &App, query_value: &str, pos: usize, i: usize) -> Option<(i64, usize, usize)> {
-    let (label, detail) = app_state.where_label(&app_state.repository.wheres[i]);
+fn where_row_score(app: &App, needle: &str, pos: usize, i: usize) -> Option<(i64, usize, usize)> {
+    let (label, detail) = app.where_label(&app.repository.wheres[i]);
 
-    let text = if app_state.repository.wheres[i] == Where::Current {
+    let text = if app.repository.wheres[i] == Where::Current {
         format!("{label} {detail}")
     } else {
         label
     };
 
-    fuzzy(query_value, &text).map(|text_value| (text_value, pos, i))
+    fuzzy(needle, &text).map(|score| (score, pos, i))
 }
 
-fn where_key_branch(app_state: &mut App, rows: &[usize], cursor: usize) {
+fn pick_where_row(app: &mut App, rows: &[usize], cursor: usize) {
     if let Some(&i) = rows.get(cursor) {
-        app_state.pick_where(i);
+        app.pick_where(i);
     }
 }

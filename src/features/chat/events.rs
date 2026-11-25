@@ -3,27 +3,27 @@ use std::fmt::Write as FormatWrite;
 use std::ops::ControlFlow;
 
 impl Thread {
-    pub(crate) fn push(&mut self, error_value: &Event) {
-        push_thread(self, error_value);
+    pub(crate) fn push(&mut self, event: &Event) {
+        record_event(self, event);
     }
 
     /// AGENT works: in a turn, or its subagents run.
     pub(crate) fn working(&self, agent: &str) -> bool {
-        self.busy.contains(agent) || self.subs.iter().any(|text| text.running() && text.master == agent)
+        self.busy.contains(agent) || self.subs.iter().any(|sub| sub.running() && sub.master == agent)
     }
     /// A message of AGENT: the thoughts before it go in.
     pub(super) fn text(&mut self, agent: String, text: String, ts: u64) {
-        text_thread(self, agent, text, ts);
+        push_text(self, agent, text, ts);
     }
-    /// The owner's messages, oldest first (compose history).
     /// Items of the runs still open (an agent's calls append to them in place).
     pub(crate) fn open_runs(&self) -> Vec<usize> {
         self.open_run.values().copied().collect()
     }
+    /// The owner's messages, oldest first (compose history).
     pub(crate) fn sent(&self) -> Vec<String> {
         self.items
             .iter()
-            .filter_map(|i| match i {
+            .filter_map(|item| match item {
                 Item::Prompt { from, text, .. } => (from == "owner").then(|| text.clone()),
                 Item::Shell { command, .. } => Some(format!("!{command}")),
                 _ => None,
@@ -36,86 +36,70 @@ impl Thread {
     }
 }
 
-fn push_answer_id_allow_label(
-    error_value: &Event,
-    agent: String,
-    id: &String,
-    allow: bool,
-    label: &str,
-    view_state: &mut Thread,
-) {
-    if let Some(i) = view_state.asks.iter().position(|agent_2| &agent_2.id == id) {
-        push_answer_id_allow_label_agent_(error_value, agent, allow, label, view_state, i);
+fn settle_ask(event: &Event, agent: String, id: &String, allow: bool, label: &str, thread: &mut Thread) {
+    if let Some(i) = thread.asks.iter().position(|ask| &ask.id == id) {
+        push_settled(event, agent, allow, label, thread, i);
     }
 }
 
-fn push_answer_id_allow_label_agent_(
-    error_value: &Event,
-    agent: String,
-    allow: bool,
-    label: &str,
-    view_state: &mut Thread,
-    i: usize,
-) {
-    let agent_3 = view_state.asks.remove(i);
-    let qs = agent_3.questions();
+fn push_settled(event: &Event, agent: String, allow: bool, label: &str, thread: &mut Thread, i: usize) {
+    let ask = thread.asks.remove(i);
+    let qs = ask.questions();
 
     let question = if qs.is_empty() {
-        let mut query = agent_3.summary();
+        let mut query = ask.summary();
 
-        if let Some(cmd) = agent_3.input["command"].as_str() {
+        if let Some(cmd) = ask.input["command"].as_str() {
             write!(query, "\n$ {cmd}").unwrap();
         }
 
         query
     } else {
         qs.iter()
-            .map(|(query_value, ..)| query_value.as_str())
+            .map(|(question, ..)| question.as_str())
             .collect::<Vec<_>>()
             .join("\n\n")
     };
 
-    view_state.items.push(Item::Settled {
+    thread.items.push(Item::Settled {
         agent,
         question,
         answer: label.to_owned(),
         allow,
         permission: qs.is_empty(),
-        asked: agent_3.ts,
-        ts: error_value.ts,
+        asked: ask.ts,
+        ts: event.ts,
     });
 }
 
-fn push_turnend_error(error_value: &Event, agent: String, error: Option<&str>, view_state: &mut Thread) {
+fn end_turn(event: &Event, agent: String, error: Option<&str>, thread: &mut Thread) {
     // thoughts at the turn's end: into its open run, else a message of their own
-    if let Some(rest) = view_state.pending.remove(&agent) {
-        if let Some(Item::Run { calls, thoughts, .. }) = view_state
-            .open_run
-            .get(&agent)
-            .and_then(|&i| view_state.items.get_mut(i))
+    if let Some(rest) = thread.pending.remove(&agent) {
+        if let Some(Item::Run { calls, thoughts, .. }) =
+            thread.open_run.get(&agent).and_then(|&i| thread.items.get_mut(i))
         {
-            thoughts.extend(rest.into_iter().map(|thread_value| (calls.len(), thread_value)));
+            thoughts.extend(rest.into_iter().map(|thought| (calls.len(), thought)));
         } else {
-            view_state.pending.insert(agent.clone(), rest);
-            view_state.text(agent.clone(), String::new(), error_value.ts);
+            thread.pending.insert(agent.clone(), rest);
+            thread.text(agent.clone(), String::new(), event.ts);
         }
     }
 
-    view_state.open_run.remove(&agent);
-    view_state.busy.remove(&agent);
+    thread.open_run.remove(&agent);
+    thread.busy.remove(&agent);
 
     // a turn ends: its open asks are moot
-    view_state.asks.retain(|agent_4| agent_4.agent != *agent);
+    thread.asks.retain(|ask| ask.agent != *agent);
 
     match error {
         None | Some("session ended") => {}
         // the owner's esc: a note, 0 error hint
-        Some(crate::engine::host::INTERRUPTED) => view_state.items.push(Item::Note {
+        Some(crate::engine::host::INTERRUPTED) => thread.items.push(Item::Note {
             agent,
             text: "interrupted".into(),
             color: theme::pal().subtext0,
         }),
-        Some(err) => view_state.items.push(Item::Note {
+        Some(err) => thread.items.push(Item::Note {
             agent,
             text: err.to_string(),
             color: theme::pal().error(),
@@ -123,61 +107,56 @@ fn push_turnend_error(error_value: &Event, agent: String, error: Option<&str>, v
     }
 }
 
-fn push_tool_id_name_input(
-    error_value: &Event,
-    agent: String,
-    id: &str,
-    name: &str,
-    input: &Value,
-    view_state: &mut Thread,
-) {
+fn push_call(event: &Event, agent: String, id: &str, name: &str, input: &Value, thread: &mut Thread) {
     let call = Call {
         id: id.to_owned(),
         name: name.to_owned(),
         input: input.clone(),
         output: None,
     };
-    let before = view_state.pending.remove(&agent).unwrap_or_default();
+    let before = thread.pending.remove(&agent).unwrap_or_default();
 
-    let i = if let Some(i) = view_state.open_run.get(&agent).copied() {
+    let i = if let Some(i) = thread.open_run.get(&agent).copied() {
         i
     } else {
-        view_state.runs += 1;
-        view_state.open_run.insert(agent.clone(), view_state.items.len());
-        view_state.items.push(Item::Run {
+        thread.runs += 1;
+        thread.open_run.insert(agent.clone(), thread.items.len());
+        thread.items.push(Item::Run {
             agent,
-            key: view_state.runs,
+            key: thread.runs,
             calls: Vec::new(),
-            start: error_value.ts,
-            end: error_value.ts,
+            start: event.ts,
+            end: event.ts,
             thoughts: Vec::new(),
         });
-        view_state.items.len() - 1
+        thread.items.len() - 1
     };
 
     if let Some(Item::Run {
         calls, end, thoughts, ..
-    }) = view_state.items.get_mut(i)
+    }) = thread.items.get_mut(i)
     {
-        thoughts.extend(before.into_iter().map(|thread| (calls.len(), thread)));
+        thoughts.extend(before.into_iter().map(|thought| (calls.len(), thought)));
         calls.push(call);
-        *end = error_value.ts;
+        *end = event.ts;
     }
 }
 
-fn push_branch(agent: &str, at: u64, view_state: &mut Thread) {
+fn set_resume(agent: &str, at: u64, thread: &mut Thread) {
     if at == 0 {
-        view_state.resumes.remove(agent);
+        thread.resumes.remove(agent);
     } else {
-        view_state.resumes.insert(agent.to_string(), at);
+        thread.resumes.insert(agent.to_string(), at);
     }
 }
 
-fn push_status_state_note(agent: String, state: &String, note: &String, view_state: &mut Thread) -> ControlFlow<()> {
-    view_state.status.insert(agent.clone(), (state.clone(), note.clone()));
+fn push_status(agent: String, state: &String, note: &String, thread: &mut Thread) {
+    thread.status.insert(agent.clone(), (state.clone(), note.clone()));
 
+    // `working`: 0 chat row (the agent card shows a turn as working…; the note says
+    // what its next messages say anyway)
     if state == "working" {
-        return ControlFlow::Break(());
+        return;
     }
 
     let text = if note.is_empty() {
@@ -193,44 +172,35 @@ fn push_status_state_note(agent: String, state: &String, note: &String, view_sta
         _ => theme::pal().subtext0,
     };
 
-    view_state.items.push(Item::Note { agent, text, color });
-
-    // `working`: 0 chat row (the agent card shows a turn as working…; the note says
-    // what its next messages say anyway)
-
-    ControlFlow::Continue(())
+    thread.items.push(Item::Note { agent, text, color });
 }
 
-fn push_text_(error_value: &Event, agent: String, id: &String, state: &str, result: &String, view_state: &mut Thread) {
-    if let Some(i) = view_state
-        .subs
-        .iter()
-        .position(|text_4| &text_4.id == id && text_4.running())
-    {
-        let text_5 = &mut view_state.subs[i];
+fn end_subagent(event: &Event, agent: String, id: &String, state: &str, result: &String, thread: &mut Thread) {
+    if let Some(i) = thread.subs.iter().position(|sub| &sub.id == id && sub.running()) {
+        let sub = &mut thread.subs[i];
 
-        text_5.state = Some(state.to_owned());
-        text_5.result.clone_from(result);
-        text_5.end = error_value.ts;
+        sub.state = Some(state.to_owned());
+        sub.result.clone_from(result);
+        sub.end = event.ts;
 
         // the master's message: its own box ends here (the next text opens a new one)
-        view_state.open_run.remove(&agent);
-        view_state.runs += 1;
-        view_state.items.push(Item::Sub {
+        thread.open_run.remove(&agent);
+        thread.runs += 1;
+        thread.items.push(Item::Sub {
             agent,
             sub: i,
-            ts: error_value.ts,
-            key: view_state.runs,
+            ts: event.ts,
+            key: thread.runs,
         });
     }
 }
 
-fn last_of_thread(state: &Thread, agent: &str, chars: usize) -> String {
+fn last_of_thread(thread: &Thread, agent: &str, chars: usize) -> String {
     let mut out: Vec<&str> = Vec::new();
-    let mut count = 0;
+    let mut taken = 0;
 
-    for i in state.items.iter().rev() {
-        if let ControlFlow::Break(()) = last_of_thread_branch(agent, chars, &mut out, &mut count, i) {
+    for item in thread.items.iter().rev() {
+        if let ControlFlow::Break(()) = take_text(agent, chars, &mut out, &mut taken, item) {
             break;
         }
     }
@@ -239,23 +209,21 @@ fn last_of_thread(state: &Thread, agent: &str, chars: usize) -> String {
     out.join("\n\n")
 }
 
-fn last_of_thread_branch<'text>(
+fn take_text<'text>(
     agent: &str,
     chars: usize,
     out: &mut Vec<&'text str>,
-    count: &mut usize,
-    i: &'text Item,
+    taken: &mut usize,
+    item: &'text Item,
 ) -> ControlFlow<()> {
     if let Item::Text {
-        agent: agent_value,
-        text,
-        ..
-    } = i
-        && agent_value == agent
+        agent: author, text, ..
+    } = item
+        && author == agent
     {
-        *count += text.len();
+        *taken += text.len();
 
-        if *count > chars && !out.is_empty() {
+        if *taken > chars && !out.is_empty() {
             return ControlFlow::Break(());
         }
 
@@ -265,12 +233,12 @@ fn last_of_thread_branch<'text>(
     ControlFlow::Continue(())
 }
 
-fn push_last(error_value: &Event, id: &String, view_state: &mut Thread) {
-    let last = view_state.subs.iter().rposition(|text_6| &text_6.id == id);
+fn rerun_subagent(event: &Event, id: &String, thread: &mut Thread) {
+    let last = thread.subs.iter().rposition(|sub| &sub.id == id);
 
-    if let Some(old) = last.map(|i| &view_state.subs[i]).filter(|text_7| !text_7.running()) {
+    if let Some(old) = last.map(|i| &thread.subs[i]).filter(|sub| !sub.running()) {
         let rerun = Sub {
-            start: error_value.ts,
+            start: event.ts,
             state: None,
             result: String::new(),
             end: 0,
@@ -278,37 +246,37 @@ fn push_last(error_value: &Event, id: &String, view_state: &mut Thread) {
             ..old.clone()
         };
 
-        view_state.subs.push(rerun);
+        thread.subs.push(rerun);
     }
 }
 
-fn push_body(error_value: &Event, from: &String, to: &Vec<String>, text: &str, view_state: &mut Thread) {
-    view_state.open_run.remove(from);
+fn push_prompt(event: &Event, from: &String, to: &Vec<String>, text: &str, thread: &mut Thread) {
+    thread.open_run.remove(from);
 
     // a message to a stopped agent: its turn, 0 auto resume
-    for agent_value in to {
-        view_state.resumes.remove(agent_value);
+    for recipient in to {
+        thread.resumes.remove(recipient);
     }
 
-    view_state.items.push(Item::Prompt {
+    thread.items.push(Item::Prompt {
         from: from.clone(),
         to: to.clone(),
         text: text.to_owned(),
-        ts: error_value.ts,
+        ts: event.ts,
     });
 }
 
-fn text_thread(state: &mut Thread, agent: String, text: String, ts: u64) {
-    let thoughts = state.pending.remove(&agent).unwrap_or_default();
+fn push_text(thread: &mut Thread, agent: String, text: String, ts: u64) {
+    let thoughts = thread.pending.remove(&agent).unwrap_or_default();
 
     let key = if thoughts.is_empty() {
         0
     } else {
-        state.thought_keys += 1;
-        state.thought_keys
+        thread.thought_keys += 1;
+        thread.thought_keys
     };
 
-    state.items.push(Item::Text {
+    thread.items.push(Item::Text {
         agent,
         text,
         ts,
@@ -317,64 +285,57 @@ fn text_thread(state: &mut Thread, agent: String, text: String, ts: u64) {
     });
 }
 
-fn push_thread(receiver_state: &mut Thread, error_value: &Event) {
-    let agent = error_value.agent.clone().unwrap_or_default();
+fn record_event(thread: &mut Thread, event: &Event) {
+    let agent = event.agent.clone().unwrap_or_default();
 
-    match &error_value.kind {
-        Kind::Prompt { .. } => record_prompt(receiver_state, error_value, agent),
-        Kind::Text { .. } => record_text(receiver_state, error_value, agent),
-        Kind::Thought { .. } => record_thought(receiver_state, error_value, agent),
-        Kind::Tool { .. } => record_tool(receiver_state, error_value, agent),
-        Kind::ToolResult { .. } => record_tool_result(receiver_state, error_value, &agent),
-        Kind::Ask { .. } => record_ask(receiver_state, error_value, agent),
-        Kind::Answer { .. } => record_answer(receiver_state, error_value, agent),
-        Kind::TurnStart => record_turn_start(receiver_state, error_value, agent),
-        Kind::Resume { .. } => record_resume(receiver_state, error_value, &agent),
-        Kind::TurnEnd { .. } => record_turn_end(receiver_state, error_value, agent),
-        Kind::Session { .. } => record_session(receiver_state, error_value, agent),
-        Kind::Status { .. } => record_status(receiver_state, error_value, agent),
-        Kind::Join => record_join(receiver_state, error_value, agent),
-        Kind::Leave => record_leave(receiver_state, error_value, agent),
-        Kind::Error { .. } => record_error(receiver_state, error_value, agent),
-        Kind::Shell { .. } => record_shell(receiver_state, error_value, agent),
+    match &event.kind {
+        Kind::Prompt { .. } => record_prompt(thread, event, agent),
+        Kind::Text { .. } => record_text(thread, event, agent),
+        Kind::Thought { .. } => record_thought(thread, event, agent),
+        Kind::Tool { .. } => record_tool(thread, event, agent),
+        Kind::ToolResult { .. } => record_tool_result(thread, event, &agent),
+        Kind::Ask { .. } => record_ask(thread, event, agent),
+        Kind::Answer { .. } => record_answer(thread, event, agent),
+        Kind::TurnStart => record_turn_start(thread, event, agent),
+        Kind::Resume { .. } => record_resume(thread, event, &agent),
+        Kind::TurnEnd { .. } => record_turn_end(thread, event, agent),
+        Kind::Session { .. } => record_session(thread, event, agent),
+        Kind::Status { .. } => record_status(thread, event, agent),
+        Kind::Join => record_join(thread, event, agent),
+        Kind::Leave => record_leave(thread, event, agent),
+        Kind::Error { .. } => record_error(thread, event, agent),
+        Kind::Shell { .. } => record_shell(thread, event, agent),
         // flow lines: 0 chat rows (the agent card shows the step, a click on it the flow box)
-        Kind::Flow { .. } => record_flow(receiver_state, error_value, agent),
-        Kind::Edits { .. } => record_edits(receiver_state, error_value, agent),
+        Kind::Flow { .. } => record_flow(thread, event, agent),
+        Kind::Edits { .. } => record_edits(thread, event, agent),
         // a running sub-thread: 0 chat rows (the sub-threads row shows it); its end: a message
         // of its agent
-        Kind::SubThread { .. } => record_sub_thread(receiver_state, error_value, agent),
-        Kind::SubStart { .. } => record_sub_start(receiver_state, error_value, agent),
-        Kind::SubInfo { .. } => record_sub_info(receiver_state, error_value, agent),
-        Kind::SubEnd { .. } => record_sub_end(receiver_state, error_value, agent),
+        Kind::SubThread { .. } => record_sub_thread(thread, event, agent),
+        Kind::SubStart { .. } => record_sub_start(thread, event, agent),
+        Kind::SubInfo { .. } => record_sub_info(thread, event, agent),
+        Kind::SubEnd { .. } => record_sub_end(thread, event, agent),
         // an ended subagent runs again: a new `Sub` (same id); the old one keeps its report
         // and row, the rerun's end gets its own row
-        Kind::SubResume { .. } => record_sub_resume(receiver_state, error_value, agent),
+        Kind::SubResume { .. } => record_sub_resume(thread, event, agent),
     }
 }
 
-fn push_thread_leave(receiver_state: &mut Thread, agent: String) {
-    receiver_state.busy.remove(&agent);
-    receiver_state.items.push(Item::Note {
+fn push_leave(thread: &mut Thread, agent: String) {
+    thread.busy.remove(&agent);
+    thread.items.push(Item::Note {
         agent,
         text: "left the thread".into(),
         color: theme::pal().subtext0,
     });
 }
 
-fn push_thread_toolresult_id_ok_output(
-    receiver_state: &mut Thread,
-    error_value: &Event,
-    agent: &str,
-    id: &String,
-    ok: bool,
-    output: &str,
-) {
-    if let Some(i) = receiver_state.open_run.get(agent).copied()
-        && let Some(Item::Run { calls, end, .. }) = receiver_state.items.get_mut(i)
-        && let Some(character_value) = calls.iter_mut().find(|character| &character.id == id)
+fn set_call_output(thread: &mut Thread, event: &Event, agent: &str, id: &String, ok: bool, output: &str) {
+    if let Some(i) = thread.open_run.get(agent).copied()
+        && let Some(Item::Run { calls, end, .. }) = thread.items.get_mut(i)
+        && let Some(call) = calls.iter_mut().find(|call| &call.id == id)
     {
-        character_value.output = Some((ok, output.to_owned()));
-        *end = error_value.ts;
+        call.output = Some((ok, output.to_owned()));
+        *end = event.ts;
     }
 }
 

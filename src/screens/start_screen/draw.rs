@@ -67,20 +67,20 @@ impl App {
 
         self.preview.last_frame.clone_from(frame.buffer_mut());
 
-        if let Some(result) = self.hover_rect() {
-            theme::hover(frame.buffer_mut(), result);
+        if let Some(rect) = self.hover_rect() {
+            theme::hover(frame.buffer_mut(), rect);
         }
     }
 
     /// A key / click of the notifications dropdown: a jump opens the thread at the note's event.
-    pub(super) fn notes_pick(&mut self, path: crate::features::notifications::Pick) {
+    pub(super) fn notes_pick(&mut self, pick: crate::features::notifications::Pick) {
         use crate::features::notifications::Pick;
 
-        match path {
+        match pick {
             Pick::Stay => {}
             Pick::Close => self.overlays.notes_panel = None,
-            Pick::Jump(count) => {
-                notes_pick_body(self, &count);
+            Pick::Jump(note) => {
+                jump_to_note(self, &note);
             }
         }
     }
@@ -133,7 +133,7 @@ impl App {
         match self.tab {
             Tab::Notes => self.draw_notes(frame, list),
             Tab::Threads => {
-                draw_pick_tick(self, frame, list);
+                draw_thread_list(self, frame, list);
             }
             Tab::Agents | Tab::New => self.draw_agents(frame, list),
             Tab::Settings | Tab::Merge | Tab::Flows | Tab::Projects => {}
@@ -152,11 +152,11 @@ impl App {
     }
 }
 
-pub(super) fn draw_overlays(app_state: &mut App, frame: &mut Frame<'_>, area: Rect) {
-    let place = if app_state.compose.screen == Screen::Compose {
-        draw_overlays_area_value(app_state, area)
-    } else if app_state.preview.regions.list.width > 0 {
-        crate::ui::context_menu::Place::Beside(app_state.preview.regions.list, app_state.preview.regions.list.y)
+pub(super) fn draw_overlays(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
+    let place = if app.compose.screen == Screen::Compose {
+        context_menu_place(app, area)
+    } else if app.preview.regions.list.width > 0 {
+        crate::ui::context_menu::Place::Beside(app.preview.regions.list, app.preview.regions.list.y)
     } else {
         crate::ui::context_menu::Place::At(Rect {
             y: area.y + 2,
@@ -165,85 +165,81 @@ pub(super) fn draw_overlays(app_state: &mut App, frame: &mut Frame<'_>, area: Re
         })
     };
 
-    if let Some(character) = app_state.overlays.ctx.as_mut() {
-        character.render(frame, place, area);
+    if let Some(ctx) = app.overlays.ctx.as_mut() {
+        ctx.render(frame, place, area);
     }
 
-    if let Some(message) = app_state.overlays.menu.as_mut() {
-        message.render(frame, area);
+    if let Some(menu) = app.overlays.menu.as_mut() {
+        menu.render(frame, area);
     }
 
-    if let Some(path_value) = app_state.overlays.notes_panel.as_mut() {
-        path_value.draw(frame, area);
+    if let Some(panel) = app.overlays.notes_panel.as_mut() {
+        panel.draw(frame, area);
     }
 }
 
-pub(super) fn draw_overlays_area_value(app_state: &mut App, area: Rect) -> crate::ui::context_menu::Place {
-    let area_value = match app_state.compose.field {
-        Field::Agents => app_state.preview.regions.task_agents,
-        Field::Notes => app_state.preview.regions.notes_label,
-        Field::Where => app_state.preview.regions.where_row,
-        Field::Repo => app_state.preview.regions.repo_row,
-        Field::Drafts => app_state.preview.regions.drafts,
+pub(super) fn context_menu_place(app: &mut App, area: Rect) -> crate::ui::context_menu::Place {
+    let field = match app.compose.field {
+        Field::Agents => app.preview.regions.task_agents,
+        Field::Notes => app.preview.regions.notes_label,
+        Field::Where => app.preview.regions.where_row,
+        Field::Repo => app.preview.regions.repo_row,
+        Field::Drafts => app.preview.regions.drafts,
         _ => Rect::default(),
     };
 
-    crate::ui::context_menu::Place::At(if area_value.height == 0 {
+    crate::ui::context_menu::Place::At(if field.height == 0 {
         Rect {
             y: area.y + 2,
             height: 1,
             ..area
         }
     } else {
-        Rect {
-            height: 1,
-            ..area_value
-        }
+        Rect { height: 1, ..field }
     })
 }
 
-pub(super) fn draw_anchor(app_state: &mut App, frame: &mut Frame<'_>, area: Rect, body: Rect) {
-    app_state.draw_drafts(frame, area);
-    app_state.draw_where_menu(frame, area);
-    app_state.draw_proj_menu(frame, area);
-    app_state.draw_flow_menu(frame, area);
-    let anchor = app_state.preview.regions.repo_chip;
+pub(super) fn draw_anchor(app: &mut App, frame: &mut Frame<'_>, area: Rect, body: Rect) {
+    app.draw_drafts(frame, area);
+    app.draw_where_menu(frame, area);
+    app.draw_proj_menu(frame, area);
+    app.draw_flow_menu(frame, area);
+    let anchor = app.preview.regions.repo_chip;
 
-    if let Some(path) = app_state.repository.repo_pick.as_mut() {
-        app_state.preview.regions.repo_pick = path.draw(frame, anchor, body).unwrap_or_default();
+    if let Some(picker) = app.repository.repo_pick.as_mut() {
+        app.preview.regions.repo_pick = picker.draw(frame, anchor, body).unwrap_or_default();
     }
 }
 
-pub(super) fn notes_pick_body(app_state: &mut App, count: &crate::domain::notifications::Note) {
-    app_state.overlays.notes_panel = None;
-    crate::domain::search::jump_to(&count.thread, count.ts);
+pub(super) fn jump_to_note(app: &mut App, note: &crate::domain::notifications::Note) {
+    app.overlays.notes_panel = None;
+    crate::domain::search::jump_to(&note.thread, note.ts);
 
-    if !count.comment.is_empty() {
-        crate::domain::changes::threads::jump_to(&count.thread, &count.comment);
+    if !note.comment.is_empty() {
+        crate::domain::changes::threads::jump_to(&note.thread, &note.comment);
     }
 
-    app_state.outcome = Some(Outcome::Resume(Box::new(worktree_of(&count.card()))));
+    app.outcome = Some(Outcome::Resume(Box::new(worktree_of(&note.card()))));
 }
 
-pub(super) fn draw_pick_settings(app_state: &mut App, frame: &mut Frame<'_>, area: Rect) {
-    if let Some(settings) = &mut app_state.settings {
-        settings.draw(frame, area, !app_state.tabs_focus);
+pub(super) fn draw_pick_settings(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
+    if let Some(settings) = &mut app.settings {
+        settings.draw(frame, area, !app.tabs_focus);
     }
 }
 
-pub(super) fn draw_pick_tick(app_state: &mut App, frame: &mut Frame<'_>, list: Rect) {
+pub(super) fn draw_thread_list(app: &mut App, frame: &mut Frame<'_>, list: Rect) {
     let tick = (u128::from(crate::engine::now_ms()) / crate::ui::thread_card::WAVE_MS) as usize;
 
-    app_state.thread_list.tlist.draw(frame, list, tick);
+    app.thread_list.tlist.draw(frame, list, tick);
 
     // worktrees / claude: this screen's rows in the list's place
-    if !app_state.thread_list.tlist.view.cards() {
-        let rows = app_state.thread_list.tlist.list;
+    if !app.thread_list.tlist.view.cards() {
+        let rows = app.thread_list.tlist.list;
 
-        app_state.draw_threads(frame, rows);
-        app_state
-            .thread_list
+        app.draw_threads(frame, rows);
+        app.thread_list
             .threads_fx
-            .apply(frame, rows, app_state.thread_list.threads_version);
+            .apply(frame, rows, app.thread_list.threads_version);
     }
 }

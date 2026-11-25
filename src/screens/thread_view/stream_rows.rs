@@ -20,7 +20,7 @@ impl View {
                 .starts
                 .iter()
                 .take(self.thread.items.len())
-                .rposition(|&text| text < bottom);
+                .rposition(|&start| start < bottom);
 
             last.and_then(|i| self.thread.items[..=i].iter().rev().find_map(item_ts))
                 .unwrap_or(0)
@@ -30,9 +30,9 @@ impl View {
             self.watch.on_screen(&self.id, ts);
         }
     }
-    pub(super) fn stream_rows(&mut self, st: Rect) -> (Vec<Line<'static>>, StreamFrame) {
+    pub(super) fn stream_rows(&mut self, area: Rect) -> (Vec<Line<'static>>, StreamFrame) {
         let extra = self.pending_rows();
-        let height = usize::from(st.height);
+        let height = usize::from(area.height);
         let total = self.stream.drawn.rows.len();
 
         self.stream.back = self.stream.back.min(total.saturating_sub(height));
@@ -65,15 +65,15 @@ impl View {
         // bottom-aligned: a short thread sits on the title row
         let pad = height.saturating_sub(lines.len()) as u16;
         let shown = Rect {
-            y: st.y + pad,
-            height: st.height - pad,
-            ..st
+            y: area.y + pad,
+            height: area.height - pad,
+            ..area
         };
 
         (
             lines,
             StreamFrame {
-                area: st,
+                area,
                 shown,
                 start,
                 end,
@@ -92,10 +92,10 @@ fn mark_stream_row(source: &Line<'static>, marked: bool) -> Line<'static> {
 
     line.spans.insert(0, Span::styled("▌", theme::accent()));
 
-    if let Some(text) = line.spans.get_mut(1)
-        && let Some(rest) = text.content.strip_prefix([' ', '│', '┌', '└']).map(String::from)
+    if let Some(span) = line.spans.get_mut(1)
+        && let Some(rest) = span.content.strip_prefix([' ', '│', '┌', '└']).map(String::from)
     {
-        text.content = rest.into();
+        span.content = rest.into();
     }
 
     line
@@ -122,12 +122,12 @@ fn mark_search_words(view: &View, lines: &mut [Line<'static>], start: usize) {
     let words = view.find.words();
 
     if !words.is_empty() {
-        for (count, line) in lines.iter_mut().enumerate() {
+        for (offset, line) in lines.iter_mut().enumerate() {
             let item = view
                 .stream
                 .drawn
                 .starts
-                .partition_point(|&text| text <= start + count)
+                .partition_point(|&first_row| first_row <= start + offset)
                 .checked_sub(1);
 
             mark_search_row(line, &words, item.is_some_and(|i| view.find.is_hit(i)));

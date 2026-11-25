@@ -8,11 +8,11 @@ fn files() -> Vec<FileDiff> {
 
 #[test]
 fn prompt_has_new_side_numbers() {
-    let path = prompt(&files());
+    let text = prompt(&files());
 
     assert!(
-        path.contains("## src/a.rs\n@@ fn main\n   1| a\n    |-b\n   2|+c\n"),
-        "{path}"
+        text.contains("## src/a.rs\n@@ fn main\n   1| a\n    |-b\n   2|+c\n"),
+        "{text}"
     );
 }
 
@@ -24,9 +24,9 @@ fn parse_keeps_known_files_critical_first() {
         {"file": "src/a.rs", "line": 0, "severity": "critical", "title": "t2\nnote", "body": "b2"}
     ]}})
     .to_string();
-    let file = parse(&out, &files()).unwrap();
+    let findings = parse(&out, &files()).unwrap();
 
-    assert_eq!(file.len(), 2);
-    assert_eq!((file[0].title.as_str(), file[0].line), ("t2", 1));
-    assert_eq!(as_comment(&file[1]), "[minor] t1: b1");
+    assert_eq!(findings.len(), 2);
+    assert_eq!((findings[0].title.as_str(), findings[0].line), ("t2", 1));
+    assert_eq!(as_comment(&findings[1]), "[minor] t1: b1");
 }

@@ -10,28 +10,27 @@ impl View {
                 true
             }
             // the flow's wait: its step (flow_answer with the prompt's note, flow_role), 0 host ask
-            crate::features::chat::ask::Act::Answer(character)
-                if character["id"].as_str().is_some_and(|id| id.starts_with("flow:")) =>
+            crate::features::chat::ask::Act::Answer(answer)
+                if answer["id"].as_str().is_some_and(|id| id.starts_with("flow:")) =>
             {
-                ask_act_option(self, &(character))
+                answer_flow_wait(self, &answer)
             }
-            crate::features::chat::ask::Act::Answer(character) => {
+            crate::features::chat::ask::Act::Answer(answer) => {
                 self.ask.sent = true;
                 self.stream.dirty = true;
-                self.host("answer", character);
+                self.host("answer", answer);
                 true
             }
         }
     }
 
-    /// `> branch`: a copy of the thread, its view next.
     /// A key of the flow box asks for ACT.
     pub(super) fn flow_act(&mut self, agent: &str, act: crate::features::flows::flow_bar::Act) {
         match act {
             crate::features::flows::flow_bar::Act::None => {}
-            crate::features::flows::flow_bar::Act::Host(op, mut character) => {
-                character["agent"] = json!(agent);
-                self.host(op, character);
+            crate::features::flows::flow_bar::Act::Host(op, mut command) => {
+                command["agent"] = json!(agent);
+                self.host(op, command);
             }
             crate::features::flows::flow_bar::Act::Answer(choice) => {
                 // the prompt's text: the owner's note to the agent
@@ -58,9 +57,7 @@ impl View {
     /// A new ask may take the focus: an empty prompt and 0 keys for 1 s.
     pub(super) fn ask_may_focus(&self) -> bool {
         self.prompt.input.text().trim().is_empty()
-            && self
-                .last_key
-                .is_none_or(|thread| thread.elapsed() >= Duration::from_secs(1))
+            && self.last_key.is_none_or(|at| at.elapsed() >= Duration::from_secs(1))
     }
 
     /// Bind the picker to the 1st open ask.
@@ -71,7 +68,7 @@ impl View {
                 .thread
                 .asks
                 .first()
-                .is_none_or(|agent| agent.tool != crate::engine::flows::run::WAIT_TOOL);
+                .is_none_or(|ask| ask.tool != crate::engine::flows::run::WAIT_TOOL);
 
         self.ask.sync_with(self.thread.asks.first(), focus);
     }
@@ -89,13 +86,13 @@ impl View {
         let have: Vec<usize> = (0..count)
             .filter(|&i| asks[i].tool == crate::engine::flows::run::WAIT_TOOL)
             .collect();
-        let at_end = have.iter().enumerate().all(|(key, &i)| i == count - have.len() + key);
+        let at_end = have.iter().enumerate().all(|(nth, &i)| i == count - have.len() + nth);
 
-        if at_end && have.len() == want.len() && have.iter().zip(&want).all(|(&i, width)| asks[i].id == width.id) {
+        if at_end && have.len() == want.len() && have.iter().zip(&want).all(|(&i, wait)| asks[i].id == wait.id) {
             return false;
         }
 
-        asks.retain(|agent| agent.tool != crate::engine::flows::run::WAIT_TOOL);
+        asks.retain(|ask| ask.tool != crate::engine::flows::run::WAIT_TOOL);
         asks.extend(want);
 
         true
@@ -112,7 +109,7 @@ impl View {
 
     /// A mouse event on the flow rows: a click that opens a box closes the others. True: used.
     pub(super) fn flow_mouse(&mut self, event: MouseEvent) -> bool {
-        let Some(i) = self.flowbars.iter_mut().position(|bytes| bytes.mouse(event)) else {
+        let Some(i) = self.flowbars.iter_mut().position(|bar| bar.mouse(event)) else {
             return false;
         };
 
@@ -125,12 +122,12 @@ impl View {
 
     /// The flow box of AGENT open (PICK: on the flows to switch to); every other box closed.
     pub(super) fn open_flow(&mut self, agent: &str, pick: bool) {
-        if !self.flowbars.iter().any(|bytes| bytes.agent == agent) {
+        if !self.flowbars.iter().any(|bar| bar.agent == agent) {
             self.sync_flowbars();
         }
 
-        for bytes in &mut self.flowbars {
-            open_flow_branch(agent, pick, bytes);
+        for bar in &mut self.flowbars {
+            open_or_close_bar(agent, pick, bar);
         }
 
         self.stream.dirty = true;
@@ -138,7 +135,7 @@ impl View {
 
     /// `place_flow_ask`, then the picker on the 1st ask.
     pub(super) fn sync_flow_ask(&mut self) {
-        let first = self.thread.asks.first().map(|agent| agent.id.clone());
+        let first = self.thread.asks.first().map(|ask| ask.id.clone());
 
         if !self.place_flow_ask() {
             return;
@@ -152,16 +149,16 @@ impl View {
     }
 }
 
-fn open_flow_branch(agent: &str, pick: bool, bytes: &mut crate::features::flows::flow_bar::FlowBar) {
-    if bytes.agent != agent {
-        bytes.close();
+fn open_or_close_bar(agent: &str, pick: bool, bar: &mut crate::features::flows::flow_bar::FlowBar) {
+    if bar.agent != agent {
+        bar.close();
         return;
     }
 
     if pick {
-        bytes.pick();
+        bar.pick();
     } else {
-        bytes.open();
+        bar.open();
     }
 }
 
@@ -180,29 +177,29 @@ fn member_flow(
     flow
 }
 
-fn ask_act_option(view: &mut View, character: &serde_json::Value) -> bool {
-    let option = character["option"].as_str().unwrap_or_default().to_string();
+fn answer_flow_wait(view: &mut View, answer: &serde_json::Value) -> bool {
+    let option = answer["option"].as_str().unwrap_or_default().to_string();
     let empty = view.prompt.input.text().trim().is_empty();
-    let id = character["id"].as_str().unwrap_or_default().to_string();
+    let id = answer["id"].as_str().unwrap_or_default().to_string();
 
-    let Some(bytes) = view
+    let Some(bar_index) = view
         .flowbars
         .iter()
-        .position(|bytes| bytes.wait_ask().is_some_and(|agent| agent.id == id))
+        .position(|bar| bar.wait_ask().is_some_and(|ask| ask.id == id))
     else {
         return true;
     };
 
     // reply: the prompt's text as a message to the waiting flow's agent, the wait stays
     if option == crate::features::flows::flow_bar::REPLY {
-        reply_to_flow(view, bytes, empty);
+        reply_to_flow(view, bar_index, empty);
 
         view.stream.dirty = true;
         return true;
     }
 
     // a gate's outcome back to a step: 0 send without the owner's words what to change
-    if empty && option != "approve" && view.flowbars[bytes].waits_gate() {
+    if empty && option != "approve" && view.flowbars[bar_index].waits_gate() {
         view.ask.focus = false;
         view.toast(format!(
             "{option}: type what to change in the prompt first, then pick it again"
@@ -211,8 +208,8 @@ fn ask_act_option(view: &mut View, character: &serde_json::Value) -> bool {
         return true;
     }
 
-    if let Some(act) = view.flowbars[bytes].wait_answer(&option) {
-        let agent = view.flowbars[bytes].agent.clone();
+    if let Some(act) = view.flowbars[bar_index].wait_answer(&option) {
+        let agent = view.flowbars[bar_index].agent.clone();
 
         view.flow_act(&agent, act);
     }
@@ -231,13 +228,13 @@ fn close_other_flows(view: &mut View, index: usize) {
         .for_each(|(_, flow)| flow.close());
 }
 
-fn reply_to_flow(view: &mut View, bytes: usize, empty: bool) {
+fn reply_to_flow(view: &mut View, bar_index: usize, empty: bool) {
     view.ask.focus = false;
 
     if empty {
         view.toast("reply: type the message in the prompt first (ctrl+enter sends it too)");
     } else {
-        view.agents.reply_to = Some(view.flowbars[bytes].agent.clone());
+        view.agents.reply_to = Some(view.flowbars[bar_index].agent.clone());
         view.submit();
         view.agents.reply_to = None;
     }

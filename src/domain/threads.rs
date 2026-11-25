@@ -65,22 +65,22 @@ fn activity(id: &str) -> (bool, Option<String>, Vec<(String, String, String)>) {
     // the last 400 events: the last 512 KiB of the log hold them (0 full read of a 10 MB log)
     let tail = crate::engine::store::events_tail(id, 512 << 10);
 
-    for error_value in tail.into_iter().rev().take(400).collect::<Vec<_>>().into_iter().rev() {
-        let agent_value = error_value.agent.clone().unwrap_or_default();
+    for event in tail.into_iter().rev().take(400).collect::<Vec<_>>().into_iter().rev() {
+        let agent = event.agent.clone().unwrap_or_default();
 
-        match error_value.kind {
-            Kind::Ask { id, .. } => open.push((agent_value, id)),
-            Kind::Answer { id, .. } => open.retain(|x| x.1 != id),
+        match event.kind {
+            Kind::Ask { id, .. } => open.push((agent, id)),
+            Kind::Answer { id, .. } => open.retain(|ask| ask.1 != id),
             Kind::TurnEnd { error: err, .. } => {
-                record_turn_error(&mut open, &mut error, &agent_value, err);
+                record_turn_error(&mut open, &mut error, &agent, err);
             }
             Kind::Error { message } => {
-                error = Some(format!("{agent_value}: {}", message.lines().next().unwrap_or_default()));
+                error = Some(format!("{agent}: {}", message.lines().next().unwrap_or_default()));
             }
             Kind::Prompt { from, .. } if from == "owner" => error = None,
             Kind::Status { state, note } => {
-                notes.retain(|x| x.0 != agent_value);
-                notes.push((agent_value, state, note));
+                notes.retain(|note| note.0 != agent);
+                notes.push((agent, state, note));
             }
             _ => {}
         }
@@ -92,13 +92,13 @@ fn activity(id: &str) -> (bool, Option<String>, Vec<(String, String, String)>) {
 fn record_turn_error(
     open: &mut Vec<(String, String)>,
     error: &mut Option<String>,
-    agent_value: &String,
+    agent: &String,
     err: Option<String>,
 ) {
-    open.retain(|x| x.0 != *agent_value);
+    open.retain(|ask| ask.0 != *agent);
     *error = err
-        .filter(|message_value| message_value != crate::engine::host::INTERRUPTED && message_value != "session ended")
-        .map(|message_2| format!("{agent_value}: {}", message_2.lines().next().unwrap_or_default()));
+        .filter(|message| message != crate::engine::host::INTERRUPTED && message != "session ended")
+        .map(|message| format!("{agent}: {}", message.lines().next().unwrap_or_default()));
 }
 
 /// Changes of DIR against its merge-base with origin/<default> (else HEAD), untracked files
@@ -110,22 +110,21 @@ fn shortstat(dir: &Path) -> Option<(usize, usize, usize)> {
 
     let def = ["origin/HEAD", "origin/main", "origin/master"]
         .into_iter()
-        .find(|result| git(dir, &["rev-parse", "--verify", "--quiet", result]).0);
+        .find(|rev| git(dir, &["rev-parse", "--verify", "--quiet", rev]).0);
 
     let base = def
-        .and_then(|directory| {
-            Some(git(dir, &["merge-base", "HEAD", directory]).1.trim().to_string()).filter(|text| !text.is_empty())
+        .and_then(|def| {
+            Some(git(dir, &["merge-base", "HEAD", def]).1.trim().to_string()).filter(|base| !base.is_empty())
         })
         .unwrap_or_else(|| "HEAD".into());
 
-    let text_value = git(dir, &["diff", "--shortstat", &base]).1;
+    let stat = git(dir, &["diff", "--shortstat", &base]).1;
 
     let num = |key: &str| {
-        text_value
-            .split(',')
-            .find(|path| path.contains(key))
-            .and_then(|path_value| path_value.split_whitespace().next())
-            .and_then(|count_value| count_value.parse::<usize>().ok())
+        stat.split(',')
+            .find(|part| part.contains(key))
+            .and_then(|part| part.split_whitespace().next())
+            .and_then(|number| number.parse::<usize>().ok())
             .unwrap_or(0)
     };
 
@@ -156,7 +155,7 @@ impl Worktree {
     pub(crate) fn key(&self) -> String {
         self.thread
             .as_ref()
-            .map_or_else(|| self.path.clone(), |thread_value| thread_value.id.clone())
+            .map_or_else(|| self.path.clone(), |thread| thread.id.clone())
     }
 
     /// Name for the list: branch of a worktree, dir name of an in-place thread.
@@ -167,7 +166,7 @@ impl Worktree {
 
         Path::new(&self.path)
             .file_name()
-            .map_or_else(|| "scratch".into(), |count| count.to_string_lossy().into_owned())
+            .map_or_else(|| "scratch".into(), |name| name.to_string_lossy().into_owned())
     }
 }
 
@@ -182,26 +181,26 @@ pub(crate) fn all_threads_lite() -> Vec<Thread> {
 }
 
 /// F over ITEMS on up to 8 OS threads, order kept.
-pub(crate) fn par_map<T: Sync, R: Send>(items: &[T], file: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let count = std::thread::available_parallelism()
+pub(crate) fn par_map<T: Sync, R: Send>(items: &[T], apply: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let workers = std::thread::available_parallelism()
         .map_or(4, std::num::NonZero::get)
         .clamp(1, 8);
 
-    if items.len() < 2 || count == 1 {
-        return items.iter().map(&file).collect();
+    if items.len() < 2 || workers == 1 {
+        return items.iter().map(&apply).collect();
     }
 
-    let size = items.len().div_ceil(count);
+    let size = items.len().div_ceil(workers);
 
-    std::thread::scope(|text| {
+    std::thread::scope(|scope| {
         let parts: Vec<_> = items
             .chunks(size)
-            .map(|character| text.spawn(|| character.iter().map(&file).collect::<Vec<R>>()))
+            .map(|chunk| scope.spawn(|| chunk.iter().map(&apply).collect::<Vec<R>>()))
             .collect();
 
         parts
             .into_iter()
-            .flat_map(|height| height.join().unwrap_or_default())
+            .flat_map(|handle| handle.join().unwrap_or_default())
             .collect()
     })
 }
@@ -226,42 +225,42 @@ fn scan(full: bool) -> Vec<Thread> {
 
         dirs.sort();
         dirs.dedup();
-        let text = par_map(&dirs, |directory| shortstat(directory));
+        let results = par_map(&dirs, |dir| shortstat(dir));
 
-        dirs.into_iter().zip(text).collect()
+        dirs.into_iter().zip(results).collect()
     } else {
         std::collections::HashMap::default()
     };
 
-    par_map(&list, |thread_value| scan_thread(&routes, &stats, thread_value))
+    par_map(&list, |thread| scan_thread(&routes, &stats, thread))
 }
 
 fn scan_thread(
     routes: &[(String, String)],
     stats: &std::collections::HashMap<PathBuf, Option<(usize, usize, usize)>>,
-    thread_value: &store::Thread,
+    stored: &store::Thread,
 ) -> Thread {
-    let thread_2 = thread_value.clone();
-    let alive = crate::engine::client::alive(&thread_2.id);
+    let thread = stored.clone();
+    let alive = crate::engine::client::alive(&thread.id);
 
     let (live, busy) = if alive {
-        crate::engine::client::state(&thread_2.id)
+        crate::engine::client::state(&thread.id)
     } else {
         (Vec::new(), Vec::new())
     };
 
     // work goes on without a turn: a running sub-thread, a monitor or background command
-    let turn = !busy.is_empty() || !thread_2.kids.is_empty();
-    let watching = !turn && alive && crate::domain::monitors::watching(&thread_2.id, &live);
+    let turn = !busy.is_empty() || !thread.kids.is_empty();
+    let watching = !turn && alive && crate::domain::monitors::watching(&thread.id, &live);
     let busy = turn || watching;
-    let (ask, error, notes) = activity(&thread_2.id);
+    let (ask, error, notes) = activity(&thread.id);
 
     let needs = if ask {
         Some("question".to_string())
-    } else if thread_2.setup.as_deref() == Some("failed") {
+    } else if thread.setup.as_deref() == Some("failed") {
         Some("setup failed".to_string())
     } else {
-        error.map(|error_value| format!("error: {error_value}"))
+        error.map(|error| format!("error: {error}"))
     };
 
     Thread {
@@ -269,28 +268,28 @@ fn scan_thread(
         busy,
         watching,
         needs,
-        stat: stats.get(&thread_2.work_dir()).copied().flatten(),
-        agents: thread_2.agents.clone(),
+        stat: stats.get(&thread.work_dir()).copied().flatten(),
+        agents: thread.agents.clone(),
         notes,
-        task: thread_2.task.clone(),
-        port: thread_2.port,
-        setup: thread_2.setup.clone(),
-        parent: thread_2.parent.clone(),
-        urls: thread_2
+        task: thread.task.clone(),
+        port: thread.port,
+        setup: thread.setup.clone(),
+        parent: thread.parent.clone(),
+        urls: thread
             .worktree
             .as_ref()
-            .and(thread_2.branch.as_deref())
-            .map(|bytes| crate::infra::portless::urls_of(routes, &crate::infra::portless::prefix(bytes)))
+            .and(thread.branch.as_deref())
+            .map(|branch| crate::infra::portless::urls_of(routes, &crate::infra::portless::prefix(branch)))
             .unwrap_or_default(),
-        updated: thread_2.updated / 1000,
-        repo: thread_2.repo.clone(),
-        projects: thread_2.projects.clone(),
-        worktree: thread_2.worktree.clone(),
-        branch: thread_2.branch.clone(),
-        dir: Some(thread_2.dir.clone()),
-        title: thread_2.title,
-        state: thread_2.state,
-        id: thread_2.id,
+        updated: thread.updated / 1000,
+        repo: thread.repo.clone(),
+        projects: thread.projects.clone(),
+        worktree: thread.worktree.clone(),
+        branch: thread.branch.clone(),
+        dir: Some(thread.dir.clone()),
+        title: thread.title,
+        state: thread.state,
+        id: thread.id,
     }
 }
 
@@ -299,7 +298,7 @@ fn when_of(path: &Path) -> String {
 
     ct.trim().parse::<u64>().map_or_else(
         |_| "?".into(),
-        |text| crate::domain::notes::ago(std::time::UNIX_EPOCH + std::time::Duration::from_secs(text)),
+        |secs| crate::domain::notes::ago(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)),
     )
 }
 
@@ -309,44 +308,44 @@ pub(crate) fn load(repo: Option<&Path>) -> Vec<Worktree> {
     let mut used = std::collections::HashSet::new();
     let mut out = Vec::new();
 
-    for thread_value in all_threads() {
-        let wt = thread_value
+    for thread in all_threads() {
+        let wt = thread
             .worktree
             .as_ref()
-            .and_then(|path_value| wts.iter().find(|(wp, _)| real(wp) == real(path_value)));
-        let rp = repo_of_thread(&thread_value);
+            .and_then(|worktree| wts.iter().find(|(wp, _)| real(wp) == real(worktree)));
+        let rp = repo_of_thread(&thread);
 
-        let row = match (wt, &thread_value.worktree) {
+        let row = match (wt, &thread.worktree) {
             (Some((path, branch)), _) => {
                 used.insert(path.clone());
-                let path_2 = Path::new(path);
+                let dir = Path::new(path);
 
                 Worktree {
-                    unpushed: unpushed(branch, path_2),
-                    when: when_of(path_2),
+                    unpushed: unpushed(branch, dir),
+                    when: when_of(dir),
                     path: path.clone(),
                     branch: branch.clone(),
                     linked: true,
-                    thread: Some(thread_value),
+                    thread: Some(thread),
                     repo: rp,
                 }
             }
             // worktree of another repo
             (None, Some(path)) if Path::new(path).exists() => {
-                let branch = thread_value.branch.clone().unwrap_or_else(|| "(detached)".into());
-                let path_3 = Path::new(path);
+                let branch = thread.branch.clone().unwrap_or_else(|| "(detached)".into());
+                let dir = Path::new(path);
 
                 Worktree {
-                    unpushed: unpushed(&branch, path_3),
-                    when: when_of(path_3),
+                    unpushed: unpushed(&branch, dir),
+                    when: when_of(dir),
                     path: path.clone(),
                     branch,
                     linked: true,
-                    thread: Some(thread_value),
+                    thread: Some(thread),
                     repo: rp,
                 }
             }
-            _ => load_match(thread_value, rp),
+            _ => in_place_row(thread, rp),
         };
 
         out.push(row);
@@ -357,12 +356,12 @@ pub(crate) fn load(repo: Option<&Path>) -> Vec<Worktree> {
             continue;
         }
 
-        let path_4 = Path::new(&path);
+        let dir = Path::new(&path);
 
         out.push(Worktree {
             thread: None,
-            unpushed: unpushed(&branch, path_4),
-            when: when_of(path_4),
+            unpushed: unpushed(&branch, dir),
+            when: when_of(dir),
             path,
             branch,
             linked: true,
@@ -373,16 +372,16 @@ pub(crate) fn load(repo: Option<&Path>) -> Vec<Worktree> {
     out
 }
 
-fn load_match(thread_value: Thread, rp: Option<PathBuf>) -> Worktree {
-    let when = crate::domain::notes::ago(std::time::UNIX_EPOCH + std::time::Duration::from_secs(thread_value.updated));
+fn in_place_row(thread: Thread, rp: Option<PathBuf>) -> Worktree {
+    let when = crate::domain::notes::ago(std::time::UNIX_EPOCH + std::time::Duration::from_secs(thread.updated));
 
     Worktree {
-        path: thread_value.dir.clone().unwrap_or_default(),
+        path: thread.dir.clone().unwrap_or_default(),
         branch: "in place".into(),
         unpushed: 0,
         when,
         linked: false,
-        thread: Some(thread_value),
+        thread: Some(thread),
         repo: rp,
     }
 }

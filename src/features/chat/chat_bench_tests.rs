@@ -23,12 +23,12 @@ fn bench_draw() {
     }
 }
 
-fn bench_draw_color(thread: &Thread, look: Look, fold: Fold<'_>, ms: &mut Vec<f64>, rows: &mut usize) {
+fn bench_draw_once(thread: &Thread, look: Look, fold: Fold<'_>, ms: &mut Vec<f64>, rows: &mut usize) {
     let at = std::time::Instant::now();
-    let color = draw(thread, look, 120, &Colors::new(), &[], &fold, &Picker::default());
+    let drawn = draw(thread, look, 120, &Colors::new(), &[], &fold, &Picker::default());
 
     ms.push(at.elapsed().as_secs_f64() * 1000.0);
-    *rows = color.rows.len();
+    *rows = drawn.rows.len();
 }
 
 fn benchmark_case(thread: &Thread, name: &str, runs: &HashSet<usize>, none: &HashSet<usize>, look: Look) {
@@ -43,7 +43,7 @@ fn benchmark_case(thread: &Thread, name: &str, runs: &HashSet<usize>, none: &Has
     let mut rows = 0;
 
     for _ in 0..3 {
-        bench_draw_color(thread, look, fold, &mut ms, &mut rows);
+        bench_draw_once(thread, look, fold, &mut ms, &mut rows);
     }
 
     eprintln!(

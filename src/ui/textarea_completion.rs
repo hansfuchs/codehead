@@ -20,7 +20,7 @@ impl TextArea {
     /// `@` and `>` dropdowns: not paths. For the path dropdown.
     #[cfg(test)]
     pub(crate) fn path_word(&self) -> Option<(Pos, String)> {
-        self.path_word_quoted().map(|(path, width, _)| (path, width))
+        self.path_word_quoted().map(|(start, word, _)| (start, word))
     }
 
     /// [`path_word`], with spaces after an open `"` (`"~/My Notes/a`): the word starts after
@@ -33,44 +33,40 @@ impl TextArea {
         let line = &self.lines[self.cur.row];
         let before = &line[..self.cur.col];
 
-        if before.iter().filter(|&&character| character == '"').count() % 2 == 1
-            && let Some(query) = before.iter().rposition(|&character_value| character_value == '"')
-            && line
-                .get(self.cur.col)
-                .is_none_or(|&character_2| character_2.is_whitespace() || character_2 == '"')
+        if before.iter().filter(|&&ch| ch == '"').count() % 2 == 1
+            && let Some(quote) = before.iter().rposition(|&ch| ch == '"')
+            && line.get(self.cur.col).is_none_or(|&ch| ch.is_whitespace() || ch == '"')
         {
-            let word: String = line[query + 1..self.cur.col].iter().collect();
+            let word: String = line[quote + 1..self.cur.col].iter().collect();
 
             return word.contains('/').then_some((
                 Pos {
                     row: self.cur.row,
-                    col: query + 1,
+                    col: quote + 1,
                 },
                 word,
                 true,
             ));
         }
 
-        let edge = |character_3: char| {
-            character_3.is_whitespace()
-                || matches!(character_3, '(' | ')' | '[' | ']' | '"' | '\'' | '`' | '<' | '>' | ',')
-        };
+        let edge =
+            |ch: char| ch.is_whitespace() || matches!(ch, '(' | ')' | '[' | ']' | '"' | '\'' | '`' | '<' | '>' | ',');
 
-        if line.get(self.cur.col).is_some_and(|&character_4| !edge(character_4)) {
+        if line.get(self.cur.col).is_some_and(|&ch| !edge(ch)) {
             return None;
         }
 
-        let mut character_5 = self.cur.col;
+        let mut start = self.cur.col;
 
-        while character_5 > 0 && !edge(line[character_5 - 1]) {
-            character_5 -= 1;
+        while start > 0 && !edge(line[start - 1]) {
+            start -= 1;
         }
 
-        let word: String = line[character_5..self.cur.col].iter().collect();
+        let word: String = line[start..self.cur.col].iter().collect();
 
         if !word.contains('/')
             || word.starts_with('@')
-            || (character_5 > 0 && line[character_5 - 1] == crate::infra::config::command_key())
+            || (start > 0 && line[start - 1] == crate::infra::config::command_key())
         {
             return None;
         }
@@ -78,7 +74,7 @@ impl TextArea {
         Some((
             Pos {
                 row: self.cur.row,
-                col: character_5,
+                col: start,
             },
             word,
             false,
@@ -93,17 +89,17 @@ impl TextArea {
         }
 
         let line = &self.lines[self.cur.row];
-        let mut character = self.cur.col;
+        let mut start = self.cur.col;
 
-        while character > 0 && line[character - 1] != mark && query(line[character - 1]) {
-            character -= 1;
+        while start > 0 && line[start - 1] != mark && query(line[start - 1]) {
+            start -= 1;
         }
 
-        if character == 0 || line[character - 1] != mark {
+        if start == 0 || line[start - 1] != mark {
             return None;
         }
 
-        let at = character - 1;
+        let at = start - 1;
 
         if at > 0 && !(line[at - 1].is_whitespace() || matches!(line[at - 1], '(' | '[' | '"' | '\'')) {
             return None;
@@ -114,7 +110,7 @@ impl TextArea {
                 row: self.cur.row,
                 col: at,
             },
-            line[character..self.cur.col].iter().collect(),
+            line[start..self.cur.col].iter().collect(),
         ))
     }
 
@@ -153,8 +149,8 @@ impl TextArea {
         self.want_x = None;
     }
 
-    /// Screen cell of P (last render). None: scrolled out.
-    pub(crate) fn screen_pos(&self, path: Pos) -> Option<Position> {
+    /// Screen cell of POS (last render). None: scrolled out.
+    pub(crate) fn screen_pos(&self, pos: Pos) -> Option<Position> {
         if self.vis.is_empty() {
             return Some(Position {
                 x: self.area.x,
@@ -162,7 +158,7 @@ impl TextArea {
             });
         }
 
-        let (vrow, x) = self.visual_of(path);
+        let (vrow, x) = self.visual_of(pos);
 
         if vrow < self.scroll || vrow >= self.scroll + self.area.height as usize {
             return None;
@@ -175,34 +171,34 @@ impl TextArea {
     }
 }
 
-fn locate_shortcut(widget_state: &TextArea, at: Option<Position>) -> Option<(Pos, String)> {
-    let path = match at {
-        Some(agent) => {
-            if !widget_state.area.contains(agent) {
+fn locate_shortcut(ta: &TextArea, at: Option<Position>) -> Option<(Pos, String)> {
+    let pos = match at {
+        Some(cell) => {
+            if !ta.area.contains(cell) {
                 return None;
             }
 
-            let y = usize::from(agent.y - widget_state.area.y);
+            let y = usize::from(cell.y - ta.area.y);
 
-            widget_state.pos_at(widget_state.scroll + y, usize::from(agent.x - widget_state.area.x))
+            ta.pos_at(ta.scroll + y, usize::from(cell.x - ta.area.x))
         }
-        None => widget_state.cur,
+        None => ta.cur,
     };
 
-    let line = widget_state.lines.get(path.row)?;
+    let line = ta.lines.get(pos.row)?;
     let name = |character: char| is_word(character) || character == '-';
 
     // back to the `#` (the cursor right after the name counts too)
-    let mut character_value = path.col.min(line.len());
+    let mut start = pos.col.min(line.len());
 
-    while character_value > 0 && line[character_value - 1] != '#' && name(line[character_value - 1]) {
-        character_value -= 1;
+    while start > 0 && line[start - 1] != '#' && name(line[start - 1]) {
+        start -= 1;
     }
 
-    let hash = if line.get(character_value) == Some(&'#') {
-        character_value
-    } else if character_value > 0 && line[character_value - 1] == '#' {
-        character_value - 1
+    let hash = if line.get(start) == Some(&'#') {
+        start
+    } else if start > 0 && line[start - 1] == '#' {
+        start - 1
     } else {
         return None;
     };
@@ -211,14 +207,11 @@ fn locate_shortcut(widget_state: &TextArea, at: Option<Position>) -> Option<(Pos
         return None;
     }
 
-    let word: String = line[hash + 1..]
-        .iter()
-        .take_while(|character_2| name(**character_2))
-        .collect();
+    let word: String = line[hash + 1..].iter().take_while(|ch| name(**ch)).collect();
 
-    (!word.is_empty() && path.col <= hash + 1 + word.chars().count()).then_some((
+    (!word.is_empty() && pos.col <= hash + 1 + word.chars().count()).then_some((
         Pos {
-            row: path.row,
+            row: pos.row,
             col: hash,
         },
         word,

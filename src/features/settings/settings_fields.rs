@@ -8,7 +8,7 @@ pub(super) fn aliases(form: &Form) -> usize {
 pub(super) fn starts(form: &Form) -> Vec<usize> {
     form.sections
         .iter()
-        .map(|text| text.0)
+        .map(|section| section.0)
         .chain(form.aliases_on.then(|| form.plain()))
         .collect()
 }
@@ -55,7 +55,7 @@ pub(super) fn values(form: &Form) -> Result<config::File, String> {
         return Err("reload config before save".into());
     }
 
-    let value = |i: usize| {
+    let typed = |i: usize| {
         let text = form.fields[i].text().trim().to_string();
 
         (!text.is_empty()).then_some(text)
@@ -86,13 +86,13 @@ pub(super) fn values(form: &Form) -> Result<config::File, String> {
     }
 
     for (i, specification) in form.specs.iter().enumerate() {
-        let value_value = value(i);
+        let value = typed(i);
 
-        if let Some(value_2) = &value_value {
-            config::validate(specification.key, value_2)?;
+        if let Some(text) = &value {
+            config::validate(specification.key, text)?;
         }
 
-        file.set(specification.key, value_value);
+        file.set(specification.key, value);
     }
 
     Ok(file)
@@ -102,8 +102,8 @@ pub(super) fn dirty(form: &Form) -> bool {
     self::values(form).ok().is_none_or(|value| value != form.saved)
 }
 
-pub(super) fn delete_alias(key: usize, form: &mut Form) {
-    let at = form.plain() + key * 2;
+pub(super) fn delete_alias(alias: usize, form: &mut Form) {
+    let at = form.plain() + alias * 2;
 
     if at + 2 > form.fields.len() {
         return;
@@ -138,9 +138,6 @@ pub(super) fn revert(form: &mut Form) {
     {
         form.fields[i].set_text(&text);
         form.fields[i].move_start();
-        form.status = format!(
-            "{}: edit undone",
-            form.specs.get(i).map_or("field", |text_value| text_value.key)
-        );
+        form.status = format!("{}: edit undone", form.specs.get(i).map_or("field", |spec| spec.key));
     }
 }

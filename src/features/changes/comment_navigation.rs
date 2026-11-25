@@ -32,7 +32,7 @@ impl View {
             .comment_state
             .comments
             .iter()
-            .find(|character| character.id == id)
+            .find(|comment| comment.id == id)
             .is_some_and(|comment| self.comment_shut(comment));
 
         if shut && !self.comment_state.comment_flip.remove(id) {
@@ -53,34 +53,34 @@ impl View {
 
     /// The rows of comment C in the file view: its head; unfolded: its text, its replies.
     pub(super) fn clines(&self, comment: &Comment) -> Vec<CLine> {
-        let mut value = vec![CLine::Head];
+        let mut lines = vec![CLine::Head];
 
         if self.comment_shut(comment) {
-            return value;
+            return lines;
         }
 
-        value.extend((1..comment.text.lines().count()).map(CLine::Text));
+        lines.extend((1..comment.text.lines().count()).map(CLine::Text));
 
-        for (result, x) in comment.replies.iter().enumerate() {
-            value.push(CLine::Reply(result));
-            value.extend((1..x.text.lines().count()).map(|key| CLine::RText(result, key)));
+        for (reply, entry) in comment.replies.iter().enumerate() {
+            lines.push(CLine::Reply(reply));
+            lines.extend((1..entry.text.lines().count()).map(|line| CLine::RText(reply, line)));
         }
 
-        value
+        lines
     }
 
     /// The comment of row I and its reply (None: the comment's own rows).
     pub(super) fn row_comment(&self, i: usize) -> Option<(usize, Option<usize>)> {
         let row = self.layout.rows.get(i)?;
 
-        let Body::Comment(ci, comment) = row.body else {
+        let Body::Comment(ci, line) = row.body else {
             return None;
         };
 
-        let comment_value = self.comment_state.comments.get(ci)?;
+        let comment = self.comment_state.comments.get(ci)?;
 
-        Some(match self.clines(comment_value).get(comment) {
-            Some(CLine::Reply(x) | CLine::RText(x, _)) => (ci, Some(*x)),
+        Some(match self.clines(comment).get(line) {
+            Some(CLine::Reply(reply) | CLine::RText(reply, _)) => (ci, Some(*reply)),
             _ => (ci, None),
         })
     }
@@ -90,7 +90,7 @@ impl View {
         self.comment_state
             .comments
             .iter()
-            .filter(|character| character.open())
+            .filter(|comment| comment.open())
             .count()
     }
 
@@ -98,8 +98,8 @@ impl View {
     pub(crate) fn took_context(&mut self) {
         self.scm.comment_picks.clear();
 
-        if let Some(path) = self.peek.as_mut() {
-            path.scm.comment_picks.clear();
+        if let Some(peek) = self.peek.as_mut() {
+            peek.scm.comment_picks.clear();
         }
     }
 
@@ -121,12 +121,7 @@ fn show_wanted_view(view: &mut View) {
         return;
     };
 
-    let Some(ci) = view
-        .comment_state
-        .comments
-        .iter()
-        .position(|character| character.id == id)
-    else {
+    let Some(ci) = view.comment_state.comments.iter().position(|comment| comment.id == id) else {
         return;
     };
 
@@ -146,7 +141,7 @@ fn see_replies_view(view: &mut View) {
     let mut on: HashSet<String> = HashSet::new();
 
     for &row in &view.layout.shown_rows {
-        if let Some(Body::Comment(ci, _)) = view.layout.rows.get(row).map(|result| result.body)
+        if let Some(Body::Comment(ci, _)) = view.layout.rows.get(row).map(|row| row.body)
             && let Some(comment) = view.comment_state.comments.get(ci)
             && threads::unseen(comment) > 0
             && !view.comment_shut(comment)
@@ -167,7 +162,7 @@ fn see_replies_view(view: &mut View) {
 
     for id in due {
         view.comment_state.seen_at.remove(&id);
-        view.write_through(|thread| threads::mark_seen(thread, &id));
+        view.write_through(|thread_id| threads::mark_seen(thread_id, &id));
     }
 }
 

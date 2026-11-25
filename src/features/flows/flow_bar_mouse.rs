@@ -6,25 +6,20 @@ impl FlowBar {
     }
 }
 
-fn mouse_mouseeventkind_down_mousebutton_left(at: Position, view_state: &mut FlowBar) {
-    if let Some(&(_, i)) = view_state
-        .popup_state
-        .rows
-        .iter()
-        .find(|(result, _)| result.contains(at))
-    {
-        view_state.popup_state.cur = i;
+fn select_clicked_row(at: Position, bar: &mut FlowBar) {
+    if let Some(&(_, i)) = bar.popup_state.rows.iter().find(|(area, _)| area.contains(at)) {
+        bar.popup_state.cur = i;
     }
 }
 
-fn mouse_body(event: MouseEvent, at: Position, view_state: &mut FlowBar) -> bool {
+fn popup_mouse(event: MouseEvent, at: Position, bar: &mut FlowBar) -> bool {
     match event.kind {
         MouseEventKind::ScrollDown => {
-            view_state.popup_state.cur = (view_state.popup_state.cur + 1).min(view_state.len().saturating_sub(1));
+            bar.popup_state.cur = (bar.popup_state.cur + 1).min(bar.len().saturating_sub(1));
         }
-        MouseEventKind::ScrollUp => view_state.popup_state.cur = view_state.popup_state.cur.saturating_sub(1),
+        MouseEventKind::ScrollUp => bar.popup_state.cur = bar.popup_state.cur.saturating_sub(1),
         MouseEventKind::Down(MouseButton::Left) => {
-            mouse_mouseeventkind_down_mousebutton_left(at, view_state);
+            select_clicked_row(at, bar);
         }
         _ => {}
     }
@@ -32,11 +27,11 @@ fn mouse_body(event: MouseEvent, at: Position, view_state: &mut FlowBar) -> bool
     true
 }
 
-fn mouse_branch(view_state: &mut FlowBar) -> bool {
-    if view_state.popup_state.open {
-        view_state.popup_state.open = false;
+fn toggle_popup(bar: &mut FlowBar) -> bool {
+    if bar.popup_state.open {
+        bar.popup_state.open = false;
     } else {
-        view_state.open();
+        bar.open();
     }
 
     true
@@ -51,11 +46,11 @@ fn mouse_flow_bar(state: &mut FlowBar, event: MouseEvent) -> bool {
     state.popup_state.hover = state.popup_state.bar.contains(at);
 
     if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) && state.popup_state.bar.contains(at) {
-        return mouse_branch(state);
+        return toggle_popup(state);
     }
 
     if state.popup_state.open && state.popup_state.popup.contains(at) {
-        return mouse_body(event, at, state);
+        return popup_mouse(event, at, state);
     }
 
     false

@@ -40,26 +40,26 @@ pub(crate) struct Arc {
 
 /// The arcs of NODES: loops (back), gate outcomes.
 pub(crate) fn arcs(nodes: &[Resolved], rounds: impl Fn(&str) -> u32) -> Vec<Arc> {
-    let mut value = Vec::new();
+    let mut arcs = Vec::new();
 
-    for (i, count) in nodes.iter().enumerate() {
-        arcs_result(&rounds, &mut value, i, count);
+    for (i, node) in nodes.iter().enumerate() {
+        push_node_arcs(&rounds, &mut arcs, i, node);
     }
 
-    value
+    arcs
 }
 
-fn arcs_result(rounds: &impl Fn(&str) -> u32, value: &mut Vec<Arc>, i: usize, count: &Resolved) {
-    if let Some((to, until, max)) = &count.loops {
-        let result = rounds(&count.id);
+fn push_node_arcs(rounds: &impl Fn(&str) -> u32, arcs: &mut Vec<Arc>, i: usize, node: &Resolved) {
+    if let Some((to, until, max)) = &node.loops {
+        let done = rounds(&node.id);
 
-        let round = if result > 0 {
-            format!(" · round {}/{max}", result + 1)
+        let round = if done > 0 {
+            format!(" · round {}/{max}", done + 1)
         } else {
             format!(" · max {max}")
         };
 
-        value.push(Arc {
+        arcs.push(Arc {
             from: i,
             to: *to,
             label: format!("↺ {}{round}", if until.is_empty() { "loop" } else { until }),
@@ -67,8 +67,8 @@ fn arcs_result(rounds: &impl Fn(&str) -> u32, value: &mut Vec<Arc>, i: usize, co
         });
     }
 
-    for (key, to) in &count.edges {
-        value.push(Arc {
+    for (key, to) in &node.edges {
+        arcs.push(Arc {
             from: i,
             to: *to,
             label: key.clone(),
@@ -102,18 +102,18 @@ pub(crate) fn draw(
     // arcs: shortest span innermost (column 0 = nearest the titles)
     let mut order: Vec<usize> = (0..arcs.len()).collect();
 
-    order.sort_by_key(|&key| (arcs[key].from.abs_diff(arcs[key].to), arcs[key].from));
-    let aw = arcs_width(arcs).min(area.width / 2);
+    order.sort_by_key(|&arc| (arcs[arc].from.abs_diff(arcs[arc].to), arcs[arc].from));
+    let arcs_w = arcs_width(arcs).min(area.width / 2);
 
     // the titles' column: as wide as the widest row (the arcs right next to it), the labels
     // keep 12+ columns
     let natural = rows
         .iter()
-        .map(|result| {
-            3 + result.mark.0.width()
+        .map(|row| {
+            3 + row.mark.0.width()
                 + 1
-                + result.title.width()
-                + result.tags.iter().map(|(thread, _)| thread.width() + 1).sum::<usize>()
+                + row.title.width()
+                + row.tags.iter().map(|(tag, _)| tag.width() + 1).sum::<usize>()
                 + 1
         })
         .max()
@@ -122,20 +122,20 @@ pub(crate) fn draw(
     let room = if arcs.is_empty() {
         area.width
     } else {
-        area.width.saturating_sub(aw + 13)
+        area.width.saturating_sub(arcs_w + 13)
     };
 
     let text_w = natural.min(room).max(10).min(area.width);
     let shown = usize::from(area.height);
 
-    finish_draw(
+    draw_rows_and_arcs(
         buf,
         RailViewport {
             area,
             cursor,
             focus,
             offset,
-            aw,
+            arcs_w,
             text_w,
         },
         rows,
@@ -146,7 +146,7 @@ pub(crate) fn draw(
     )
 }
 
-fn finish_draw(
+fn draw_rows_and_arcs(
     buf: &mut Buffer,
     rail_viewport: RailViewport,
     rows: &[Row],
@@ -160,12 +160,12 @@ fn finish_draw(
         cursor,
         focus,
         offset,
-        aw,
+        arcs_w,
         text_w,
     } = rail_viewport;
 
-    for (key_value, row) in rows.iter().enumerate().skip(offset).take(shown) {
-        draw_area_value(
+    for (index, row) in rows.iter().enumerate().skip(offset).take(shown) {
+        draw_row(
             buf,
             RailRowLayout {
                 area,
@@ -175,7 +175,7 @@ fn finish_draw(
                 hits: &mut hits,
                 text_w,
             },
-            key_value,
+            index,
             row,
         );
     }
@@ -183,19 +183,19 @@ fn finish_draw(
     // arcs
     let ax = area.x + text_w + 1;
 
-    for (col, &key_2) in order.iter().enumerate() {
-        if let ControlFlow::Break(()) = draw_agent(
+    for (col, &arc_index) in order.iter().enumerate() {
+        if let ControlFlow::Break(()) = draw_arc(
             buf,
             ArcLayout {
                 area,
                 offset,
-                aw,
+                arcs_w,
                 shown,
                 ax,
                 col,
             },
             arcs,
-            key_2,
+            arc_index,
         ) {
             break;
         }
@@ -204,48 +204,48 @@ fn finish_draw(
     hits
 }
 
-fn draw_agent(buf: &mut Buffer, context: ArcLayout, arcs: &[Arc], key_2: usize) -> ControlFlow<()> {
+fn draw_arc(buf: &mut Buffer, context: ArcLayout, arcs: &[Arc], arc_index: usize) -> ControlFlow<()> {
     let ArcLayout {
         area,
         offset,
-        aw,
+        arcs_w,
         shown,
         ax,
         col,
     } = context;
 
-    let agent = &arcs[key_2];
+    let arc = &arcs[arc_index];
     let cx = ax + 2 + 3 * col as u16;
 
     if cx >= area.right() {
         return ControlFlow::Break(());
     }
 
-    let st = if agent.loops {
+    let style = if arc.loops {
         theme::fg(theme::pal().info())
     } else {
         theme::fg(theme::pal().attention())
     };
 
-    let (top, bottom) = (agent.from.min(agent.to), agent.from.max(agent.to));
+    let (top, bottom) = (arc.from.min(arc.to), arc.from.max(arc.to));
     let row_y = |i: usize| -> Option<u16> { (i >= offset && i < offset + shown).then(|| area.y + (i - offset) as u16) };
 
-    let set = |buf: &mut Buffer, x: u16, y: u16, text_2: &str| {
+    let set = |buf: &mut Buffer, x: u16, y: u16, symbol: &str| {
         if x < area.right() {
-            buf[(x, y)].set_symbol(text_2).set_style(st);
+            buf[(x, y)].set_symbol(symbol).set_style(style);
         }
     };
 
-    if agent.from == agent.to {
-        if let Some(y) = row_y(agent.from) {
+    if arc.from == arc.to {
+        if let Some(y) = row_y(arc.from) {
             set(buf, ax, y, "↺");
         }
     } else {
-        draw_agent_target(
+        draw_arc_span(
             buf,
             ArcTargetLayout {
                 ax,
-                agent,
+                arc,
                 cx,
                 top,
                 bottom,
@@ -256,14 +256,14 @@ fn draw_agent(buf: &mut Buffer, context: ArcLayout, arcs: &[Arc], key_2: usize) 
     }
 
     // the label right of every arc column, on the source row
-    if let Some(y) = row_y(agent.from) {
-        draw_arc_label(buf, area, agent, ax, aw, y, st);
+    if let Some(y) = row_y(arc.from) {
+        draw_arc_label(buf, area, arc, ax, arcs_w, y, style);
     }
 
     ControlFlow::Continue(())
 }
 
-fn draw_agent_target(
+fn draw_arc_span(
     buf: &mut Buffer,
     context: ArcTargetLayout<'_>,
     row_y: impl Fn(usize) -> Option<u16>,
@@ -271,18 +271,18 @@ fn draw_agent_target(
 ) {
     let ArcTargetLayout {
         ax,
-        agent,
+        arc,
         cx,
         top,
         bottom,
     } = context;
 
     for i in top..=bottom {
-        draw_agent_target_target(
+        draw_arc_row(
             buf,
             ArcRowLayout {
                 ax,
-                agent,
+                arc,
                 cx,
                 top,
                 bottom,
@@ -294,7 +294,7 @@ fn draw_agent_target(
     }
 }
 
-fn draw_agent_target_target(
+fn draw_arc_row(
     buf: &mut Buffer,
     context: ArcRowLayout<'_>,
     row_y: &impl Fn(usize) -> Option<u16>,
@@ -302,7 +302,7 @@ fn draw_agent_target_target(
 ) {
     let ArcRowLayout {
         ax,
-        agent,
+        arc,
         cx,
         top,
         bottom,
@@ -315,7 +315,7 @@ fn draw_agent_target_target(
 
     if i == top || i == bottom {
         // the end rows: a horizontal run to the column, the corner, the arrow at the target
-        let target = i == agent.to;
+        let target = i == arc.to;
 
         set(buf, ax, y, if target { "◀" } else { "─" });
 
@@ -331,7 +331,7 @@ fn draw_agent_target_target(
     }
 }
 
-fn draw_area_value(buf: &mut Buffer, context: RailRowLayout<'_>, key_value: usize, row: &Row) {
+fn draw_row(buf: &mut Buffer, context: RailRowLayout<'_>, index: usize, row: &Row) {
     let RailRowLayout {
         area,
         cursor,
@@ -341,41 +341,37 @@ fn draw_area_value(buf: &mut Buffer, context: RailRowLayout<'_>, key_value: usiz
         text_w,
     } = context;
 
-    let y = area.y + (key_value - offset) as u16;
-    let area_value = Rect { y, height: 1, ..area };
-    let on = cursor == Some(key_value);
+    let y = area.y + (index - offset) as u16;
+    let row_area = Rect { y, height: 1, ..area };
+    let on = cursor == Some(index);
 
     let base = rail_row_style(on, focus);
 
-    clear_selected_row(buf, area_value, on, base);
+    clear_selected_row(buf, row_area, on, base);
 
     let mut x = area.x;
 
-    let put = |buf: &mut Buffer, x: &mut u16, text_value: &str, st: Style, end: u16| {
-        draw_area_value_width_value(
+    let put = |buf: &mut Buffer, x: &mut u16, text: &str, style: Style, end: u16| {
+        put_text(
             RailTextLayout {
                 focus,
                 y,
                 on,
                 base,
                 x,
-                st,
+                style,
                 end,
             },
             buf,
-            text_value,
+            text,
         );
     };
 
     let end = area.x + text_w;
 
-    put(buf, &mut x, &format!("{:>2} ", key_value + 1), theme::muted(), end);
+    put(buf, &mut x, &format!("{:>2} ", index + 1), theme::muted(), end);
     put(buf, &mut x, &format!("{} ", row.mark.0), row.mark.1, end);
-    let tags_w: u16 = row
-        .tags
-        .iter()
-        .map(|(thread_value, _)| thread_value.width() as u16 + 1)
-        .sum();
+    let tags_w: u16 = row.tags.iter().map(|(tag, _)| tag.width() as u16 + 1).sum();
     let title_end = end.saturating_sub(tags_w).max(x + 4);
     let title = crate::ui::thread_card::fit(&row.title, usize::from(title_end.saturating_sub(x)));
 
@@ -392,35 +388,33 @@ fn draw_area_value(buf: &mut Buffer, context: RailRowLayout<'_>, key_value: usiz
     );
     x = x.max(title_end);
 
-    for (thread_2, st) in &row.tags {
+    for (tag, style) in &row.tags {
         put(buf, &mut x, " ", Style::default(), end);
-        put(buf, &mut x, thread_2, *st, end);
+        put(buf, &mut x, tag, *style, end);
     }
 
-    hits.push((area_value, key_value));
+    hits.push((row_area, index));
 }
 
-fn draw_area_value_width_value(context: RailTextLayout<'_>, buf: &mut Buffer, text_value: &str) {
+fn put_text(context: RailTextLayout<'_>, buf: &mut Buffer, text: &str) {
     let RailTextLayout {
         focus,
         y,
         on,
         base,
         x,
-        st,
+        style,
         end,
     } = context;
 
-    for ch in text_value.chars() {
-        if let ControlFlow::Break(()) =
-            draw_area_value_width_value_width_value(buf, RailCellStyle { focus, on, base, st }, y, x, end, ch)
-        {
+    for ch in text.chars() {
+        if let ControlFlow::Break(()) = put_char(buf, RailCellStyle { focus, on, base, style }, y, x, end, ch) {
             break;
         }
     }
 }
 
-fn draw_area_value_width_value_width_value(
+fn put_char(
     buf: &mut Buffer,
     rail_cell_style: RailCellStyle,
     y: u16,
@@ -428,25 +422,25 @@ fn draw_area_value_width_value_width_value(
     end: u16,
     ch: char,
 ) -> ControlFlow<()> {
-    let RailCellStyle { focus, on, base, st } = rail_cell_style;
+    let RailCellStyle { focus, on, base, style } = rail_cell_style;
 
-    let width_value = ch.width().unwrap_or(0) as u16;
+    let char_w = ch.width().unwrap_or(0) as u16;
 
-    if *x + width_value > end {
+    if *x + char_w > end {
         return ControlFlow::Break(());
     }
 
-    let st = if on {
+    let style = if on {
         base.patch(Style {
-            fg: if focus { None } else { st.fg },
+            fg: if focus { None } else { style.fg },
             ..Style::default()
         })
     } else {
-        st
+        style
     };
 
-    buf[(*x, y)].set_symbol(&ch.to_string()).set_style(st);
-    *x += width_value.max(1);
+    buf[(*x, y)].set_symbol(&ch.to_string()).set_style(style);
+    *x += char_w.max(1);
 
     ControlFlow::Continue(())
 }
@@ -459,60 +453,60 @@ mod tests;
 struct ArcLayout {
     area: Rect,
     offset: usize,
-    aw: u16,
+    arcs_w: u16,
     shown: usize,
     ax: u16,
     col: usize,
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct ArcTargetLayout<'reference_0> {
+pub(super) struct ArcTargetLayout<'arc> {
     pub(super) ax: u16,
-    pub(super) agent: &'reference_0 Arc,
+    pub(super) arc: &'arc Arc,
     pub(super) cx: u16,
     pub(super) top: usize,
     pub(super) bottom: usize,
 }
 
 #[derive(Clone, Copy)]
-struct ArcRowLayout<'reference_0> {
+struct ArcRowLayout<'arc> {
     ax: u16,
-    agent: &'reference_0 Arc,
+    arc: &'arc Arc,
     cx: u16,
     top: usize,
     bottom: usize,
     i: usize,
 }
 
-pub(super) struct RailRowLayout<'reference_0> {
+pub(super) struct RailRowLayout<'hits> {
     pub(super) area: Rect,
     pub(super) cursor: Option<usize>,
     pub(super) focus: bool,
     pub(super) offset: usize,
-    pub(super) hits: &'reference_0 mut Vec<(Rect, usize)>,
+    pub(super) hits: &'hits mut Vec<(Rect, usize)>,
     pub(super) text_w: u16,
 }
 
-struct RailTextLayout<'reference_0> {
+struct RailTextLayout<'x> {
     focus: bool,
     y: u16,
     on: bool,
     base: Style,
-    x: &'reference_0 mut u16,
-    st: Style,
+    x: &'x mut u16,
+    style: Style,
     end: u16,
 }
 
-fn draw_arc_label(buf: &mut Buffer, area: Rect, agent: &Arc, ax: u16, aw: u16, y: u16, st: Style) {
-    let lx = ax + aw;
+fn draw_arc_label(buf: &mut Buffer, area: Rect, arc: &Arc, ax: u16, arcs_w: u16, y: u16, style: Style) {
+    let lx = ax + arcs_w;
     let mut x = lx;
 
-    for ch in crate::ui::thread_card::fit(&agent.label, usize::from(area.right().saturating_sub(lx))).chars() {
+    for ch in crate::ui::thread_card::fit(&arc.label, usize::from(area.right().saturating_sub(lx))).chars() {
         if x >= area.right() {
             break;
         }
 
-        buf[(x, y)].set_symbol(&ch.to_string()).set_style(st);
+        buf[(x, y)].set_symbol(&ch.to_string()).set_style(style);
         x += ch.width().unwrap_or(1).max(1) as u16;
     }
 }
@@ -533,10 +527,10 @@ fn rail_row_style(on: bool, focus: bool) -> Style {
     }
 }
 
-fn clear_selected_row(buf: &mut Buffer, area_value: Rect, on: bool, base: Style) {
+fn clear_selected_row(buf: &mut Buffer, row_area: Rect, on: bool, base: Style) {
     if on {
-        for x in area_value.x..area_value.right() {
-            buf[(x, area_value.y)].set_symbol(" ").set_style(base);
+        for x in row_area.x..row_area.right() {
+            buf[(x, row_area.y)].set_symbol(" ").set_style(base);
         }
     }
 }
@@ -547,7 +541,7 @@ struct RailViewport {
     cursor: Option<usize>,
     focus: bool,
     offset: usize,
-    aw: u16,
+    arcs_w: u16,
     text_w: u16,
 }
 
@@ -556,5 +550,5 @@ struct RailCellStyle {
     focus: bool,
     on: bool,
     base: Style,
-    st: Style,
+    style: Style,
 }

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 impl FlowsTab {
     pub(super) fn out(&mut self) -> Out {
         match self.note.take() {
-            Some(count) => Out::Toast(count),
+            Some(note) => Out::Toast(note),
             None => Out::None,
         }
     }
@@ -20,22 +20,22 @@ impl FlowsTab {
     pub(super) fn move_layer(&mut self) {
         move_layer_flows_tab(self);
     }
-    pub(super) fn move_node(&mut self, directory: isize) {
-        let Some(fl) = self.flow.as_mut() else { return };
-        let to = self.node as isize + directory;
+    pub(super) fn move_node(&mut self, delta: isize) {
+        let Some(flow) = self.flow.as_mut() else { return };
+        let to = self.node as isize + delta;
 
-        if to < 0 || to as usize >= fl.steps.len() {
+        if to < 0 || to as usize >= flow.steps.len() {
             return;
         }
 
         // keep the ids of the moved nodes (loops and outcomes point to ids)
-        let ids = flows::node_ids(fl);
+        let ids = flows::node_ids(flow);
 
-        for (i, nd) in fl.steps.iter_mut().enumerate() {
-            move_node_branch(&ids, i, nd);
+        for (i, node) in flow.steps.iter_mut().enumerate() {
+            pin_node_id(&ids, i, node);
         }
 
-        fl.steps.swap(self.node, to as usize);
+        flow.steps.swap(self.node, to as usize);
         self.node = to as usize;
         self.save_flow();
     }
@@ -44,97 +44,97 @@ impl FlowsTab {
     }
 }
 
-fn move_node_branch(ids: &[String], i: usize, nd: &mut flows::Node) {
-    if nd.id.is_none() && nd.uses.is_none() {
-        nd.id = Some(ids[i].clone());
+fn pin_node_id(ids: &[String], i: usize, node: &mut flows::Node) {
+    if node.id.is_none() && node.uses.is_none() {
+        node.id = Some(ids[i].clone());
     }
 }
 
-fn apply_ask_message_value(value: &str, to_id: String, nd: &mut flows::Node) {
-    let mut message_value = match nd.gate.take() {
-        Some(Gate::Edges(message)) => message,
+fn add_outcome(value: &str, to_id: String, node: &mut flows::Node) {
+    let mut edges = match node.gate.take() {
+        Some(Gate::Edges(edges)) => edges,
         _ => BTreeMap::default(),
     };
 
-    message_value.insert(value.to_string(), to_id);
-    nd.gate = Some(Gate::Edges(message_value));
+    edges.insert(value.to_string(), to_id);
+    node.gate = Some(Gate::Edges(edges));
 }
 
 /// An id for node I (set when it has none): loops and outcomes point to it.
-fn id_of(i: usize, view_state: &mut FlowsTab) -> String {
-    let Some(fl) = view_state.flow.as_mut() else {
+fn id_of(i: usize, tab: &mut FlowsTab) -> String {
+    let Some(flow) = tab.flow.as_mut() else {
         return String::new();
     };
 
-    let ids = flows::node_ids(fl);
+    let ids = flows::node_ids(flow);
 
-    if fl.steps[i].id.is_none() && fl.steps[i].uses.as_deref() != Some(ids[i].as_str()) {
-        fl.steps[i].id = Some(ids[i].clone());
+    if flow.steps[i].id.is_none() && flow.steps[i].uses.as_deref() != Some(ids[i].as_str()) {
+        flow.steps[i].id = Some(ids[i].clone());
     }
 
     ids[i].clone()
 }
 
-fn apply_ask_ask_renameflow(value: &str, view_state: &mut FlowsTab) {
-    if let Some(file_value) = view_state.flow.as_mut() {
-        file_value.name = value.to_string();
+fn rename_flow(value: &str, tab: &mut FlowsTab) {
+    if let Some(flow) = tab.flow.as_mut() {
+        flow.name = value.to_string();
     }
 
-    view_state.save_flow();
+    tab.save_flow();
 }
 
-fn apply_ask_ask_loopuntil_from_to(value: &str, from: usize, to: usize, view_state: &mut FlowsTab) {
-    let to_id = id_of(to, view_state);
+fn set_loop_until(value: &str, from: usize, to: usize, tab: &mut FlowsTab) {
+    let to_id = id_of(to, tab);
 
-    if let Some(nd) = view_state.flow.as_mut().and_then(|file_4| file_4.steps.get_mut(from)) {
-        nd.loops = Some(Loop {
+    if let Some(node) = tab.flow.as_mut().and_then(|flow| flow.steps.get_mut(from)) {
+        node.loops = Some(Loop {
             to: to_id,
             until: value.to_string(),
             max: 3,
         });
     }
 
-    view_state.save_flow();
+    tab.save_flow();
 }
 
-fn delete_ok_count(text: &Step, count: usize, view_state: &mut FlowsTab) {
-    view_state.note = Some(format!(
+fn note_step_deleted(step: &Step, count: usize, tab: &mut FlowsTab) {
+    tab.note = Some(format!(
         "step {} deleted · {count} flows keep its text as a one-off",
-        text.name
+        step.name
     ));
 }
 
 fn delete_flows_tab(state: &mut FlowsTab) {
     match state.sub {
         Sub::Flows => {
-            let Some(file) = state.flow.clone() else { return };
+            let Some(flow) = state.flow.clone() else { return };
 
-            if file.layer == Layer::Builtin {
+            if flow.layer == Layer::Builtin {
                 return state.fail("a built-in flow stays: edit it (a user copy), or duplicate it");
             }
 
-            if let Err(error_value) = state.lib.remove_flow_file(&file.slug, file.layer) {
-                return state.fail(error_value);
+            if let Err(error) = state.lib.remove_flow_file(&flow.slug, flow.layer) {
+                return state.fail(error);
             }
 
-            state.note = Some(if file.edited {
-                format!("{}: back to the built-in", file.name)
+            state.note = Some(if flow.edited {
+                format!("{}: back to the built-in", flow.name)
             } else {
-                format!("flow {} deleted", file.name)
+                format!("flow {} deleted", flow.name)
             });
         }
         Sub::Steps => {
-            let Some(text) = state.cur_step().cloned() else { return };
+            let Some(step) = state.cur_step().cloned() else { return };
 
-            if text.edited {
+            if step.edited {
                 return state.fail("an edited built-in: ctrl+d resets it");
             }
 
-            match state.lib.delete_step(&text.name) {
+            match state.lib.delete_step(&step.name) {
                 Ok(count) => {
-                    delete_ok_count(&text, count, state);
+                    note_step_deleted(&step, count, state);
                 }
-                Err(error_2) => return state.fail(error_2),
+                Err(error) => return state.fail(error),
             }
         }
     }
@@ -146,11 +146,11 @@ fn delete_flows_tab(state: &mut FlowsTab) {
 fn reset_flows_tab(state: &mut FlowsTab) {
     let (name, layer, edited) = match state.sub {
         Sub::Flows => match &state.flow {
-            Some(file) => (file.slug.clone(), file.layer, file.edited),
+            Some(flow) => (flow.slug.clone(), flow.layer, flow.edited),
             None => return,
         },
         Sub::Steps => match state.cur_step() {
-            Some(text) => (text.name.clone(), text.layer, text.edited),
+            Some(step) => (step.name.clone(), step.layer, step.edited),
             None => return,
         },
     };
@@ -175,26 +175,26 @@ fn reset_flows_tab(state: &mut FlowsTab) {
 }
 
 fn move_layer_flows_tab(state: &mut FlowsTab) {
-    let Some(mut file) = state.flow.clone() else { return };
+    let Some(mut flow) = state.flow.clone() else { return };
 
     if state.lib.repo.is_none() {
         return state.fail("0 repo here: start codehead in a repo for repo flows");
     }
 
-    let old = file.layer;
+    let old = flow.layer;
 
-    file.layer = if old == Layer::Repo { Layer::User } else { Layer::Repo };
+    flow.layer = if old == Layer::Repo { Layer::User } else { Layer::Repo };
 
-    if let Err(error) = state.lib.save_flow(&file) {
+    if let Err(error) = state.lib.save_flow(&flow) {
         return state.fail(error);
     }
 
     if old != Layer::Builtin {
-        let _ = state.lib.remove_flow_file(&file.slug, old);
+        let _ = state.lib.remove_flow_file(&flow.slug, old);
     }
 
-    state.note = Some(format!("{} → {} flows", file.name, file.layer.label()));
-    state.flow = Some(file);
+    state.note = Some(format!("{} → {} flows", flow.name, flow.layer.label()));
+    state.flow = Some(flow);
     state.reload();
 }
 
@@ -202,24 +202,24 @@ fn apply_ask_flows_tab(state: &mut FlowsTab, what: &Ask, value: &str) -> Result<
     match what {
         Ask::NewFlow | Ask::DuplicateFlow => create_flow(state, what, value)?,
         Ask::RenameFlow => {
-            apply_ask_ask_renameflow(value, state);
+            rename_flow(value, state);
         }
         Ask::NewStep | Ask::DuplicateStep => create_step(state, what, value)?,
         Ask::RenameStep => {
-            let Some(text_2) = state.cur_step().cloned() else {
+            let Some(step) = state.cur_step().cloned() else {
                 return Ok(());
             };
 
             let new = flows::slug(value);
 
-            state.lib.rename_step(&text_2.name, &new)?;
+            state.lib.rename_step(&step.name, &new)?;
             state.reload();
             state.at = state
                 .list()
                 .iter()
                 .position(|&i| state.lib.steps[i].name == new)
                 .unwrap_or(0);
-            state.note = Some(format!("step {} → {new}: every flow follows", text_2.name));
+            state.note = Some(format!("step {} → {new}: every flow follows", step.name));
         }
         Ask::Promote(i) => {
             let name = flows::slug(value);
@@ -228,23 +228,23 @@ fn apply_ask_flows_tab(state: &mut FlowsTab, what: &Ask, value: &str) -> Result<
                 return Err(format!("step {name} exists already"));
             }
 
-            let Some(nd) = state.flow.as_ref().and_then(|file_2| file_2.steps.get(*i)).cloned() else {
+            let Some(node) = state.flow.as_ref().and_then(|flow| flow.steps.get(*i)).cloned() else {
                 return Ok(());
             };
 
-            let (text_3, node) = flows::promote(&nd, &name);
+            let (step, promoted) = flows::promote(&node, &name);
 
-            state.lib.save_step(&text_3)?;
+            state.lib.save_step(&step)?;
 
-            if let Some(file_3) = state.flow.as_mut() {
-                file_3.steps[*i] = node;
+            if let Some(flow) = state.flow.as_mut() {
+                flow.steps[*i] = promoted;
             }
 
             state.save_flow();
             state.note = Some(format!("step {name} saved: a for it in any flow"));
         }
         Ask::LoopUntil(from, to) => {
-            apply_ask_ask_loopuntil_from_to(value, *from, *to, state);
+            set_loop_until(value, *from, *to, state);
         }
         Ask::Outcome(from, to) => {
             if !flows::valid_name(value) {
@@ -253,8 +253,8 @@ fn apply_ask_flows_tab(state: &mut FlowsTab, what: &Ask, value: &str) -> Result<
 
             let to_id = id_of(*to, state);
 
-            if let Some(nd) = state.flow.as_mut().and_then(|file_5| file_5.steps.get_mut(*from)) {
-                apply_ask_message_value(value, to_id, nd);
+            if let Some(node) = state.flow.as_mut().and_then(|flow| flow.steps.get_mut(*from)) {
+                add_outcome(value, to_id, node);
             }
 
             state.save_flow();
@@ -267,22 +267,22 @@ fn apply_ask_flows_tab(state: &mut FlowsTab, what: &Ask, value: &str) -> Result<
 fn create_flow(state: &mut FlowsTab, what: &Ask, value: &str) -> Result<(), String> {
     let slug = state.lib.free_flow_slug(&flows::slug(value));
 
-    let mut file = match what {
+    let mut flow = match what {
         Ask::DuplicateFlow => state.flow.clone().unwrap_or_default(),
         _ => Flow::default(),
     };
 
-    file.slug.clone_from(&slug);
-    file.name = value.to_string();
+    flow.slug.clone_from(&slug);
+    flow.name = value.to_string();
 
-    file.layer = if file.layer == Layer::Repo {
+    flow.layer = if flow.layer == Layer::Repo {
         Layer::Repo
     } else {
         Layer::User
     };
 
-    file.edited = false;
-    state.lib.save_flow(&file)?;
+    flow.edited = false;
+    state.lib.save_flow(&flow)?;
     state.filter.clear();
     state.reload();
     state.at = state
@@ -293,7 +293,7 @@ fn create_flow(state: &mut FlowsTab, what: &Ask, value: &str) -> Result<(), Stri
     state.load_flow();
     state.focus = Focus::Rail;
 
-    if file.steps.is_empty() {
+    if flow.steps.is_empty() {
         state.picker = Some((input(true, "step name, or text of a one-off step", ""), 0));
     }
 
@@ -307,15 +307,15 @@ fn create_step(state: &mut FlowsTab, what: &Ask, value: &str) -> Result<(), Stri
         return Err(format!("step {name} exists already"));
     }
 
-    let mut text = match what {
+    let mut step = match what {
         Ask::DuplicateStep => state.cur_step().cloned().unwrap_or_default(),
         _ => Step::default(),
     };
 
-    text.name.clone_from(&name);
-    text.layer = Layer::User;
-    text.edited = false;
-    state.lib.save_step(&text)?;
+    step.name.clone_from(&name);
+    step.layer = Layer::User;
+    step.edited = false;
+    state.lib.save_step(&step)?;
     state.filter.clear();
     state.reload();
     state.at = state
@@ -324,8 +324,8 @@ fn create_step(state: &mut FlowsTab, what: &Ask, value: &str) -> Result<(), Stri
         .position(|&i| state.lib.steps[i].name == name)
         .unwrap_or(0);
 
-    if let Some(text_value) = state.lib.step(&name).cloned() {
-        state.open_step_editor(&text_value);
+    if let Some(step) = state.lib.step(&name).cloned() {
+        state.open_step_editor(&step);
     }
 
     Ok(())

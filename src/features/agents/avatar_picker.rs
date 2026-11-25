@@ -37,14 +37,14 @@ const CELL_H: u16 = sprites::HEIGHT as u16 + 1;
 impl Picker {
     /// Opened on the avatar of CURRENT.
     pub(crate) fn new(current: &Sprite) -> Picker {
-        let agent = current.avatar;
-        let cat = CATS.iter().position(|character| *character == agent.cat).unwrap_or(0);
+        let avatar = current.avatar;
+        let cat = CATS.iter().position(|candidate| *candidate == avatar.cat).unwrap_or(0);
         let mut picks = [0; CATS.len()];
 
-        picks[cat] = agent.idx;
+        picks[cat] = avatar.idx;
         let speed = SPEEDS
             .iter()
-            .position(|text| text.total_cmp(&agent.speed).is_eq())
+            .position(|candidate| candidate.total_cmp(&avatar.speed).is_eq())
             .unwrap_or(0);
 
         Picker {
@@ -52,7 +52,7 @@ impl Picker {
             picks,
             status: 0,
             speed,
-            eyes: agent.eyes,
+            eyes: avatar.eyes,
             per_row: 1,
             top: 0,
         }
@@ -77,25 +77,25 @@ impl Picker {
         CATS[self.cat].count()
     }
 
-    pub(crate) fn key(&mut self, key_value: KeyEvent) -> Act {
-        let count_value = self.count();
+    pub(crate) fn key(&mut self, key: KeyEvent) -> Act {
+        let count = self.count();
         let pick = &mut self.picks[self.cat];
 
-        match key_value.code {
+        match key.code {
             KeyCode::Esc => return Act::Close,
             KeyCode::Enter => return Act::Take(Sprite::of(self.avatar(self.picks[self.cat]))),
             KeyCode::Tab => self.cat = (self.cat + 1) % CATS.len(),
             KeyCode::BackTab => self.cat = (self.cat + CATS.len() - 1) % CATS.len(),
             KeyCode::Left | KeyCode::Char('h') => *pick = pick.saturating_sub(1),
-            KeyCode::Right | KeyCode::Char('l') => *pick = (*pick + 1).min(count_value - 1),
+            KeyCode::Right | KeyCode::Char('l') => *pick = (*pick + 1).min(count - 1),
             KeyCode::Up | KeyCode::Char('k') => *pick = pick.saturating_sub(self.per_row),
-            KeyCode::Down | KeyCode::Char('j') => *pick = (*pick + self.per_row).min(count_value - 1),
+            KeyCode::Down | KeyCode::Char('j') => *pick = (*pick + self.per_row).min(count - 1),
             KeyCode::Char('s') => self.status = (self.status + 1) % STATUSES.len(),
             KeyCode::Char('f') => self.speed = (self.speed + 1) % SPEEDS.len(),
             KeyCode::Char('e') => {
                 self.eyes = match self.eyes {
                     None => Some(0),
-                    Some(key_2) if key_2 + 1 < regi::PATTERNS.len() => Some(key_2 + 1),
+                    Some(pattern) if pattern + 1 < regi::PATTERNS.len() => Some(pattern + 1),
                     _ => None,
                 }
             }

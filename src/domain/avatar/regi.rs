@@ -211,7 +211,7 @@ pub(crate) struct Regi {
 impl Regi {
     pub(crate) fn name(&self, look: Look) -> String {
         let body = match self.kind {
-            Kind::Solid(text, message) => format!("3d · {} · {:?}", text.name(), message).to_lowercase(),
+            Kind::Solid(solid, motion) => format!("3d · {} · {:?}", solid.name(), motion).to_lowercase(),
         };
 
         let pat = look.pattern.unwrap_or(self.pattern);
@@ -245,36 +245,36 @@ impl Default for Look {
 const YAWS: [f32; 4] = [0.35, -0.35, 0.15, -0.5];
 
 /// 7x4 cells of R at time T for status S (0 working, 1 thinking, 2 idle, 3 blocked, 4 done).
-pub(crate) fn render(result: &Regi, text: usize, thread: f32, look: Look) -> Vec<Cell> {
-    render_toned(result, text, thread, look).0
+pub(crate) fn render(regi: &Regi, status: usize, time: f32, look: Look) -> Vec<Cell> {
+    render_toned(regi, status, time, look).0
 }
 
 /// [`render`] and the tone of each cell (0..1 of its color; see [`tones`]): views that paint the
 /// avatar in 1 color of their own (the agent color) dim each cell by it.
-pub(crate) fn render_toned(result: &Regi, text: usize, thread: f32, look: Look) -> (Vec<Cell>, Vec<f32>) {
-    let pat = look.pattern.unwrap_or(result.pattern);
+pub(crate) fn render_toned(regi: &Regi, status: usize, time: f32, look: Look) -> (Vec<Cell>, Vec<f32>) {
+    let pat = look.pattern.unwrap_or(regi.pattern);
 
-    render_with(result, pat, text, thread, look.speed, |key| {
-        lit(pat, result.talk, result.blink, text, thread + result.phase, key)
+    render_with(regi, pat, status, time, look.speed, |dot| {
+        lit(pat, regi.talk, regi.blink, status, time + regi.phase, dot)
     })
 }
 
 fn render_with(
-    result: &Regi,
+    regi: &Regi,
     pat: Pattern,
-    text: usize,
-    thread: f32,
+    status: usize,
+    time: f32,
     speed: f32,
     on: impl Fn(usize) -> bool,
 ) -> (Vec<Cell>, Vec<f32>) {
-    let (eye_c, frame_c) = colors(text);
-    let (dots, cov) = dots_cov(result, pat, text, thread, speed, on);
+    let (eye_c, frame_c) = colors(status);
+    let (dots, cov) = dots_cov(regi, pat, status, time, speed, on);
     let mut out = cells(&dots, eye_c, frame_c);
     let tones = tones(&dots, &cov);
 
-    for (character, &key) in out.iter_mut().zip(&tones) {
-        if character.fg == frame_c {
-            character.fg = super::glyph::mix(super::glyph::BG, frame_c, key);
+    for (cell, &tone) in out.iter_mut().zip(&tones) {
+        if cell.fg == frame_c {
+            cell.fg = super::glyph::mix(super::glyph::BG, frame_c, tone);
         }
     }
 
@@ -284,29 +284,29 @@ fn render_with(
 /// The 14x16 dots of R (0 off, 1 frame, 2 eye). The eyes: 1 rigid pattern, whatever the pose
 /// (only its anchor moves), a blink only takes dots out of it.
 #[cfg(test)]
-fn dots_with(result: &Regi, pat: Pattern, text: usize, thread: f32, speed: f32, on: impl Fn(usize) -> bool) -> Vec<u8> {
-    dots_cov(result, pat, text, thread, speed, on).0
+fn dots_with(regi: &Regi, pat: Pattern, status: usize, time: f32, speed: f32, on: impl Fn(usize) -> bool) -> Vec<u8> {
+    dots_cov(regi, pat, status, time, speed, on).0
 }
 
 /// [`dots_with`] and the line coverage of each dot (0..1, see [`draw3d_cov`]).
 fn dots_cov(
-    result: &Regi,
+    regi: &Regi,
     pat: Pattern,
-    text: usize,
-    thread: f32,
+    status: usize,
+    time: f32,
     speed: f32,
     on: impl Fn(usize) -> bool,
 ) -> (Vec<u8>, Vec<f32>) {
-    match result.kind {
+    match regi.kind {
         Kind::Solid(solid, motion) => {
-            let thread_value = thread + result.phase;
-            let (pitch, roll, bob) = pose(motion, text, thread_value * speed);
+            let local = time + regi.phase;
+            let (pitch, roll, bob) = pose(motion, status, local * speed);
 
             // blocked: a shake now and then
-            let yaw = if text == 3 && (thread_value * 0.8).fract() < 0.2 {
-                result.yaw + (thread_value * 50.0).sin() * 0.1
+            let yaw = if status == 3 && (local * 0.8).fract() < 0.2 {
+                regi.yaw + (local * 50.0).sin() * 0.1
             } else {
-                result.yaw
+                regi.yaw
             };
 
             let (mesh, eye, ey) = solid.mesh();
@@ -316,10 +316,10 @@ fn dots_cov(
                 .dots()
                 .iter()
                 .enumerate()
-                .filter(|(key, _)| on(*key))
+                .filter(|(dot, _)| on(*dot))
                 .map(|(_, &(x, y))| ((x * eye.0).round() as i32, (y * eye.1).round() as i32, 2))
                 .collect();
-            let fit = fit(&mesh, motion, result.yaw);
+            let fit = fit(&mesh, motion, regi.yaw);
 
             draw3d_cov(&mesh, &[], (0.0, ey), &marks, (yaw, pitch, roll), bob, fit)
         }
@@ -365,10 +365,10 @@ fn accumulate_lit_dot(dots: &[u8], cov: &[f32], sum: &mut f32, count: &mut i32, 
 fn average_cell_light(out: &mut [f32], cy: usize, cx: usize, sum: f32, count: i32) {
     if count > 0 {
         // the mean coverage, 0.8 and up full; 3 steps: 1/3, 2/3, 1
-        let bytes = (sum / count as f32 / 0.8).min(1.0);
-        let bytes_value = (bytes * 3.0).round().clamp(1.0, 3.0) / 3.0;
+        let mean = (sum / count as f32 / 0.8).min(1.0);
+        let step = (mean * 3.0).round().clamp(1.0, 3.0) / 3.0;
 
-        out[cy * 7 + cx] = 0.3 + 0.7 * bytes_value;
+        out[cy * 7 + cx] = 0.3 + 0.7 * step;
     }
 }
 

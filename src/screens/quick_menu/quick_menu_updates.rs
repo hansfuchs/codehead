@@ -18,7 +18,7 @@ impl Menu {
             .search_state
             .msgs
             .as_deref()
-            .map(|message| crate::domain::search::find(message, &query))
+            .map(|msgs| crate::domain::search::find(msgs, &query))
             .unwrap_or_default();
         self.search_state.hits_for = query;
         self.search_state.scursor = 0;
@@ -26,28 +26,28 @@ impl Menu {
     }
 }
 
-fn poll_token_details(widget_state: &mut Menu) {
-    if let Some(rx) = &widget_state.tokens.detail_rx
-        && let Ok(directory) = rx.try_recv()
+fn poll_token_details(menu: &mut Menu) {
+    if let Some(rx) = &menu.tokens.detail_rx
+        && let Ok(detail) = rx.try_recv()
     {
-        widget_state.tokens.detail = Some(directory);
-        widget_state.tokens.detail_rx = None;
+        menu.tokens.detail = Some(detail);
+        menu.tokens.detail_rx = None;
     }
 
-    let due = widget_state
+    let due = menu
         .tokens
         .detail_at
-        .is_none_or(|thread_value| thread_value.elapsed() >= std::time::Duration::from_secs(2));
+        .is_none_or(|read_at| read_at.elapsed() >= std::time::Duration::from_secs(2));
 
-    if widget_state.tab == Tab::Tokens && widget_state.tokens.detail_rx.is_none() && due && !cfg!(test) {
+    if menu.tab == Tab::Tokens && menu.tokens.detail_rx.is_none() && due && !cfg!(test) {
         let (tx, rx) = crate::infra::bus::channel();
-        let id = widget_state.thread.clone();
+        let id = menu.thread.clone();
 
         std::thread::spawn(move || {
             let _ = tx.send(crate::features::cost::detail(id.as_deref()));
         });
 
-        widget_state.tokens.detail_rx = Some(rx);
-        widget_state.tokens.detail_at = Some(Instant::now());
+        menu.tokens.detail_rx = Some(rx);
+        menu.tokens.detail_at = Some(Instant::now());
     }
 }

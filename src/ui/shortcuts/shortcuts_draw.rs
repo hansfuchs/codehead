@@ -20,8 +20,8 @@ impl Tab {
         let shown = usize::from(list.height.saturating_sub(2));
         let off = dropdown::fit(0, self.at, count, shown);
 
-        for key in off..count.min(off + shown) {
-            draw_list_row(frame, list, key, off, active, self);
+        for index in off..count.min(off + shown) {
+            draw_list_row(frame, list, index, off, active, self);
         }
 
         // right: the name, the text
@@ -44,7 +44,7 @@ impl Tab {
             return;
         }
 
-        let label = |thread: &str, on: bool| draw_form_label(thread, on);
+        let label = |text: &str, on: bool| draw_form_label(text, on);
 
         frame.render_widget(
             Paragraph::new(Line::from(label("name", self.focus == Focus::Name))),
@@ -59,11 +59,8 @@ impl Tab {
     }
 }
 
-fn draw_form_label(thread: &str, on: bool) -> Span<'static> {
-    Span::styled(
-        thread.to_string(),
-        if on { theme::accent_bold() } else { theme::muted() },
-    )
+fn draw_form_label(text: &str, on: bool) -> Span<'static> {
+    Span::styled(text.to_string(), if on { theme::accent_bold() } else { theme::muted() })
 }
 
 fn draw_form(
@@ -71,18 +68,15 @@ fn draw_form(
     active: bool,
     right: Rect,
     label: impl Fn(&str, bool) -> Span<'static>,
-    widget_state: &mut Tab,
+    tab: &mut Tab,
 ) {
-    widget_state.name.render(
-        frame,
-        widget_state.name_rect,
-        active && widget_state.focus == Focus::Name,
-    );
-    let err = widget_state.error.clone();
+    tab.name
+        .render(frame, tab.name_rect, active && tab.focus == Focus::Name);
+    let err = tab.error.clone();
     let ty = right.y + 3;
 
     frame.render_widget(
-        Paragraph::new(Line::from(label("text", widget_state.focus == Focus::Text))),
+        Paragraph::new(Line::from(label("text", tab.focus == Focus::Text))),
         Rect {
             y: ty,
             height: 1,
@@ -91,20 +85,17 @@ fn draw_form(
     );
     let th = right.bottom().saturating_sub(ty + 2);
 
-    widget_state.text_rect = Rect {
+    tab.text_rect = Rect {
         y: ty + 1,
         height: th,
         ..right
     };
-    widget_state.text.render(
-        frame,
-        widget_state.text_rect,
-        active && widget_state.focus == Focus::Text,
-    );
+    tab.text
+        .render(frame, tab.text_rect, active && tab.focus == Focus::Text);
 
-    if let Some(error_value) = err {
+    if let Some(error) = err {
         frame.render_widget(
-            Paragraph::new(Line::styled(error_value, Style::default().fg(theme::pal().error()))),
+            Paragraph::new(Line::styled(error, Style::default().fg(theme::pal().error()))),
             Rect {
                 y: right.bottom().saturating_sub(1),
                 height: 1,
@@ -114,16 +105,16 @@ fn draw_form(
     }
 }
 
-fn draw_list_row(frame: &mut Frame, list: Rect, key: usize, off: usize, active: bool, tab: &mut Tab) {
-    let area_value = Rect {
-        y: list.y + 2 + (key - off) as u16,
+fn draw_list_row(frame: &mut Frame, list: Rect, index: usize, off: usize, active: bool, tab: &mut Tab) {
+    let row_area = Rect {
+        y: list.y + 2 + (index - off) as u16,
         height: 1,
         ..list
     };
-    let on = key == tab.at;
+    let on = index == tab.at;
 
-    let (label, st) = match tab.list.get(key) {
-        Some(text_value) => (format!(" #{}", text_value.name), theme::text()),
+    let (label, st) = match tab.list.get(index) {
+        Some(shortcut) => (format!(" #{}", shortcut.name), theme::text()),
         None => (" + add shortcut".to_string(), theme::accent()),
     };
 
@@ -133,12 +124,12 @@ fn draw_list_row(frame: &mut Frame, list: Rect, key: usize, off: usize, active: 
         _ => st,
     };
 
-    let label = crate::ui::thread_card::fit(&label, usize::from(area_value.width));
-    let pad = usize::from(area_value.width).saturating_sub(label.width());
+    let label = crate::ui::thread_card::fit(&label, usize::from(row_area.width));
+    let pad = usize::from(row_area.width).saturating_sub(label.width());
 
     frame.render_widget(
         Paragraph::new(Line::styled(format!("{label}{}", " ".repeat(pad)), st)),
-        area_value,
+        row_area,
     );
-    tab.rows.push((area_value, key));
+    tab.rows.push((row_area, index));
 }

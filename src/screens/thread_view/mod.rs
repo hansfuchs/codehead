@@ -9,7 +9,7 @@ mod agents;
 mod agents_menu;
 mod agents_state;
 mod branch;
-mod checkout_state_state;
+mod checkout_state;
 mod context_menu;
 mod draw;
 mod draw_activity;
@@ -32,26 +32,26 @@ mod header_labels;
 mod ide_state;
 mod initialize;
 mod layout_state;
-mod merge_state_state;
-mod mini_chat_state_state;
+mod merge_state;
+mod mini_chat_state;
 mod panes_state;
 mod prompt_state;
 mod selection_state;
-mod shell_state_state;
+mod shell_state;
 mod stream_state;
-mod urls_state_state;
+mod urls_state;
 use agents_state::AgentState;
-use checkout_state_state::CheckoutState;
+use checkout_state::CheckoutState;
 use ide_state::IdeState;
 use layout_state::LayoutState;
-use merge_state_state::MergeState;
-use mini_chat_state_state::MiniChatState;
+use merge_state::MergeState;
+use mini_chat_state::MiniChatState;
 use panes_state::PaneState;
 use prompt_state::PromptState;
 use selection_state::SelectionState;
-use shell_state_state::ShellState;
+use shell_state::ShellState;
 use stream_state::StreamState;
-use urls_state_state::UrlState;
+use urls_state::UrlState;
 mod keys;
 mod keys_activity;
 mod keys_controls;
@@ -152,10 +152,10 @@ pub(crate) fn open_pr(id: &str, pr: &crate::infra::gh::PrRef) {
 }
 
 fn take_pr(id: &str) -> Option<crate::infra::gh::PrRef> {
-    let mut group = OPEN_PR.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut open = OPEN_PR.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    if group.as_ref().is_some_and(|(thread, _)| thread == id) {
-        group.take().map(|x| x.1)
+    if open.as_ref().is_some_and(|(thread, _)| thread == id) {
+        open.take().map(|(_, pr)| pr)
     } else {
         None
     }
@@ -263,10 +263,10 @@ enum Ctx {
 }
 
 /// A view's context menu action as the thread view's.
-fn ctx_of(agent: &crate::ui::context_menu::Act) -> Ctx {
-    match agent {
+fn ctx_of(action: &crate::ui::context_menu::Act) -> Ctx {
+    match action {
         crate::ui::context_menu::Act::Key(key) => Ctx::Key(*key),
-        crate::ui::context_menu::Act::Cmd(character) => Ctx::Cmd(character),
+        crate::ui::context_menu::Act::Cmd(command) => Ctx::Cmd(command),
         crate::ui::context_menu::Act::Step(i) => Ctx::Step(*i),
     }
 }

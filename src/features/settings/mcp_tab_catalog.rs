@@ -14,7 +14,7 @@ pub(super) fn icon(state: &str) -> (&'static str, Style) {
 }
 
 pub(super) fn harness_label(harness: &str) -> &'static str {
-    harnesses::get(harness).map_or("harness", |x| x.label)
+    harnesses::get(harness).map_or("harness", |entry| entry.label)
 }
 
 /// `claudeAiMcpEverConnected` of ~/.claude.json: connectors that were connected once.
@@ -36,30 +36,33 @@ pub(super) fn read_ever(path: &std::path::Path) -> std::collections::HashSet<Str
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|text| text.as_str().map(String::from))
+        .filter_map(|entry| entry.as_str().map(String::from))
         .collect()
 }
 
 pub(super) fn harness_order(harness: &str) -> usize {
-    harnesses::ALL.iter().position(|x| x.name == harness).unwrap_or(99)
+    harnesses::ALL
+        .iter()
+        .position(|entry| entry.name == harness)
+        .unwrap_or(99)
 }
 
 pub(super) fn codehead_item(server: &Server, mcp_tab: &McpTab) -> Item {
     let probe = mcp_tab
         .statuses
         .get("codehead")
-        .and_then(|statuses_value| statuses_value.get(&server.name));
+        .and_then(|statuses| statuses.get(&server.name));
 
     // a harness that could not run it (a session's report)
     let failed: Vec<(String, String)> = mcp_tab
         .statuses
         .iter()
         .filter(|(harness, _)| *harness != "codehead")
-        .filter_map(|(harness_value, statuses_2)| {
-            statuses_2
+        .filter_map(|(harness, statuses)| {
+            statuses
                 .get(&server.name)
                 .filter(|status| status.source == "codehead" && !status.error.is_empty())
-                .map(|status_value| (harness_value.clone(), status_value.error.clone()))
+                .map(|status| (harness.clone(), status.error.clone()))
         })
         .collect();
 
@@ -69,16 +72,16 @@ pub(super) fn codehead_item(server: &Server, mcp_tab: &McpTab) -> Item {
         .filter(|agent| agent.mcp.contains(&server.name))
         .count();
     let plain = server.plain_secrets();
-    let mut state = probe.map_or("unknown".to_string(), |status_2| status_2.state.clone());
+    let mut state = probe.map_or("unknown".to_string(), |status| status.state.clone());
     let mut action = String::new();
 
-    if let Some((harness_2, error_2)) = failed.first() {
-        action = format!("{}: {error_2}", harness_label(harness_2));
+    if let Some((harness, error)) = failed.first() {
+        action = format!("{}: {error}", harness_label(harness));
 
         if state == "connected" || state == "unknown" {
             state = "failed".into();
         }
-    } else if let Some(failed_probe) = probe.filter(|probe_value| probe_value.state != "connected") {
+    } else if let Some(failed_probe) = probe.filter(|status| status.state != "connected") {
         action.clone_from(&failed_probe.error);
     }
 
@@ -90,7 +93,7 @@ pub(super) fn codehead_item(server: &Server, mcp_tab: &McpTab) -> Item {
     }
 
     let tools = probe
-        .and_then(|status_3| status_3.tools)
+        .and_then(|status| status.tools)
         .map(|tool_count| format!("{tool_count} tools · "))
         .unwrap_or_default();
     let allow = if server.auto_allow { " · auto-allow" } else { "" };
@@ -142,15 +145,15 @@ pub(super) fn native_item(native: &Native, mcp_tab: &McpTab) -> Item {
     };
 
     // the tool count: from the last session's init (Claude Code), else the list's state
-    let status_value = mcp_tab
+    let status = mcp_tab
         .statuses
         .get(&native.harness)
-        .and_then(|statuses_value| statuses_value.get(&native.name))
+        .and_then(|statuses| statuses.get(&native.name))
         .unwrap_or(&native.status);
     let state = native.status.state.clone();
 
     let detail = match state.as_str() {
-        "connected" => status_value
+        "connected" => status
             .tools
             .map_or_else(|| "connected".into(), |tool_count| format!("{tool_count} tools")),
         "needs-auth" => "needs sign-in".into(),
@@ -192,8 +195,8 @@ fn native_item_failed(native: &Native) -> String {
 pub(super) fn info_for(item: &Item, mcp_tab: &McpTab) -> Modal {
     match &item.key {
         Key::Codehead(name) => {
-            let server_value = mcp_tab.servers.iter().find(|server| &server.name == name);
-            let target = server_value.map(Server::target).unwrap_or_default();
+            let server = mcp_tab.servers.iter().find(|server| &server.name == name);
+            let target = server.map(Server::target).unwrap_or_default();
             let mut lines = vec![format!("{name}: {}", item.action), String::new()];
 
             if item.action.contains("HTTP") || item.action.contains("SSE") {

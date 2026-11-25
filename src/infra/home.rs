@@ -35,26 +35,22 @@ pub(crate) fn parse(text: &str) -> Vec<Repo> {
 
         let Some(path) = ticks
             .iter()
-            .find(|thread| thread.starts_with("~/") || thread.starts_with('/'))
+            .find(|tick| tick.starts_with("~/") || tick.starts_with('/'))
         else {
             continue;
         };
 
         let path = match path.strip_prefix("~/") {
-            Some(result) => home.join(result),
+            Some(rest) => home.join(rest),
             None => PathBuf::from(path),
         };
 
         let url = ticks
             .iter()
-            .find(|thread_value| {
-                thread_value.starts_with("git@")
-                    || thread_value.starts_with("https://")
-                    || thread_value.starts_with("ssh://")
-            })
+            .find(|tick| tick.starts_with("git@") || tick.starts_with("https://") || tick.starts_with("ssh://"))
             .map(std::string::ToString::to_string);
 
-        if !out.iter().any(|result_value| result_value.path == path) {
+        if !out.iter().any(|repo| repo.path == path) {
             out.push(Repo {
                 name: name.to_string(),
                 path,
@@ -71,12 +67,8 @@ pub(crate) fn parse(text: &str) -> Vec<Repo> {
 pub(crate) fn notes_of(text: &str, repo: &Path, name: &str) -> Option<String> {
     let line = parse_lines(text)
         .into_iter()
-        .find(|(result, _)| result.path == repo)
-        .or_else(|| {
-            parse_lines(text)
-                .into_iter()
-                .find(|(result_value, _)| result_value.name == name)
-        })?
+        .find(|(entry, _)| entry.path == repo)
+        .or_else(|| parse_lines(text).into_iter().find(|(entry, _)| entry.name == name))?
         .1;
     let after = &line[line.find("Notes:")? + "Notes:".len()..];
     let tick = after.split('`').nth(1)?.trim();
@@ -87,7 +79,7 @@ pub(crate) fn notes_of(text: &str, repo: &Path, name: &str) -> Option<String> {
 /// Each repo line of TEXT with its repo.
 fn parse_lines(text: &str) -> Vec<(Repo, &str)> {
     text.lines()
-        .filter_map(|line| parse(line).into_iter().next().map(|result| (result, line)))
+        .filter_map(|line| parse(line).into_iter().next().map(|repo| (repo, line)))
         .collect()
 }
 
@@ -98,14 +90,14 @@ pub(crate) fn repos() -> Vec<Repo> {
     };
 
     std::fs::read_to_string(home.join("AGENTS.md"))
-        .map(|thread| parse(&thread))
+        .map(|text| parse(&text))
         .unwrap_or_default()
 }
 
 /// Clone URL into PATH (its parent made first). Err: git's 1st error line.
 pub(crate) fn clone(url: &str, path: &Path) -> Result<(), String> {
-    if let Some(directory) = path.parent() {
-        std::fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
     }
 
     let out = std::process::Command::new("git")
@@ -116,7 +108,7 @@ pub(crate) fn clone(url: &str, path: &Path) -> Result<(), String> {
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(std::process::Stdio::null())
         .output()
-        .map_err(|error_value| format!("git clone: {error_value}"))?;
+        .map_err(|error| format!("git clone: {error}"))?;
 
     if out.status.success() {
         Ok(())

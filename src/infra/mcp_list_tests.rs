@@ -4,51 +4,51 @@ use serde_json::json;
 #[test]
 fn claude_list_lines_parse_with_states_sources_and_errors() {
     let text = "Checking MCP server health…\n\nclaude.ai Linear: https://mcp.linear.app/mcp - ✔ Connected\nclaude.ai Box: https://mcp.box.com - ! Needs authentication\nplugin:general:domerge: https://d.dev/mcp (HTTP) - ✘ Failed to connect — HTTP 525: Error POSTing\nfiles: npx -y fs /tmp - ⏸ Pending approval\n";
-    let value = parse_claude(text);
+    let natives = parse_claude(text);
 
-    assert_eq!(value.len(), 4, "{value:#?}");
+    assert_eq!(natives.len(), 4, "{natives:#?}");
     assert_eq!(
         (
-            value[0].name.as_str(),
-            value[0].source.as_str(),
-            value[0].status.state.as_str()
+            natives[0].name.as_str(),
+            natives[0].source.as_str(),
+            natives[0].status.state.as_str()
         ),
         ("claude.ai Linear", "claudeai", "connected")
     );
-    assert_eq!(value[1].status.state, "needs-auth");
+    assert_eq!(natives[1].status.state, "needs-auth");
     assert_eq!(
         (
-            value[2].name.as_str(),
-            value[2].source.as_str(),
-            value[2].status.state.as_str()
+            natives[2].name.as_str(),
+            natives[2].source.as_str(),
+            natives[2].status.state.as_str()
         ),
         ("plugin:general:domerge", "plugin", "failed")
     );
-    assert_eq!(value[2].target, "https://d.dev/mcp (HTTP)");
+    assert_eq!(natives[2].target, "https://d.dev/mcp (HTTP)");
     assert!(
-        value[2].status.error.starts_with("HTTP 525"),
+        natives[2].status.error.starts_with("HTTP 525"),
         "{}",
-        value[2].status.error
+        natives[2].status.error
     );
     assert_eq!(
-        (value[3].source.as_str(), value[3].status.state.as_str()),
+        (natives[3].source.as_str(), natives[3].status.state.as_str()),
         ("user", "pending")
     );
 }
 
 #[test]
 fn codex_json_and_opencode_text_parse() {
-    let value = parse_codex(
+    let natives = parse_codex(
         r#"[{"name":"docs","transport":{"type":"stdio","command":"npx","args":["-y","d"]},"enabled":true},{"name":"web","url":"https://w/mcp","enabled":false}]"#,
     );
 
-    assert_eq!(value.len(), 2);
+    assert_eq!(natives.len(), 2);
     assert_eq!(
-        (value[0].target.as_str(), value[0].status.state.as_str()),
+        (natives[0].target.as_str(), natives[0].status.state.as_str()),
         ("npx -y d", "unknown")
     );
     assert_eq!(
-        (value[1].target.as_str(), value[1].status.state.as_str()),
+        (natives[1].target.as_str(), natives[1].status.state.as_str()),
         ("https://w/mcp", "off")
     );
     assert_eq!(parse_codex("[]"), [] as [crate::infra::mcp_list::Native; 0]);
@@ -57,12 +57,12 @@ fn codex_json_and_opencode_text_parse() {
         [] as [crate::infra::mcp_list::Native; 0]
     );
 
-    let output = parse_opencode("● ✓ sentry connected\n● ✗ jira failed: 401\n");
+    let natives = parse_opencode("● ✓ sentry connected\n● ✗ jira failed: 401\n");
 
     assert_eq!(
-        output
+        natives
             .iter()
-            .map(|count| (count.name.as_str(), count.status.state.as_str()))
+            .map(|native| (native.name.as_str(), native.status.state.as_str()))
             .collect::<Vec<_>>(),
         [("sentry", "connected"), ("jira", "failed")]
     );
@@ -70,24 +70,24 @@ fn codex_json_and_opencode_text_parse() {
 
 #[test]
 fn entries_become_codehead_servers() {
-    let text = from_json("fs", &sample());
+    let server = from_json("fs", &sample());
 
     assert_eq!(
         (
-            text.kind.as_str(),
-            text.command.as_deref(),
-            text.args.len(),
-            text.env["K"].as_str()
+            server.kind.as_str(),
+            server.command.as_deref(),
+            server.args.len(),
+            server.env["K"].as_str()
         ),
         ("stdio", Some("npx"), 2, "v")
     );
 
-    let height = from_json(
+    let http = from_json(
         "w",
         &json!({"type": "http", "url": "https://w/mcp", "headers": {"Authorization": "Bearer x"}}),
     );
 
-    assert_eq!((height.kind.as_str(), height.headers.len()), ("http", 1));
+    assert_eq!((http.kind.as_str(), http.headers.len()), ("http", 1));
     assert_eq!(
         from_json("c", &json!({"type": "streamable_http", "url": "https://c"})).kind,
         "http"
@@ -103,7 +103,7 @@ fn entries_become_codehead_servers() {
 fn probe_counts_the_tools_of_a_stdio_server() {
     // a tiny MCP server in sh: the init reply, then the tool list
     let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'; read b; read c; echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"a"},{"name":"b"},{"name":"c"}]}}'; sleep 1"#;
-    let text = Server {
+    let server = Server {
         name: "t".into(),
         kind: "stdio".into(),
         command: Some("sh".into()),
@@ -111,13 +111,13 @@ fn probe_counts_the_tools_of_a_stdio_server() {
         auto_allow: true,
         ..Default::default()
     };
-    let st = probe(&text);
+    let st = probe(&server);
 
     assert_eq!((st.state.as_str(), st.tools), ("connected", Some(3)), "{st:?}");
 
     let bad = Server {
         command: Some("/nonexistent/x".into()),
-        ..text
+        ..server
     };
 
     assert_eq!(probe(&bad).state, "failed");

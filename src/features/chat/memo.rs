@@ -17,28 +17,28 @@ thread_local! {
 
 fn get(key: u64, make: impl FnOnce() -> Vec<Row>) -> Vec<Row> {
     let hit = MEMO.with_borrow_mut(|(cur, prev)| {
-        if let Some(result) = cur.get(&key) {
-            return Some(result.clone());
+        if let Some(rows) = cur.get(&key) {
+            return Some(rows.clone());
         }
 
-        let result_value = prev.remove(&key)?;
+        let rows = prev.remove(&key)?;
 
-        cur.insert(key, result_value.clone());
-        Some(result_value)
+        cur.insert(key, rows.clone());
+        Some(rows)
     });
 
     let rows = hit.unwrap_or_else(|| {
-        let result_2 = Rc::new(make());
+        let rows = Rc::new(make());
 
-        MEMO.with_borrow_mut(|(cur, _)| cur.insert(key, result_2.clone()));
-        result_2
+        MEMO.with_borrow_mut(|(cur, _)| cur.insert(key, rows.clone()));
+        rows
     });
 
     rows.as_ref().clone()
 }
 
 fn key(what: &str, width: usize, prefix: &[Span<'static>], input: impl FnOnce(&mut DefaultHasher)) -> u64 {
-    let mut height = DefaultHasher::new();
+    let mut hasher = DefaultHasher::new();
 
     (
         what,
@@ -47,29 +47,23 @@ fn key(what: &str, width: usize, prefix: &[Span<'static>], input: impl FnOnce(&m
         crate::ui::theme::pal(),
         crate::ui::markdown::marks_hash(),
     )
-        .hash(&mut height);
-    input(&mut height);
-    height.finish()
+        .hash(&mut hasher);
+    input(&mut hasher);
+    hasher.finish()
 }
 
 pub(crate) fn markdown(text: &str, width: usize, prefix: &[Span<'static>]) -> Vec<Row> {
-    get(key("md", width, prefix, |height| text.hash(height)), || {
+    get(key("md", width, prefix, |hasher| text.hash(hasher)), || {
         crate::ui::markdown::markdown(text, width, prefix)
     })
 }
 
-pub(crate) fn call(character: &super::Call, width: usize, margin: &[Span<'static>]) -> Vec<Row> {
-    let key_value = key("call", width, margin, |height| {
-        (
-            &character.id,
-            &character.name,
-            character.input.to_string(),
-            &character.output,
-        )
-            .hash(height);
+pub(crate) fn call(call: &super::Call, width: usize, margin: &[Span<'static>]) -> Vec<Row> {
+    let memo_key = key("call", width, margin, |hasher| {
+        (&call.id, &call.name, call.input.to_string(), &call.output).hash(hasher);
     });
 
-    get(key_value, || super::call_rows(character, width, margin))
+    get(memo_key, || super::call_rows(call, width, margin))
 }
 
 /// End of a draw: bodies this draw did not use go.

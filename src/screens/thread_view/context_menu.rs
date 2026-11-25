@@ -26,7 +26,7 @@ impl View {
                 self.ctx = None;
                 false
             }
-            Out::Run(agent) => ctx_out_act(self, *agent),
+            Out::Run(action) => run_ctx_action(self, *action),
         }
     }
 
@@ -46,7 +46,7 @@ impl View {
                 ..self.layout.view_rect
             }),
             Region::Agents => {
-                let at = self.agents.agents_focus.as_ref().map_or(0, |file| file.at);
+                let at = self.agents.agents_focus.as_ref().map_or(0, |focus| focus.at);
                 let agent = self.agents.order.get(at);
 
                 Place::At(
@@ -54,8 +54,8 @@ impl View {
                         .slots
                         .borrow()
                         .iter()
-                        .find(|(agent_value, _)| Some(agent_value) == agent)
-                        .map_or(self.layout.input_rect, |(_, result)| *result),
+                        .find(|(name, _)| Some(name) == agent)
+                        .map_or(self.layout.input_rect, |(_, rect)| *rect),
                 )
             }
             _ => Place::At(self.layout.input_rect),
@@ -129,7 +129,7 @@ fn agent_context(view: &mut View) -> Option<(String, Vec<crate::ui::context_menu
     let items = ["flow", "remove", "replace with …"]
         .iter()
         .enumerate()
-        .map(|(key, label)| Item::new(*label, "", Ctx::Menu(AGENT_ITEMS + index * 3 + key)))
+        .map(|(row, label)| Item::new(*label, "", Ctx::Menu(AGENT_ITEMS + index * 3 + row)))
         .collect();
 
     Some((format!("@{agent}"), items))
@@ -174,10 +174,10 @@ fn changes_context(view: &View) -> [crate::ui::context_menu::Item<Ctx>; 2] {
     ]
 }
 
-fn ctx_out_act(view: &mut View, agent: Ctx) -> bool {
+fn run_ctx_action(view: &mut View, action: Ctx) -> bool {
     view.ctx = None;
 
-    match agent {
+    match action {
         Ctx::Key(key) if key.code == KeyCode::Char('b') && key.modifiers == KeyModifiers::CONTROL => {
             toggle_context_panel(view);
 
@@ -190,7 +190,7 @@ fn ctx_out_act(view: &mut View, agent: Ctx) -> bool {
             view.changes_act(act);
             false
         }
-        Ctx::Cmd(character) => ctx_out_act_act(view, character),
+        Ctx::Cmd(command) => run_ctx_command(view, command),
         Ctx::Menu(id) => view.menu_action(crate::screens::quick_menu::Action::Command(id)),
         Ctx::Hist => {
             let cmds = view.shell_cmds();
@@ -212,20 +212,20 @@ fn toggle_context_panel(view: &mut View) {
     }
 }
 
-fn ctx_out_act_act(view: &mut View, character: &'static str) -> bool {
+fn run_ctx_command(view: &mut View, command: &'static str) -> bool {
     match view.panes.pane {
         Pane::Changes => {
-            let act = view.panes.changes.ctx_cmd(character);
+            let act = view.panes.changes.ctx_cmd(command);
 
             view.changes_act(act);
         }
         Pane::Files => {
-            let act = view.panes.files.ctx_cmd(character);
+            let act = view.panes.files.ctx_cmd(command);
 
             view.files_act(act);
         }
         Pane::Merge => {
-            let act = view.merge_state.merge.ctx_cmd(character);
+            let act = view.merge_state.merge.ctx_cmd(command);
 
             view.merge_act(act);
         }

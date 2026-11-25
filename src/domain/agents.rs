@@ -43,7 +43,7 @@ impl Agent {
     /// `claude` or `claude/opus`.
     pub(crate) fn harness_model(&self) -> String {
         match &self.model {
-            Some(message) if !message.is_empty() => format!("{}/{message}", self.harness),
+            Some(model) if !model.is_empty() => format!("{}/{model}", self.harness),
             _ => self.harness.clone(),
         }
     }
@@ -83,43 +83,43 @@ pub(crate) fn cached() -> Vec<Agent> {
     roster_only()
 }
 
-fn from_roster(result: &roster::Agent, seen: &HashMap<String, i64>) -> Agent {
+fn from_roster(record: &roster::Agent, seen: &HashMap<String, i64>) -> Agent {
     let profile = Profile {
-        style: result.style.clone(),
-        voice: result.voice.clone().unwrap_or_default(),
-        prompt: result.prompt.clone().unwrap_or_default(),
-        sprite: result
+        style: record.style.clone(),
+        voice: record.voice.clone().unwrap_or_default(),
+        prompt: record.prompt.clone().unwrap_or_default(),
+        sprite: record
             .sprite
             .as_ref()
-            .and_then(|text_value| crate::domain::sprites::from_id(&text_value.id)),
+            .and_then(|sprite| crate::domain::sprites::from_id(&sprite.id)),
     };
-    let text = compose(&profile, &[], &result.harness, None);
+    let text = compose(&profile, &[], &record.harness, None);
 
     Agent {
-        name: result.name.clone(),
-        harness: result.harness.clone(),
-        model: result.model.clone(),
-        color: result.color.clone(),
-        mode: result.mode.clone(),
+        name: record.name.clone(),
+        harness: record.harness.clone(),
+        model: record.model.clone(),
+        color: record.color.clone(),
+        mode: record.mode.clone(),
         prompt: (!text.is_empty()).then_some(text),
-        last_seen: seen.get(&result.name).copied(),
+        last_seen: seen.get(&record.name).copied(),
     }
 }
 
 /// Last activity per agent: the newest thread it is on.
 fn last_seen() -> HashMap<String, i64> {
-    let mut message: HashMap<String, i64> = HashMap::new();
+    let mut seen: HashMap<String, i64> = HashMap::new();
 
     for thread in store::all() {
         for agent in &thread.agents {
             let at = (thread.updated / 1000) as i64;
-            let error = message.entry(agent.clone()).or_insert(at);
+            let newest = seen.entry(agent.clone()).or_insert(at);
 
-            *error = (*error).max(at);
+            *newest = (*newest).max(at);
         }
     }
 
-    message
+    seen
 }
 
 pub(crate) fn load() -> Vec<Agent> {
@@ -127,7 +127,7 @@ pub(crate) fn load() -> Vec<Agent> {
 
     roster::active()
         .iter()
-        .map(|result| from_roster(result, &seen))
+        .map(|record| from_roster(record, &seen))
         .collect()
 }
 
@@ -136,20 +136,20 @@ pub(crate) fn load() -> Vec<Agent> {
 pub(crate) fn roster_only() -> Vec<Agent> {
     roster::active()
         .iter()
-        .map(|result| from_roster(result, &HashMap::new()))
+        .map(|record| from_roster(record, &HashMap::new()))
         .collect()
 }
 
 /// Config agent ($`CODEHEAD_AGENT`, codehead.toml), else amon, else the first active agent.
 pub(crate) fn default_agent(all: &[Agent]) -> Option<String> {
-    if let Some(agent_value) = crate::infra::config::agent() {
-        return Some(agent_value);
+    if let Some(configured) = crate::infra::config::agent() {
+        return Some(configured);
     }
 
     all.iter()
-        .find(|agent_2| agent_2.name == "amon")
+        .find(|agent| agent.name == "amon")
         .or(all.first())
-        .map(|agent_3| agent_3.name.clone())
+        .map(|agent| agent.name.clone())
 }
 
 /// Threads per agent name (open + done).
@@ -166,7 +166,7 @@ pub(crate) fn usage() -> HashMap<String, Vec<Use>> {
         let dir = thread.work_dir().display().to_string();
 
         for agent in &thread.agents {
-            let mine = |value: &Vec<String>| value.iter().filter(|x| *x == agent).cloned().collect::<Vec<_>>();
+            let mine = |names: &Vec<String>| names.iter().filter(|name| *name == agent).cloned().collect::<Vec<_>>();
 
             map.entry(agent.clone()).or_default().push(Use {
                 thread_id: thread.id.clone(),
@@ -174,7 +174,7 @@ pub(crate) fn usage() -> HashMap<String, Vec<Use>> {
                 state: thread.state.clone(),
                 live: mine(&live),
                 busy: mine(&busy),
-                others_live: live.iter().filter(|x| *x != agent).count(),
+                others_live: live.iter().filter(|name| *name != agent).count(),
                 dir: dir.clone(),
             });
         }
@@ -190,33 +190,33 @@ pub(crate) fn show_extra(name: &str) -> Vec<String> {
         roster::agents_dir().join(format!("{name}.toml")).display()
     )];
 
-    if let Some(result) = roster::get(name)
-        && let Some(height) = crate::engine::harnesses::get(&result.harness)
+    if let Some(record) = roster::get(name)
+        && let Some(harness) = crate::engine::harnesses::get(&record.harness)
     {
-        let cmd = crate::engine::harnesses::acp_command(height, result.command.as_deref())
-            .map_or_else(|| "claude -p (stream-json)".into(), |character| character.join(" "));
+        let cmd = crate::engine::harnesses::acp_command(harness, record.command.as_deref())
+            .map_or_else(|| "claude -p (stream-json)".into(), |command| command.join(" "));
 
-        let state = if crate::engine::harnesses::on_path(height.bin) {
+        let state = if crate::engine::harnesses::on_path(harness.bin) {
             "installed".to_string()
         } else {
-            format!("missing: {}", height.install)
+            format!("missing: {}", harness.install)
         };
 
-        out.push(format!("harness: {} · {state}", height.label));
+        out.push(format!("harness: {} · {state}", harness.label));
         out.push(format!("runs: {cmd}"));
     }
 
     let (mut threads, mut usd) = (0usize, 0.0f64);
 
-    for thread_value in store::all()
+    for thread in store::all()
         .iter()
-        .filter(|thread| thread.agents.iter().any(|agent_value| agent_value == name))
+        .filter(|thread| thread.agents.iter().any(|agent| agent == name))
     {
         threads += 1;
-        usd += store::events(&thread_value.id)
+        usd += store::events(&thread.id)
             .iter()
-            .filter(|error| error.agent.as_deref() == Some(name))
-            .map(turn_error_details)
+            .filter(|event| event.agent.as_deref() == Some(name))
+            .map(turn_cost)
             .sum::<f64>();
     }
 
@@ -226,8 +226,8 @@ pub(crate) fn show_extra(name: &str) -> Vec<String> {
     out
 }
 
-fn turn_error_details(error_value: &store::Event) -> f64 {
-    if let store::Kind::TurnEnd { cost, .. } = error_value.kind {
+fn turn_cost(event: &store::Event) -> f64 {
+    if let store::Kind::TurnEnd { cost, .. } = event.kind {
         cost
     } else {
         0.0
@@ -245,93 +245,93 @@ pub(crate) struct Spec {
 }
 
 /// `claude/opus` → (claude, Some(opus)).
-fn split_harness(height: &str) -> (String, Option<String>) {
-    match height.split_once('/') {
-        Some((height_value, message)) => (
-            height_value.to_string(),
-            Some(message.to_string()).filter(|message_value| !message_value.is_empty() && message_value != "default"),
+fn split_harness(harness_model: &str) -> (String, Option<String>) {
+    match harness_model.split_once('/') {
+        Some((harness, model)) => (
+            harness.to_string(),
+            Some(model.to_string()).filter(|model| !model.is_empty() && model != "default"),
         ),
-        None if height.is_empty() => ("claude".into(), None),
-        None => (height.to_string(), None),
+        None if harness_model.is_empty() => ("claude".into(), None),
+        None => (harness_model.to_string(), None),
     }
 }
 
 /// The profile text of the editor → the fields of R.
-fn set_profile(result: &mut roster::Agent, text: &str) {
-    let path = parse_profile(Some(text), None);
+fn set_profile(record: &mut roster::Agent, text: &str) {
+    let profile = parse_profile(Some(text), None);
 
-    result.style = path.style;
-    result.voice = Some(path.voice).filter(|value| !value.trim().is_empty());
-    result.prompt = Some(path.prompt).filter(|value_value| !value_value.trim().is_empty());
-    result.sprite = path.sprite.map(|text_value| roster::SpriteRec {
-        id: text_value.id.clone(),
-        rows: text_value.rows.to_vec(),
+    record.style = profile.style;
+    record.voice = Some(profile.voice).filter(|voice| !voice.trim().is_empty());
+    record.prompt = Some(profile.prompt).filter(|prompt| !prompt.trim().is_empty());
+    record.sprite = profile.sprite.map(|sprite| roster::SpriteRec {
+        id: sprite.id.clone(),
+        rows: sprite.rows.to_vec(),
     });
 }
 
 /// Harness H is one codehead drives.
-fn known(height: &str) -> Result<(), String> {
-    match crate::engine::harnesses::get(height) {
+fn known(harness: &str) -> Result<(), String> {
+    match crate::engine::harnesses::get(harness) {
         Some(_) => Ok(()),
         None => Err(format!(
-            "harness {height:?}: one of {}",
+            "harness {harness:?}: one of {}",
             crate::engine::harnesses::ALL
                 .iter()
-                .map(|height_value| height_value.name)
+                .map(|harness| harness.name)
                 .collect::<Vec<_>>()
                 .join(", ")
         )),
     }
 }
 
-pub(crate) fn create(text: &Spec) -> Result<(), String> {
-    if roster::get(&text.name).is_some() {
-        return Err(format!("agent {} exists", text.name));
+pub(crate) fn create(spec: &Spec) -> Result<(), String> {
+    if roster::get(&spec.name).is_some() {
+        return Err(format!("agent {} exists", spec.name));
     }
 
-    let (harness, model) = split_harness(&text.harness);
+    let (harness, model) = split_harness(&spec.harness);
 
     known(&harness)?;
-    let mut result = roster::Agent {
-        name: text.name.clone(),
+    let mut record = roster::Agent {
+        name: spec.name.clone(),
         harness,
         model,
-        mode: text.mode.clone(),
-        color: text.color.clone(),
-        mcp: text.mcp.clone(),
+        mode: spec.mode.clone(),
+        color: spec.color.clone(),
+        mcp: spec.mcp.clone(),
         ..Default::default()
     };
 
-    set_profile(&mut result, &text.prompt);
+    set_profile(&mut record, &spec.prompt);
 
-    roster::save(&result)
+    roster::save(&record)
 }
 
 /// Pass only what changed.
-pub(crate) fn edit(old: &Agent, text: &Spec) -> Result<(), String> {
-    if text.name != old.name {
-        roster::rename(&old.name, &text.name)?;
+pub(crate) fn edit(old: &Agent, spec: &Spec) -> Result<(), String> {
+    if spec.name != old.name {
+        roster::rename(&old.name, &spec.name)?;
     }
 
-    let mut result = roster::get(&text.name).ok_or_else(|| format!("no agent {}", text.name))?;
+    let mut record = roster::get(&spec.name).ok_or_else(|| format!("no agent {}", spec.name))?;
 
-    if !text.harness.is_empty() && text.harness != old.harness_model() {
-        let (height, message) = split_harness(&text.harness);
+    if !spec.harness.is_empty() && spec.harness != old.harness_model() {
+        let (harness, model) = split_harness(&spec.harness);
 
-        known(&height)?;
-        (result.harness, result.model) = (height, message);
+        known(&harness)?;
+        (record.harness, record.model) = (harness, model);
     }
 
-    result.mode.clone_from(&text.mode);
-    result.mcp.clone_from(&text.mcp);
+    record.mode.clone_from(&spec.mode);
+    record.mcp.clone_from(&spec.mcp);
 
-    if text.color.is_some() {
-        result.color.clone_from(&text.color);
+    if spec.color.is_some() {
+        record.color.clone_from(&spec.color);
     }
 
-    set_profile(&mut result, &text.prompt);
+    set_profile(&mut record, &spec.prompt);
 
-    roster::save(&result)
+    roster::save(&record)
 }
 
 /// Changes a live session keeps from its start: harness, model, mode, prompt.
@@ -356,16 +356,16 @@ pub(crate) struct Restart {
 pub(crate) fn restart(agent: &Agent, same_harness: bool, uses: &[Use], _logs: &Path) -> Restart {
     let mut result = Restart::default();
 
-    for user_value in uses.iter().filter(|user| !user.live.is_empty()) {
-        let short: String = user_value.thread_id.chars().take(12).collect();
+    for usage in uses.iter().filter(|usage| !usage.live.is_empty()) {
+        let short: String = usage.thread_id.chars().take(12).collect();
 
-        if !user_value.busy.is_empty() {
+        if !usage.busy.is_empty() {
             result.busy.push(short);
             continue;
         }
 
         match client::send(
-            &user_value.thread_id,
+            &usage.thread_id,
             &serde_json::json!({"op": "reload", "agent": agent.name, "fresh": !same_harness}),
         ) {
             Ok(_) if same_harness => result.resumed += 1,

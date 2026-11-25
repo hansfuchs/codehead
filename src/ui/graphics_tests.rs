@@ -16,13 +16,13 @@ fn picker_of(proto: ProtocolType) -> Picker {
 /// the header up to it), IEND.
 fn png_header(width: u32, height: u32) -> Vec<u8> {
     fn crc32(bytes: &[u8]) -> u32 {
-        let mut character = !0u32;
+        let mut crc = !0u32;
 
-        for bytes_value in bytes {
-            crc32_byte(&mut character, *bytes_value);
+        for byte in bytes {
+            crc32_byte(&mut crc, *byte);
         }
 
-        !character
+        !crc
     }
 
     let chunk = |kind: &[u8], data: &[u8]| {
@@ -48,14 +48,14 @@ fn png_header(width: u32, height: u32) -> Vec<u8> {
     .concat()
 }
 
-fn crc32_byte(character: &mut u32, bytes_value: u8) {
-    *character ^= u32::from(bytes_value);
+fn crc32_byte(crc: &mut u32, byte: u8) {
+    *crc ^= u32::from(byte);
 
     for _ in 0..8 {
-        *character = if *character & 1 == 1 {
-            (*character >> 1) ^ 0xEDB8_8320
+        *crc = if *crc & 1 == 1 {
+            (*crc >> 1) ^ 0xEDB8_8320
         } else {
-            *character >> 1
+            *crc >> 1
         };
     }
 }
@@ -156,7 +156,7 @@ fn check_terminal_protocols() {
         protocol_from(environment(&[("TERM", "xterm-ghostty"), ("ZELLIJ", "0")])),
         None
     );
-    assert_eq!(picker().map(|path| path.protocol_type()), None, "tests: 0 images");
+    assert_eq!(picker().map(|picker| picker.protocol_type()), None, "tests: 0 images");
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn a_broken_huge_or_roomless_file_gets_a_line_not_a_panic() {
     assert!(
         build(&big, Kind::Image, &picker, 40, 20)
             .err()
-            .is_some_and(|error| error.contains("over 50 MB"))
+            .is_some_and(|message| message.contains("over 50 MB"))
     );
     assert!(build(&ok, Kind::Image, &picker, 0, 20).is_err());
     assert!(build(&ok, Kind::Image, &picker, 40, 0).is_err());
@@ -239,7 +239,7 @@ fn a_huge_canvas_in_a_small_file_never_decodes() {
     assert!(
         error
             .as_deref()
-            .is_some_and(|error_value| error_value.to_lowercase().contains("limit")),
+            .is_some_and(|message| message.to_lowercase().contains("limit")),
         "over MAX_ALLOC: {error:?}"
     );
 
@@ -248,16 +248,16 @@ fn a_huge_canvas_in_a_small_file_never_decodes() {
 
 #[test]
 fn a_tool_that_fails_hangs_or_is_missing_counts_as_failed() {
-    let argv = |agent: &[&str]| agent.iter().map(OsString::from).collect::<Vec<_>>();
+    let argv = |args: &[&str]| args.iter().map(OsString::from).collect::<Vec<_>>();
 
     assert!(run(&argv(&["true"]), Duration::from_secs(5)));
     assert!(!run(&argv(&["false"]), Duration::from_secs(5)));
     assert!(!run(&argv(&["/nonexistent/codehead-tool"]), Duration::from_secs(5)));
 
-    let thread = Instant::now();
+    let started = Instant::now();
 
     assert!(!run(&argv(&["sleep", "5"]), Duration::from_millis(100)));
-    assert!(thread.elapsed() < Duration::from_secs(2), "killed at the timeout");
+    assert!(started.elapsed() < Duration::from_secs(2), "killed at the timeout");
 }
 
 #[test]
@@ -279,7 +279,7 @@ fn kitty_images_go_out_compressed_once_inside_the_area() {
         ratatui_image::Image::new(&pre.protocol).render(area, &mut buf);
         buf.content()
             .iter()
-            .map(|character| character.symbol().to_string())
+            .map(|cell| cell.symbol().to_string())
             .collect::<String>()
     };
 
@@ -289,18 +289,18 @@ fn kitty_images_go_out_compressed_once_inside_the_area() {
     let id = pre.kitty.unwrap();
 
     // the transmit: out of the cells, zlib, a few KB for a flat 400×200 image (raw: 320 KB)
-    let thread = pre.transmit.as_deref().unwrap();
+    let transmit = pre.transmit.as_deref().unwrap();
 
     assert!(
-        thread.starts_with("\x1b_G")
-            && thread.ends_with("\x1b\\")
-            && thread.contains("o=z")
-            && thread.contains(&format!("i={id},a=T")),
+        transmit.starts_with("\x1b_G")
+            && transmit.ends_with("\x1b\\")
+            && transmit.contains("o=z")
+            && transmit.contains(&format!("i={id},a=T")),
         "{}",
-        &thread[..60]
+        &transmit[..60]
     );
-    assert!(!thread.contains('\u{10EEEE}'));
-    assert!(thread.len() < 40_000, "{} bytes", thread.len());
+    assert!(!transmit.contains('\u{10EEEE}'));
+    assert!(transmit.len() < 40_000, "{} bytes", transmit.len());
 
     // every draw: placeholders only (an overlay over cell 0 drops 0 image data)
     for _ in 0..2 {

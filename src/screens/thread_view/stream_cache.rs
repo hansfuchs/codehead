@@ -1,7 +1,7 @@
 use super::{Rect, View, back_for, chat, item_ts, top_anchor};
 impl View {
-    pub(super) fn refresh_stream(&mut self, st: Rect) {
-        let height = usize::from(st.height);
+    pub(super) fn refresh_stream(&mut self, area: Rect) {
+        let height = usize::from(area.height);
 
         let anchor = (self.stream.back > 0)
             .then(|| {
@@ -14,7 +14,7 @@ impl View {
             })
             .flatten();
 
-        self.stream.width = st.width;
+        self.stream.width = area.width;
         self.find.refresh(&self.thread);
         let logged = self.thread.items.len();
 
@@ -30,7 +30,7 @@ impl View {
         self.stream.drawn = chat::draw(
             &self.thread,
             self.stream.look,
-            st.width,
+            area.width,
             &self.colors_now(),
             &self.agents.harness_of,
             &fold,
@@ -39,8 +39,8 @@ impl View {
         self.thread.items.truncate(logged);
         self.stream.dirty = false;
 
-        if let Some(agent) = anchor {
-            self.stream.back = back_for(&self.stream.drawn.starts, self.stream.drawn.rows.len(), agent, height);
+        if let Some(anchor) = anchor {
+            self.stream.back = back_for(&self.stream.drawn.starts, self.stream.drawn.rows.len(), anchor, height);
         }
 
         apply_message_jump(self, height);
@@ -51,7 +51,7 @@ impl View {
 fn append_live_text(view: &mut View) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |directory| directory.as_millis() as u64);
+        .map_or(0, |since_epoch| since_epoch.as_millis() as u64);
 
     for (agent, text) in &view.stream.live {
         view.thread.items.push(chat::Item::Text {
@@ -74,12 +74,8 @@ fn apply_message_jump(view: &mut View, height: usize) {
 
     let at = items
         .iter()
-        .position(|it| item_ts(it) == Some(ts))
-        .or_else(|| {
-            items
-                .iter()
-                .position(|it| item_ts(it).is_some_and(|thread| thread >= ts))
-        })
+        .position(|item| item_ts(item) == Some(ts))
+        .or_else(|| items.iter().position(|item| item_ts(item).is_some_and(|at| at >= ts)))
         .or_else(|| items.len().checked_sub(1));
 
     match at {

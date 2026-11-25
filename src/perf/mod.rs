@@ -10,14 +10,14 @@ const BUDGET: Duration = Duration::from_millis(20);
 /// Warm runs after the cold 1st run.
 const RUNS: usize = 5;
 
-/// Time F: 1 cold run, RUNS warm runs. Fail if the slowest run reaches BUDGET.
-fn bench<T>(name: &str, file: impl FnMut() -> T) {
-    bench_within(name, BUDGET, file);
+/// Time RUN: 1 cold run, RUNS warm runs. Fail if the slowest run reaches BUDGET.
+fn bench<T>(name: &str, run: impl FnMut() -> T) {
+    bench_within(name, BUDGET, run);
 }
 
 /// `bench` with its own budget (a 1-off action, e.g. a form's save: 50 ms).
-fn bench_within<T>(name: &str, budget: Duration, mut file: impl FnMut() -> T) {
-    let worst = measure_budget(name, budget, || (), |()| file());
+fn bench_within<T>(name: &str, budget: Duration, mut run: impl FnMut() -> T) {
+    let worst = measure_budget(name, budget, || (), |()| run());
 
     assert!(
         worst < budget,
@@ -29,14 +29,14 @@ fn bench_within<T>(name: &str, budget: Duration, mut file: impl FnMut() -> T) {
 
 /// `bench` without the assert: the slowest run (several cases in 1 test: each prints its line,
 /// the test asserts at its end).
-fn measure<T>(name: &str, mut file: impl FnMut() -> T) -> Duration {
-    measure_split(name, || (), |()| file())
+fn measure<T>(name: &str, mut run: impl FnMut() -> T) -> Duration {
+    measure_split(name, || (), |()| run())
 }
 
-/// `measure` with an untimed PREP before each run (its value goes to F): a run's background work
+/// `measure` with an untimed PREP before each run (its value goes to RUN): a run's background work
 /// (a host's `git worktree add`) never slows the next run.
-fn measure_split<P, T>(name: &str, prep: impl FnMut() -> P, file: impl FnMut(P) -> T) -> Duration {
-    measure_budget(name, BUDGET, prep, file)
+fn measure_split<P, T>(name: &str, prep: impl FnMut() -> P, run: impl FnMut(P) -> T) -> Duration {
+    measure_budget(name, BUDGET, prep, run)
 }
 
 /// `measure_split` against BUDGET (the ok / SLOW mark).
@@ -44,13 +44,13 @@ fn measure_budget<P, T>(
     name: &str,
     budget: Duration,
     mut prep: impl FnMut() -> P,
-    mut file: impl FnMut(P) -> T,
+    mut run: impl FnMut(P) -> T,
 ) -> Duration {
     let mut time = || {
-        let path = prep();
+        let input = prep();
         let at = Instant::now();
 
-        black_box(file(path));
+        black_box(run(input));
         at.elapsed()
     };
 
@@ -68,8 +68,8 @@ fn measure_budget<P, T>(
     worst
 }
 
-fn ms(directory: Duration) -> f64 {
-    directory.as_secs_f64() * 1e3
+fn ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1e3
 }
 
 /// Fixtures: deterministic, sized like a long real session.

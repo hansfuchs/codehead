@@ -80,16 +80,14 @@ pub(crate) fn strip_replaces(text: &str) -> String {
 /// Agents (indexes of AGENTS) whose name starts with Q (0 such: contains Q), in dropdown order:
 /// by harness, A→Z.
 fn visible(agents: &[Agent], query: &str) -> Vec<(String, Vec<usize>)> {
-    let query_value = query.to_lowercase();
-    let prefix = agents
-        .iter()
-        .any(|agent| agent.name.to_lowercase().starts_with(&query_value));
+    let query = query.to_lowercase();
+    let prefix = agents.iter().any(|agent| agent.name.to_lowercase().starts_with(&query));
 
-    cards::groups(agents, |agent_value| {
+    cards::groups(agents, |agent| {
         if prefix {
-            agent_value.name.to_lowercase().starts_with(&query_value)
+            agent.name.to_lowercase().starts_with(&query)
         } else {
-            agent_value.name.to_lowercase().contains(&query_value)
+            agent.name.to_lowercase().contains(&query)
         }
     })
 }
@@ -103,14 +101,14 @@ impl Mention {
     fn targets(&self, name: &str) -> Vec<String> {
         self.replaceable
             .iter()
-            .filter(|result| *result != name)
+            .filter(|target| *target != name)
             .cloned()
             .collect()
     }
 
     fn pick(&mut self, ta: &mut TextArea, at: Pos, name: &str, old: Option<String>) {
         let text = match &old {
-            Some(output) => format!("@{name}{} ", replaces_note(output)),
+            Some(old) => format!("@{name}{} ", replaces_note(old)),
             None => format!("@{name} "),
         };
 
@@ -123,7 +121,7 @@ impl Mention {
 
     /// The `@` of TA, and its esc state: a closed `@` that is gone opens again on the next `@`.
     fn sync(&mut self, ta: &TextArea) {
-        if self.closed.is_some() && ta.mention().map(|message| message.0) != self.closed {
+        if self.closed.is_some() && ta.mention().map(|found| found.0) != self.closed {
             self.closed = None;
         }
     }
@@ -131,26 +129,26 @@ impl Mention {
     /// The `@` of TA + its query. A live preview in the text: the query typed before it filters.
     /// None: 0 `@`, or closed.
     fn query(&self, ta: &TextArea) -> Option<(Pos, String)> {
-        let (at, query_value) = ta.mention()?;
+        let (at, query) = ta.mention()?;
 
         if self.closed == Some(at) {
             return None;
         }
 
-        let query_2 = match self.preview.typed(ta) {
-            Some((path, thread)) if path == at => thread.chars().skip(1).collect(),
-            _ => query_value,
+        let query = match self.preview.typed(ta) {
+            Some((pos, typed)) if pos == at => typed.chars().skip(1).collect(),
+            _ => query,
         };
 
-        Some((at, query_2))
+        Some((at, query))
     }
 
     /// The open dropdown: `@` position + the matching agents (in order). None: closed.
     fn open(&self, ta: &TextArea, agents: &[Agent]) -> Option<(Pos, Vec<usize>)> {
-        let (at, query_value) = self.query(ta)?;
-        let message = order(&visible(agents, &query_value));
+        let (at, query) = self.query(ta)?;
+        let shown = order(&visible(agents, &query));
 
-        (!message.is_empty()).then_some((at, message))
+        (!shown.is_empty()).then_some((at, shown))
     }
 
     pub(crate) fn is_open(&self, ta: &TextArea, agents: &[Agent]) -> bool {
@@ -158,34 +156,34 @@ impl Mention {
     }
 
     /// Key for the dropdown. true: used (the input must not see it).
-    pub(crate) fn key(&mut self, key_value: KeyEvent, ta: &mut TextArea, agents: &[Agent]) -> bool {
+    pub(crate) fn key(&mut self, key: KeyEvent, ta: &mut TextArea, agents: &[Agent]) -> bool {
         self.sync(ta);
 
-        let Some((at, message)) = self.open(ta, agents) else {
+        let Some((at, shown)) = self.open(ta, agents) else {
             self.cursor = 0;
             self.replace = None;
             return false;
         };
 
-        let plain = key_value.modifiers.is_empty() || key_value.modifiers == KeyModifiers::SHIFT;
-        let count = message.len();
+        let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+        let count = shown.len();
 
         self.cursor = self.cursor.min(count - 1);
-        let name = agents[message[self.cursor]].name.clone();
+        let name = agents[shown[self.cursor]].name.clone();
         let targets = self.targets(&name);
 
         if let Some(character) = self.replace {
-            return replace_key(key_value, ta, at, &name, &targets, character, self);
+            return replace_key(key, ta, at, &name, &targets, character, self);
         }
 
         key_add(
-            key_value,
+            key,
             ta,
             agents,
             self,
             MentionSelection {
                 at,
-                message,
+                shown,
                 plain,
                 count,
                 name,
@@ -195,11 +193,8 @@ impl Mention {
     }
 
     /// Row of the last draw at P (hover).
-    pub(crate) fn row_at(&self, path: Position) -> Option<Rect> {
-        self.rows
-            .iter()
-            .map(|(result, _)| *result)
-            .find(|result_value| result_value.contains(path))
+    pub(crate) fn row_at(&self, at: Position) -> Option<Rect> {
+        self.rows.iter().map(|(rect, _)| *rect).find(|rect| rect.contains(at))
     }
 
     /// Click on a card: insert it (add); on an agent of the replace dropdown: replace it. true: used.
@@ -212,7 +207,7 @@ impl Mention {
 #[path = "mention_tests.rs"]
 mod tests;
 
-fn handle_click(widget_state: &mut Mention, ev: MouseEvent, ta: &mut TextArea, agents: &[Agent]) -> bool {
+fn handle_click(mention: &mut Mention, ev: MouseEvent, ta: &mut TextArea, agents: &[Agent]) -> bool {
     if !matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
         return false;
     }
@@ -222,22 +217,22 @@ fn handle_click(widget_state: &mut Mention, ev: MouseEvent, ta: &mut TextArea, a
         y: ev.row,
     };
 
-    let Some(hit) = widget_state
+    let Some(hit) = mention
         .rows
         .iter()
-        .find(|(result, _)| result.contains(at))
-        .map(|(_, height)| height.clone())
+        .find(|(rect, _)| rect.contains(at))
+        .map(|(_, hit)| hit.clone())
     else {
         return false;
     };
 
-    if let Some((pos, message)) = widget_state.open(ta, agents) {
+    if let Some((pos, shown)) = mention.open(ta, agents) {
         match hit {
-            Hit::Card(name) => widget_state.pick(ta, pos, &name, None),
+            Hit::Card(name) => mention.pick(ta, pos, &name, None),
             Hit::Target(old) => {
-                let name = agents[message[widget_state.cursor.min(message.len() - 1)]].name.clone();
+                let name = agents[shown[mention.cursor.min(shown.len() - 1)]].name.clone();
 
-                widget_state.pick(ta, pos, &name, Some(old));
+                mention.pick(ta, pos, &name, Some(old));
             }
         }
     }
@@ -246,59 +241,57 @@ fn handle_click(widget_state: &mut Mention, ev: MouseEvent, ta: &mut TextArea, a
 }
 
 fn key_add(
-    key_value: KeyEvent,
+    key: KeyEvent,
     ta: &mut TextArea,
     agents: &[Agent],
-    widget_state: &mut Mention,
+    mention: &mut Mention,
     settings: MentionSelection,
 ) -> bool {
     let MentionSelection {
         at,
-        message,
+        shown,
         plain,
         count,
         name,
         targets,
     } = settings;
 
-    match key_value.code {
+    match key.code {
         KeyCode::Up | KeyCode::Down if plain => {
-            widget_state.cursor = if key_value.code == KeyCode::Up {
-                (widget_state.cursor + count - 1) % count
+            mention.cursor = if key.code == KeyCode::Up {
+                (mention.cursor + count - 1) % count
             } else {
-                (widget_state.cursor + 1) % count
+                (mention.cursor + 1) % count
             };
 
             // the agent's `@name` in the text at once
-            let typed = match widget_state.preview.typed(ta) {
-                Some((_, thread_value)) => thread_value,
+            let typed = match mention.preview.typed(ta) {
+                Some((_, typed)) => typed,
                 None => ta.mention().map(|(_, query)| format!("@{query}")).unwrap_or_default(),
             };
 
-            let name = agents[message[widget_state.cursor]].name.clone();
+            let name = agents[shown[mention.cursor]].name.clone();
 
-            widget_state.preview.show(ta, at, &typed, &format!("@{name}"));
+            mention.preview.show(ta, at, &typed, &format!("@{name}"));
         }
-        KeyCode::Right if key_value.modifiers.is_empty() && !targets.is_empty() => widget_state.replace = Some(0),
-        KeyCode::Left if key_value.modifiers.is_empty() && !targets.is_empty() => {}
-        KeyCode::Tab | KeyCode::Enter if key_value.modifiers.is_empty() => widget_state.pick(ta, at, &name, None),
-        KeyCode::Esc if key_value.modifiers.is_empty() => {
-            widget_state.closed = Some(at);
-            widget_state.cursor = 0;
+        KeyCode::Right if key.modifiers.is_empty() && !targets.is_empty() => mention.replace = Some(0),
+        KeyCode::Left if key.modifiers.is_empty() && !targets.is_empty() => {}
+        KeyCode::Tab | KeyCode::Enter if key.modifiers.is_empty() => mention.pick(ta, at, &name, None),
+        KeyCode::Esc if key.modifiers.is_empty() => {
+            mention.closed = Some(at);
+            mention.cursor = 0;
         }
         // a name char after a preview: the typed query again, the char after it
-        KeyCode::Char(character_value)
-            if plain
-                && (character_value.is_alphanumeric() || matches!(character_value, '-' | '_' | '.'))
-                && widget_state.preview.revert(ta) =>
+        KeyCode::Char(ch)
+            if plain && (ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.')) && mention.preview.revert(ta) =>
         {
-            widget_state.cursor = 0;
+            mention.cursor = 0;
             return false;
         }
         _ => {
             // typing goes on: the 1st match is current again
-            if matches!(key_value.code, KeyCode::Char(_) | KeyCode::Backspace) {
-                widget_state.cursor = 0;
+            if matches!(key.code, KeyCode::Char(_) | KeyCode::Backspace) {
+                mention.cursor = 0;
             }
 
             return false;
@@ -313,7 +306,7 @@ mod render;
 
 struct MentionSelection {
     at: Pos,
-    message: Vec<usize>,
+    shown: Vec<usize>,
     plain: bool,
     count: usize,
     name: String,
@@ -321,24 +314,24 @@ struct MentionSelection {
 }
 
 fn replace_key(
-    key_value: KeyEvent,
+    key: KeyEvent,
     ta: &mut TextArea,
     at: Pos,
     name: &str,
     targets: &[String],
-    character: usize,
+    target: usize,
     mention: &mut Mention,
 ) -> bool {
-    let plain = key_value.modifiers.is_empty() || key_value.modifiers == KeyModifiers::SHIFT;
-    let thread = targets.len().max(1);
+    let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+    let targets_len = targets.len().max(1);
 
-    match key_value.code {
-        KeyCode::Up if plain => mention.replace = Some((character + thread - 1) % thread),
-        KeyCode::Down if plain => mention.replace = Some((character + 1) % thread),
-        KeyCode::Left | KeyCode::Esc if key_value.modifiers.is_empty() => mention.replace = None,
-        KeyCode::Right if key_value.modifiers.is_empty() => {}
-        KeyCode::Tab | KeyCode::Enter if key_value.modifiers.is_empty() => {
-            let old = targets.get(character.min(thread - 1)).cloned();
+    match key.code {
+        KeyCode::Up if plain => mention.replace = Some((target + targets_len - 1) % targets_len),
+        KeyCode::Down if plain => mention.replace = Some((target + 1) % targets_len),
+        KeyCode::Left | KeyCode::Esc if key.modifiers.is_empty() => mention.replace = None,
+        KeyCode::Right if key.modifiers.is_empty() => {}
+        KeyCode::Tab | KeyCode::Enter if key.modifiers.is_empty() => {
+            let old = targets.get(target.min(targets_len - 1)).cloned();
 
             mention.pick(ta, at, name, old);
         }

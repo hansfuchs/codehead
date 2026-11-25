@@ -19,38 +19,38 @@ impl FileDiff {
         self.add = self
             .hunks
             .iter()
-            .flat_map(|height| &height.lines)
+            .flat_map(|hunk| &hunk.lines)
             .filter(|line| line.kind == Kind::Add)
             .count();
         self.del = self
             .hunks
             .iter()
-            .flat_map(|height_value| &height_value.lines)
-            .filter(|line_value| line_value.kind == Kind::Del)
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind == Kind::Del)
             .count();
         self.cat = categorize(&self.path);
-        let mut height_2 = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
 
-        (&self.path, self.binary, self.status as u8).hash(&mut height_2);
+        (&self.path, self.binary, self.status as u8).hash(&mut hasher);
 
-        for line_3 in self
+        for line in self
             .hunks
             .iter()
-            .flat_map(|height_3| &height_3.lines)
-            .filter(|line_2| line_2.kind != Kind::Ctx)
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind != Kind::Ctx)
         {
-            (line_3.kind as u8, &line_3.text).hash(&mut height_2);
+            (line.kind as u8, &line.text).hash(&mut hasher);
         }
 
-        self.hash = height_2.finish();
+        self.hash = hasher.finish();
     }
     /// The new-side line of the 1st change (deleted file: 1).
     pub(crate) fn first_line(&self) -> u32 {
         self.hunks
             .iter()
-            .flat_map(|height| &height.lines)
+            .flat_map(|hunk| &hunk.lines)
             .find(|line| line.kind != Kind::Ctx)
-            .and_then(|line_value| line_value.new.or(line_value.old))
+            .and_then(|line| line.new.or(line.old))
             .unwrap_or(1)
     }
 }
@@ -120,7 +120,7 @@ impl DiffParser {
     }
 }
 
-fn line_number(range: Option<&str>) -> u32 {
+fn range_start(range: Option<&str>) -> u32 {
     range
         .and_then(|range| range[1..].split(',').next())
         .and_then(|number| number.parse::<u32>().ok())
@@ -148,12 +148,11 @@ fn update_file_header(file: &mut FileDiff, line: &str) {
 
 /// Review order: category, then the most changed lines first, then the path.
 pub(crate) fn order(files: &mut [FileDiff]) {
-    files.sort_by(|agent, bytes| {
-        agent
-            .cat
-            .cmp(&bytes.cat)
-            .then((bytes.add + bytes.del).cmp(&(agent.add + agent.del)))
-            .then(agent.path.cmp(&bytes.path))
+    files.sort_by(|left, right| {
+        left.cat
+            .cmp(&right.cat)
+            .then((right.add + right.del).cmp(&(left.add + left.del)))
+            .then(left.path.cmp(&right.path))
     });
 }
 /// A new-file diff of untracked file PATH in DIR.
@@ -162,7 +161,7 @@ pub(crate) fn untracked(dir: &Path, path: &str) -> FileDiff {
 
     file.status = Status::New;
     let full = dir.join(path);
-    let big = std::fs::metadata(&full).map_or(true, |message| message.len() > MAX_FILE);
+    let big = std::fs::metadata(&full).map_or(true, |metadata| metadata.len() > MAX_FILE);
 
     match (big, std::fs::read(&full)) {
         (false, Ok(bytes)) if !bytes.contains(&0) => {
@@ -201,34 +200,34 @@ pub(crate) fn z_paths(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn begin_file(header: &str, model_state: &mut DiffParser) {
-    model_state.flush();
+fn begin_file(header: &str, parser: &mut DiffParser) {
+    parser.flush();
     let path = header
         .rsplit_once(" b/")
         .map_or(header, |(_, path)| path)
         .trim_matches('"')
         .to_string();
 
-    model_state.files.push(FileDiff::new(path));
+    parser.files.push(FileDiff::new(path));
 }
 
-fn begin_hunk(header: &str, model_state: &mut DiffParser) {
-    model_state.flush();
+fn begin_hunk(header: &str, parser: &mut DiffParser) {
+    parser.flush();
     let (ranges, context) = header.split_once(" @@").unwrap_or((header, ""));
     let mut ranges = ranges.split(' ');
 
-    model_state.old_line = line_number(ranges.next());
-    model_state.new_line = line_number(ranges.next());
-    model_state.hunk = Some(Hunk {
+    parser.old_line = range_start(ranges.next());
+    parser.new_line = range_start(ranges.next());
+    parser.hunk = Some(Hunk {
         ctx: context.trim().to_string(),
-        old: model_state.old_line,
-        new: model_state.new_line,
+        old: parser.old_line,
+        new: parser.new_line,
         lines: Vec::new(),
     });
 }
 
-fn hunk_line(line: &str, model_state: &mut DiffParser) {
-    let Some(hunk) = model_state.hunk.as_mut() else { return };
+fn hunk_line(line: &str, parser: &mut DiffParser) {
+    let Some(hunk) = parser.hunk.as_mut() else { return };
 
     let (kind, text) = match line.as_bytes().first() {
         Some(b'+') => (Kind::Add, &line[1..]),
@@ -239,17 +238,17 @@ fn hunk_line(line: &str, model_state: &mut DiffParser) {
     };
 
     let (old, new) = match kind {
-        Kind::Ctx => (Some(model_state.old_line), Some(model_state.new_line)),
-        Kind::Add => (None, Some(model_state.new_line)),
-        Kind::Del => (Some(model_state.old_line), None),
+        Kind::Ctx => (Some(parser.old_line), Some(parser.new_line)),
+        Kind::Add => (None, Some(parser.new_line)),
+        Kind::Del => (Some(parser.old_line), None),
     };
 
     if kind != Kind::Add {
-        model_state.old_line += 1;
+        parser.old_line += 1;
     }
 
     if kind != Kind::Del {
-        model_state.new_line += 1;
+        parser.new_line += 1;
     }
 
     hunk.lines.push(DLine {

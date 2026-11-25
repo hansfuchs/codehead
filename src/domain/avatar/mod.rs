@@ -59,7 +59,7 @@ impl Cat {
     }
 
     fn parse(text: &str) -> Option<Cat> {
-        CATS.into_iter().find(|character| character.name() == text)
+        CATS.into_iter().find(|cat| cat.name() == text)
     }
 }
 
@@ -94,7 +94,7 @@ impl Status {
     }
 
     fn index(self) -> usize {
-        STATUSES.iter().position(|text| *text == self).unwrap_or(2)
+        STATUSES.iter().position(|status| *status == self).unwrap_or(2)
     }
 }
 
@@ -133,23 +133,23 @@ impl Avatar {
             return None;
         }
 
-        let mut agent = Avatar {
+        let mut avatar = Avatar {
             cat,
             idx,
             eyes: None,
             speed: 1.0,
         };
 
-        parse_avatar_options(words, &mut agent);
+        parse_avatar_options(words, &mut avatar);
 
-        Some(agent)
+        Some(avatar)
     }
 
     pub(crate) fn id(&self) -> String {
         let mut text = format!("{}:{}", self.cat.name(), self.idx);
 
-        if let Some(error) = self.eyes {
-            let _ = write!(text, " eyes={error}");
+        if let Some(pattern) = self.eyes {
+            let _ = write!(text, " eyes={pattern}");
         }
 
         if self.speed.to_bits() != 1.0_f32.to_bits() {
@@ -169,83 +169,83 @@ impl Avatar {
 
     fn look(&self) -> regi::Look {
         regi::Look {
-            pattern: self.eyes.map(|key| regi::PATTERNS[key]),
+            pattern: self.eyes.map(|index| regi::PATTERNS[index]),
             speed: self.speed,
         }
     }
 
     /// The 4 rows (7 cells each) at time T (s) for status S.
-    pub(crate) fn rows(&self, text: Status, thread: f32) -> [String; HEIGHT] {
-        rows(&self.cells(text, thread))
+    pub(crate) fn rows(&self, status: Status, time: f32) -> [String; HEIGHT] {
+        rows(&self.cells(status, time))
     }
 
     /// The 4 rows at time T for status S and the tone of each cell (0..1 of the color, row by row;
     /// regi: by line coverage, see `regi::render_toned`; geo: 1).
-    pub(crate) fn toned(&self, text: Status, thread: f32) -> ([String; HEIGHT], Vec<f32>) {
+    pub(crate) fn toned(&self, status: Status, time: f32) -> ([String; HEIGHT], Vec<f32>) {
         match self.cat {
             Cat::Regi => {
-                let (cells, tones) = regi::render_toned(&regi::all()[self.idx], text.index(), thread, self.look());
+                let (cells, tones) = regi::render_toned(&regi::all()[self.idx], status.index(), time, self.look());
 
                 (rows(&cells), tones)
             }
-            _ => (self.rows(text, thread), vec![1.0; WIDTH * HEIGHT]),
+            _ => (self.rows(status, time), vec![1.0; WIDTH * HEIGHT]),
         }
     }
 
-    pub(crate) fn cells(&self, text: Status, thread: f32) -> Vec<glyph::Cell> {
+    pub(crate) fn cells(&self, status: Status, time: f32) -> Vec<glyph::Cell> {
         match self.cat {
-            Cat::Regi => regi::render(&regi::all()[self.idx], text.index(), thread, self.look()),
+            Cat::Regi => regi::render(&regi::all()[self.idx], status.index(), time, self.look()),
             Cat::Geo => {
-                let (value, output) = geo_view(
+                let (view, opts) = geo_view(
                     geo_at(self.idx).0,
-                    text,
-                    thread * self.speed,
+                    status,
+                    time * self.speed,
                     self.idx as f32 * 1.7,
-                    (thread * 30.0) as usize,
+                    (time * 30.0) as usize,
                 );
 
-                glyph::render(&value, WIDTH, HEIGHT, output)
+                glyph::render(&view, WIDTH, HEIGHT, opts)
             }
             Cat::GeoB => {
-                let (value_value, output_value) = geo_view(
+                let (view, opts) = geo_view(
                     geo_at(self.idx).0,
-                    text,
-                    thread * self.speed,
+                    status,
+                    time * self.speed,
                     self.idx as f32 * 1.7,
-                    (thread * 30.0) as usize,
+                    (time * 30.0) as usize,
                 );
 
-                glyph::outline(&value_value, WIDTH, HEIGHT, output_value)
+                glyph::outline(&view, WIDTH, HEIGHT, opts)
             }
         }
     }
 }
 
-fn parse_avatar_options(words: std::str::SplitWhitespace<'_>, agent: &mut Avatar) {
-    for width in words {
-        match width.split_once('=') {
-            Some(("eyes", value)) => agent.eyes = value.parse().ok().filter(|&key| key < regi::PATTERNS.len()),
-            Some(("speed", value_value)) => {
-                parse_avatar_speed(agent, value_value);
+fn parse_avatar_options(words: std::str::SplitWhitespace<'_>, avatar: &mut Avatar) {
+    for word in words {
+        match word.split_once('=') {
+            Some(("eyes", eyes)) => avatar.eyes = eyes.parse().ok().filter(|&index| index < regi::PATTERNS.len()),
+            Some(("speed", speed)) => {
+                parse_avatar_speed(avatar, speed);
             }
             _ => {}
         }
     }
 }
 
-fn parse_avatar_speed(agent: &mut Avatar, value_value: &str) {
-    agent.speed = value_value
+fn parse_avatar_speed(avatar: &mut Avatar, speed: &str) {
+    avatar.speed = speed
         .parse()
         .ok()
-        .filter(|text: &f32| text.is_finite() && *text > 0.0)
+        .filter(|parsed: &f32| parsed.is_finite() && *parsed > 0.0)
         .unwrap_or(1.0);
 }
 
 fn rows(cells: &[glyph::Cell]) -> [String; HEIGHT] {
-    std::array::from_fn(|result| {
-        cells[result * WIDTH..(result + 1) * WIDTH]
+    std::array::from_fn(|row| {
+        cells[row * WIDTH..(row + 1) * WIDTH]
             .iter()
-            .map(|character| character.ch)
+            .map(|cell| cell.ch)
             .collect()
     })
 }
@@ -255,8 +255,8 @@ pub(crate) fn now() -> f32 {
     static T0: OnceLock<Instant> = OnceLock::new();
 
     #[cfg(test)]
-    if let Some(thread) = FROZEN.with(std::cell::Cell::get) {
-        return thread;
+    if let Some(frozen) = FROZEN.with(std::cell::Cell::get) {
+        return frozen;
     }
 
     T0.get_or_init(Instant::now).elapsed().as_secs_f32()
@@ -268,10 +268,10 @@ thread_local! {
     static FROZEN: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
 }
 
-/// Freeze [`now`] of this thread at T (None: the real clock again).
+/// Freeze [`now`] of this time at T (None: the real clock again).
 #[cfg(test)]
-pub(crate) fn freeze(thread: Option<f32>) {
-    FROZEN.with(|character| character.set(thread));
+pub(crate) fn freeze(time: Option<f32>) {
+    FROZEN.with(|clock| clock.set(time));
 }
 
 fn geo_at(i: usize) -> (sdf::Shape, String) {
@@ -286,26 +286,26 @@ fn geo_at(i: usize) -> (sdf::Shape, String) {
 
 /// A geo avatar at time T in braille: the view and render options of status S. The 6 first
 /// solids turn by status; geo shapes play their own motion, slowed or stopped by status.
-fn geo_view(shape: sdf::Shape, text: Status, thread: f32, phase: f32, frame: usize) -> (sdf::View, glyph::Opts) {
+fn geo_view(shape: sdf::Shape, status: Status, time: f32, phase: f32, frame: usize) -> (sdf::View, glyph::Opts) {
     use sdf::Shape;
     let mut view = sdf::View::new(shape);
-    let mut output = glyph::Opts::new();
+    let mut opts = glyph::Opts::new();
 
-    output.floor = 0.3;
+    opts.floor = 0.3;
     view.zoom = 1.15;
 
-    let tt = match text {
-        Status::Working => thread,
-        Status::Thinking => thread * 0.6,
-        Status::Idle => thread * 0.25,
+    let motion_time = match status {
+        Status::Working => time,
+        Status::Thinking => time * 0.6,
+        Status::Idle => time * 0.25,
         Status::Blocked => 1.0 + phase,
         Status::Done => phase,
     };
 
-    view.time = tt;
+    view.time = motion_time;
 
     if let Shape::Geo(i) = shape {
-        (view.yaw, view.pitch, view.roll) = geo::all()[i as usize].pose(tt);
+        (view.yaw, view.pitch, view.roll) = geo::all()[i as usize].pose(motion_time);
     } else {
         view.pitch = if matches!(shape, Shape::Monolith | Shape::Pillar | Shape::Pyramid) {
             0.15
@@ -313,22 +313,22 @@ fn geo_view(shape: sdf::Shape, text: Status, thread: f32, phase: f32, frame: usi
             0.45
         };
 
-        view.yaw = match text {
-            Status::Working => thread * 1.8 + phase,
-            Status::Thinking => 0.5 * (thread * 0.7 + phase).sin(),
-            Status::Idle => 0.35 * (thread * 0.5 + phase).sin(),
+        view.yaw = match status {
+            Status::Working => time * 1.8 + phase,
+            Status::Thinking => 0.5 * (time * 0.7 + phase).sin(),
+            Status::Idle => 0.35 * (time * 0.5 + phase).sin(),
             _ => 0.4,
         };
     }
 
-    match text {
-        Status::Thinking => output.jitter = frame / 3,
-        Status::Blocked if (thread * 0.8 + phase).fract() < 0.25 => view.yaw += (thread * 45.0).sin() * 0.12,
-        Status::Done => output.gain = 0.55,
+    match status {
+        Status::Thinking => opts.jitter = frame / 3,
+        Status::Blocked if (time * 0.8 + phase).fract() < 0.25 => view.yaw += (time * 45.0).sin() * 0.12,
+        Status::Done => opts.gain = 0.55,
         _ => {}
     }
 
-    (view, output)
+    (view, opts)
 }
 
 /// A spawn under way: animation ANIM of avatar A, started at START (`now()`).
@@ -349,11 +349,11 @@ pub(crate) const SPAWN_AT: (usize, usize) = (3, 1);
 impl Spawn {
     /// A random animation none of TAKEN (the ones playing), starting now.
     pub(crate) fn random_except(taken: &[usize]) -> Spawn {
-        let count_value = std::time::SystemTime::now()
+        let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |directory| u64::from(directory.subsec_nanos()));
+            .map_or(0, |elapsed| u64::from(elapsed.subsec_nanos()));
         let count = spawn::count();
-        let mut anim = (regi::hash(count_value) * count as f32) as usize % count;
+        let mut anim = (regi::hash(nanos) * count as f32) as usize % count;
 
         // the next free one (all taken: any)
         find_unused_animation(taken, count, &mut anim);
@@ -386,23 +386,23 @@ impl Spawn {
 
     /// The shape the goo forms: the frame of status S at the snap (the 1st frame the status
     /// animation shows after the spawn: 0 jump at the snap).
-    fn target(&self, agent: &Avatar, text: Status) -> Vec<glyph::Cell> {
-        agent.cells(text, self.start + spawn::timing(self.anim).2)
+    fn target(&self, avatar: &Avatar, status: Status) -> Vec<glyph::Cell> {
+        avatar.cells(status, self.start + spawn::timing(self.anim).2)
     }
 
     /// The 13x6 canvas rows of A (the sprite at `SPAWN_AT`), status S after the snap. None: over.
-    pub(crate) fn rows(&self, agent: &Avatar, text: Status) -> Option<[String; SPAWN_H]> {
+    pub(crate) fn rows(&self, avatar: &Avatar, status: Status) -> Option<[String; SPAWN_H]> {
         if self.done() {
             return None;
         }
 
-        let live = |_: f32| agent.cells(text, now());
-        let cells = spawn::render(self.anim, &self.target(agent, text), &live, now() - self.start);
+        let live = |_: f32| avatar.cells(status, now());
+        let cells = spawn::render(self.anim, &self.target(avatar, status), &live, now() - self.start);
 
-        Some(std::array::from_fn(|result| {
-            cells[result * SPAWN_W..(result + 1) * SPAWN_W]
+        Some(std::array::from_fn(|row| {
+            cells[row * SPAWN_W..(row + 1) * SPAWN_W]
                 .iter()
-                .map(|character| character.ch)
+                .map(|cell| cell.ch)
                 .collect()
         }))
     }
@@ -410,7 +410,7 @@ impl Spawn {
 
 fn find_unused_animation(taken: &[usize], count: usize, anim: &mut usize) {
     for _ in 0..count {
-        if let ControlFlow::Break(()) = skip_taken_animation(taken, *anim) {
+        if let ControlFlow::Break(()) = stop_at_free_animation(taken, *anim) {
             break;
         }
 
@@ -418,7 +418,7 @@ fn find_unused_animation(taken: &[usize], count: usize, anim: &mut usize) {
     }
 }
 
-fn skip_taken_animation(taken: &[usize], anim: usize) -> ControlFlow<()> {
+fn stop_at_free_animation(taken: &[usize], anim: usize) -> ControlFlow<()> {
     if !taken.contains(&anim) {
         return ControlFlow::Break(());
     }

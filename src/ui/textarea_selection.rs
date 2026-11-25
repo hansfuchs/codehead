@@ -2,16 +2,16 @@ use super::{Pos, TextArea, is_word};
 
 impl TextArea {
     pub(super) fn range(&self) -> Option<(Pos, Pos)> {
-        let agent = self.anchor?;
+        let anchor = self.anchor?;
 
-        if agent == self.cur {
+        if anchor == self.cur {
             return None;
         }
 
-        Some(if agent < self.cur {
-            (agent, self.cur)
+        Some(if anchor < self.cur {
+            (anchor, self.cur)
         } else {
-            (self.cur, agent)
+            (self.cur, anchor)
         })
     }
 
@@ -19,39 +19,39 @@ impl TextArea {
         collect_selected_text(self)
     }
 
-    pub(super) fn delete_range(&mut self, mut agent: Pos, mut bytes: Pos) {
+    pub(super) fn delete_range(&mut self, mut from: Pos, mut to: Pos) {
         if let Some((start, _)) = self
-            .atomic_ranges(agent.row)
+            .atomic_ranges(from.row)
             .into_iter()
-            .find(|&(start, end)| agent.col > start && agent.col < end)
+            .find(|&(start, end)| from.col > start && from.col < end)
         {
-            agent.col = start;
+            from.col = start;
         }
 
         if let Some((_, end)) = self
-            .atomic_ranges(bytes.row)
+            .atomic_ranges(to.row)
             .into_iter()
-            .find(|&(start, end)| bytes.col > start && bytes.col < end)
+            .find(|&(start, end)| to.col > start && to.col < end)
         {
-            bytes.col = end;
+            to.col = end;
         }
 
-        let tail: Vec<char> = self.lines[bytes.row][bytes.col..].to_vec();
+        let tail: Vec<char> = self.lines[to.row][to.col..].to_vec();
 
-        self.lines[agent.row].truncate(agent.col);
-        self.lines[agent.row].extend(tail);
+        self.lines[from.row].truncate(from.col);
+        self.lines[from.row].extend(tail);
 
-        if bytes.row > agent.row {
-            self.lines.drain(agent.row + 1..=bytes.row);
+        if to.row > from.row {
+            self.lines.drain(from.row + 1..=to.row);
         }
 
-        self.cur = agent;
+        self.cur = from;
         self.anchor = None;
     }
 
     pub(super) fn delete_selection(&mut self) -> bool {
-        if let Some((agent, bytes)) = self.range() {
-            self.delete_range(agent, bytes);
+        if let Some((from, to)) = self.range() {
+            self.delete_range(from, to);
             true
         } else {
             self.anchor = None;
@@ -59,33 +59,33 @@ impl TextArea {
         }
     }
 
-    pub(super) fn select_word(&mut self, path: Pos) {
-        select_word_at(self, path);
+    pub(super) fn select_word(&mut self, pos: Pos) {
+        select_word_at(self, pos);
     }
 
     pub(crate) fn select_all(&mut self) {
         self.anchor = Some(Pos::default());
-        let result = self.lines.len() - 1;
+        let last = self.lines.len() - 1;
 
         self.cur = Pos {
-            row: result,
-            col: self.lines[result].len(),
+            row: last,
+            col: self.lines[last].len(),
         };
     }
 }
 
-fn collect_selected_text(widget_state: &TextArea) -> Option<String> {
-    let (agent, bytes) = widget_state.range()?;
+fn collect_selected_text(ta: &TextArea) -> Option<String> {
+    let (start, end) = ta.range()?;
     let mut out = String::new();
 
-    for row_value in agent.row..=bytes.row {
-        let line = &widget_state.lines[row_value];
-        let text = if row_value == agent.row { agent.col } else { 0 };
-        let error = if row_value == bytes.row { bytes.col } else { line.len() };
+    for row in start.row..=end.row {
+        let line = &ta.lines[row];
+        let from = if row == start.row { start.col } else { 0 };
+        let to = if row == end.row { end.col } else { line.len() };
 
-        out.extend(&line[text..error]);
+        out.extend(&line[from..to]);
 
-        if row_value != bytes.row {
+        if row != end.row {
             out.push('\n');
         }
     }
@@ -93,9 +93,9 @@ fn collect_selected_text(widget_state: &TextArea) -> Option<String> {
     Some(out)
 }
 
-fn select_word_at(widget_state: &mut TextArea, path: Pos) {
-    let line = &widget_state.lines[path.row];
-    let (mut agent, mut bytes) = (path.col, path.col);
+fn select_word_at(ta: &mut TextArea, pos: Pos) {
+    let line = &ta.lines[pos.row];
+    let (mut start, mut end) = (pos.col, pos.col);
 
     let class = |character: char| {
         if is_word(character) {
@@ -107,27 +107,24 @@ fn select_word_at(widget_state: &mut TextArea, path: Pos) {
         }
     };
 
-    let key = line
-        .get(path.col)
-        .or(path.col.checked_sub(1).and_then(|i| line.get(i)))
-        .map(|&character_value| class(character_value));
+    let class_at = line
+        .get(pos.col)
+        .or(pos.col.checked_sub(1).and_then(|i| line.get(i)))
+        .map(|&ch| class(ch));
 
-    if let Some(key_value) = key {
-        while agent > 0 && class(line[agent - 1]) == key_value {
-            agent -= 1;
+    if let Some(class_of) = class_at {
+        while start > 0 && class(line[start - 1]) == class_of {
+            start -= 1;
         }
 
-        while bytes < line.len() && class(line[bytes]) == key_value {
-            bytes += 1;
+        while end < line.len() && class(line[end]) == class_of {
+            end += 1;
         }
     }
 
-    widget_state.anchor = Some(Pos {
-        row: path.row,
-        col: agent,
+    ta.anchor = Some(Pos {
+        row: pos.row,
+        col: start,
     });
-    widget_state.cur = Pos {
-        row: path.row,
-        col: bytes,
-    };
+    ta.cur = Pos { row: pos.row, col: end };
 }

@@ -2,11 +2,11 @@ use super::Cat;
 
 /// Category of PATH by its name and dirs (heuristics; an agent ranking can replace them).
 pub(crate) fn categorize(path: &str) -> Cat {
-    let path_value = path.to_ascii_lowercase();
-    let name = path_value.rsplit('/').next().unwrap_or(&path_value);
-    let dirs: Vec<&str> = path_value.split('/').collect();
+    let lowered = path.to_ascii_lowercase();
+    let name = lowered.rsplit('/').next().unwrap_or(&lowered);
+    let dirs: Vec<&str> = lowered.split('/').collect();
     let dirs = &dirs[..dirs.len().saturating_sub(1)];
-    let ext = name.rsplit_once('.').map_or("", |(_, error)| error);
+    let ext = name.rsplit_once('.').map_or("", |(_, extension)| extension);
 
     if is_generated(name, dirs, ext) {
         return Cat::Generated;
@@ -70,7 +70,7 @@ fn is_generated(name: &str, dirs: &[&str], ext: &str) -> bool {
         })
 }
 fn is_test(name: &str, dirs: &[&str]) -> bool {
-    dirs.iter().any(|directory_value| {
+    dirs.iter().any(|dir| {
         [
             "test",
             "tests",
@@ -81,7 +81,7 @@ fn is_test(name: &str, dirs: &[&str]) -> bool {
             "fixtures",
             "testdata",
         ]
-        .contains(directory_value)
+        .contains(dir)
     }) || name.contains(".test.")
         || name.contains(".spec.")
         || name.contains("_test.")
@@ -96,9 +96,9 @@ fn is_document(name: &str, dirs: &[&str], ext: &str) -> bool {
 }
 fn is_schema(name: &str, dirs: &[&str], ext: &str) -> bool {
     ["sql", "proto", "graphql", "gql", "prisma"].contains(&ext)
-        || dirs.iter().any(|directory_2| {
-            directory_2.contains("migration") || *directory_2 == "schema" || *directory_2 == "schemas"
-        })
+        || dirs
+            .iter()
+            .any(|dir| dir.contains("migration") || *dir == "schema" || *dir == "schemas")
         || name.contains("schema")
         || name.contains("openapi")
         || name.contains("swagger")
@@ -110,13 +110,13 @@ fn is_configuration(name: &str, dirs: &[&str], ext: &str) -> bool {
     .contains(&ext)
         || ["dockerfile", "makefile", "justfile", ".gitignore", ".editorconfig"].contains(&name)
         || name.contains(".config.")
-        || dirs.first().is_some_and(|directory_3| {
-            *directory_3 == ".github" || *directory_3 == "config" || *directory_3 == ".vscode"
-        })
+        || dirs
+            .first()
+            .is_some_and(|top| *top == ".github" || *top == "config" || *top == ".vscode")
 }
 fn is_interface(dirs: &[&str], ext: &str) -> bool {
     ["css", "scss", "sass", "less", "html", "svelte", "vue", "astro", "svg"].contains(&ext)
-        || dirs.iter().any(|directory_4| {
+        || dirs.iter().any(|dir| {
             [
                 "components",
                 "ui",
@@ -127,6 +127,6 @@ fn is_interface(dirs: &[&str], ext: &str) -> bool {
                 "public",
                 "assets",
             ]
-            .contains(directory_4)
+            .contains(dir)
         })
 }

@@ -1,10 +1,10 @@
 use super::*;
 
 fn ta(text: &str) -> TextArea {
-    let mut thread = TextArea::new(false, "");
+    let mut input = TextArea::new(false, "");
 
-    thread.set_text(text);
-    thread
+    input.set_text(text);
+    input
 }
 
 #[test]
@@ -25,271 +25,271 @@ fn sent_text_drops_trailing_empty_list_items() {
 
 #[test]
 fn markdown_lists_continue_and_outdent() {
-    let key_value = |character: KeyCode| KeyEvent::new(character, KeyModifiers::NONE);
-    let mut thread = ta("- a");
+    let press = |code: KeyCode| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut input = ta("- a");
 
-    thread.move_end();
-    thread.key(key_value(KeyCode::Enter));
+    input.move_end();
+    input.key(press(KeyCode::Enter));
 
-    assert_eq!(thread.text(), "- a\n- ");
+    assert_eq!(input.text(), "- a\n- ");
 
-    let mut thread_value = ta("- a\n  - b");
+    let mut input = ta("- a\n  - b");
 
-    thread_value.move_end();
-    thread_value.key(key_value(KeyCode::Enter));
+    input.move_end();
+    input.key(press(KeyCode::Enter));
 
-    assert_eq!(thread_value.text(), "- a\n  - b\n  - ");
+    assert_eq!(input.text(), "- a\n  - b\n  - ");
 
     // backspace on the empty item: 1 layer out, then the marker goes in 1 press
-    thread_value.key(key_value(KeyCode::Backspace));
+    input.key(press(KeyCode::Backspace));
 
-    assert_eq!(thread_value.text(), "- a\n  - b\n- ");
+    assert_eq!(input.text(), "- a\n  - b\n- ");
 
-    thread_value.key(key_value(KeyCode::Backspace));
+    input.key(press(KeyCode::Backspace));
 
-    assert_eq!(thread_value.text(), "- a\n  - b\n");
+    assert_eq!(input.text(), "- a\n  - b\n");
 
     // undo: 1 step per press
-    thread_value.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    input.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
 
-    assert_eq!(thread_value.text(), "- a\n  - b\n- ");
+    assert_eq!(input.text(), "- a\n  - b\n- ");
 
     // enter on an empty item: 1 layer out too
-    let mut thread_2 = ta("    - ");
+    let mut input = ta("    - ");
 
-    thread_2.move_end();
-    thread_2.key(key_value(KeyCode::Enter));
+    input.move_end();
+    input.key(press(KeyCode::Enter));
 
-    assert_eq!(thread_2.text(), "  - ");
+    assert_eq!(input.text(), "  - ");
 
     // numbers count up, check boxes stay open, text after the cursor moves along
-    let mut thread_3 = ta("9. x");
+    let mut input = ta("9. x");
 
-    thread_3.move_end();
-    thread_3.key(key_value(KeyCode::Enter));
+    input.move_end();
+    input.key(press(KeyCode::Enter));
 
-    assert_eq!(thread_3.text(), "9. x\n10. ");
+    assert_eq!(input.text(), "9. x\n10. ");
 
-    let mut thread_4 = ta("* [x] done");
+    let mut input = ta("* [x] done");
 
-    thread_4.move_end();
-    thread_4.newline();
+    input.move_end();
+    input.newline();
 
-    assert_eq!(thread_4.text(), "* [x] done\n* [ ] ");
+    assert_eq!(input.text(), "* [x] done\n* [ ] ");
 
-    let mut thread_5 = ta("- ab");
+    let mut input = ta("- ab");
 
-    thread_5.move_end();
-    thread_5.key(key_value(KeyCode::Left));
-    thread_5.key(key_value(KeyCode::Enter));
+    input.move_end();
+    input.key(press(KeyCode::Left));
+    input.key(press(KeyCode::Enter));
 
-    assert_eq!(thread_5.text(), "- a\n- b");
+    assert_eq!(input.text(), "- a\n- b");
 
     // plain text, a cursor inside the marker, `-x`: plain new line
     for (text, want) in [("ab", "ab\n"), ("-x", "-x\n")] {
-        let mut thread_6 = ta(text);
+        let mut input = ta(text);
 
-        thread_6.move_end();
-        thread_6.key(key_value(KeyCode::Enter));
+        input.move_end();
+        input.key(press(KeyCode::Enter));
 
-        assert_eq!(thread_6.text(), want);
+        assert_eq!(input.text(), want);
     }
 
-    let mut thread_7 = ta("- a");
+    let mut input = ta("- a");
 
-    thread_7.move_start();
-    thread_7.key(key_value(KeyCode::Enter));
+    input.move_start();
+    input.key(press(KeyCode::Enter));
 
-    assert_eq!(thread_7.text(), "\n- a");
+    assert_eq!(input.text(), "\n- a");
 
     // backspace after text of an item: 1 char
-    let mut thread_8 = ta("- a");
+    let mut input = ta("- a");
 
-    thread_8.move_end();
-    thread_8.key(key_value(KeyCode::Backspace));
+    input.move_end();
+    input.key(press(KeyCode::Backspace));
 
-    assert_eq!(thread_8.text(), "- ");
+    assert_eq!(input.text(), "- ");
 
     // backspace on an empty item after a click (anchor = cursor): 0 panic
-    let mut thread_9 = ta("- a\n- ");
+    let mut input = ta("- a\n- ");
 
-    thread_9.move_end();
-    thread_9.anchor = Some(thread_9.cur);
-    thread_9.key(key_value(KeyCode::Backspace));
-    thread_9.key(key_value(KeyCode::Char('x')));
+    input.move_end();
+    input.anchor = Some(input.cur);
+    input.key(press(KeyCode::Backspace));
+    input.key(press(KeyCode::Char('x')));
 
-    assert_eq!(thread_9.text(), "- a\nx");
+    assert_eq!(input.text(), "- a\nx");
 }
 
 #[test]
 fn space_on_empty_list_item_indents() {
-    let key_value = |character: KeyCode| KeyEvent::new(character, KeyModifiers::NONE);
-    let mut thread = ta("- a");
+    let press = |code: KeyCode| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut input = ta("- a");
 
-    thread.move_end();
-    thread.key(key_value(KeyCode::Enter));
+    input.move_end();
+    input.key(press(KeyCode::Enter));
 
     // space on the empty item: 1 layer in, backspace: 1 layer out again
-    thread.key(key_value(KeyCode::Char(' ')));
+    input.key(press(KeyCode::Char(' ')));
 
-    assert_eq!(thread.text(), "- a\n  - ");
+    assert_eq!(input.text(), "- a\n  - ");
 
-    thread.key(key_value(KeyCode::Char(' ')));
+    input.key(press(KeyCode::Char(' ')));
 
-    assert_eq!(thread.text(), "- a\n    - ");
+    assert_eq!(input.text(), "- a\n    - ");
 
-    thread.key(key_value(KeyCode::Backspace));
+    input.key(press(KeyCode::Backspace));
 
-    assert_eq!(thread.text(), "- a\n  - ");
+    assert_eq!(input.text(), "- a\n  - ");
 
     // the next key goes after the marker
-    thread.key(key_value(KeyCode::Char('b')));
+    input.key(press(KeyCode::Char('b')));
 
-    assert_eq!(thread.text(), "- a\n  - b");
+    assert_eq!(input.text(), "- a\n  - b");
 
     // undo: the char, then the indent
-    thread.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    input.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
 
-    assert_eq!(thread.text(), "- a\n  - ");
+    assert_eq!(input.text(), "- a\n  - ");
 
     // numbers + check boxes too
-    let mut thread_value = ta("1. ");
+    let mut input = ta("1. ");
 
-    thread_value.move_end();
-    thread_value.key(key_value(KeyCode::Char(' ')));
+    input.move_end();
+    input.key(press(KeyCode::Char(' ')));
 
-    assert_eq!(thread_value.text(), "  1. ");
+    assert_eq!(input.text(), "  1. ");
 
     // an item with text, a cursor inside the marker: plain space
-    let mut thread_2 = ta("- a");
+    let mut input = ta("- a");
 
-    thread_2.move_end();
-    thread_2.key(key_value(KeyCode::Char(' ')));
+    input.move_end();
+    input.key(press(KeyCode::Char(' ')));
 
-    assert_eq!(thread_2.text(), "- a ");
+    assert_eq!(input.text(), "- a ");
 
-    let mut thread_3 = ta("- ");
+    let mut input = ta("- ");
 
-    thread_3.move_start();
-    thread_3.key(key_value(KeyCode::Char(' ')));
+    input.move_start();
+    input.key(press(KeyCode::Char(' ')));
 
-    assert_eq!(thread_3.text(), " - ");
+    assert_eq!(input.text(), " - ");
 }
 
 #[test]
 fn space_and_backspace_right_after_the_marker_of_an_item_with_text() {
-    let key_value = |character: KeyCode| KeyEvent::new(character, KeyModifiers::NONE);
+    let press = |code: KeyCode| KeyEvent::new(code, KeyModifiers::NONE);
     let undo = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
     let redo = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
 
     // cursor right after `- ` of `- foo`: space → 1 layer in, the cursor stays before `foo`
-    let mut thread = ta("- a\n- foo");
+    let mut input = ta("- a\n- foo");
 
-    thread.move_end();
+    input.move_end();
 
     for _ in 0..3 {
-        thread.key(key_value(KeyCode::Left));
+        input.key(press(KeyCode::Left));
     }
 
-    thread.key(key_value(KeyCode::Char(' ')));
+    input.key(press(KeyCode::Char(' ')));
 
-    assert_eq!(thread.text(), "- a\n  - foo");
+    assert_eq!(input.text(), "- a\n  - foo");
 
-    thread.key(key_value(KeyCode::Char(' ')));
+    input.key(press(KeyCode::Char(' ')));
 
-    assert_eq!(thread.text(), "- a\n    - foo");
+    assert_eq!(input.text(), "- a\n    - foo");
 
-    thread.key(key_value(KeyCode::Char('x')));
+    input.key(press(KeyCode::Char('x')));
 
-    assert_eq!(thread.text(), "- a\n    - xfoo");
+    assert_eq!(input.text(), "- a\n    - xfoo");
 
-    thread.key(key_value(KeyCode::Backspace));
+    input.key(press(KeyCode::Backspace));
 
     // backspace right after the marker: 1 layer out
-    thread.key(key_value(KeyCode::Backspace));
+    input.key(press(KeyCode::Backspace));
 
-    assert_eq!(thread.text(), "- a\n  - foo");
+    assert_eq!(input.text(), "- a\n  - foo");
 
-    thread.key(key_value(KeyCode::Backspace));
+    input.key(press(KeyCode::Backspace));
 
-    assert_eq!(thread.text(), "- a\n- foo");
+    assert_eq!(input.text(), "- a\n- foo");
 
     // indent 0 + text: backspace as before (1 char)
-    thread.key(key_value(KeyCode::Backspace));
+    input.key(press(KeyCode::Backspace));
 
-    assert_eq!(thread.text(), "- a\n-foo");
+    assert_eq!(input.text(), "- a\n-foo");
 
     // undo: 1 step per press, back through the layers; redo forward
-    thread.key(undo);
+    input.key(undo);
 
-    assert_eq!(thread.text(), "- a\n- foo");
+    assert_eq!(input.text(), "- a\n- foo");
 
-    thread.key(undo);
+    input.key(undo);
 
-    assert_eq!(thread.text(), "- a\n  - foo");
+    assert_eq!(input.text(), "- a\n  - foo");
 
-    thread.key(undo);
+    input.key(undo);
 
-    assert_list_marker_edits(key_value, redo, thread);
+    assert_list_marker_edits(press, redo, input);
 }
 
-fn assert_list_marker_edits(key_value: impl Fn(KeyCode) -> KeyEvent, redo: KeyEvent, mut thread: TextArea) {
-    assert_eq!(thread.text(), "- a\n    - foo");
+fn assert_list_marker_edits(press: impl Fn(KeyCode) -> KeyEvent, redo: KeyEvent, mut input: TextArea) {
+    assert_eq!(input.text(), "- a\n    - foo");
 
-    thread.key(redo);
+    input.key(redo);
 
-    assert_eq!(thread.text(), "- a\n  - foo");
+    assert_eq!(input.text(), "- a\n  - foo");
 
     // numbers and check boxes: right after the whole marker
-    let mut thread_value = ta("1. one");
+    let mut input = ta("1. one");
 
-    thread_value.move_start();
+    input.move_start();
 
     for _ in 0..3 {
-        thread_value.key(key_value(KeyCode::Right));
+        input.key(press(KeyCode::Right));
     }
 
-    thread_value.key(key_value(KeyCode::Char(' ')));
+    input.key(press(KeyCode::Char(' ')));
 
-    assert_eq!(thread_value.text(), "  1. one");
+    assert_eq!(input.text(), "  1. one");
 
-    let mut thread_2 = ta("* [ ] task");
+    let mut input = ta("* [ ] task");
 
-    thread_2.move_start();
+    input.move_start();
 
     for _ in 0..6 {
-        thread_2.key(key_value(KeyCode::Right));
+        input.key(press(KeyCode::Right));
     }
 
-    thread_2.key(key_value(KeyCode::Char(' ')));
+    input.key(press(KeyCode::Char(' ')));
 
-    assert_eq!(thread_2.text(), "  * [ ] task");
+    assert_eq!(input.text(), "  * [ ] task");
 
-    thread_2.key(key_value(KeyCode::Backspace));
+    input.key(press(KeyCode::Backspace));
 
-    assert_eq!(thread_2.text(), "* [ ] task");
+    assert_eq!(input.text(), "* [ ] task");
 
     // inside the text: plain space / backspace
-    let mut thread_3 = ta("  - foo");
+    let mut input = ta("  - foo");
 
-    thread_3.move_end();
-    thread_3.key(key_value(KeyCode::Left));
-    thread_3.key(key_value(KeyCode::Char(' ')));
+    input.move_end();
+    input.key(press(KeyCode::Left));
+    input.key(press(KeyCode::Char(' ')));
 
-    assert_eq!(thread_3.text(), "  - fo o");
+    assert_eq!(input.text(), "  - fo o");
 
-    thread_3.key(key_value(KeyCode::Backspace));
+    input.key(press(KeyCode::Backspace));
 
-    assert_eq!(thread_3.text(), "  - foo");
+    assert_eq!(input.text(), "  - foo");
 
     // a single-line input: 0 list keys
-    let mut thread_4 = TextArea::new(true, "");
+    let mut input = TextArea::new(true, "");
 
-    thread_4.set_text("- foo");
-    thread_4.move_start();
-    thread_4.key(key_value(KeyCode::Right));
-    thread_4.key(key_value(KeyCode::Right));
-    thread_4.key(key_value(KeyCode::Char(' ')));
+    input.set_text("- foo");
+    input.move_start();
+    input.key(press(KeyCode::Right));
+    input.key(press(KeyCode::Right));
+    input.key(press(KeyCode::Char(' ')));
 
-    assert_eq!(thread_4.text(), "-  foo");
+    assert_eq!(input.text(), "-  foo");
 }

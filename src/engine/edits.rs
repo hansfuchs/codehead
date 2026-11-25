@@ -94,28 +94,28 @@ fn load(id: &str) -> State {
         .unwrap_or_default()
 }
 
-fn save(id: &str, text: &State) {
-    if let Ok(bytes) = serde_json::to_vec_pretty(text) {
+fn save(id: &str, state: &State) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(state) {
         let _ = write_atomic(&path(id), &bytes);
     }
 }
 
 /// Stdout of `git ARGS` in DIR (INDEX: its index file), None on a failure.
 fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Option<String> {
-    let mut character = Command::new("git");
+    let mut command = Command::new("git");
 
-    character
+    command
         .arg("-C")
         .arg(dir)
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null());
 
-    if let Some(i) = index {
-        character.env("GIT_INDEX_FILE", i);
+    if let Some(index) = index {
+        command.env("GIT_INDEX_FILE", index);
     }
 
-    let out = character.output().ok()?;
+    let out = command.output().ok()?;
 
     out.status
         .success()
@@ -140,21 +140,15 @@ pub(crate) fn tree(dir: &Path) -> Option<String> {
     )?;
 
     // 1 name per call: 2 calls in 1 ms (threads, tests) never share a temp index
-
-    let count_value = NEXT_INDEX.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = std::env::temp_dir().join(format!(
-        "codehead-index-{}-{}-{count_value}",
-        std::process::id(),
-        now_ms()
-    ));
+    let sequence = NEXT_INDEX.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("codehead-index-{}-{}-{sequence}", std::process::id(), now_ms()));
 
     // a copy of the real index: its stat cache spares hashing unchanged files
     let _ = std::fs::copy(real.trim(), &tmp);
     let tree = git(dir, &["add", "-A"], Some(&tmp)).and_then(|_| git(dir, &["write-tree"], Some(&tmp)));
     let _ = std::fs::remove_file(&tmp);
 
-    tree.map(|thread| thread.trim().to_string())
-        .filter(|thread_value| !thread_value.is_empty())
+    tree.map(|tree| tree.trim().to_string()).filter(|tree| !tree.is_empty())
 }
 
 /// A new turn of AGENT starts in DIR (`OTHERS_BUSY`: another agent is mid-turn). Records the
@@ -203,10 +197,10 @@ pub(crate) fn writer(id: &str, dir: &Path, path: &str) -> Option<String> {
     st.log
         .iter()
         .rev()
-        .find(|character| {
+        .find(|change| {
             git(
                 dir,
-                &["diff", "--name-only", &character.from, &character.to, "--", path],
+                &["diff", "--name-only", &change.from, &change.to, "--", path],
                 None,
             )
             .is_some_and(|output| !output.trim().is_empty())
@@ -220,13 +214,13 @@ impl State {
     /// stopped (0 agents at work in between) go in the log.
     fn start(&mut self, now: String, ts: u64, agent: &str, others_busy: bool) {
         if !others_busy
-            && let Some(query) = self.quiet.take()
-            && query != now
+            && let Some(quiet) = self.quiet.take()
+            && quiet != now
         {
             self.log.push(Change {
                 ts,
                 by: None,
-                from: query,
+                from: quiet,
                 to: now.clone(),
             });
         }
@@ -236,13 +230,13 @@ impl State {
 
     /// AGENT's turn ends at tree END, time TS: its edits go in the log.
     fn end(&mut self, end: String, ts: u64, agent: &str, all_idle: bool) {
-        if let Some(text) = self.start.remove(agent)
-            && text != end
+        if let Some(start) = self.start.remove(agent)
+            && start != end
         {
             self.log.push(Change {
                 ts,
                 by: Some(agent.to_string()),
-                from: text,
+                from: start,
                 to: end.clone(),
             });
         }
@@ -258,7 +252,7 @@ impl State {
 /// Changes no agent needs any more go; `MAX_LOG` at most.
 fn trim(st: &mut State) {
     if let Some(oldest) = st.seen.values().min().copied() {
-        st.log.retain(|character| character.ts > oldest);
+        st.log.retain(|change| change.ts > oldest);
     }
 
     let count = st.log.len();
@@ -284,12 +278,12 @@ impl File {
         let mut text = self.path.clone();
 
         if !self.new && !self.gone && !self.ranges.is_empty() {
-            let mut result: Vec<String> = self.ranges.iter().take(MAX_RANGES).map(range_label).collect();
+            let mut ranges: Vec<String> = self.ranges.iter().take(MAX_RANGES).map(range_label).collect();
 
-            append_range_remainder(&mut result, self);
+            append_range_remainder(&mut ranges, self);
 
             text.push(':');
-            text.push_str(&result.join(", "));
+            text.push_str(&ranges.join(", "));
         }
 
         let tag = if self.new {
@@ -310,22 +304,22 @@ fn files(diff: &str) -> Vec<File> {
     let mut old: Option<String> = None;
 
     for line in diff.lines() {
-        if let Some(path_value) = line.strip_prefix("--- ") {
-            old = (path_value != "/dev/null").then(|| path_value.trim_start_matches("a/").to_string());
-        } else if let Some(path_2) = line.strip_prefix("+++ ") {
-            let file = diff_file(path_2, old.as_deref());
+        if let Some(path) = line.strip_prefix("--- ") {
+            old = (path != "/dev/null").then(|| path.trim_start_matches("a/").to_string());
+        } else if let Some(path) = line.strip_prefix("+++ ") {
+            let file = diff_file(path, old.as_deref());
 
             out.push(file);
-        } else if let Some(height) = line.strip_prefix("@@ ")
-            && let Some(file_value) = out.last_mut()
+        } else if let Some(hunk) = line.strip_prefix("@@ ")
+            && let Some(file) = out.last_mut()
         {
-            append_range(file_value, height);
+            append_range(file, hunk);
         } else if line.starts_with('+') {
             count_added_line(&mut out);
         } else if line.starts_with('-')
-            && let Some(file_3) = out.last_mut()
+            && let Some(file) = out.last_mut()
         {
-            file_3.del += 1;
+            file.del += 1;
         }
     }
 
@@ -333,8 +327,8 @@ fn files(diff: &str) -> Vec<File> {
 }
 
 fn count_added_line(out: &mut [File]) {
-    if let Some(file_2) = out.last_mut() {
-        file_2.add += 1;
+    if let Some(file) = out.last_mut() {
+        file.add += 1;
     }
 }
 
@@ -343,7 +337,7 @@ fn merged(dir: &Path, log: &[&Change]) -> Vec<File> {
     let mut by_path: BTreeMap<String, File> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
 
-    for character in log {
+    for change in log {
         let diff = git(
             dir,
             &[
@@ -353,8 +347,8 @@ fn merged(dir: &Path, log: &[&Change]) -> Vec<File> {
                 "--no-color",
                 "--no-ext-diff",
                 "--no-renames",
-                &character.from,
-                &character.to,
+                &change.from,
+                &change.to,
             ],
             None,
         )
@@ -367,19 +361,19 @@ fn merged(dir: &Path, log: &[&Change]) -> Vec<File> {
 
     order
         .into_iter()
-        .filter_map(|path_value| by_path.remove(&path_value))
-        .filter(|file_value| file_value.new || file_value.gone || file_value.add + file_value.del > 0)
+        .filter_map(|path| by_path.remove(&path))
+        .filter(|file| file.new || file.gone || file.add + file.del > 0)
         .collect()
 }
 
 fn merge_file_ranges(by_path: &mut BTreeMap<String, File>, order: &mut Vec<String>, file: File) {
-    if let Some(message) = by_path.get_mut(&file.path) {
-        message.add += file.add;
-        message.del += file.del;
-        message.gone = file.gone;
-        message.ranges.extend(file.ranges);
-        message.ranges.sort_unstable();
-        message.ranges.dedup();
+    if let Some(known) = by_path.get_mut(&file.path) {
+        known.add += file.add;
+        known.del += file.del;
+        known.gone = file.gone;
+        known.ranges.extend(file.ranges);
+        known.ranges.sort_unstable();
+        known.ranges.dedup();
     } else {
         order.push(file.path.clone());
         by_path.insert(file.path.clone(), file);
@@ -390,19 +384,19 @@ fn merge_file_ranges(by_path: &mut BTreeMap<String, File>, order: &mut Vec<Strin
 fn note(dir: &Path, log: &[Change], since: u64, agent: &str, mode: Mode) -> Option<Note> {
     let fresh: Vec<&Change> = log
         .iter()
-        .filter(|character| character.ts > since && character.by.as_deref() != Some(agent))
+        .filter(|change| change.ts > since && change.by.as_deref() != Some(agent))
         .collect();
 
     // groups: the owner first, then the agents in the order of their 1st change
     let mut groups: Vec<Option<String>> = Vec::new();
 
-    if fresh.iter().any(|character_value| character_value.by.is_none()) {
+    if fresh.iter().any(|change| change.by.is_none()) {
         groups.push(None);
     }
 
-    for character_2 in &fresh {
-        if character_2.by.is_some() && !groups.contains(&character_2.by) {
-            groups.push(character_2.by.clone());
+    for change in &fresh {
+        if change.by.is_some() && !groups.contains(&change.by) {
+            groups.push(change.by.clone());
         }
     }
 
@@ -434,31 +428,27 @@ fn append_contributor_notes(
     summary: &mut Vec<String>,
 ) {
     for group in groups {
-        let changes: Vec<&Change> = fresh
-            .iter()
-            .copied()
-            .filter(|character_3| character_3.by == *group)
-            .collect();
-        let fs = merged(dir, &changes);
+        let changes: Vec<&Change> = fresh.iter().copied().filter(|change| change.by == *group).collect();
+        let files = merged(dir, &changes);
 
-        if fs.is_empty() {
+        if files.is_empty() {
             continue;
         }
 
         let who = group
             .as_ref()
-            .map_or_else(|| "owner".to_string(), |agent_value| format!("@{agent_value}"));
+            .map_or_else(|| "owner".to_string(), |agent| format!("@{agent}"));
 
         let _ = writeln!(text, "{who}:");
 
-        for file in &fs {
+        for file in &files {
             let _ = writeln!(text, "- {}", file.label());
         }
 
-        let mut shown: Vec<String> = fs.iter().take(3).map(File::label).collect();
+        let mut shown: Vec<String> = files.iter().take(3).map(File::label).collect();
 
-        if fs.len() > 3 {
-            shown.push(format!("+{} more", fs.len() - 3));
+        if files.len() > 3 {
+            shown.push(format!("+{} more", files.len() - 3));
         }
 
         summary.push(format!("{who}: {}", shown.join(", ")));
@@ -505,9 +495,9 @@ fn append_diff_lines(text: &mut String, lines: &[String]) {
 #[path = "edits_tests.rs"]
 mod tests;
 
-fn append_range_remainder(result: &mut Vec<String>, model_state: &File) {
-    if model_state.ranges.len() > MAX_RANGES {
-        result.push("…".into());
+fn append_range_remainder(labels: &mut Vec<String>, file: &File) {
+    if file.ranges.len() > MAX_RANGES {
+        labels.push("…".into());
     }
 }
 
@@ -520,24 +510,24 @@ fn range_label(&(start, end): &(usize, usize)) -> String {
 }
 
 // `@@ -a,b +c,d @@`: new side c..c+d-1 (d 0: lines removed after c)
-fn append_range(file_value: &mut File, height: &str) {
-    let Some(new) = height.split(' ').find(|width| width.starts_with('+')) else {
+fn append_range(file: &mut File, hunk: &str) {
+    let Some(new) = hunk.split(' ').find(|side| side.starts_with('+')) else {
         return;
     };
 
-    let mut it = new[1..].split(',');
-    let character: usize = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-    let directory: usize = it.next().and_then(|x| x.parse().ok()).unwrap_or(1);
+    let mut numbers = new[1..].split(',');
+    let first: usize = numbers.next().and_then(|number| number.parse().ok()).unwrap_or(0);
+    let len: usize = numbers.next().and_then(|number| number.parse().ok()).unwrap_or(1);
 
-    let (agent, bytes) = if directory == 0 {
-        (character.max(1), character.max(1))
+    let (start, end) = if len == 0 {
+        (first.max(1), first.max(1))
     } else {
-        (character, character + directory - 1)
+        (first, first + len - 1)
     };
 
-    match file_value.ranges.last_mut() {
-        Some(last) if agent <= last.1 + 1 => last.1 = last.1.max(bytes),
-        _ => file_value.ranges.push((agent, bytes)),
+    match file.ranges.last_mut() {
+        Some(last) if start <= last.1 + 1 => last.1 = last.1.max(end),
+        _ => file.ranges.push((start, end)),
     }
 }
 
@@ -560,8 +550,8 @@ fn diff_file(path: &str, old: Option<&str>) -> File {
 fn change_diffs(dir: &Path, changes: &[&Change]) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
-    for character_4 in changes {
-        let directory = git(
+    for change in changes {
+        let diff = git(
             dir,
             &[
                 "diff",
@@ -569,14 +559,14 @@ fn change_diffs(dir: &Path, changes: &[&Change]) -> Vec<String> {
                 "-U2",
                 "--no-color",
                 "--no-ext-diff",
-                &character_4.from,
-                &character_4.to,
+                &change.from,
+                &change.to,
             ],
             None,
         )
         .unwrap_or_default();
 
-        lines.extend(directory.lines().map(str::to_string));
+        lines.extend(diff.lines().map(str::to_string));
     }
 
     lines

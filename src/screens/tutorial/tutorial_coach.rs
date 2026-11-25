@@ -2,10 +2,10 @@ use super::{Coach, Event, Kind, MARKER, Member, Path, REPO_EVERY, SEEDED, Task, 
 
 impl Coach {
     pub(crate) fn new(crew: &[Member]) -> Coach {
-        let by = |result: &str| {
+        let by = |role: &str| {
             crew.iter()
-                .find(|message| message.role == result)
-                .map(|message_value| message_value.name.clone())
+                .find(|member| member.role == role)
+                .map(|member| member.name.clone())
         };
 
         let reviewer = by("reviewer");
@@ -21,7 +21,7 @@ impl Coach {
         Coach {
             quests,
             done: Vec::new(),
-            lead: crew.first().map(|message_2| message_2.name.clone()).unwrap_or_default(),
+            lead: crew.first().map(|member| member.name.clone()).unwrap_or_default(),
             builder: by("builder").unwrap_or_default(),
             reviewer,
             owner_msgs: 0,
@@ -32,29 +32,29 @@ impl Coach {
     pub(super) fn order(&self) -> Vec<Task> {
         self.quests
             .iter()
-            .flat_map(|query| query.tasks.iter().copied())
+            .flat_map(|quest| quest.tasks.iter().copied())
             .collect()
     }
     /// The next task (None: all done).
     pub(crate) fn current(&self) -> Option<Task> {
-        self.order().into_iter().find(|thread| !self.done.contains(thread))
+        self.order().into_iter().find(|task| !self.done.contains(task))
     }
-    pub(crate) fn is_done(&self, thread: Task) -> bool {
-        self.done.contains(&thread)
+    pub(crate) fn is_done(&self, task: Task) -> bool {
+        self.done.contains(&task)
     }
     /// The quest of the next task (None: all done).
     pub(crate) fn quest(&self) -> Option<usize> {
         let cur = self.current()?;
 
-        self.quests.iter().position(|query| query.tasks.contains(&cur))
+        self.quests.iter().position(|quest| quest.tasks.contains(&cur))
     }
     /// Every task of the basics done.
     pub(crate) fn basics_done(&self) -> bool {
         self.quests
             .iter()
-            .filter(|query| !query.advanced)
-            .flat_map(|query_value| &query_value.tasks)
-            .all(|thread| self.done.contains(thread))
+            .filter(|quest| !quest.advanced)
+            .flat_map(|quest| &quest.tasks)
+            .all(|task| self.done.contains(task))
     }
     /// The owner may leave as done: the basics done (the advanced quests are optional).
     pub(crate) fn finished(&self) -> bool {
@@ -66,34 +66,34 @@ impl Coach {
             && !self
                 .quests
                 .iter()
-                .filter(|query| query.advanced)
-                .flat_map(|query_value| &query_value.tasks)
-                .any(|thread| self.done.contains(thread))
+                .filter(|quest| quest.advanced)
+                .flat_map(|quest| &quest.tasks)
+                .any(|task| self.done.contains(task))
     }
     /// Task T done, and every task before it (a skipped one never blocks). true: a change.
-    pub(crate) fn reach(&mut self, thread: Task) -> bool {
-        reach_task(self, thread)
+    pub(crate) fn reach(&mut self, task: Task) -> bool {
+        reach_task(self, task)
     }
     /// What to do, the keys.
-    pub(crate) fn text(&self, thread: Task) -> (String, &'static str) {
-        let (lead, bytes) = (&self.lead, &self.builder);
+    pub(crate) fn text(&self, task: Task) -> (String, &'static str) {
+        let (lead, builder) = (&self.lead, &self.builder);
         let side = self.reviewer.as_deref().unwrap_or(lead);
 
-        match (thread, &self.reviewer) {
+        match (task, &self.reviewer) {
             (Task::Send, _) => (format!("send the task to {lead}. it holds a style guide"), "ctrl+enter"),
             (Task::Attach, _) => (
                 format!("click {MARKER} in your message: the files view shows it"),
                 "click",
             ),
-            (Task::Mention, Some(result)) => (
-                format!("back to the chat. call {result} in with a shortcut: @{result} #review"),
+            (Task::Mention, Some(reviewer)) => (
+                format!("back to the chat. call {reviewer} in with a shortcut: @{reviewer} #review"),
                 "F1 · @ · # · ctrl+enter",
             ),
             (Task::Mention, None) => (
                 format!("back to the chat. ask for more with a shortcut: @{lead} #polish"),
                 "F1 · # · ctrl+enter",
             ),
-            (Task::Watch, Some(result_value)) => (format!("watch {result_value} and {bytes} work it out"), "wait"),
+            (Task::Watch, Some(reviewer)) => (format!("watch {reviewer} and {builder} work it out"), "wait"),
             (Task::Watch, None) => (String::new(), ""),
             (Task::Changes, _) => ("see what changed: the changes view".into(), "F2"),
             (Task::Ide, _) => (
@@ -123,30 +123,30 @@ impl Coach {
             (Task::Leave, _) => ("done. leave the tutorial".into(), "esc esc"),
         }
     }
-    /// New events of a thread. true: a change.
+    /// New events of a task. true: a change.
     pub(crate) fn see(&mut self, events: &[Event]) -> bool {
         observe_events(self, events)
     }
     /// T done (+ the tasks before it) once AFTER is done: an advanced task done out of order.
-    pub(super) fn reach_from(&mut self, thread: Task, after: Task) -> bool {
-        if self.is_done(after) { self.reach(thread) } else { false }
+    pub(super) fn reach_from(&mut self, task: Task, after: Task) -> bool {
+        if self.is_done(after) { self.reach(task) } else { false }
     }
     /// The view's state. true: a change.
-    pub(crate) fn see_view(&mut self, path: &crate::screens::thread_view::Peek) -> bool {
+    pub(crate) fn see_view(&mut self, peek: &crate::screens::thread_view::Peek) -> bool {
         let mut moved = false;
 
-        match path.pane {
+        match peek.pane {
             crate::screens::thread_view::Pane::Files => moved |= self.tick(Task::Attach),
             crate::screens::thread_view::Pane::Changes => moved |= self.tick(Task::Changes),
             crate::screens::thread_view::Pane::Merge => moved |= self.tick(Task::MergeView),
             crate::screens::thread_view::Pane::Chat => {}
         }
 
-        if path.ide {
+        if peek.ide {
             moved |= self.tick(Task::Ide);
         }
 
-        if path.menu {
+        if peek.menu {
             moved |= self.tick(Task::Menu) || self.tick(Task::Menu2);
         }
 
@@ -155,9 +155,9 @@ impl Coach {
     /// The repo's git state, while a task waits on it (max. 1 read per `REPO_EVERY`). true: a
     /// change.
     pub(crate) fn see_repo(&mut self, repo: &Path) -> bool {
-        let Some(thread_value) = self
+        let Some(task) = self
             .current()
-            .filter(|thread| matches!(thread, Task::Ide | Task::Stage | Task::Commit | Task::Merged))
+            .filter(|task| matches!(task, Task::Ide | Task::Stage | Task::Commit | Task::Merged))
         else {
             return false;
         };
@@ -177,11 +177,11 @@ impl Coach {
                 .stderr(std::process::Stdio::null())
                 .output()
                 .ok()
-                .map(|output_value| String::from_utf8_lossy(&output_value.stdout).into_owned())
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
                 .unwrap_or_default()
         };
 
-        if thread_value == Task::Merged {
+        if task == Task::Merged {
             return mock_merged(repo) && self.tick(Task::Merged);
         }
 
@@ -190,7 +190,7 @@ impl Coach {
             return self.reach(Task::Commit);
         }
 
-        if thread_value == Task::Stage
+        if task == Task::Stage
             && out(&["diff", "--cached", "--name-only"])
                 .lines()
                 .any(|line| line.trim() == "hello.md")
@@ -202,17 +202,17 @@ impl Coach {
     }
 }
 
-fn reach_task(widget_state: &mut Coach, thread: Task) -> bool {
-    if widget_state.done.contains(&thread) {
+fn reach_task(coach: &mut Coach, task: Task) -> bool {
+    if coach.done.contains(&task) {
         return false;
     }
 
-    for x in widget_state.order() {
-        if !widget_state.done.contains(&x) {
-            widget_state.done.push(x);
+    for step in coach.order() {
+        if !coach.done.contains(&step) {
+            coach.done.push(step);
         }
 
-        if x == thread {
+        if step == task {
             break;
         }
     }
@@ -220,62 +220,58 @@ fn reach_task(widget_state: &mut Coach, thread: Task) -> bool {
     true
 }
 
-fn observe_events(widget_state: &mut Coach, events: &[Event]) -> bool {
+fn observe_events(coach: &mut Coach, events: &[Event]) -> bool {
     let mut moved = false;
 
-    for error in events {
-        observe_event(widget_state, &mut moved, error);
+    for event in events {
+        observe_event(coach, &mut moved, event);
     }
 
     moved
 }
 
-fn observe_event(widget_state: &mut Coach, moved: &mut bool, error: &Event) {
-    match &error.kind {
+fn observe_event(coach: &mut Coach, moved: &mut bool, event: &Event) {
+    match &event.kind {
         Kind::Prompt { from, to, text } if from == "owner" => {
-            observe_prompt(widget_state, moved, to, text);
+            observe_prompt(coach, moved, to, text);
         }
         Kind::Prompt { from, to, .. }
-            if *from == widget_state.builder
-                && widget_state
-                    .reviewer
-                    .as_ref()
-                    .is_some_and(|result_value| to.contains(result_value)) =>
+            if *from == coach.builder && coach.reviewer.as_ref().is_some_and(|reviewer| to.contains(reviewer)) =>
         {
-            widget_state.fixed = true;
+            coach.fixed = true;
         }
-        Kind::TurnEnd { .. } if widget_state.fixed && error.agent.is_some() && error.agent == widget_state.reviewer => {
-            *moved |= widget_state.tick(Task::Watch);
+        Kind::TurnEnd { .. } if coach.fixed && event.agent.is_some() && event.agent == coach.reviewer => {
+            *moved |= coach.tick(Task::Watch);
         }
         Kind::SubThread { state, .. } if state == "running" => {
-            *moved |= widget_state.reach_from(Task::Sub, Task::Commit);
+            *moved |= coach.reach_from(Task::Sub, Task::Commit);
         }
         Kind::SubThread { state, .. } if state == "done" || state == "failed" => {
-            *moved |= widget_state.tick(Task::SubDone);
+            *moved |= coach.tick(Task::SubDone);
         }
-        Kind::Text { text } if error.agent.is_some() && text.contains("/pull/") => {
-            *moved |= widget_state.reach_from(Task::AskPr, Task::Commit);
+        Kind::Text { text } if event.agent.is_some() && text.contains("/pull/") => {
+            *moved |= coach.reach_from(Task::AskPr, Task::Commit);
         }
-        Kind::Flow { op, .. } if op == "finished" => *moved |= widget_state.tick(Task::FlowRun),
+        Kind::Flow { op, .. } if op == "finished" => *moved |= coach.tick(Task::FlowRun),
         _ => {}
     }
 }
 
-fn observe_prompt(widget_state: &mut Coach, moved: &mut bool, to: &[String], text: &str) {
-    widget_state.owner_msgs += 1;
-    let to_reviewer = widget_state
+fn observe_prompt(coach: &mut Coach, moved: &mut bool, to: &[String], text: &str) {
+    coach.owner_msgs += 1;
+    let to_reviewer = coach
         .reviewer
         .as_ref()
-        .is_some_and(|result| to.contains(result) || text.contains(&format!("@{result}")));
+        .is_some_and(|reviewer| to.contains(reviewer) || text.contains(&format!("@{reviewer}")));
 
-    *moved |= widget_state.tick(Task::Send);
+    *moved |= coach.tick(Task::Send);
 
-    if to_reviewer || (widget_state.reviewer.is_none() && widget_state.owner_msgs >= 2) {
+    if to_reviewer || (coach.reviewer.is_none() && coach.owner_msgs >= 2) {
         // the files view skipped: the mention counts all the same
-        if widget_state.current() == Some(Task::Attach) {
-            *moved |= widget_state.reach(Task::Attach);
+        if coach.current() == Some(Task::Attach) {
+            *moved |= coach.reach(Task::Attach);
         }
 
-        *moved |= widget_state.tick(Task::Mention);
+        *moved |= coach.tick(Task::Mention);
     }
 }

@@ -12,7 +12,7 @@ impl App {
             .as_ref()
             .unwrap_or(&self.cfg.cwd)
             .file_name()
-            .map(|count| count.to_string_lossy().into_owned())
+            .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
 
         Draft {
@@ -27,7 +27,7 @@ impl App {
                 .repository
                 .wheres
                 .get(self.repository.where_i)
-                .map(|width| format!("{width:?}"))
+                .map(|choice| format!("{choice:?}"))
                 .unwrap_or_default(),
             checkout: self.repository.checkout,
             stash: self.repository.stash,
@@ -35,18 +35,18 @@ impl App {
                 .compose
                 .files
                 .iter()
-                .filter(|(message, _)| self.compose.prompt.text().contains(message))
-                .map(|(message_value, path)| (message_value.clone(), path.display().to_string()))
+                .filter(|(marker, _)| self.compose.prompt.text().contains(marker))
+                .map(|(marker, path)| (marker.clone(), path.display().to_string()))
                 .collect(),
             carry: self
                 .compose
                 .carry
                 .iter()
-                .map(|character| {
+                .map(|session| {
                     (
-                        character.thread.clone(),
-                        character.path.display().to_string(),
-                        character.title.clone(),
+                        session.thread.clone(),
+                        session.path.display().to_string(),
+                        session.title.clone(),
                     )
                 })
                 .collect(),
@@ -61,16 +61,16 @@ impl App {
             return;
         }
 
-        let directory = self.draft();
-        let content = directory.content();
+        let draft = self.draft();
+        let content = draft.content();
 
         if content == self.draft_selection.draft_saved {
             return;
         }
 
-        if directory.is_empty() {
+        if draft.is_empty() {
             drafts::remove(&self.cfg.drafts, &self.draft_selection.draft_id);
-        } else if let Err(error) = drafts::save(&self.cfg.drafts, &directory) {
+        } else if let Err(error) = drafts::save(&self.cfg.drafts, &draft) {
             self.toast(format!("draft not saved: {error}"), true);
         }
 
@@ -85,19 +85,19 @@ impl App {
     /// ctrl+s: the task as a kept draft (0 cleanup by age), the form empty for the next one. The
     /// drafts row loads it later.
     pub(super) fn save_draft(&mut self) {
-        let mut directory = self.draft();
+        let mut draft = self.draft();
 
-        if directory.is_empty() {
+        if draft.is_empty() {
             return self.toast("0 title, 0 prompt: nothing to save", true);
         }
 
-        directory.kept = true;
+        draft.kept = true;
 
-        if let Err(error) = drafts::save(&self.cfg.drafts, &directory) {
+        if let Err(error) = drafts::save(&self.cfg.drafts, &draft) {
             return self.toast(format!("draft not saved: {error}"), true);
         }
 
-        let name = directory.name();
+        let name = draft.name();
 
         // a new id first: clear_task drops the draft of the id on screen
         self.draft_selection.draft_id = drafts::new_id();
@@ -124,7 +124,7 @@ impl App {
             self.repository
                 .wheres
                 .iter()
-                .position(|worktree| *worktree == Where::NewWorktree)
+                .position(|choice| *choice == Where::NewWorktree)
                 .unwrap_or(0)
         } else {
             0
@@ -134,17 +134,11 @@ impl App {
             .cfg
             .picks
             .iter()
-            .filter(|count| self.agent_list.agents.iter().any(|agent| &agent.name == *count))
+            .filter(|pick| self.agent_list.agents.iter().any(|agent| &agent.name == *pick))
             .cloned()
             .collect();
 
-        if picks.is_empty()
-            && self
-                .agent_list
-                .agents
-                .iter()
-                .any(|agent_value| agent_value.name == self.cfg.agent)
-        {
+        if picks.is_empty() && self.agent_list.agents.iter().any(|agent| agent.name == self.cfg.agent) {
             picks.push(self.cfg.agent.clone());
         }
 
@@ -205,8 +199,8 @@ impl App {
             return;
         }
 
-        let set = |app: &mut App, character: usize| {
-            drafts_key_message(app, character);
+        let set = |app: &mut App, cursor: usize| {
+            set_drafts_cursor(app, cursor);
         };
 
         let armed = self.draft_selection.draft_armed.take() == Some(cur);
@@ -222,7 +216,7 @@ impl App {
                 self.toast("d again: delete the draft", false);
             }
             KeyCode::Char('d') | KeyCode::Delete => {
-                drafts_key_directory(self, cur, count, set);
+                delete_draft(self, cur, count, set);
             }
             _ => {}
         }
@@ -233,24 +227,24 @@ impl App {
     pub(super) fn load_draft(&mut self, i: usize) {
         self.draft_selection.drafts_menu = None;
 
-        let Some(directory) = self.draft_selection.drafts.get(i).cloned() else {
+        let Some(draft) = self.draft_selection.drafts.get(i).cloned() else {
             return;
         };
 
-        self.draft_selection.draft_id.clone_from(&directory.id);
-        self.draft_selection.draft_kept = directory.kept;
-        self.compose.title.set_text(&directory.title);
-        self.compose.prompt.set_text(&directory.prompt);
-        self.note_list.selected = directory
+        self.draft_selection.draft_id.clone_from(&draft.id);
+        self.draft_selection.draft_kept = draft.kept;
+        self.compose.title.set_text(&draft.title);
+        self.compose.prompt.set_text(&draft.prompt);
+        self.note_list.selected = draft
             .notes
             .iter()
-            .filter(|count| self.note_list.notes.files.contains(count))
+            .filter(|note| self.note_list.notes.files.contains(note))
             .cloned()
             .collect();
-        let picks: Vec<String> = directory
+        let picks: Vec<String> = draft
             .picks
             .iter()
-            .filter(|path_value| self.agent_list.agents.iter().any(|agent| &agent.name == *path_value))
+            .filter(|pick| self.agent_list.agents.iter().any(|agent| &agent.name == *pick))
             .cloned()
             .collect();
 
@@ -258,41 +252,41 @@ impl App {
             self.compose.picks = picks;
         }
 
-        if let Some(width_value) = self
+        if let Some(index) = self
             .repository
             .wheres
             .iter()
-            .position(|width| format!("{width:?}") == directory.place_choice)
+            .position(|choice| format!("{choice:?}") == draft.place_choice)
         {
-            self.repository.where_i = width_value;
+            self.repository.where_i = index;
         }
 
-        self.repository.checkout = directory.checkout;
-        self.repository.stash = directory.stash;
+        self.repository.checkout = draft.checkout;
+        self.repository.stash = draft.stash;
         self.compose.target = None;
-        self.compose.files = directory
+        self.compose.files = draft
             .files
             .iter()
-            .map(|(path_2, path_3)| (path_2.clone(), PathBuf::from(path_3)))
+            .map(|(marker, path)| (marker.clone(), PathBuf::from(path)))
             .collect();
 
         // new pastes: numbers after the draft's markers
-        for (message, _) in &self.compose.files {
-            self.compose.paster.seen(message);
+        for (marker, _) in &self.compose.files {
+            self.compose.paster.seen(marker);
         }
 
-        self.compose.carry = directory
+        self.compose.carry = draft
             .carry
             .iter()
             .filter_map(|(thread, path, title)| match thread {
-                Some(thread_value) => claude::of_thread(thread_value, title),
+                Some(id) => claude::of_thread(id, title),
                 None => claude::from_transcript(std::path::Path::new(path)),
             })
             .collect();
         self.compose.field = Field::Prompt;
         self.draft_selection.draft_saved = self.draft().content();
         self.draft_selection.drafts = drafts::load(&self.cfg.drafts, &self.draft_selection.draft_id);
-        self.toast(format!("draft loaded: {}", directory.name()), false);
+        self.toast(format!("draft loaded: {}", draft.name()), false);
     }
 
     /// The open drafts dropdown, below its field.
@@ -308,14 +302,14 @@ impl App {
             .draft_selection
             .drafts
             .iter()
-            .map(|directory| {
+            .map(|draft| {
                 (
-                    directory.name(),
+                    draft.name(),
                     format!(
                         "{}{} · {}",
-                        if directory.kept { "★ saved · " } else { "" },
-                        directory.place,
-                        crate::domain::notes::ago(std::time::UNIX_EPOCH + Duration::from_secs(directory.saved))
+                        if draft.kept { "★ saved · " } else { "" },
+                        draft.place,
+                        crate::domain::notes::ago(std::time::UNIX_EPOCH + Duration::from_secs(draft.saved))
                     ),
                 )
             })
@@ -323,22 +317,22 @@ impl App {
 
         let width = rows
             .iter()
-            .map(|(agent, bytes)| agent.width().min(60) + bytes.width() + 5)
+            .map(|(name, detail)| name.width().min(60) + detail.width() + 5)
             .max()
             .unwrap_or(0)
             .clamp(44, 96) as u16;
 
-        let Some(result) = dropdown::place(self.preview.regions.drafts, width, count, bounds, false) else {
+        let Some(area) = dropdown::place(self.preview.regions.drafts, width, count, bounds, false) else {
             return;
         };
 
-        let shown = (result.height as usize).saturating_sub(2);
+        let shown = (area.height as usize).saturating_sub(2);
         let off = dropdown::fit(off, cur, count, shown);
 
         self.draft_selection.drafts_menu = Some((cur, off));
         let inner = dropdown::frame(
             frame,
-            result,
+            area,
             "drafts",
             "enter: load · d d: delete · esc: back",
             dropdown::FrameState {
@@ -352,14 +346,14 @@ impl App {
     }
 }
 
-fn drafts_key_message(app: &mut App, character: usize) {
-    if let Some(message) = &mut app.draft_selection.drafts_menu {
-        message.0 = character;
+fn set_drafts_cursor(app: &mut App, cursor: usize) {
+    if let Some(menu) = &mut app.draft_selection.drafts_menu {
+        menu.0 = cursor;
     }
 }
 
 fn draw_draft_rows(
-    app_state: &mut App,
+    app: &mut App,
     frame: &mut Frame<'_>,
     cur: usize,
     rows: &[(String, String)],
@@ -398,22 +392,22 @@ fn draw_draft_rows(
         ]);
 
         frame.render_widget(Paragraph::new(line).style(st), row);
-        app_state.preview.regions.draft_rows.push((row, i));
+        app.preview.regions.draft_rows.push((row, i));
     }
 }
 
-fn drafts_key_directory(app_state: &mut App, cur: usize, count: usize, set: impl Fn(&mut App, usize)) {
-    let directory = app_state.draft_selection.drafts.remove(cur.min(count - 1));
+fn delete_draft(app: &mut App, cur: usize, count: usize, set: impl Fn(&mut App, usize)) {
+    let draft = app.draft_selection.drafts.remove(cur.min(count - 1));
 
-    match trash(&drafts::path(&app_state.cfg.drafts, &directory.id)) {
-        Ok(how) => app_state.toast(format!("draft {how}: {}", directory.name()), false),
-        Err(error) => app_state.toast(format!("draft not deleted: {error}"), true),
+    match trash(&drafts::path(&app.cfg.drafts, &draft.id)) {
+        Ok(how) => app.toast(format!("draft {how}: {}", draft.name()), false),
+        Err(error) => app.toast(format!("draft not deleted: {error}"), true),
     }
 
-    if app_state.draft_selection.drafts.is_empty() {
-        app_state.draft_selection.drafts_menu = None;
-        app_state.compose.field = Field::Prompt;
+    if app.draft_selection.drafts.is_empty() {
+        app.draft_selection.drafts_menu = None;
+        app.compose.field = Field::Prompt;
     } else {
-        set(app_state, cur.min(app_state.draft_selection.drafts.len() - 1));
+        set(app, cur.min(app.draft_selection.drafts.len() - 1));
     }
 }

@@ -108,25 +108,24 @@ fn error_text(error: &Value) -> String {
 pub(crate) fn mcp_config(exe: &str, env: &[(String, String)], acp: &[Value]) -> Value {
     let mut all = serde_json::Map::new();
 
-    let pairs = |agent: &Value| -> serde_json::Map<String, Value> {
-        agent
-            .as_array()
+    let pairs = |list: &Value| -> serde_json::Map<String, Value> {
+        list.as_array()
             .into_iter()
             .flatten()
-            .filter_map(|path| Some((path["name"].as_str()?.to_string(), path["value"].clone())))
+            .filter_map(|pair| Some((pair["name"].as_str()?.to_string(), pair["value"].clone())))
             .collect()
     };
 
     all.insert("codehead".into(), json!({"command": exe, "args": ["mcp"], "env": env.iter().map(|(key, value)| (key.clone(), json!(value))).collect::<serde_json::Map<_, _>>()}));
 
-    for text in acp {
-        let Some(name) = text["name"].as_str().filter(|count| *count != "codehead") else {
+    for server in acp {
+        let Some(name) = server["name"].as_str().filter(|name| *name != "codehead") else {
             continue;
         };
 
-        let entry = match text["url"].as_str() {
-            Some(url) => json!({"url": url, "http_headers": pairs(&text["headers"])}),
-            None => json!({"command": text["command"], "args": text["args"], "env": pairs(&text["env"])}),
+        let entry = match server["url"].as_str() {
+            Some(url) => json!({"url": url, "http_headers": pairs(&server["headers"])}),
+            None => json!({"command": server["command"], "args": server["args"], "env": pairs(&server["env"])}),
         };
 
         all.insert(name.to_string(), entry);
@@ -150,9 +149,9 @@ fn tool_of(item: &Value) -> Option<(String, Value)> {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|character| character["path"].as_str().map(String::from))
+                .filter_map(|change| change["path"].as_str().map(String::from))
                 .collect();
-            let mut input = json!({"_kind": "edit", "description": paths.join(", "), "locations": paths.iter().map(|parent| json!({"path": parent})).collect::<Vec<_>>()});
+            let mut input = json!({"_kind": "edit", "description": paths.join(", "), "locations": paths.iter().map(|path| json!({"path": path})).collect::<Vec<_>>()});
 
             if let Some(path) = paths.first() {
                 input["file_path"] = json!(path);
@@ -193,14 +192,14 @@ fn result_of(item: &Value) -> (bool, String) {
 
     let text = match item["type"].as_str().unwrap_or_default() {
         "commandExecution" => {
-            ok &= item["exitCode"].as_i64().is_none_or(|character| character == 0);
+            ok &= item["exitCode"].as_i64().is_none_or(|code| code == 0);
             item["aggregatedOutput"].as_str().unwrap_or_default().to_string()
         }
         "fileChange" => item["changes"]
             .as_array()
             .into_iter()
             .flatten()
-            .map(|character_value| character_value["diff"].as_str().unwrap_or_default())
+            .map(|change| change["diff"].as_str().unwrap_or_default())
             .collect::<Vec<_>>()
             .join("\n"),
         "mcpToolCall" => match item["error"]["message"].as_str() {
@@ -212,7 +211,7 @@ fn result_of(item: &Value) -> (bool, String) {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|character_2| character_2["text"].as_str())
+                .filter_map(|content| content["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n"),
         },
@@ -222,7 +221,7 @@ fn result_of(item: &Value) -> (bool, String) {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|character_3| character_3["text"].as_str())
+                .filter_map(|content| content["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n")
         }
@@ -254,8 +253,8 @@ fn cap(mut text: String) -> String {
 
 /// A token breakdown of `thread/tokenUsage/updated` → codehead's numbers: input without the
 /// cached part (`OpenAI` counts it in `inputTokens`).
-fn usage_of(bytes: &Value) -> TurnUse {
-    let count = |key: &str| bytes[key].as_u64().unwrap_or(0);
+fn usage_of(breakdown: &Value) -> TurnUse {
+    let count = |key: &str| breakdown[key].as_u64().unwrap_or(0);
 
     TurnUse {
         input: count("inputTokens").saturating_sub(count("cachedInputTokens")),
@@ -304,11 +303,11 @@ pub(crate) fn start(
     let conn = Conn(Arc::new(Mutex::new(state(writer, setup, name, tx))));
 
     {
-        let mut text = conn.0.lock().expect("fresh lock");
+        let mut state = conn.0.lock().expect("fresh lock");
         let init = json!({"clientInfo": {"name": "codehead", "title": "codehead", "version": crate::infra::update::VERSION}, "capabilities": {"experimentalApi": true}});
 
-        if let Err(error) = text.request("initialize", &init, Pending::Init) {
-            text.out(Out::Event(Kind::Error {
+        if let Err(error) = state.request("initialize", &init, Pending::Init) {
+            state.out(Out::Event(Kind::Error {
                 message: format!("codex: {error}"),
             }));
         }
@@ -322,10 +321,10 @@ pub(crate) fn start(
 
 impl super::harness::Driver for Conn {
     fn prompt(&mut self, text: &str) -> Result<(), String> {
-        let mut text_value = self.0.lock().map_err(|error| error.to_string())?;
+        let mut state = self.0.lock().map_err(|error| error.to_string())?;
 
-        text_value.queue.push_back(text.to_string());
-        text_value.pump()
+        state.queue.push_back(text.to_string());
+        state.pump()
     }
 
     fn allow(&mut self, id: &str, input: &Value) -> Result<(), String> {
@@ -335,7 +334,7 @@ impl super::harness::Driver for Conn {
             .answer(id, true, input)
     }
 
-    fn deny(&mut self, id: &str, _why: &str) -> Result<(), String> {
+    fn deny(&mut self, id: &str, _: &str) -> Result<(), String> {
         self.0
             .lock()
             .map_err(|error| error.to_string())?
@@ -343,10 +342,10 @@ impl super::harness::Driver for Conn {
     }
 
     fn interrupt(&mut self) -> Result<(), String> {
-        let mut text = self.0.lock().map_err(|error| error.to_string())?;
+        let mut state = self.0.lock().map_err(|error| error.to_string())?;
 
         // open asks first: cancelled
-        let asks: Vec<(Value, Ask)> = text.asks.drain().map(|(_, agent)| agent).collect();
+        let asks: Vec<(Value, Ask)> = state.asks.drain().map(|(_, ask)| ask).collect();
 
         for (rpc, kind) in asks {
             let result = match kind {
@@ -355,15 +354,15 @@ impl super::harness::Driver for Conn {
                 Ask::Questions(_) => json!({"answers": {}}),
             };
 
-            text.send(&json!({"id": rpc, "result": result}))?;
+            state.send(&json!({"id": rpc, "result": result}))?;
         }
 
-        text.queue.clear();
+        state.queue.clear();
 
-        match (text.thread.clone(), text.turn.clone()) {
-            (Some(thread_value), Some(turn)) => text.request(
+        match (state.thread.clone(), state.turn.clone()) {
+            (Some(thread), Some(turn)) => state.request(
                 "turn/interrupt",
-                &json!({"threadId": thread_value, "turnId": turn}),
+                &json!({"threadId": thread, "turnId": turn}),
                 Pending::Interrupt,
             ),
             _ => Ok(()),

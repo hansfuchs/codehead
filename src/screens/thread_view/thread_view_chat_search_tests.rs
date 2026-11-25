@@ -23,8 +23,8 @@ fn view(id: &str) -> View {
     view
 }
 
-fn key(view: &mut View, character: KeyCode, message: KeyModifiers) {
-    view.key(KeyEvent::new(character, message));
+fn key(view: &mut View, code: KeyCode, modifiers: KeyModifiers) {
+    view.key(KeyEvent::new(code, modifiers));
 }
 
 fn typed(view: &mut View, text: &str) {
@@ -34,35 +34,35 @@ fn typed(view: &mut View, text: &str) {
 }
 
 fn screen(view: &mut View) -> Vec<String> {
-    let mut thread = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
 
-    thread.draw(|file| view.draw(file)).unwrap();
-    let bytes = thread.backend().buffer().clone();
+    term.draw(|frame| view.draw(frame)).unwrap();
+    let buf = term.backend().buffer().clone();
 
     (0..30)
-        .map(|y| (0..100).map(|x| bytes[(x, y)].symbol().to_string()).collect::<String>())
+        .map(|y| (0..100).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
         .collect()
 }
 
 #[test]
 fn ctrl_f_searches_the_chat_enter_cycles_esc_closes_the_draft_stays() {
-    let mut value = view("chatsearch-0000");
+    let mut view = view("chatsearch-0000");
 
-    typed(&mut value, "draft");
-    screen(&mut value);
-    key(&mut value, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    typed(&mut view, "draft");
+    screen(&mut view);
+    key(&mut view, KeyCode::Char('f'), KeyModifiers::CONTROL);
 
-    assert!(value.find.open && value.find.focus);
+    assert!(view.find.open && view.find.focus);
 
-    typed(&mut value, "needle");
+    typed(&mut view, "needle");
 
     assert_eq!(
-        value.prompt.input.text(),
+        view.prompt.input.text(),
         "draft",
         "the query goes to the bar, not to the prompt"
     );
 
-    let text = screen(&mut value);
+    let text = screen(&mut view);
     let bar = text
         .iter()
         .position(|line| line.contains(" find "))
@@ -81,8 +81,8 @@ fn ctrl_f_searches_the_chat_enter_cycles_esc_closes_the_draft_stays() {
     );
 
     // enter: the next older match, scrolled into view with the marker
-    key(&mut value, KeyCode::Enter, KeyModifiers::NONE);
-    let text = screen(&mut value);
+    key(&mut view, KeyCode::Enter, KeyModifiers::NONE);
+    let text = screen(&mut view);
 
     assert!(
         text.iter().any(|line| line.contains("message 23: the needle")),
@@ -96,9 +96,9 @@ fn ctrl_f_searches_the_chat_enter_cycles_esc_closes_the_draft_stays() {
     );
 
     // ↓: newer again; wraps past the newest to the oldest
-    key(&mut value, KeyCode::Down, KeyModifiers::NONE);
-    key(&mut value, KeyCode::Down, KeyModifiers::NONE);
-    let text = screen(&mut value);
+    key(&mut view, KeyCode::Down, KeyModifiers::NONE);
+    key(&mut view, KeyCode::Down, KeyModifiers::NONE);
+    let text = screen(&mut view);
 
     assert!(
         text.iter().any(|line| line.contains("1/4")) && text.iter().any(|line| line.contains("message 3: the needle")),
@@ -106,66 +106,66 @@ fn ctrl_f_searches_the_chat_enter_cycles_esc_closes_the_draft_stays() {
     );
 
     // esc: the bar goes, the stream stays, the keys go to the prompt
-    let back = value.stream.back;
+    let back = view.stream.back;
 
-    key(&mut value, KeyCode::Esc, KeyModifiers::NONE);
+    key(&mut view, KeyCode::Esc, KeyModifiers::NONE);
 
-    assert!(!value.find.open && value.stream.back == back);
+    assert!(!view.find.open && view.stream.back == back);
 
-    let text = screen(&mut value);
+    let text = screen(&mut view);
 
     assert!(!text.iter().any(|line| line.contains(" find ")), "{text:#?}");
 
-    typed(&mut value, "!");
+    typed(&mut view, "!");
 
-    assert_eq!(value.prompt.input.text(), "draft!");
+    assert_eq!(view.prompt.input.text(), "draft!");
 }
 
 #[test]
 fn the_footer_shows_the_mode_as_a_badge() {
-    let mut value = view("chatsearch-0003");
+    let mut view = view("chatsearch-0003");
     let last = |text: &[String]| text.last().cloned().unwrap_or_default();
 
-    assert!(!last(&screen(&mut value)).contains(" SHELL "));
+    assert!(!last(&screen(&mut view)).contains(" SHELL "));
 
-    typed(&mut value, "!ls");
-    let text = screen(&mut value);
+    typed(&mut view, "!ls");
+    let text = screen(&mut view);
 
     assert!(last(&text).trim_start().starts_with("SHELL"), "{}", last(&text));
 
-    value.prompt.input.set_text("");
-    key(&mut value, KeyCode::Char('f'), KeyModifiers::CONTROL);
-    let text = screen(&mut value);
+    view.prompt.input.set_text("");
+    key(&mut view, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    let text = screen(&mut view);
 
     assert!(last(&text).trim_start().starts_with("SEARCH"), "{}", last(&text));
 
-    key(&mut value, KeyCode::Esc, KeyModifiers::NONE);
+    key(&mut view, KeyCode::Esc, KeyModifiers::NONE);
 
-    assert!(!last(&screen(&mut value)).contains("SEARCH"));
+    assert!(!last(&screen(&mut view)).contains("SEARCH"));
 }
 
 #[test]
 fn a_query_with_0_matches_says_so_and_keeps_the_stream() {
-    let mut value = view("chatsearch-0001");
+    let mut view = view("chatsearch-0001");
 
-    screen(&mut value);
-    key(&mut value, KeyCode::Char('f'), KeyModifiers::CONTROL);
-    typed(&mut value, "zzqq");
-    let text = screen(&mut value);
+    screen(&mut view);
+    key(&mut view, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    typed(&mut view, "zzqq");
+    let text = screen(&mut view);
 
     assert!(text.iter().any(|line| line.contains("0 matches")), "{text:#?}");
-    assert_eq!(value.stream.back, 0);
+    assert_eq!(view.stream.back, 0);
 }
 
 #[test]
 fn ctrl_f_in_another_view_is_its_filter_not_the_chat_search() {
-    let mut value = view("chatsearch-0002");
+    let mut view = view("chatsearch-0002");
 
-    key(&mut value, KeyCode::F(4), KeyModifiers::NONE);
+    key(&mut view, KeyCode::F(4), KeyModifiers::NONE);
 
-    assert_eq!(value.panes.pane, Pane::Files);
+    assert_eq!(view.panes.pane, Pane::Files);
 
-    key(&mut value, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    key(&mut view, KeyCode::Char('f'), KeyModifiers::CONTROL);
 
-    assert!(value.panes.files.typing() && !value.find.open);
+    assert!(view.panes.files.typing() && !view.find.open);
 }

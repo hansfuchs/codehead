@@ -1,62 +1,62 @@
 use super::*;
 
-fn sh(path: &Path, character: &str) {
+fn sh(dir: &Path, script: &str) {
     assert!(
         Command::new("sh")
             .arg("-c")
-            .arg(character)
-            .current_dir(path)
+            .arg(script)
+            .current_dir(dir)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .unwrap()
             .success(),
-        "{character}"
+        "{script}"
     );
 }
 
 fn repo(name: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!("codehead-setup-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
+    let repo_dir = std::env::temp_dir().join(format!("codehead-setup-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo_dir);
 
-    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::create_dir_all(&repo_dir).unwrap();
     sh(
-        &directory,
+        &repo_dir,
         "git init -q && git config user.email t@t && git config user.name t && printf '.env*\\ncerts/\\n' > .gitignore && echo x > a.rs && git add -A && git commit -qm init",
     );
-    directory
+    repo_dir
 }
 
 #[test]
 fn default_includes_are_the_ignored_env_files() {
-    let directory = repo("inc");
+    let repo_dir = repo("inc");
 
     sh(
-        &directory,
+        &repo_dir,
         "echo S=1 > .env && echo L=1 > .env.local && echo t > .envrc.tracked && git add -f .envrc.tracked && git commit -qm t",
     );
 
-    assert_eq!(includes(&directory), [".env", ".env.local"]);
+    assert_eq!(includes(&repo_dir), [".env", ".env.local"]);
 
-    std::fs::write(directory.join(".worktreeinclude"), "# local\n.env\ncerts/\n\n").unwrap();
+    std::fs::write(repo_dir.join(".worktreeinclude"), "# local\n.env\ncerts/\n\n").unwrap();
 
-    assert_eq!(includes(&directory), [".env", "certs"]);
+    assert_eq!(includes(&repo_dir), [".env", "certs"]);
 
-    let _ = std::fs::remove_dir_all(directory);
+    let _ = std::fs::remove_dir_all(repo_dir);
 }
 
 #[test]
 fn copy_includes_brings_ignored_files_and_dirs_into_the_worktree() {
-    let directory = repo("copy");
+    let repo_dir = repo("copy");
 
     sh(
-        &directory,
+        &repo_dir,
         "echo S=1 > .env && mkdir -p certs/a && echo k > certs/a/key.pem && printf '.env\\ncerts\\nmissing\\n' > .worktreeinclude",
     );
-    let wt = directory.join("wt");
+    let wt = repo_dir.join("wt");
 
-    sh(&directory, "git worktree add -q -b t wt");
-    let copied = copy_includes(&directory, &wt);
+    sh(&repo_dir, "git worktree add -q -b t wt");
+    let copied = copy_includes(&repo_dir, &wt);
 
     assert_eq!(copied, [".env", "certs"]);
     assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "S=1\n");
@@ -65,72 +65,72 @@ fn copy_includes_brings_ignored_files_and_dirs_into_the_worktree() {
     // a 2nd run: 0 copies over existing files
     std::fs::write(wt.join(".env"), "S=2\n").unwrap();
 
-    assert_eq!(copy_includes(&directory, &wt), [] as [std::string::String; 0]);
+    assert_eq!(copy_includes(&repo_dir, &wt), [] as [std::string::String; 0]);
     assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "S=2\n");
 
-    let _ = std::fs::remove_dir_all(directory);
+    let _ = std::fs::remove_dir_all(repo_dir);
 }
 
 #[test]
 fn scripts_in_order_and_their_env() {
-    let directory = repo("script");
+    let repo_dir = repo("script");
 
-    assert!(script(&directory, "setup").is_none());
+    assert!(script(&repo_dir, "setup").is_none());
 
     std::fs::write(
-        directory.join("conductor.json"),
+        repo_dir.join("conductor.json"),
         r#"{"scripts": {"setup": "echo conductor $CONDUCTOR_PORT", "archive": "echo bye"}}"#,
     )
     .unwrap();
 
-    assert_eq!(script(&directory, "setup").unwrap().1, "conductor.json scripts.setup");
+    assert_eq!(script(&repo_dir, "setup").unwrap().1, "conductor.json scripts.setup");
     assert_eq!(
-        script(&directory, "teardown").unwrap().1,
+        script(&repo_dir, "teardown").unwrap().1,
         "conductor.json scripts.archive"
     );
 
-    std::fs::create_dir_all(directory.join(".codehead")).unwrap();
+    std::fs::create_dir_all(repo_dir.join(".codehead")).unwrap();
     std::fs::write(
-        directory.join(".codehead/setup"),
+        repo_dir.join(".codehead/setup"),
         "echo port=$CODEHEAD_PORT root=$CODEHEAD_ROOT\nexit 3\n",
     )
     .unwrap();
-    let (argv, label, _) = script(&directory, "setup").unwrap();
+    let (argv, label, _) = script(&repo_dir, "setup").unwrap();
 
     assert_eq!(label, ".codehead/setup");
 
     let (ok, out) = run(
         &argv,
-        &directory,
-        &env(Path::new("/r"), &directory, "t1", "b", Some(40010)),
+        &repo_dir,
+        &env(Path::new("/r"), &repo_dir, "t1", "b", Some(40010)),
         Duration::from_secs(10),
     );
 
     assert!(!ok, "exit 3: failed");
     assert_eq!(out.trim(), "port=40010 root=/r");
 
-    let _ = std::fs::remove_dir_all(directory);
+    let _ = std::fs::remove_dir_all(repo_dir);
 }
 
 #[test]
 fn a_script_over_its_time_gets_killed() {
-    let directory = repo("slow");
+    let repo_dir = repo("slow");
     let (ok, out) = run(
         &["sh".into(), "-c".into(), "echo start; sleep 30".into()],
-        &directory,
+        &repo_dir,
         &[],
         Duration::from_secs(2),
     );
 
     assert!(!ok && out.contains("start") && out.contains("stopped after"), "{out}");
 
-    let _ = std::fs::remove_dir_all(directory);
+    let _ = std::fs::remove_dir_all(repo_dir);
 }
 
 #[test]
 fn free_port_skips_held_blocks() {
-    let thread = |path: Option<u16>| crate::engine::store::Thread {
-        port: path,
+    let thread = |port: Option<u16>| crate::engine::store::Thread {
+        port,
         state: "open".into(),
         ..Default::default()
     };

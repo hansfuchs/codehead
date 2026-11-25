@@ -91,11 +91,11 @@ pub(super) enum PRow {
 impl PRow {
     fn label(&self) -> Option<Fold> {
         match self {
-            PRow::Section(text, _) => Some(Fold::Sec(*text)),
-            PRow::Level(line, _) => Some(Fold::Level(*line)),
-            PRow::CLevel(line_value, _) => Some(Fold::CLevel(*line_value)),
-            PRow::Push(path, _) => Some(Fold::Push(*path)),
-            PRow::CState(result, _) => Some(Fold::CState(*result)),
+            PRow::Section(sec, _) => Some(Fold::Sec(*sec)),
+            PRow::Level(level, _) => Some(Fold::Level(*level)),
+            PRow::CLevel(level, _) => Some(Fold::CLevel(*level)),
+            PRow::Push(pushed, _) => Some(Fold::Push(*pushed)),
+            PRow::CState(resolved, _) => Some(Fold::CState(*resolved)),
             _ => None,
         }
     }
@@ -191,9 +191,9 @@ impl Panel {
     }
 }
 
-/// The color of level L.
-pub(super) fn level_color(line: Level) -> Color {
-    match line {
+/// The color of level LEVEL.
+pub(super) fn level_color(level: Level) -> Color {
+    match level {
         Level::Critical => theme::pal().error(),
         // orange, yellow
         Level::High => theme::pal().caution(),
@@ -202,9 +202,9 @@ pub(super) fn level_color(line: Level) -> Color {
     }
 }
 
-/// The 1-letter status of a file with status S: A added, M modified, D deleted, R renamed.
-fn status_letter(text: Status) -> (char, Color) {
-    match text {
+/// The 1-letter status of a file with status STATUS: A added, M modified, D deleted, R renamed.
+fn status_letter(status: Status) -> (char, Color) {
+    match status {
         Status::New => ('A', theme::pal().success()),
         Status::Deleted => ('D', theme::pal().error()),
         Status::Renamed => ('R', theme::pal().renamed()),
@@ -215,7 +215,7 @@ fn status_letter(text: Status) -> (char, Color) {
 /// `name` and `dir/` of PATH.
 fn split_path(path: &str) -> (&str, &str) {
     match path.rsplit_once('/') {
-        Some((directory, count)) => (count, directory),
+        Some((dir, name)) => (name, dir),
         None => (path, ""),
     }
 }

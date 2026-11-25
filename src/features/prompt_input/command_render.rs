@@ -12,19 +12,19 @@ impl Command {
         render_command(self, frame, ta, bounds, avoid);
     }
 
-    fn menu(&mut self, level: Level, lq: &str, items: bool) -> Vec<usize> {
+    fn menu(&mut self, level: Level, level_query: &str, items: bool) -> Vec<usize> {
         if items {
             Vec::new()
         } else {
-            super::menu(level, lq, self)
+            super::menu(level, level_query, self)
         }
     }
 }
 
-fn render_level_items(idx: usize, command: &mut Command) -> (String, String, bool) {
-    let it = &command.items[command.matched.1[idx]];
+fn item_row(idx: usize, command: &mut Command) -> (String, String, bool) {
+    let item = &command.items[command.matched.1[idx]];
 
-    (it.label.clone(), it.detail.clone(), false)
+    (item.label.clone(), item.detail.clone(), false)
 }
 
 fn render_command(command: &mut Command, frame: &mut Frame, ta: &TextArea, bounds: Rect, avoid: Rect) {
@@ -42,12 +42,12 @@ fn render_command(command: &mut Command, frame: &mut Frame, ta: &TextArea, bound
         return;
     }
 
-    let Some(path) = ta.screen_pos(at) else { return };
+    let Some(screen) = ta.screen_pos(at) else { return };
 
-    let mut layout = command_layout(bounds, avoid, path.x);
+    let mut layout = command_layout(bounds, avoid, screen.x);
 
-    for directory in 0..=depth {
-        let menu = menu_view(command, directory, depth, &query);
+    for level_depth in 0..=depth {
+        let menu = menu_view(command, level_depth, depth, &query);
 
         if !draw_menu(command, frame, &menu, &mut layout) {
             return;
@@ -67,7 +67,7 @@ struct MenuView<'query> {
     level: Level,
     active: bool,
     query: &'query str,
-    directory: usize,
+    depth: usize,
     items: bool,
     menu: Vec<usize>,
     len: usize,
@@ -108,34 +108,34 @@ fn command_layout(bounds: Rect, avoid: Rect, x: u16) -> CommandLayout {
     }
 }
 
-fn menu_view<'query>(command: &mut Command, directory: usize, depth: usize, query: &'query str) -> MenuView<'query> {
-    let level = super::level(directory, command);
-    let active = directory == depth;
-    let lq = if active { query } else { "" };
+fn menu_view<'query>(command: &mut Command, depth: usize, open_depth: usize, query: &'query str) -> MenuView<'query> {
+    let level = super::level(depth, command);
+    let active = depth == open_depth;
+    let level_query = if active { query } else { "" };
     let items = matches!(level, Level::Items(_));
-    let menu: Vec<usize> = command.menu(level, lq, items);
+    let menu: Vec<usize> = command.menu(level, level_query, items);
 
     let len = if items { command.matched.1.len() } else { menu.len() };
 
     let cursor = if !items && !active {
-        menu.iter().position(|&i| i == command.cursor[directory]).unwrap_or(0)
+        menu.iter().position(|&i| i == command.cursor[depth]).unwrap_or(0)
     } else {
-        command.cursor[directory]
+        command.cursor[depth]
     };
 
-    let (label, width_value) = menu_label_width(command, level, &menu);
+    let (label, width) = menu_label_width(command, level, &menu);
 
     MenuView {
         level,
         active,
-        query: lq,
-        directory,
+        query: level_query,
+        depth,
         items,
         menu,
         len,
         cursor,
         label,
-        width: width_value,
+        width,
     }
 }
 
@@ -148,18 +148,18 @@ fn menu_area(menu: &MenuView<'_>, layout: &CommandLayout) -> Option<Rect> {
     }
 }
 
-fn draw_menu(command: &mut Command, frame_2: &mut Frame, menu_view: &MenuView<'_>, layout: &mut CommandLayout) -> bool {
+fn draw_menu(command: &mut Command, frame: &mut Frame, menu_view: &MenuView<'_>, layout: &mut CommandLayout) -> bool {
     let MenuView {
         level,
         active,
-        query: lq,
-        directory,
+        query: level_query,
+        depth,
         len,
         cursor,
         label,
         ..
     } = menu_view;
-    let (level, active, directory, len, cursor) = (*level, *active, *directory, *len, *cursor);
+    let (level, active, depth, len, cursor) = (*level, *active, *depth, *len, *cursor);
 
     let Some(area) = menu_area(menu_view, layout) else {
         return false;
@@ -167,18 +167,18 @@ fn draw_menu(command: &mut Command, frame_2: &mut Frame, menu_view: &MenuView<'_
 
     let shown = (area.height as usize).saturating_sub(2);
 
-    command.offset[directory] = dropdown::fit(command.offset[directory], cursor, len, shown);
-    let off = command.offset[directory];
+    command.offset[depth] = dropdown::fit(command.offset[depth], cursor, len, shown);
+    let off = command.offset[depth];
 
     let note = match level {
         Level::Items(_) if command.loading => "scan…".to_string(),
-        Level::Items(_) if !lq.is_empty() => format!("{len} of {}", command.items.len()),
+        Level::Items(_) if !level_query.is_empty() => format!("{len} of {}", command.items.len()),
         Level::Items(_) => format!("{len}"),
         _ => String::new(),
     };
 
     let inner = dropdown::frame(
-        frame_2,
+        frame,
         area,
         label,
         &note,
@@ -190,22 +190,22 @@ fn draw_menu(command: &mut Command, frame_2: &mut Frame, menu_view: &MenuView<'_
     );
 
     command.areas.push(area);
-    layout.stack = Some(layout.stack.map_or(area, |text_value| text_value.union(area)));
+    layout.stack = Some(layout.stack.map_or(area, |stack| stack.union(area)));
 
-    draw_empty_menu(command, frame_2, inner, len, lq);
-    let cur_y = draw_menu_rows(command, frame_2, inner, shown, off, menu_view);
+    draw_empty_menu(command, frame, inner, len, level_query);
+    let cur_y = draw_menu_rows(command, frame, inner, shown, off, menu_view);
 
     layout.parent = Some((area, cur_y));
-    draw_item_info(command, frame_2, area, menu_view, layout);
+    draw_item_info(command, frame, area, menu_view, layout);
 
     true
 }
 
-fn draw_empty_menu(command: &Command, frame: &mut Frame, inner: Rect, len: usize, lq: &str) {
+fn draw_empty_menu(command: &Command, frame: &mut Frame, inner: Rect, len: usize, level_query: &str) {
     if len == 0 {
         let text = if command.loading {
             " scan of the transcripts…"
-        } else if lq.is_empty() {
+        } else if level_query.is_empty() {
             " 0 entries"
         } else {
             " 0 matches"
@@ -231,7 +231,7 @@ fn draw_menu_rows(
 ) -> u16 {
     let len = menu.len;
     let cursor = menu.cursor;
-    let directory = menu.directory;
+    let depth = menu.depth;
     let mut cur_y = inner.y;
 
     for i in 0..shown.min(len.saturating_sub(off)) {
@@ -245,13 +245,20 @@ fn draw_menu_rows(
 
         mark_current_row(&mut cur_y, row, highlighted);
         draw_menu_row(command, frame, row, idx, highlighted, menu);
-        command.rows.push((row, directory, idx));
+        command.rows.push((row, depth, idx));
     }
 
     cur_y
 }
 
-fn draw_menu_row(command: &mut Command, frame: &mut Frame, row: Rect, idx: usize, hl: bool, view: &MenuView<'_>) {
+fn draw_menu_row(
+    command: &mut Command,
+    frame: &mut Frame,
+    row: Rect,
+    idx: usize,
+    highlighted: bool,
+    view: &MenuView<'_>,
+) {
     let level = view.level;
     let active = view.active;
     let items = view.items;
@@ -264,19 +271,19 @@ fn draw_menu_row(command: &mut Command, frame: &mut Frame, row: Rect, idx: usize
             !matches!(menu[idx], BRANCH | HANDOFF | RELOAD | FLOW | SUB),
         ),
         Level::Kinds => (KINDS[menu[idx]].1.to_string(), KINDS[menu[idx]].2.to_string(), true),
-        Level::Items(_) => render_level_items(idx, command),
+        Level::Items(_) => item_row(idx, command),
     };
 
-    let st = match (hl, active) {
+    let style = match (highlighted, active) {
         (true, true) => theme::pill().add_modifier(Modifier::BOLD),
         (true, false) => theme::pill_dim().add_modifier(Modifier::BOLD),
         _ => Style::default().fg(theme::pal().text),
     };
 
-    let dim = if hl && active {
-        st.remove_modifier(Modifier::BOLD)
+    let dim = if highlighted && active {
+        style.remove_modifier(Modifier::BOLD)
     } else {
-        st.fg(theme::pal().subtext0).remove_modifier(Modifier::BOLD)
+        style.fg(theme::pal().subtext0).remove_modifier(Modifier::BOLD)
     };
 
     // menus: a `›` on the right (a submenu opens)
@@ -293,12 +300,12 @@ fn draw_menu_row(command: &mut Command, frame: &mut Frame, row: Rect, idx: usize
         &detail,
         mark,
         row.width,
-        st,
+        style,
         dim,
         matches!(level, Level::Items(Kind::Skills)),
     );
 
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(st), row);
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(style), row);
 }
 
 fn row_spans(
@@ -306,7 +313,7 @@ fn row_spans(
     detail: &str,
     mark: &str,
     width: u16,
-    st: Style,
+    style: Style,
     dim: Style,
     skills: bool,
 ) -> Vec<Span<'static>> {
@@ -323,7 +330,7 @@ fn row_spans(
     };
 
     let pad = left.saturating_sub(if detail.is_empty() { 0 } else { detail.width() + 2 });
-    let mut spans = vec![Span::styled(format!(" {text}"), st)];
+    let mut spans = vec![Span::styled(format!(" {text}"), style)];
 
     // skills: the description right after the name; the others: at the right edge
     if skills {
@@ -331,9 +338,9 @@ fn row_spans(
             spans.push(Span::styled(format!("  {detail}"), dim));
         }
 
-        spans.push(Span::styled(" ".repeat(pad), st));
+        spans.push(Span::styled(" ".repeat(pad), style));
     } else {
-        spans.push(Span::styled(" ".repeat(pad), st));
+        spans.push(Span::styled(" ".repeat(pad), style));
 
         if !detail.is_empty() {
             spans.push(Span::styled(format!("  {detail}"), dim));
@@ -345,7 +352,7 @@ fn row_spans(
     spans
 }
 
-fn draw_item_info(command: &mut Command, frame_2: &mut Frame, area: Rect, view: &MenuView<'_>, layout: &CommandLayout) {
+fn draw_item_info(command: &mut Command, frame: &mut Frame, area: Rect, view: &MenuView<'_>, layout: &CommandLayout) {
     let active = view.active;
     let items = view.items;
     let cursor = view.cursor;
@@ -355,29 +362,25 @@ fn draw_item_info(command: &mut Command, frame_2: &mut Frame, area: Rect, view: 
     // the long text of the current row (a skill's description): a box above the dropdown
     if active
         && items
-        && let Some(it) = command.matched.1.get(cursor).and_then(|&i| command.items.get(i))
-        && !it.info.is_empty()
+        && let Some(item) = command.matched.1.get(cursor).and_then(|&i| command.items.get(i))
+        && !item.info.is_empty()
         && area.width > 8
     {
-        let chars: Vec<char> = it.info.chars().collect();
+        let chars: Vec<char> = item.info.chars().collect();
         let lines: Vec<String> = crate::ui::textarea::wrap(&chars, area.width as usize - 4)
             .into_iter()
             .take(INFO_ROWS)
-            .map(|(agent, bytes)| chars[agent..bytes].iter().collect::<String>().trim_end().to_string())
+            .map(|(start, end)| chars[start..end].iter().collect::<String>().trim_end().to_string())
             .collect();
-        let height_value = lines.len() as u16 + 2;
-        let spot = info_position(area, room, stack, height_value);
+        let height = lines.len() as u16 + 2;
+        let spot = info_position(area, room, stack, height);
 
         if let Some(y) = spot {
-            let area_value = Rect {
-                y,
-                height: height_value,
-                ..area
-            };
+            let info_area = Rect { y, height, ..area };
             let inner = dropdown::frame(
-                frame_2,
-                area_value,
-                &it.label,
+                frame,
+                info_area,
+                &item.label,
                 "",
                 dropdown::FrameState {
                     up: false,
@@ -386,7 +389,7 @@ fn draw_item_info(command: &mut Command, frame_2: &mut Frame, area: Rect, view: 
                 },
             );
 
-            frame_2.render_widget(
+            frame.render_widget(
                 Paragraph::new(
                     lines
                         .into_iter()
@@ -395,13 +398,13 @@ fn draw_item_info(command: &mut Command, frame_2: &mut Frame, area: Rect, view: 
                 ),
                 inner,
             );
-            command.areas.push(area_value);
+            command.areas.push(info_area);
         }
     }
 }
 
-fn mark_current_row(cur_y: &mut u16, row: Rect, hl: bool) {
-    if hl {
+fn mark_current_row(cur_y: &mut u16, row: Rect, highlighted: bool) {
+    if highlighted {
         *cur_y = row.y;
     }
 }
@@ -418,7 +421,7 @@ fn menu_label_width(command: &Command, level: Level, menu: &[usize]) -> (String,
         ),
         Level::Kinds => (
             COMMANDS[MENTION].0.to_string(),
-            KINDS.iter().map(|key| key.1.width() + key.2.width()).max().unwrap_or(0) + 8,
+            KINDS.iter().map(|row| row.1.width() + row.2.width()).max().unwrap_or(0) + 8,
         ),
         Level::Items(Kind::Skills) => (
             COMMANDS[SKILLS].0.to_string(),
@@ -428,24 +431,19 @@ fn menu_label_width(command: &Command, level: Level, menu: &[usize]) -> (String,
             format!(
                 "{} › {}",
                 COMMANDS[MENTION].0,
-                KINDS
-                    .iter()
-                    .find(|key_value| key_value.0 == kind)
-                    .map_or("items", |key_2| key_2.1)
+                KINDS.iter().find(|row| row.0 == kind).map_or("items", |row| row.1)
             ),
             (command.items_w + 4).clamp(28, MAX_W),
         ),
     }
 }
 
-fn info_position(area: Rect, room: Rect, stack: Option<Rect>, height_value: u16) -> Option<u16> {
-    let top = stack.map_or(area.y, |text_2| text_2.y);
+fn info_position(area: Rect, room: Rect, stack: Option<Rect>, height: u16) -> Option<u16> {
+    let top = stack.map_or(area.y, |stack| stack.y);
 
-    if top >= room.y + height_value {
-        Some(top - height_value)
-    } else if area.bottom() + height_value <= room.bottom()
-        && stack.is_some_and(|text_3| text_3.bottom() <= area.bottom())
-    {
+    if top >= room.y + height {
+        Some(top - height)
+    } else if area.bottom() + height <= room.bottom() && stack.is_some_and(|stack| stack.bottom() <= area.bottom()) {
         Some(area.bottom())
     } else {
         None

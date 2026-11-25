@@ -12,7 +12,7 @@ impl View {
             crate::ui::graphics::delete_kitty(id);
         }
 
-        self.image_cache.image_order.retain(|key_value| key_value != key);
+        self.image_cache.image_order.retain(|cached| cached != key);
         self.image_cache.image_reads.forget(key);
     }
     /// The encoded images out: the next draw encodes (and sends) them again. After another
@@ -37,32 +37,32 @@ impl View {
     }
     /// PATH as shown: relative to the work dir, else `~/…`.
     pub(super) fn shown(&self, path: &Path) -> String {
-        if let Ok(result) = path.strip_prefix(&self.dir) {
-            return result.display().to_string();
+        if let Ok(relative) = path.strip_prefix(&self.dir) {
+            return relative.display().to_string();
         }
 
         let home = crate::infra::config::home();
 
         match path.strip_prefix(&home) {
-            Ok(result_value) => format!("~/{}", result_value.display()),
+            Ok(relative) => format!("~/{}", relative.display()),
             Err(_) => path.display().to_string(),
         }
     }
     /// The preview of P at WIDTH: from the cache, else None and a render off the UI thread
     /// (tests: at once).
-    pub(super) fn preview_lines(&mut self, path_value: &Path, width: u16) -> Option<Vec<Line<'static>>> {
-        preview_lines_view(self, path_value, width)
+    pub(super) fn preview_lines(&mut self, path: &Path, width: u16) -> Option<Vec<Line<'static>>> {
+        preview_lines_view(self, path, width)
     }
 }
 
-fn apply_branch(files: &mut Vec<Entry>, path_value: &std::path::PathBuf) {
-    if !files.iter().any(|error| error.path == *path_value) {
+fn keep_named(files: &mut Vec<Entry>, named: &std::path::PathBuf) {
+    if !files.iter().any(|entry| entry.path == *named) {
         files.insert(
             0,
             Entry {
-                path: path_value.clone(),
+                path: named.clone(),
                 source: Source::Named,
-                at: mtime(path_value),
+                at: mtime(named),
             },
         );
     }
@@ -73,37 +73,37 @@ pub(super) fn render_preview(path: &Path, width: u16) -> Vec<Line<'static>> {
         |error| format!("{error}"),
         |bytes| String::from_utf8_lossy(&bytes).into_owned(),
     );
-    let width_value = usize::from(width);
+    let columns = usize::from(width);
 
-    if path.extension().is_some_and(|x| x == "md") {
-        crate::ui::markdown::markdown(&text, width_value, &[])
+    if path.extension().is_some_and(|extension| extension == "md") {
+        crate::ui::markdown::markdown(&text, columns, &[])
             .into_iter()
-            .map(|result| result.line)
+            .map(|row| row.line)
             .collect()
     } else {
         let lang = path
             .extension()
-            .map_or_else(|| "text".into(), |x| x.to_string_lossy().into_owned());
+            .map_or_else(|| "text".into(), |extension| extension.to_string_lossy().into_owned());
 
-        crate::ui::markdown::code_rows(&text, &lang, width_value, &[], true, None)
+        crate::ui::markdown::code_rows(&text, &lang, columns, &[], true, None)
             .into_iter()
             .skip(1)
-            .map(|result_value| result_value.line)
+            .map(|row| row.line)
             .collect()
     }
 }
 
-fn show_view(state: &mut View, path: &Path) {
-    if !state.named.iter().any(|path_value| path_value == path) && !state.files.iter().any(|error| error.path == path) {
-        state.named.push(path.to_path_buf());
+fn show_view(view: &mut View, path: &Path) {
+    if !view.named.iter().any(|named| named == path) && !view.files.iter().any(|entry| entry.path == path) {
+        view.named.push(path.to_path_buf());
     }
 
-    state.filter_input.filter.set_text("");
-    state.filter_input.filtering = false;
+    view.filter_input.filter.set_text("");
+    view.filter_input.filtering = false;
 
     // the named file at once; the rest of the list from the read
-    if !state.files.iter().any(|error_value| error_value.path == path) {
-        state.files.insert(
+    if !view.files.iter().any(|entry| entry.path == path) {
+        view.files.insert(
             0,
             Entry {
                 path: path.to_path_buf(),
@@ -113,46 +113,46 @@ fn show_view(state: &mut View, path: &Path) {
         );
     }
 
-    state.refresh(true);
-    state.rebuild();
-    state.at = state
+    view.refresh(true);
+    view.rebuild();
+    view.at = view
         .visible
         .iter()
-        .position(|(i, _)| state.files[*i].path == path)
+        .position(|(i, _)| view.files[*i].path == path)
         .unwrap_or(0);
-    state.text_preview.scroll = 0;
+    view.text_preview.scroll = 0;
 }
 
-fn apply_body(path_2: &Path, view_state: &mut View) {
-    view_state.at = view_state
+fn restore_cursor(path: &Path, view: &mut View) {
+    view.at = view
         .visible
         .iter()
-        .position(|(i, _)| view_state.files[*i].path == *path_2)
-        .unwrap_or(view_state.at);
+        .position(|(i, _)| view.files[*i].path == *path)
+        .unwrap_or(view.at);
 }
 
-fn apply_body_state(path_2: &Path, view_state: &mut View) {
-    apply_body(path_2, view_state);
+fn keep_cursor_on(path: &Path, view: &mut View) {
+    restore_cursor(path, view);
 }
 
-fn apply_view(state: &mut View, mut files: Vec<Entry>) -> bool {
+fn apply_view(view: &mut View, mut files: Vec<Entry>) -> bool {
     // named files (clicked links) stay
-    for path_value in state.named.iter().rev() {
-        apply_branch(&mut files, path_value);
+    for named in view.named.iter().rev() {
+        keep_named(&mut files, named);
     }
 
-    if files != state.files
-        || state.visible.len() != state.files.len()
-        || !state.filter_input.filter.text().trim().is_empty()
+    if files != view.files
+        || view.visible.len() != view.files.len()
+        || !view.filter_input.filter.text().trim().is_empty()
     {
-        let cur = state.cur().map(|error_value| error_value.path.clone());
-        let changed = files != state.files;
+        let cur = view.cur().map(|entry| entry.path.clone());
+        let changed = files != view.files;
 
-        state.files = files;
-        state.rebuild();
+        view.files = files;
+        view.rebuild();
 
-        if let Some(path_2) = cur {
-            apply_body_state(&path_2, state);
+        if let Some(path) = cur {
+            keep_cursor_on(&path, view);
         }
 
         return changed;
@@ -161,27 +161,26 @@ fn apply_view(state: &mut View, mut files: Vec<Entry>) -> bool {
     false
 }
 
-fn preview_lines_view(state: &mut View, path_value: &Path, width: u16) -> Option<Vec<Line<'static>>> {
-    let key = (path_value.to_path_buf(), width, mtime(path_value));
+fn preview_lines_view(view: &mut View, file: &Path, width: u16) -> Option<Vec<Line<'static>>> {
+    let key = (file.to_path_buf(), width, mtime(file));
 
-    if let Some(line) = state.text_preview.cache.get(&key) {
-        return Some(line.clone());
+    if let Some(lines) = view.text_preview.cache.get(&key) {
+        return Some(lines.clone());
     }
 
     if cfg!(test) {
-        let lines = render_preview(path_value, width);
+        let lines = render_preview(file, width);
 
-        state.text_preview.cache.insert(key, lines.clone());
+        view.text_preview.cache.insert(key, lines.clone());
         return Some(lines);
     }
 
-    if !state.text_preview.renders.waiting(&key) {
-        let path = path_value.to_path_buf();
+    if !view.text_preview.renders.waiting(&key) {
+        let owned = file.to_path_buf();
 
-        state
-            .text_preview
+        view.text_preview
             .renders
-            .request(key, move || render_preview(&path, width));
+            .request(key, move || render_preview(&owned, width));
     }
 
     None

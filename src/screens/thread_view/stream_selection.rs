@@ -14,7 +14,7 @@ impl SelectionState {
     }
     fn draw_row(frame: &mut Frame, view: &View, window: &StreamFrame, range: ((usize, u16), (usize, u16)), y: u16) {
         let ((r0, c0), (r1, c1)) = range;
-        let st = window.area;
+        let area = window.area;
 
         let Some(row) = view.row_at(y) else {
             return;
@@ -31,18 +31,18 @@ impl SelectionState {
             .map(|span| span.content.as_ref())
             .collect();
 
-        let Some((ta, tb)) = content_cols(&text) else {
+        let Some((text_start, text_end)) = content_cols(&text) else {
             return;
         };
 
-        if tb <= ta {
+        if text_end <= text_start {
             return;
         }
 
-        let (ta, tb) = (ta as u16, tb as u16 - 1);
+        let (text_start, text_end) = (text_start as u16, text_end as u16 - 1);
         let (first, last) = (
-            if row == r0 { c0.max(ta) } else { ta },
-            if row == r1 { c1.min(tb) } else { tb },
+            if row == r0 { c0.max(text_start) } else { text_start },
+            if row == r1 { c1.min(text_end) } else { text_end },
         );
 
         if last < first {
@@ -51,8 +51,8 @@ impl SelectionState {
 
         let buffer = frame.buffer_mut();
 
-        for x in first..=last.min(st.width.saturating_sub(1)) {
-            buffer[(st.x + x, y)].set_style(theme::pill());
+        for x in first..=last.min(area.width.saturating_sub(1)) {
+            buffer[(area.x + x, y)].set_style(theme::pill());
         }
     }
 }

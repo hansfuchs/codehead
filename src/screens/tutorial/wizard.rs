@@ -104,15 +104,15 @@ fn edit(text: &mut String, key: &KeyEvent) -> bool {
     match key.code {
         KeyCode::Char('u') if ctrl => text.clear(),
         KeyCode::Backspace if alt => {
-            let thread = text.trim_end().len();
-            let cut = text[..thread].rfind([' ', '/']).map_or(0, |i| i + 1);
+            let end = text.trim_end().len();
+            let cut = text[..end].rfind([' ', '/']).map_or(0, |i| i + 1);
 
             text.truncate(cut);
         }
         KeyCode::Backspace => {
             text.pop();
         }
-        KeyCode::Char(character) if !ctrl && !alt => text.push(character),
+        KeyCode::Char(typed) if !ctrl && !alt => text.push(typed),
         _ => return false,
     }
 
@@ -123,11 +123,6 @@ pub(crate) struct Wizard {
     dry: bool,
     screen: usize,
     seed: u64,
-    // harness screen
-
-    // home screen
-
-    // crew screen
     /// The tutorial runs next (its own process, the loop in `run` starts it).
     launch: bool,
     /// Screens before this one: esc goes back to the last.
@@ -136,8 +131,11 @@ pub(crate) struct Wizard {
     /// Screen entered at: the title decode.
     entered: Instant,
 
+    // harness screen
     harness_state: HarnessState,
+    // home screen
     home_state: HomeState,
+    // crew screen
     crew_state: CrewState,
 }
 
@@ -145,8 +143,8 @@ impl Wizard {
     pub(crate) fn new(dry: bool) -> Wizard {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(7, |directory| directory.as_nanos() as u64);
-        let mut width = Wizard {
+            .map_or(7, |elapsed| elapsed.as_nanos() as u64);
+        let mut wizard = Wizard {
             dry,
             screen: 0,
             seed,
@@ -172,16 +170,16 @@ impl Wizard {
             },
         };
 
-        width.detect();
+        wizard.detect();
 
         // a real run skips the harness screen when 1 harness is ready
-        if !dry && !width.harness_state.installed.is_empty() {
-            width.screen = 1;
+        if !dry && !wizard.harness_state.installed.is_empty() {
+            wizard.screen = 1;
         }
 
-        width.build_crew();
+        wizard.build_crew();
 
-        width
+        wizard
     }
 
     fn rand(&mut self) -> u64 {
@@ -193,25 +191,25 @@ impl Wizard {
     }
 
     fn detect(&mut self) {
-        self.harness_state.installed = harnesses::installed().iter().map(|height| height.name).collect();
+        self.harness_state.installed = harnesses::installed().iter().map(|harness| harness.name).collect();
     }
 
     /// Harness rows: installed ones, then the offered ones not installed.
     fn harness_rows(&self) -> Vec<&'static harnesses::Harness> {
-        let mut value: Vec<&'static harnesses::Harness> = self
+        let mut rows: Vec<&'static harnesses::Harness> = self
             .harness_state
             .installed
             .iter()
-            .filter_map(|count| harnesses::get(count))
+            .filter_map(|name| harnesses::get(name))
             .collect();
 
-        value.extend(
+        rows.extend(
             OFFER
                 .iter()
-                .filter(|count_value| !self.harness_state.installed.contains(count_value))
-                .filter_map(|count_2| harnesses::get(count_2)),
+                .filter(|name| !self.harness_state.installed.contains(name))
+                .filter_map(|name| harnesses::get(name)),
         );
-        value
+        rows
     }
 
     fn random_avatar(&mut self) -> Avatar {
@@ -231,7 +229,7 @@ impl Wizard {
     }
 
     fn spawn(&self) -> Spawn {
-        let taken: Vec<usize> = self.crew_state.crew.iter().map(|message| message.spawn.anim).collect();
+        let taken: Vec<usize> = self.crew_state.crew.iter().map(|member| member.spawn.anim).collect();
 
         Spawn::random_except(&taken)
     }
@@ -258,7 +256,7 @@ impl Wizard {
     /// Back to the screen before (0 before: quit).
     fn back(&mut self) {
         match self.history.pop() {
-            Some(text) => self.show(text),
+            Some(previous) => self.show(previous),
             None => self.quit = true,
         }
     }
@@ -279,12 +277,12 @@ impl Wizard {
             .crew_state
             .crew
             .iter()
-            .map(|message| crate::screens::tutorial::Member {
-                name: message.name.clone(),
-                role: message.role.name().into(),
-                harness: message.harness.into(),
-                avatar: message.avatar.id(),
-                color: message.color.into(),
+            .map(|member| crate::screens::tutorial::Member {
+                name: member.name.clone(),
+                role: member.role.name().into(),
+                harness: member.harness.into(),
+                avatar: member.avatar.id(),
+                color: member.color.into(),
             })
             .collect();
 
@@ -313,9 +311,9 @@ impl Wizard {
                 self.home_state.paths[self.home_state.home].push_str(line);
             }
             Screen::Crew => {
-                let count = format!("{}{line}", self.crew_state.crew[self.crew_state.focus].name);
+                let typed = format!("{}{line}", self.crew_state.crew[self.crew_state.focus].name);
 
-                self.crew_state.crew[self.crew_state.focus].name = clean_name(&count);
+                self.crew_state.crew[self.crew_state.focus].name = clean_name(&typed);
             }
             _ => {}
         }
@@ -325,8 +323,6 @@ impl Wizard {
     fn crew_problem(&self) -> Option<String> {
         validate_crew(self)
     }
-
-    // ---------- draw ----------
 }
 
 /// S as an agent name while it is typed: upper case, letters, digits, `-`, `_`, a letter 1st,
@@ -335,14 +331,10 @@ fn clean_name(text: &str) -> String {
     let mut out: String = text
         .chars()
         .filter(|character| character.is_ascii_alphanumeric() || *character == '-' || *character == '_')
-        .map(|character_value| character_value.to_ascii_uppercase())
+        .map(|character| character.to_ascii_uppercase())
         .collect();
 
-    while out
-        .chars()
-        .next()
-        .is_some_and(|character_2| !character_2.is_ascii_alphabetic())
-    {
+    while out.chars().next().is_some_and(|first| !first.is_ascii_alphabetic()) {
         out.remove(0);
     }
 
@@ -361,30 +353,30 @@ pub(crate) fn run(dry: bool) -> ! {
     }
 
     let mut term = match ratatui::Terminal::new(crate::ui::frames::backend()) {
-        Ok(thread) => thread,
-        Err(error_value) => {
+        Ok(terminal) => terminal,
+        Err(error) => {
             tty.leave(&mut out);
-            crate::infra::terminal::fail(&format!("terminal: {error_value}"), 1)
+            crate::infra::terminal::fail(&format!("terminal: {error}"), 1)
         }
     };
 
-    let mut width = Wizard::new(dry);
-    let result = run_setup(&mut width, &mut tty, &mut out, &mut term);
+    let mut wizard = Wizard::new(dry);
+    let result = run_setup(&mut wizard, &mut tty, &mut out, &mut term);
 
-    finish_setup(dry, out, tty, &(width), result)
+    finish_setup(dry, out, tty, &(wizard), result)
 }
 
 fn finish_setup(
     dry: bool,
     mut out: io::Stdout,
     mut tty: crate::ui::terminal::Tty,
-    width: &Wizard,
+    wizard: &Wizard,
     result: Result<(), io::Error>,
 ) -> ! {
     tty.leave(&mut out);
 
-    if let Err(error_4) = result {
-        crate::infra::terminal::fail(&format!("terminal: {error_4}"), 1);
+    if let Err(error) = result {
+        crate::infra::terminal::fail(&format!("terminal: {error}"), 1);
     }
 
     println!(
@@ -396,7 +388,7 @@ fn finish_setup(
         }
     );
 
-    for line in width.plan() {
+    for line in wizard.plan() {
         println!("- {line}");
     }
 
@@ -439,15 +431,10 @@ struct CrewState {
     focus: usize,
 }
 
-fn rebuild_crew(widget_state: &mut Wizard) {
-    let roles = PRESETS[widget_state.crew_state.preset].1;
-    let first = widget_state
-        .harness_state
-        .installed
-        .first()
-        .copied()
-        .unwrap_or("claude");
-    let second = widget_state.harness_state.installed.get(1).copied().unwrap_or(first);
+fn rebuild_crew(wizard: &mut Wizard) {
+    let roles = PRESETS[wizard.crew_state.preset].1;
+    let first = wizard.harness_state.installed.first().copied().unwrap_or("claude");
+    let second = wizard.harness_state.installed.get(1).copied().unwrap_or(first);
     let taken: Vec<String> = crate::engine::roster::all()
         .into_iter()
         .map(|agent| agent.name)
@@ -455,26 +442,26 @@ fn rebuild_crew(widget_state: &mut Wizard) {
     let mut names: Vec<&str> = NAMES
         .iter()
         .copied()
-        .filter(|count| !taken.iter().any(|thread| thread == count))
+        .filter(|name| !taken.iter().any(|agent| agent == name))
         .collect();
 
-    widget_state.crew_state.crew.clear();
+    wizard.crew_state.crew.clear();
 
     for (i, role) in roles.iter().enumerate() {
-        let key = (widget_state.rand() % names.len().max(1) as u64) as usize;
+        let pick = (wizard.rand() % names.len().max(1) as u64) as usize;
 
         let name = if names.is_empty() {
             format!("AGENT{i}")
         } else {
-            names.remove(key).to_string()
+            names.remove(pick).to_string()
         };
 
-        let avatar = widget_state.random_avatar();
-        let color = crate::domain::agents::COLORS[(i + widget_state.crew_state.preset) % 5];
+        let avatar = wizard.random_avatar();
+        let color = crate::domain::agents::COLORS[(i + wizard.crew_state.preset) % 5];
         let harness = if *role == Role::Reviewer { second } else { first };
-        let spawn = widget_state.spawn();
+        let spawn = wizard.spawn();
 
-        widget_state.crew_state.crew.push(Member {
+        wizard.crew_state.crew.push(Member {
             name,
             role: *role,
             harness,
@@ -484,38 +471,35 @@ fn rebuild_crew(widget_state: &mut Wizard) {
         });
     }
 
-    widget_state.crew_state.focus = widget_state
-        .crew_state
-        .focus
-        .min(widget_state.crew_state.crew.len() - 1);
+    wizard.crew_state.focus = wizard.crew_state.focus.min(wizard.crew_state.crew.len() - 1);
 }
 
-fn select_setup_screen(widget_state: &mut Wizard, to: usize) {
-    widget_state.screen = to;
-    widget_state.entered = Instant::now();
-    widget_state.harness_state.note.clear();
+fn select_setup_screen(wizard: &mut Wizard, to: usize) {
+    wizard.screen = to;
+    wizard.entered = Instant::now();
+    wizard.harness_state.note.clear();
 
-    if SCREENS[widget_state.screen] == Screen::Crew {
-        for i in 0..widget_state.crew_state.crew.len() {
-            widget_state.crew_state.crew[i].spawn = Spawn {
-                anim: widget_state.crew_state.crew[i].spawn.anim,
+    if SCREENS[wizard.screen] == Screen::Crew {
+        for i in 0..wizard.crew_state.crew.len() {
+            wizard.crew_state.crew[i].spawn = Spawn {
+                anim: wizard.crew_state.crew[i].spawn.anim,
                 start: avatar::now() + i as f32 * 0.25,
             };
         }
     }
 }
 
-fn validate_crew(widget_state: &Wizard) -> Option<String> {
-    for (i, message) in widget_state.crew_state.crew.iter().enumerate() {
-        if message.name.is_empty() {
-            return Some(format!("the {} needs a name", message.role.name()));
+fn validate_crew(wizard: &Wizard) -> Option<String> {
+    for (i, member) in wizard.crew_state.crew.iter().enumerate() {
+        if member.name.is_empty() {
+            return Some(format!("the {} needs a name", member.role.name()));
         }
 
-        if widget_state.crew_state.crew[..i]
+        if wizard.crew_state.crew[..i]
             .iter()
-            .any(|output| output.name == message.name)
+            .any(|earlier| earlier.name == member.name)
         {
-            return Some(format!("2 agents named {}", message.name));
+            return Some(format!("2 agents named {}", member.name));
         }
     }
 
@@ -523,73 +507,73 @@ fn validate_crew(widget_state: &Wizard) -> Option<String> {
 }
 
 fn run_setup(
-    width: &mut Wizard,
+    wizard: &mut Wizard,
     tty: &mut crate::ui::terminal::Tty,
     out: &mut io::Stdout,
     term: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<crate::ui::frames::Frames>>,
 ) -> io::Result<()> {
-    while !width.quit {
+    while !wizard.quit {
         // the tutorial: its own process takes the terminal (a sandbox env of its own)
-        if width.launch {
-            launch_tutorial(width, tty, out, term)?;
+        if wizard.launch {
+            launch_tutorial(wizard, tty, out, term)?;
             continue;
         }
 
-        term.draw(|file| width.draw(file))?;
+        term.draw(|frame| wizard.draw(frame))?;
 
-        read_setup_events(width)?;
+        read_setup_events(wizard)?;
     }
 
     Ok(())
 }
 
 fn launch_tutorial(
-    width: &mut Wizard,
+    wizard: &mut Wizard,
     tty: &mut crate::ui::terminal::Tty,
     out: &mut io::Stdout,
     term: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<crate::ui::frames::Frames>>,
 ) -> io::Result<()> {
-    width.launch = false;
+    wizard.launch = false;
     tty.release(out);
     let child = std::process::Command::new(crate::engine::exe())
         .arg("tutorial")
-        .arg(width.spec())
+        .arg(wizard.spec())
         .stderr(std::process::Stdio::piped())
         .spawn();
 
     let (code, err) = match child {
-        Ok(character) => match character.wait_with_output() {
+        Ok(process) => match process.wait_with_output() {
             Ok(output) => (
                 output.status.code(),
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ),
-            Err(error_2) => (None, error_2.to_string()),
+            Err(error) => (None, error.to_string()),
         },
-        Err(error_3) => (None, error_3.to_string()),
+        Err(error) => (None, error.to_string()),
     };
 
     tty.enter(out)?;
     term.clear()?;
 
     if err.is_empty() {
-        width.tutorial_ended(code);
+        wizard.tutorial_ended(code);
     } else {
-        width.harness_state.note = err.lines().last().unwrap_or_default().to_string();
+        wizard.harness_state.note = err.lines().last().unwrap_or_default().to_string();
     }
 
     Ok(())
 }
 
-fn read_setup_events(width: &mut Wizard) -> io::Result<()> {
+fn read_setup_events(wizard: &mut Wizard) -> io::Result<()> {
     // read_ready, not crossterm: a hung-up terminal ends the wizard
     for (ev, _) in crate::infra::terminal::read_ready(Duration::from_millis(33)).map_err(io::Error::other)? {
         match ev {
-            Event::Key(key_value) if key_value.kind != KeyEventKind::Release => width.key(key_value),
-            Event::Paste(text) => width.paste(&text),
+            Event::Key(key) if key.kind != KeyEventKind::Release => wizard.key(key),
+            Event::Paste(text) => wizard.paste(&text),
             _ => {}
         }
 
-        if width.quit {
+        if wizard.quit {
             break;
         }
     }

@@ -3,14 +3,14 @@ use super::{Card, Focus, KeyEvent, Mode, Position, Rect, ThreadList, View, threa
 impl ThreadList {
     /// Section of card C: 0 open (working, a question, work not in the base yet, 0 code yet, 0
     /// landed state read yet), 1 stale (open, 0 code, idle 3 days), 2 shipped.
-    pub(super) fn section(character: &Card) -> u8 {
-        let stale = || character.stale(crate::engine::now_ms());
+    pub(super) fn section(card: &Card) -> u8 {
+        let stale = || card.stale(crate::engine::now_ms());
 
-        if character.agents.busy || character.land.as_ref().is_some_and(crate::domain::landed::Land::open) {
+        if card.agents.busy || card.land.as_ref().is_some_and(crate::domain::landed::Land::open) {
             0
-        } else if character.agents.blocked {
+        } else if card.agents.blocked {
             u8::from(stale())
-        } else if character.shipped() {
+        } else if card.shipped() {
             2
         } else {
             u8::from(stale())
@@ -22,16 +22,16 @@ impl ThreadList {
     }
     /// The cards of the view, status tab applied (active: by section, then match / activity).
     pub(crate) fn visible(&self) -> Vec<usize> {
-        let mut value = self.base();
+        let mut rows = self.base();
 
         if self.has_stats() {
-            let st = self.stat_tab();
+            let tab = self.stat_tab();
 
-            value.retain(|&i| st.keeps(Self::section(&self.cards[i])));
-            value.sort_by_key(|&i| Self::section(&self.cards[i]));
+            rows.retain(|&i| tab.keeps(Self::section(&self.cards[i])));
+            rows.sort_by_key(|&i| Self::section(&self.cards[i]));
         }
 
-        value
+        rows
     }
     pub(crate) fn current(&self) -> Option<&Card> {
         self.visible().get(self.cursor).map(|&i| &self.cards[i])
@@ -43,7 +43,7 @@ impl ThreadList {
                 .visible()
                 .into_iter()
                 .map(|i| self.cards[i].clone())
-                .filter(|character| self.sel.contains(&character.id))
+                .filter(|card| self.sel.contains(&card.id))
                 .collect();
         }
 
@@ -57,10 +57,10 @@ impl ThreadList {
             _ => self.visible().len(),
         }
     }
-    pub(super) fn type_filter(&mut self, key_value: KeyEvent) {
+    pub(super) fn type_filter(&mut self, key: KeyEvent) {
         let before = self.filter.text();
 
-        self.filter.key(key_value);
+        self.filter.key(key);
 
         if self.filter.text() != before {
             self.cursor = 0;
@@ -76,9 +76,9 @@ impl ThreadList {
         self.hit_regions
             .act_rows
             .iter()
-            .map(|(result, _)| *result)
-            .chain(self.hit_regions.rows.iter().map(|(result_value, _)| *result_value))
-            .find(|result_2| result_2.contains(at))
+            .map(|(rect, _)| *rect)
+            .chain(self.hit_regions.rows.iter().map(|(rect, _)| *rect))
+            .find(|rect| rect.contains(at))
     }
 }
 

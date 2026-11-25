@@ -82,14 +82,14 @@ fn cut(text: &str, max: usize) -> String {
 
 /// What a subagent does, from its tool input: the description, else the title, else the 1st line of the prompt.
 fn description_of(input: &Value) -> String {
-    let path = input["prompt"].as_str().unwrap_or_default();
-    let directory = input["description"]
+    let prompt = input["prompt"].as_str().unwrap_or_default();
+    let description = input["description"]
         .as_str()
         .or_else(|| input["title"].as_str())
         .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| path.lines().next().unwrap_or("subagent"));
+        .unwrap_or_else(|| prompt.lines().next().unwrap_or("subagent"));
 
-    directory
+    description
         .chars()
         .map(|character| if character.is_control() { ' ' } else { character })
         .take(120)
@@ -120,24 +120,24 @@ impl Tracker {
     /// The tracker of a host that starts now, from the thread's log: subagents the log has open
     /// ran in a process that is gone: they end as lost.
     pub(crate) fn from_log(events: &[Event]) -> (Tracker, Logs) {
-        let mut thread = Tracker {
+        let mut tracker = Tracker {
             since: super::now_ms(),
             ..Default::default()
         };
         let mut open: Vec<(String, String)> = Vec::new();
         let mut runs: HashMap<String, Run> = HashMap::new();
 
-        replay_subagent_events(events, &mut thread, &mut open, &mut runs);
+        replay_subagent_events(events, &mut tracker, &mut open, &mut runs);
 
         let logs = open
             .into_iter()
-            .map(|(agent_value, id)| {
-                thread.ended.insert(id.clone());
+            .map(|(master, id)| {
+                tracker.ended.insert(id.clone());
 
-                restore_ended_subagent(&mut thread, &mut runs, &id);
+                restore_lost_subagent(&mut tracker, &mut runs, &id);
 
                 (
-                    agent_value,
+                    master,
                     Kind::SubEnd {
                         id,
                         state: "lost".into(),
@@ -147,7 +147,7 @@ impl Tracker {
             })
             .collect();
 
-        (thread, logs)
+        (tracker, logs)
     }
     /// Subagents run.
     pub(crate) fn any(&self) -> bool {
@@ -155,7 +155,7 @@ impl Tracker {
     }
     /// Masters with running subagents.
     pub(crate) fn masters(&self) -> HashSet<String> {
-        self.running.values().map(|result| result.agent.clone()).collect()
+        self.running.values().map(|run| run.agent.clone()).collect()
     }
     /// Ended subagents with files (Claude Code), ended in the last RESUMABLE: a message of their
     /// master can resume them.
@@ -164,28 +164,28 @@ impl Tracker {
 
         self.done
             .values()
-            .any(|(result, end)| result.transcript.is_some() && *end >= since)
+            .any(|(run, end)| run.transcript.is_some() && *end >= since)
     }
     /// ID ends: out of the running ones, kept with its end time for a resume.
     fn end(&mut self, id: &str) -> Option<Run> {
-        let result = self.running.remove(id)?;
+        let run = self.running.remove(id)?;
 
         self.ended.insert(id.to_string());
-        self.done.insert(id.to_string(), (result.clone(), super::now_ms()));
-        Some(result)
+        self.done.insert(id.to_string(), (run.clone(), super::now_ms()));
+        Some(run)
     }
     /// Ended subagent ID runs again. It ends with its meta file (0 tool result of its master).
     fn resume(&mut self, id: &str) -> Logs {
-        let Some((mut result, _)) = self.done.remove(id) else {
+        let Some((mut run, _)) = self.done.remove(id) else {
             return Vec::new();
         };
 
         self.ended.remove(id);
-        result.resumed = super::now_ms();
-        result.background = true;
-        let agent = result.agent.clone();
+        run.resumed = super::now_ms();
+        run.background = true;
+        let agent = run.agent.clone();
 
-        self.running.insert(id.to_string(), result);
+        self.running.insert(id.to_string(), run);
 
         vec![(agent, Kind::SubResume { id: id.to_string() })]
     }
@@ -226,12 +226,7 @@ impl Tracker {
                     },
                 )]
             }
-            Kind::ToolResult { id, ok, output }
-                if self
-                    .running
-                    .get(id)
-                    .is_some_and(|result_value| result_value.agent == agent) =>
-            {
+            Kind::ToolResult { id, ok, output } if self.running.get(id).is_some_and(|run| run.agent == agent) => {
                 record_task_result(agent, id, *ok, output, self)
             }
             // a message to an ended subagent (Claude Code `SendMessage`, `to`: its agent id) resumes it
@@ -240,7 +235,7 @@ impl Tracker {
                 let id = self
                     .done
                     .iter()
-                    .find(|(_, (result_4, _))| result_4.agent == agent && !to.is_empty() && result_4.task == to)
+                    .find(|(_, (run, _))| run.agent == agent && !to.is_empty() && run.task == to)
                     .map(|(id, _)| id.clone());
 
                 id.map(|id| self.resume(&id)).unwrap_or_default()
@@ -254,7 +249,7 @@ impl Tracker {
         let ids: Vec<String> = self
             .running
             .iter()
-            .filter(|(_, result_value)| result_value.agent == agent)
+            .filter(|(_, run)| run.agent == agent)
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -280,14 +275,14 @@ impl Tracker {
 
 fn replay_subagent_events(
     events: &[Event],
-    thread: &mut Tracker,
+    tracker: &mut Tracker,
     open: &mut Vec<(String, String)>,
     runs: &mut HashMap<String, Run>,
 ) {
-    for error in events {
-        let agent = error.agent.clone().unwrap_or_default();
+    for event in events {
+        let agent = event.agent.clone().unwrap_or_default();
 
-        match &error.kind {
+        match &event.kind {
             Kind::SubStart {
                 id,
                 parent,
@@ -295,32 +290,32 @@ fn replay_subagent_events(
                 background,
                 ..
             } => {
-                from_log_substart(open, runs, &agent, id, parent.as_deref(), description, *background);
+                restore_started_subagent(open, runs, &agent, id, parent.as_deref(), description, *background);
             }
             Kind::SubInfo { id, transcript, task } => {
                 record_transcript(runs, id, transcript, task);
             }
             Kind::SubEnd { id, .. } => {
-                from_log_subend_id(thread, open, &*runs, error, id);
+                restore_logged_end(tracker, open, &*runs, event, id);
             }
             Kind::SubResume { id } => {
-                restore_resumed_subagent(thread, open, agent, id);
+                restore_resumed_subagent(tracker, open, agent, id);
             }
             _ => {}
         }
     }
 }
 
-fn restore_resumed_subagent(thread: &mut Tracker, open: &mut Vec<(String, String)>, agent: String, id: &String) {
-    thread.ended.remove(id);
-    thread.done.remove(id);
+fn restore_resumed_subagent(tracker: &mut Tracker, open: &mut Vec<(String, String)>, agent: String, id: &String) {
+    tracker.ended.remove(id);
+    tracker.done.remove(id);
 
-    if !open.iter().any(|(_, x)| x == id) {
+    if !open.iter().any(|(_, open_id)| open_id == id) {
         open.push((agent, id.clone()));
     }
 }
 
-fn from_log_substart(
+fn restore_started_subagent(
     open: &mut Vec<(String, String)>,
     runs: &mut HashMap<String, Run>,
     agent: &str,
@@ -342,35 +337,35 @@ fn from_log_substart(
     );
 }
 
-fn restore_ended_subagent(thread: &mut Tracker, runs: &mut HashMap<String, Run>, id: &String) {
-    if let Some(result_3) = runs.remove(id) {
-        thread.done.insert(id.clone(), (result_3, thread.since));
+fn restore_lost_subagent(tracker: &mut Tracker, runs: &mut HashMap<String, Run>, id: &String) {
+    if let Some(run) = runs.remove(id) {
+        tracker.done.insert(id.clone(), (run, tracker.since));
     }
 }
 
-fn from_log_subend_id(
-    thread: &mut Tracker,
+fn restore_logged_end(
+    tracker: &mut Tracker,
     open: &mut Vec<(String, String)>,
     runs: &HashMap<String, Run>,
-    error: &Event,
+    event: &Event,
     id: &String,
 ) {
-    thread.ended.insert(id.clone());
-    open.retain(|(_, x)| x != id);
+    tracker.ended.insert(id.clone());
+    open.retain(|(_, open_id)| open_id != id);
 
-    if let Some(result_2) = runs.get(id) {
-        thread.done.insert(id.clone(), (result_2.clone(), error.ts));
+    if let Some(run) = runs.get(id) {
+        tracker.done.insert(id.clone(), (run.clone(), event.ts));
     }
 }
 
 fn record_transcript(runs: &mut HashMap<String, Run>, id: &String, transcript: &String, task: &String) {
-    if let Some(result_value) = runs.get_mut(id) {
+    if let Some(run) = runs.get_mut(id) {
         if !transcript.is_empty() {
-            result_value.transcript = Some(PathBuf::from(transcript));
+            run.transcript = Some(PathBuf::from(transcript));
         }
 
         if !task.is_empty() {
-            result_value.task.clone_from(task);
+            run.task.clone_from(task);
         }
     }
 }
@@ -386,25 +381,19 @@ pub(crate) use subagent_transcripts::*;
 #[path = "subagent_scan.rs"]
 mod subagent_scan;
 
-fn record_task_result(
-    agent: &str,
-    id: &String,
-    ok: bool,
-    output: &str,
-    model_state: &mut Tracker,
-) -> Vec<(String, Kind)> {
-    let result_2 = model_state.running.get_mut(id).expect("checked");
+fn record_task_result(agent: &str, id: &String, ok: bool, output: &str, tracker: &mut Tracker) -> Vec<(String, Kind)> {
+    let run = tracker.running.get_mut(id).expect("checked");
 
     // Claude Code starts subagents in the background by default (0 `run_in_background`
     // in the input): the result is the launch, not the end
-    if ok && !result_2.background && async_launch(output) {
-        result_2.background = true;
+    if ok && !run.background && async_launch(output) {
+        run.background = true;
     }
 
-    if result_2.background && ok {
-        if let Some(task) = agent_id_in(output).filter(|thread| *thread != result_2.task) {
-            result_2.task.clone_from(&task);
-            let transcript = result_2
+    if run.background && ok {
+        if let Some(task) = agent_id_in(output).filter(|launched| *launched != run.task) {
+            run.task.clone_from(&task);
+            let transcript = run
                 .transcript
                 .as_ref()
                 .map(|path| path.display().to_string())
@@ -423,8 +412,8 @@ fn record_task_result(
         return Vec::new();
     }
 
-    let result_3 = model_state.end(id).expect("checked");
-    let result = result_3
+    let ended = tracker.end(id).expect("checked");
+    let result = ended
         .transcript
         .as_deref()
         .and_then(result_of)

@@ -7,43 +7,34 @@ fn floating_solids_stay_inside_the_canvas() {
         let (mesh, _, _) = solid.mesh();
 
         for motion in MOTIONS {
-            floating_solids_stay_inside_the_canvas_for_yaw_in_0_5f32_0(*solid, &mesh, motion);
+            assert_turns_inside(*solid, &mesh, motion);
         }
     }
 }
 
-fn floating_solids_stay_inside_the_canvas_for_yaw_in_0_5f32_0(solid: Solid, mesh: &Mesh, motion: Motion) {
+fn assert_turns_inside(solid: Solid, mesh: &Mesh, motion: Motion) {
     for yaw in [-0.5f32, -0.2, 0.0, 0.3, 0.6] {
-        let file = fit(mesh, motion, yaw);
+        let fit = fit(mesh, motion, yaw);
 
-        assert!(file.scale > 0.75, "{solid:?} {motion:?}: scale {}", file.scale);
+        assert!(fit.scale > 0.75, "{solid:?} {motion:?}: scale {}", fit.scale);
 
-        for text in 0..4 {
-            floating_solids_stay_inside_the_canvas_for_yaw_in_0_5f32_0_for_i_in_0_400(
-                solid, mesh, motion, yaw, file, text,
-            );
+        for status in 0..4 {
+            assert_status_poses_inside(solid, mesh, motion, yaw, fit, status);
         }
     }
 }
 
-fn floating_solids_stay_inside_the_canvas_for_yaw_in_0_5f32_0_for_i_in_0_400(
-    solid: Solid,
-    mesh: &Mesh,
-    motion: Motion,
-    yaw: f32,
-    file: Fit,
-    text: usize,
-) {
+fn assert_status_poses_inside(solid: Solid, mesh: &Mesh, motion: Motion, yaw: f32, fit: Fit, status: usize) {
     for i in 0..400 {
-        let (pitch, roll, bob) = pose(motion, text, i as f32 * 0.05);
+        let (pitch, roll, bob) = pose(motion, status, i as f32 * 0.05);
 
-        for &value in &mesh.verts {
-            let (x, y) = persp(rot(value, yaw, pitch, roll), bob);
-            let (x, y) = (file.cx + x * file.scale, file.cy + y * file.scale);
+        for &vertex in &mesh.verts {
+            let (x, y) = persp(rot(vertex, yaw, pitch, roll), bob);
+            let (x, y) = (fit.cx + x * fit.scale, fit.cy + y * fit.scale);
 
             assert!(
                 (-0.5..DW as f32 - 0.5).contains(&x) && (-0.5..DH as f32 - 0.5).contains(&y),
-                "{solid:?} {motion:?} yaw {yaw} s {text}: ({x}, {y})"
+                "{solid:?} {motion:?} yaw {yaw} s {status}: ({x}, {y})"
             );
         }
     }
@@ -53,10 +44,10 @@ fn floating_solids_stay_inside_the_canvas_for_yaw_in_0_5f32_0_for_i_in_0_400(
 fn lines_have_no_loose_ends() {
     // every regi, every status, 20 s at 10 fps: each line dot touches 2+ dots (a closed
     // wireframe: 0 lone dots, 0 spurs off a corner)
-    lines_have_no_loose_ends_for_i_result_in_all_iter();
+    assert_all_regis_closed();
 }
 
-fn lines_have_no_loose_ends_for_i_result_in_all_iter() {
+fn assert_all_regis_closed() {
     for (index, model) in all().iter().enumerate() {
         for status in 0..5 {
             assert_closed_frames(index, model, status);
@@ -104,20 +95,20 @@ fn neighbor_count(dots: &[u8], x: i32, y: i32) -> usize {
 fn working_eyes_blink_one_by_one() {
     // over 40 s at 60 fps: each dot blinks, mostly 0 or 1 dot off, never half of them
     for talk in TALKS {
-        let count_value = 9;
-        let (mut off_any, mut multi) = (vec![false; count_value], 0);
+        let dot_count = 9;
+        let (mut off_any, mut multi) = (vec![false; dot_count], 0);
 
-        for file in 0..2400 {
-            let thread = file as f32 / 60.0;
-            let off = (0..count_value).filter(|&key| blinks(talk, key, thread)).count();
+        for frame in 0..2400 {
+            let time = frame as f32 / 60.0;
+            let off = (0..dot_count).filter(|&dot| blinks(talk, dot, time)).count();
 
-            assert!(off <= count_value / 2, "{talk:?} {thread}: {off} off");
+            assert!(off <= dot_count / 2, "{talk:?} {time}: {off} off");
 
             multi += usize::from(off > 1);
-            (0..count_value).for_each(|key_value| off_any[key_value] |= blinks(talk, key_value, thread));
+            (0..dot_count).for_each(|dot| off_any[dot] |= blinks(talk, dot, time));
         }
 
-        assert!(off_any.iter().all(|&bytes| bytes), "{talk:?}: a dot never blinks");
+        assert!(off_any.iter().all(|&blinked| blinked), "{talk:?}: a dot never blinks");
         assert!(multi < 2400 / 20, "{talk:?}: {multi} frames with 2+ off");
     }
 }
@@ -221,29 +212,29 @@ fn assert_eye_cells(index: usize, pattern: Pattern, status: usize, time: f32, do
     let (eye_color, frame_color) = colors(status);
     let drawn = cells(dots, eye_color, frame_color);
 
-    for (character, cell) in drawn.iter().enumerate() {
+    for (cell_index, cell) in drawn.iter().enumerate() {
         let bits = (cell.ch as u32).saturating_sub(0x2800) & 0xFF;
         let (mut frame, mut eye) = (0, 0);
 
-        assert_eye_cells_for_bit_in_0_8(dots, character, &mut frame, &mut eye);
+        collect_cell_bits(dots, cell_index, &mut frame, &mut eye);
         assert_eq!(
             bits,
             frame | eye,
-            "regi {index} {pattern:?} s{status} t{time}: cell {character} a gap"
+            "regi {index} {pattern:?} s{status} t{time}: cell {cell_index} a gap"
         );
 
         if eye_color != frame_color && cell.fg == eye_color {
             assert_eq!(
                 frame, 0,
-                "regi {index} {pattern:?} s{status} t{time}: cell {character} a frame dot in the eye color"
+                "regi {index} {pattern:?} s{status} t{time}: cell {cell_index} a frame dot in the eye color"
             );
         }
     }
 }
 
-fn assert_eye_cells_for_bit_in_0_8(dots: &[u8], character: usize, frame: &mut u32, eye: &mut u32) {
+fn collect_cell_bits(dots: &[u8], cell_index: usize, frame: &mut u32, eye: &mut u32) {
     for bit in 0..8 {
-        match dots[((character / 7) * 4 + bit / 2) * DW + (character % 7) * 2 + bit % 2] {
+        match dots[((cell_index / 7) * 4 + bit / 2) * DW + (cell_index % 7) * 2 + bit % 2] {
             1 => *frame |= BIT[bit / 2][bit % 2],
             2 => *eye |= BIT[bit / 2][bit % 2],
             _ => {}
@@ -254,23 +245,23 @@ fn assert_eye_cells_for_bit_in_0_8(dots: &[u8], character: usize, frame: &mut u3
 #[test]
 fn thinking_eyes_blink_slower() {
     // over 60 s at 60 fps: each dot blinks, blinks last longer, fewer blinks than working
-    let count_value = 9;
+    let dot_count = 9;
 
     for talk in TALKS {
         let count = |off: &dyn Fn(usize, f32) -> bool| {
-            let (mut starts, mut frames, mut seen) = (0, 0, vec![false; count_value]);
+            let (mut starts, mut frames, mut seen) = (0, 0, vec![false; dot_count]);
 
-            thinking_eyes_blink_slower_for_key_in_0_count_value(count_value, off, &mut starts, &mut frames, &mut seen);
+            count_blinks(dot_count, off, &mut starts, &mut frames, &mut seen);
 
             (
                 starts,
                 frames as f32 / starts.max(1) as f32,
-                seen.iter().all(|&bytes| bytes),
+                seen.iter().all(|&blinked| blinked),
             )
         };
 
-        let (ws, wlen, _) = count(&|key_value, thread| blinks(talk, key_value, thread));
-        let (ts, tlen, all) = count(&|key_2, thread_value| blinks_slow(talk, key_2, thread_value));
+        let (ws, wlen, _) = count(&|dot, time| blinks(talk, dot, time));
+        let (ts, tlen, all) = count(&|dot, time| blinks_slow(talk, dot, time));
 
         assert!(all, "{talk:?}: a dot never blinks");
         assert!(
@@ -278,33 +269,33 @@ fn thinking_eyes_blink_slower() {
             "{talk:?}: thinking {ts} blinks of {tlen} frames, working {ws} of {wlen}"
         );
 
-        for file_value in 0..3600 {
-            let off = (0..count_value)
-                .filter(|&key_3| blinks_slow(talk, key_3, file_value as f32 / 60.0))
+        for frame in 0..3600 {
+            let off = (0..dot_count)
+                .filter(|&dot| blinks_slow(talk, dot, frame as f32 / 60.0))
                 .count();
 
-            assert!(off <= count_value / 2, "{talk:?}: {off} off");
+            assert!(off <= dot_count / 2, "{talk:?}: {off} off");
         }
     }
 }
 
-fn thinking_eyes_blink_slower_for_key_in_0_count_value(
-    count_value: usize,
+fn count_blinks(
+    dot_count: usize,
     off: &dyn Fn(usize, f32) -> bool,
     starts: &mut usize,
     frames: &mut usize,
     seen: &mut [bool],
 ) {
-    for (key, observed) in seen.iter_mut().enumerate().take(count_value) {
+    for (dot, observed) in seen.iter_mut().enumerate().take(dot_count) {
         let mut was = false;
 
-        for file in 0..3600 {
-            let output = off(key, file as f32 / 60.0);
+        for frame in 0..3600 {
+            let blinked = off(dot, frame as f32 / 60.0);
 
-            *starts += usize::from(output && !was);
-            *frames += usize::from(output);
-            *observed |= output;
-            was = output;
+            *starts += usize::from(blinked && !was);
+            *frames += usize::from(blinked);
+            *observed |= blinked;
+            was = blinked;
         }
     }
 }

@@ -93,11 +93,7 @@ impl Notes {
                 .cloned()
                 .collect()
         } else {
-            self.files
-                .iter()
-                .filter(|file_value| *file_value == path)
-                .cloned()
-                .collect()
+            self.files.iter().filter(|file| *file == path).cloned().collect()
         }
     }
 
@@ -128,11 +124,11 @@ impl Notes {
             .filter_map(|path| rank_file(self, path, &terms))
             .collect::<Vec<_>>();
 
-        ranked.sort_by(|agent, bytes_2| {
-            bytes_2
+        ranked.sort_by(|left, right| {
+            right
                 .score
-                .cmp(&agent.score)
-                .then_with(|| self.mtime(bytes_2.path).cmp(&self.mtime(agent.path)))
+                .cmp(&left.score)
+                .then_with(|| self.mtime(right.path).cmp(&self.mtime(left.path)))
         });
 
         ranked
@@ -146,8 +142,8 @@ impl Notes {
 }
 
 fn tree_parent<'tree>(mut node: &'tree mut Node, parts: &[&str]) -> &'tree mut Node {
-    for directory in parts {
-        node = node.dirs.entry(directory.to_string()).or_default();
+    for name in parts {
+        node = node.dirs.entry(name.to_string()).or_default();
     }
 
     node
@@ -156,15 +152,15 @@ fn tree_parent<'tree>(mut node: &'tree mut Node, parts: &[&str]) -> &'tree mut N
 fn walk(root: &Path, dir: &Path, files: &mut Vec<String>, mtimes: &mut HashMap<String, SystemTime>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
 
-    for error in rd.flatten() {
-        let name = error.file_name().to_string_lossy().into_owned();
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
 
         if name.starts_with('.') {
             continue;
         }
 
-        let path = error.path();
-        let Ok(meta) = error.metadata() else { continue };
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
 
         if meta.is_dir() {
             walk(root, &path, files, mtimes);
@@ -177,14 +173,12 @@ fn walk(root: &Path, dir: &Path, files: &mut Vec<String>, mtimes: &mut HashMap<S
     }
 }
 
-pub(crate) fn ago(thread: SystemTime) -> String {
-    let text = SystemTime::now()
-        .duration_since(thread)
-        .map_or(0, |directory| directory.as_secs());
+pub(crate) fn ago(time: SystemTime) -> String {
+    let secs = SystemTime::now().duration_since(time).map_or(0, |age| age.as_secs());
 
-    for (unit, count) in [("d", 86400), ("h", 3600), ("m", 60)] {
-        if text >= count {
-            return format!("{}{unit}", text / count);
+    for (unit, size) in [("d", 86400), ("h", 3600), ("m", 60)] {
+        if secs >= size {
+            return format!("{}{unit}", secs / size);
         }
     }
 
@@ -200,23 +194,23 @@ fn truncate_chars(text: &str, count: usize) -> &str {
 
 /// Score TERM as a fuzzy subsequence of TEXT (case-insensitive). None = no match.
 pub(crate) fn fuzzy(term: &str, text: &str) -> Option<i64> {
-    let thread: Vec<char> = text.to_lowercase().chars().collect();
+    let chars: Vec<char> = text.to_lowercase().chars().collect();
     let query: Vec<char> = term.chars().collect();
 
     if query.is_empty() {
         return Some(0);
     }
 
-    let alnum = |i: usize| thread[i].is_alphanumeric();
+    let alnum = |i: usize| chars[i].is_alphanumeric();
 
     // contiguous match wins
-    if let Some(i) = (0..thread.len()).find(|&i| thread[i..].starts_with(&query)) {
+    if let Some(i) = (0..chars.len()).find(|&i| chars[i..].starts_with(&query)) {
         let boundary = if i == 0 || !alnum(i - 1) { 20 } else { 0 };
 
         return Some(100 + 12 * query.len() as i64 + boundary);
     }
 
-    let find = |character: char, from: usize| (from..thread.len()).find(|&i| thread[i] == character);
+    let find = |character: char, from: usize| (from..chars.len()).find(|&i| chars[i] == character);
     let mut best: Option<i64> = None;
     let mut start = find(query[0], 0);
     let mut tries = 0;
@@ -228,26 +222,26 @@ pub(crate) fn fuzzy(term: &str, text: &str) -> Option<i64> {
 
         tries += 1;
 
-        let Some(score) = subsequence_score(&thread, &query, s0) else {
+        let Some(score) = subsequence_score(&chars, &query, s0) else {
             break;
         };
 
-        best = Some(best.map_or(score, |bytes| bytes.max(score)));
+        best = Some(best.map_or(score, |best| best.max(score)));
         start = find(query[0], s0 + 1);
     }
 
     best
 }
 
-fn add_boundary_score(alnum: impl Fn(usize) -> bool, score: &mut i64, path: usize) {
-    if path == 0 || !alnum(path - 1) {
+fn add_boundary_score(alnum: impl Fn(usize) -> bool, score: &mut i64, index: usize) {
+    if index == 0 || !alnum(index - 1) {
         *score += 6;
     }
 }
 
-fn subtract_gap_score(score: &mut i64, prev: i64, path: usize) {
+fn subtract_gap_score(score: &mut i64, prev: i64, index: usize) {
     if prev >= 0 {
-        *score -= (path as i64 - prev - 1).min(10);
+        *score -= (index as i64 - prev - 1).min(10);
     }
 }
 
@@ -257,14 +251,14 @@ fn snippet(line: &str, term: &str) -> String {
     let lower: Vec<char> = line.to_lowercase().chars().collect();
     let head: Vec<char> = term.chars().take(3).collect();
     let i = (0..lower.len()).find(|&i| lower[i..].starts_with(&head)).unwrap_or(0);
-    let text = i.saturating_sub(20);
-    let error = (text + 70).min(chars.len());
+    let from = i.saturating_sub(20);
+    let to = (from + 70).min(chars.len());
 
     format!(
         "{}{}{}",
-        if text > 0 { "…" } else { "" },
-        chars[text..error].iter().collect::<String>(),
-        if error < chars.len() { "…" } else { "" }
+        if from > 0 { "…" } else { "" },
+        chars[from..to].iter().collect::<String>(),
+        if to < chars.len() { "…" } else { "" }
     )
 }
 
@@ -292,14 +286,14 @@ pub(crate) fn slug(text: &str) -> String {
 mod tests;
 
 fn append_tree_rows(
-    count_value: &Node,
+    node: &Node,
     prefix: &str,
     depth: usize,
     notes: &Notes,
     collapsed: &HashSet<String>,
     out: &mut Vec<Row>,
 ) {
-    for (name, child) in &count_value.dirs {
+    for (name, child) in &node.dirs {
         let path = format!("{prefix}{name}/");
         let closed = collapsed.contains(&path);
 
@@ -316,27 +310,27 @@ fn append_tree_rows(
         }
     }
 
-    let mut files = count_value.files.clone();
+    let mut files = node.files.clone();
 
     files.sort_by_key(|file| std::cmp::Reverse(notes.mtime(file)));
 
-    for file_value in files {
-        let name = file_value
+    for file in files {
+        let name = file
             .rsplit('/')
             .next()
-            .unwrap_or(&file_value)
+            .unwrap_or(&file)
             .trim_end_matches(".md")
             .to_string();
 
         out.push(Row::File {
-            path: file_value,
+            path: file,
             name,
             depth,
         });
     }
 }
-fn tree_file_count(count_value: &Node) -> usize {
-    count_value.files.len() + count_value.dirs.values().map(tree_file_count).sum::<usize>()
+fn tree_file_count(node: &Node) -> usize {
+    node.files.len() + node.dirs.values().map(tree_file_count).sum::<usize>()
 }
 
 struct FileMatch<'path> {

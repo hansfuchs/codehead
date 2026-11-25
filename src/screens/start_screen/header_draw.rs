@@ -28,7 +28,7 @@ impl App {
     }
 }
 
-pub(super) fn draw_header_active(app_state: &mut App, area: Rect, spans: &mut Vec<Span<'_>>, x: &mut u16) {
+pub(super) fn draw_header_active(app: &mut App, area: Rect, spans: &mut Vec<Span<'_>>, x: &mut u16) {
     for (tab, label) in [
         (Tab::New, "new"),
         (Tab::Threads, "threads"),
@@ -38,8 +38,8 @@ pub(super) fn draw_header_active(app_state: &mut App, area: Rect, spans: &mut Ve
         (Tab::Flows, "flows"),
         (Tab::Settings, "settings"),
     ] {
-        let active = app_state.cur_tab() == tab;
-        let focused = active && app_state.tabs_focus;
+        let active = app.cur_tab() == tab;
+        let focused = active && app.tabs_focus;
 
         let (bg, fg) = match (active, focused) {
             (true, true) => (Some(theme::pal().accent), theme::pal().on_accent),
@@ -47,16 +47,16 @@ pub(super) fn draw_header_active(app_state: &mut App, area: Rect, spans: &mut Ve
             _ => (None, theme::pal().subtext0),
         };
 
-        let base = bg.map_or(Style::default(), |style| Style::default().bg(style));
+        let base = bg.map_or(Style::default(), |color| Style::default().bg(color));
         let mut label = label.to_string();
 
-        if tab == Tab::New && !app_state.note_list.selected.is_empty() {
-            label = format!("{label} {}", app_state.note_list.selected.len());
+        if tab == Tab::New && !app.note_list.selected.is_empty() {
+            label = format!("{label} {}", app.note_list.selected.len());
         }
 
         let width = (label.width() + 2) as u16;
 
-        app_state.preview.regions.tabs.push((
+        app.preview.regions.tabs.push((
             Rect {
                 x: *x,
                 y: area.y,

@@ -60,18 +60,18 @@ impl AgentForm {
         let mut prompt = TextArea::new(false, "standing instructions: role, focus, rules (system prompt)");
         let mut opts: Vec<(Option<String>, String)> = vec![(None, "none".into())];
 
-        opts.extend(styles.iter().map(|text| (Some(text.id.clone()), text.name.clone())));
+        opts.extend(styles.iter().map(|style| (Some(style.id.clone()), style.name.clone())));
         let (mut color, mut mode) = (4, 0);
         let mut models: Vec<String> = std::iter::once("default".to_string())
             .chain(crate::infra::config::models())
             .collect();
         let mut model = 0;
         let effort = agents::effort()
-            .and_then(|error| agents::EFFORTS.iter().position(|x| *x == error))
+            .and_then(|level| agents::EFFORTS.iter().position(|x| *x == level))
             .unwrap_or(0);
         let profile = agents::parse_profile(edit.as_ref().and_then(|agent| agent.prompt.as_deref()), default_style);
 
-        if let Some(agent_value) = &edit {
+        if let Some(agent) = &edit {
             apply_existing_agent(
                 &mut name,
                 &mut harness,
@@ -79,7 +79,7 @@ impl AgentForm {
                 &mut mode,
                 &mut models,
                 &mut model,
-                agent_value,
+                agent,
             );
         } else {
             harness.set_text("claude");
@@ -91,7 +91,7 @@ impl AgentForm {
 
         // saved, else what the agent tab shows (stable pick), else (new agent) a random regi
         let sprite = profile.sprite.clone().unwrap_or_else(|| match &edit {
-            Some(agent_2) => sprites::default_for(&agent_2.name),
+            Some(agent) => sprites::default_for(&agent.name),
             None => sprites::random(crate::domain::avatar::Cat::Regi),
         });
         let mut form = initial_form(FormValues {
@@ -154,21 +154,21 @@ impl AgentForm {
 
     /// Harness is claude (or empty = claude): the model row applies.
     pub(super) fn is_claude(&self) -> bool {
-        let height = self.harness.text();
-        let height_value = height.trim();
+        let text = self.harness.text();
+        let harness = text.trim();
 
-        height_value.is_empty() || height_value == "claude"
+        harness.is_empty() || harness == "claude"
     }
 
     /// The harness of the harness field: the part before `/` (empty: claude).
     pub(super) fn harness_name(&self) -> String {
-        let thread = self.harness.text();
-        let height = thread.trim().split('/').next().unwrap_or_default().trim();
+        let text = self.harness.text();
+        let harness = text.trim().split('/').next().unwrap_or_default().trim();
 
-        if height.is_empty() {
+        if harness.is_empty() {
             "claude".into()
         } else {
-            height.to_string()
+            harness.to_string()
         }
     }
 
@@ -178,13 +178,12 @@ impl AgentForm {
             return self.models[self.model].clone();
         }
 
-        let thread = self.harness.text();
+        let text = self.harness.text();
 
-        thread
-            .trim()
+        text.trim()
             .split_once('/')
-            .map(|(_, message)| message.trim().to_string())
-            .filter(|message_value| !message_value.is_empty())
+            .map(|(_, model)| model.trim().to_string())
+            .filter(|model| !model.is_empty())
             .unwrap_or_else(|| "default".into())
     }
 
@@ -203,21 +202,21 @@ impl AgentForm {
 
     /// Model ID of the current harness from the dropdown: claude → the model row, else `harness/id`.
     pub(super) fn set_model(&mut self, id: &str) {
-        let height = self.harness_name();
+        let harness = self.harness_name();
 
-        if height == "claude" {
-            self.set_model_body(id);
+        if harness == "claude" {
+            self.set_claude_model(id);
         } else if id == "default" {
-            self.harness.load_text(&height);
+            self.harness.load_text(&harness);
         } else {
-            self.harness.load_text(&format!("{height}/{id}"));
+            self.harness.load_text(&format!("{harness}/{id}"));
         }
     }
 
-    fn set_model_body(&mut self, id: &str) {
+    fn set_claude_model(&mut self, id: &str) {
         self.harness.load_text("claude");
 
-        self.model = self.models.iter().position(|message| message == id).unwrap_or_else(|| {
+        self.model = self.models.iter().position(|model| model == id).unwrap_or_else(|| {
             self.models.push(id.to_string());
             self.models.len() - 1
         });
@@ -225,31 +224,31 @@ impl AgentForm {
 
     /// `claude`, `claude/opus`, or the harness text as typed (other harnesses).
     pub(super) fn harness_model(&self) -> String {
-        let height = self.harness.text().trim().to_string();
+        let text = self.harness.text().trim().to_string();
 
         if !self.is_claude() {
-            return height;
+            return text;
         }
 
         match self.models[self.model].as_str() {
             "default" => "claude".into(),
-            message => format!("claude/{message}"),
+            model => format!("claude/{model}"),
         }
     }
 
     /// None: effortLevel unset.
     pub(super) fn effort_level(&self) -> Option<&'static str> {
-        Some(agents::EFFORTS[self.effort]).filter(|error| *error != "default")
+        Some(agents::EFFORTS[self.effort]).filter(|level| *level != "default")
     }
 
     /// r: a random avatar of the category, the speed and eyes kept.
     pub(super) fn random_sprite(&mut self) {
-        let agent = self.sprite.avatar;
-        let result = sprites::random(agent.cat).avatar;
+        let current = self.sprite.avatar;
+        let random = sprites::random(current.cat).avatar;
 
         self.sprite = Sprite::of(crate::domain::avatar::Avatar {
-            idx: result.idx,
-            ..agent
+            idx: random.idx,
+            ..current
         });
     }
 
@@ -280,7 +279,7 @@ impl AgentForm {
                 .mcp
                 .iter()
                 .filter(|(_, on)| *on)
-                .map(|(count, _)| count.clone())
+                .map(|(server, _)| server.clone())
                 .collect(),
         }
     }
@@ -293,13 +292,15 @@ impl AgentForm {
             .trim()
             .split('/')
             .next()
-            .is_none_or(|height| height.is_empty() || height == "claude");
+            .is_none_or(|harness| harness.is_empty() || harness == "claude");
         let (id, name) = &self.styles[self.style];
 
         match (id, claude, global) {
-            (None, true, Some(group)) => format!("claude agents still get {group} from ~/.claude/settings.json"),
+            (None, true, Some(global_style)) => {
+                format!("claude agents still get {global_style} from ~/.claude/settings.json")
+            }
             (None, _, _) => "no base style".into(),
-            (Some(_), true, Some(group_value)) if group_value == name => {
+            (Some(_), true, Some(global_style)) if global_style == name => {
                 "= global outputStyle: claude applies it, 0 copies in the prompt".to_string()
             }
             (Some(_), _, _) => format!("{name} goes into the agent prompt"),
@@ -362,11 +363,11 @@ fn initial_form(values: FormValues) -> AgentForm {
         orig: String::new(),
         harnesses: crate::engine::harnesses::installed()
             .into_iter()
-            .map(|height| {
+            .map(|harness| {
                 (
-                    height.name.to_string(),
-                    height.label.to_string(),
-                    height.bin.to_string(),
+                    harness.name.to_string(),
+                    harness.label.to_string(),
+                    harness.bin.to_string(),
                 )
             })
             .collect(),
@@ -380,13 +381,13 @@ fn load_form_servers(form: &mut AgentForm) {
     let own: Vec<String> = form
         .edit
         .as_ref()
-        .and_then(|agent_3| crate::engine::roster::get(&agent_3.name))
-        .map(|agent_4| agent_4.mcp)
+        .and_then(|agent| crate::engine::roster::get(&agent.name))
+        .map(|entry| entry.mcp)
         .unwrap_or_default();
 
     form.mcp = crate::engine::servers::all()
         .into_iter()
-        .map(|text_value| (text_value.name.clone(), own.contains(&text_value.name)))
+        .map(|server| (server.name.clone(), own.contains(&server.name)))
         .collect();
     form.orig = form.fingerprint();
 }
@@ -398,37 +399,34 @@ fn apply_existing_agent(
     mode: &mut usize,
     models: &mut Vec<String>,
     model: &mut usize,
-    agent_value: &Agent,
+    agent: &Agent,
 ) {
-    name.set_text(&agent_value.name);
+    name.set_text(&agent.name);
 
-    if agent_value.harness == "claude" {
-        select_existing_model(harness, models, model, agent_value);
+    if agent.harness == "claude" {
+        select_existing_model(harness, models, model, agent);
     } else {
-        harness.set_text(&agent_value.harness_model());
+        harness.set_text(&agent.harness_model());
     }
 
-    *color = agent_value
+    *color = agent
         .color
         .as_deref()
-        .and_then(|character| agents::COLORS.iter().position(|x| *x == character))
+        .and_then(|name| agents::COLORS.iter().position(|x| *x == name))
         .unwrap_or(3);
-    *mode = agents::MODES
-        .iter()
-        .position(|message_2| *message_2 == agent_value.mode)
-        .unwrap_or(0);
+    *mode = agents::MODES.iter().position(|name| *name == agent.mode).unwrap_or(0);
 }
 
-fn select_existing_model(harness: &mut TextArea, models: &mut Vec<String>, model: &mut usize, agent_value: &Agent) {
+fn select_existing_model(harness: &mut TextArea, models: &mut Vec<String>, model: &mut usize, agent: &Agent) {
     harness.set_text("claude");
 
-    if let Some(message_value) = agent_value
+    if let Some(saved) = agent
         .model
         .as_deref()
-        .filter(|message| !message.is_empty() && *message != "default")
+        .filter(|saved| !saved.is_empty() && *saved != "default")
     {
-        *model = models.iter().position(|x| x == message_value).unwrap_or_else(|| {
-            models.push(message_value.to_string());
+        *model = models.iter().position(|x| x == saved).unwrap_or_else(|| {
+            models.push(saved.to_string());
             models.len() - 1
         });
     }

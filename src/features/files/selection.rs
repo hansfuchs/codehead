@@ -24,33 +24,33 @@ impl View {
         let mut out = Vec::new();
         let mut last = None;
 
-        for (key, (i, _)) in self.visible.iter().enumerate() {
-            rows_text_value(&mut out, &mut last, key, *i, self);
+        for (position, (i, _)) in self.visible.iter().enumerate() {
+            push_file_row(&mut out, &mut last, position, *i, self);
         }
 
         out
     }
 
-    pub(super) fn step(&mut self, directory: isize) {
+    pub(super) fn step(&mut self, delta: isize) {
         let count = self.visible.len();
 
         if count == 0 {
             return;
         }
 
-        self.at = (self.at as isize + directory).clamp(0, count as isize - 1) as usize;
+        self.at = (self.at as isize + delta).clamp(0, count as isize - 1) as usize;
         self.text_preview.scroll = 0;
     }
 }
 
 /// The section of E.
-fn sec(error: &Entry, view_state: &View) -> Sec {
-    match error.source {
+fn sec(entry: &Entry, view: &View) -> Sec {
+    match entry.source {
         Source::Note => Sec::Notes,
         Source::Named => Sec::Named,
         Source::Attached(_) => Sec::Attached,
-        Source::Agent if error.path.starts_with(&view_state.dir) => Sec::Repo,
-        Source::Agent if crate::infra::config::home_repo().is_some_and(|height| error.path.starts_with(height)) => {
+        Source::Agent if entry.path.starts_with(&view.dir) => Sec::Repo,
+        Source::Agent if crate::infra::config::home_repo().is_some_and(|home| entry.path.starts_with(home)) => {
             Sec::Home
         }
         Source::Agent => Sec::Other,
@@ -58,82 +58,77 @@ fn sec(error: &Entry, view_state: &View) -> Sec {
 }
 
 /// The text of file I for the filter (cached per mtime).
-fn text_of(i: usize, view_state: &mut View) -> String {
-    let error = &view_state.files[i];
-    let key = (error.path.clone(), error.at);
+fn text_of(i: usize, view: &mut View) -> String {
+    let entry = &view.files[i];
+    let key = (entry.path.clone(), entry.at);
 
-    if let Some(thread) = view_state.text_preview.texts.get(&key) {
-        return thread.clone();
+    if let Some(text) = view.text_preview.texts.get(&key) {
+        return text.clone();
     }
 
     let mut buf = Vec::new();
 
-    if let Ok(file) = std::fs::File::open(&error.path) {
+    if let Ok(file) = std::fs::File::open(&entry.path) {
         let _ = file.take(256 << 10).read_to_end(&mut buf);
     }
 
     // binary files: 0 text
-    let thread_value = if buf.contains(&0) {
+    let text = if buf.contains(&0) {
         String::new()
     } else {
         String::from_utf8_lossy(&buf).into_owned()
     };
 
-    if view_state.text_preview.texts.len() > 512 {
-        view_state.text_preview.texts.clear();
+    if view.text_preview.texts.len() > 512 {
+        view.text_preview.texts.clear();
     }
 
-    view_state.text_preview.texts.insert(key, thread_value.clone());
+    view.text_preview.texts.insert(key, text.clone());
 
-    thread_value
+    text
 }
 
-fn rows_text_value(out: &mut Vec<Row>, last: &mut Option<Sec>, key: usize, i: usize, view_state: &View) {
-    let text_value = sec(&view_state.files[i], view_state);
+fn push_file_row(out: &mut Vec<Row>, last: &mut Option<Sec>, position: usize, i: usize, view: &View) {
+    let section = sec(&view.files[i], view);
 
-    if *last != Some(text_value) {
+    if *last != Some(section) {
         if last.is_some() {
             out.push(Row::Gap);
         }
 
-        out.push(Row::Head(text_value));
-        *last = Some(text_value);
+        out.push(Row::Head(section));
+        *last = Some(section);
     }
 
-    out.push(Row::File(key));
+    out.push(Row::File(position));
 }
 
-fn rebuild_view(state: &mut View) {
-    let cur = state.cur().map(|error| error.path.clone());
-    let mut order: Vec<usize> = (0..state.files.len()).collect();
+fn rebuild_view(view: &mut View) {
+    let cur = view.cur().map(|entry| entry.path.clone());
+    let mut order: Vec<usize> = (0..view.files.len()).collect();
 
-    order.sort_by_key(|&i| (sec(&state.files[i], state), std::cmp::Reverse(state.files[i].at)));
-    let query = state.filter_input.filter.text();
+    order.sort_by_key(|&i| (sec(&view.files[i], view), std::cmp::Reverse(view.files[i].at)));
+    let query = view.filter_input.filter.text();
 
-    state.visible = if query.trim().is_empty() {
+    view.visible = if query.trim().is_empty() {
         order.into_iter().map(|i| (i, Vec::new())).collect()
     } else {
-        let names: Vec<String> = order.iter().map(|&i| state.label(&state.files[i])).collect();
-        let bodies: Vec<String> = order.iter().map(|&i| text_of(i, state)).collect();
+        let names: Vec<String> = order.iter().map(|&i| view.label(&view.files[i])).collect();
+        let bodies: Vec<String> = order.iter().map(|&i| text_of(i, view)).collect();
         let idx: Vec<usize> = (0..order.len()).collect();
 
         crate::ui::fuzzy::rank(
             &idx,
             &query,
-            |&key| names[key].clone(),
-            |&key_value| bodies[key_value].clone(),
+            |&position| names[position].clone(),
+            |&position| bodies[position].clone(),
         )
         .into_iter()
-        .map(|(key_2, marks)| (order[key_2], marks))
+        .map(|(position, marks)| (order[position], marks))
         .collect()
     };
 
-    state.at = cur
-        .and_then(|path_value| {
-            state
-                .visible
-                .iter()
-                .position(|(i, _)| state.files[*i].path == path_value)
-        })
+    view.at = cur
+        .and_then(|path| view.visible.iter().position(|(i, _)| view.files[*i].path == path))
         .unwrap_or(0);
 }

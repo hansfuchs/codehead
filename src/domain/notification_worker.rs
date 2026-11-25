@@ -23,9 +23,8 @@ pub(crate) fn start() {
     std::thread::Builder::new()
         .name("notify".into())
         .spawn(move || {
-            let open =
-                |thread_value: &store::Thread| thread_value.state != "archived" && thread_value.state != "deleted";
-            let character = Cache {
+            let open = |thread: &store::Thread| thread.state != "archived" && thread.state != "deleted";
+            let cache = Cache {
                 logs: HashMap::new(),
                 prs: HashMap::new(),
                 first: load_map("prs.json"),
@@ -34,59 +33,59 @@ pub(crate) fn start() {
             let threads: HashMap<String, store::Thread> = store::all()
                 .into_iter()
                 .filter(open)
-                .map(|thread_2| (thread_2.id.clone(), thread_2))
+                .map(|thread| (thread.id.clone(), thread))
                 .collect();
             let due: HashSet<String> = threads.keys().cloned().collect();
             let pr_at: Option<Instant> = None;
 
-            start_loop(&topics, &open, character, threads, due, pr_at);
+            poll_loop(&topics, &open, cache, threads, due, pr_at);
         })
         .ok();
 }
 
-fn start_loop(
+fn poll_loop(
     topics: &std::sync::mpsc::Receiver<crate::infra::bus::Topic>,
     open: &impl Fn(&store::Thread) -> bool,
-    mut character: Cache,
+    mut cache: Cache,
     mut threads: HashMap<String, store::Thread>,
     mut due: HashSet<String>,
     mut pr_at: Option<Instant>,
 ) {
     loop {
-        poll_due_pull_requests(&mut character, &threads, &mut pr_at);
+        poll_due_pull_requests(&mut cache, &threads, &mut pr_at);
 
-        read_due_threads(&mut character, &threads, &mut due);
+        read_due_threads(&mut cache, &threads, &mut due);
 
-        publish(&threads, &character);
+        publish(&threads, &cache);
 
         // the next topic, or the next PR pass
-        let wait = pr_at.map_or(Duration::ZERO, |thread_5| PR_EVERY.saturating_sub(thread_5.elapsed()));
+        let wait = pr_at.map_or(Duration::ZERO, |at| PR_EVERY.saturating_sub(at.elapsed()));
 
         let first = match topics.recv_timeout(wait) {
-            Ok(thread_6) => Some(thread_6),
+            Ok(topic) => Some(topic),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         };
 
-        for thread_7 in first.into_iter().chain(std::iter::from_fn(|| topics.try_recv().ok())) {
-            dispatch_topic(thread_7, open, &mut threads, &mut due);
+        for topic in first.into_iter().chain(std::iter::from_fn(|| topics.try_recv().ok())) {
+            dispatch_topic(topic, open, &mut threads, &mut due);
         }
     }
 }
 
-fn read_due_threads(character: &mut Cache, threads: &HashMap<String, store::Thread>, due: &mut HashSet<String>) {
+fn read_due_threads(cache: &mut Cache, threads: &HashMap<String, store::Thread>, due: &mut HashSet<String>) {
     for id in due.drain() {
-        let Some(thread_4) = threads.get(&id) else {
-            character.logs.remove(&id);
-            character.replies.remove(&id);
+        let Some(thread) = threads.get(&id) else {
+            cache.logs.remove(&id);
+            cache.replies.remove(&id);
             continue;
         };
 
-        read_thread(thread_4, character);
+        read_thread(thread, cache);
     }
 }
 
-fn start_topic_rescan_result_if(
+fn reload_open_threads(
     open: impl Fn(&store::Thread) -> bool,
     threads: &mut HashMap<String, store::Thread>,
     due: &mut HashSet<String>,
@@ -94,53 +93,49 @@ fn start_topic_rescan_result_if(
     *threads = store::all()
         .into_iter()
         .filter(open)
-        .map(|thread_10| (thread_10.id.clone(), thread_10))
+        .map(|thread| (thread.id.clone(), thread))
         .collect();
     due.extend(threads.keys().cloned());
 }
 
-fn poll_due_pull_requests(
-    character: &mut Cache,
-    threads: &HashMap<String, store::Thread>,
-    pr_at: &mut Option<Instant>,
-) {
-    if pr_at.is_none_or(|thread_3| thread_3.elapsed() > PR_EVERY) {
+fn poll_due_pull_requests(cache: &mut Cache, threads: &HashMap<String, store::Thread>, pr_at: &mut Option<Instant>) {
+    if pr_at.is_none_or(|at| at.elapsed() > PR_EVERY) {
         *pr_at = Some(Instant::now());
         let list: Vec<store::Thread> = threads.values().cloned().collect();
 
-        pr_pass(&list, character);
+        pr_pass(&list, cache);
     }
 }
 
-fn start_topic_thread_id_part(
+fn reload_thread(
     open: impl Fn(&store::Thread) -> bool,
     threads: &mut HashMap<String, store::Thread>,
     due: &mut HashSet<String>,
     id: String,
 ) {
-    match store::load(&id).filter(|thread_8| open(thread_8) && thread_8.of.is_none()) {
-        Some(thread_9) => threads.insert(id.clone(), thread_9),
+    match store::load(&id).filter(|thread| open(thread) && thread.of.is_none()) {
+        Some(thread) => threads.insert(id.clone(), thread),
         None => threads.remove(&id),
     };
 
     due.insert(id);
 }
 /// Read thread T's log (when it changed) and its comment replies (when the file changed).
-pub(super) fn read_thread(thread_value: &store::Thread, character: &mut Cache) {
-    let path = store::events_path(&thread_value.id);
+pub(super) fn read_thread(thread: &store::Thread, cache: &mut Cache) {
+    let path = store::events_path(&thread.id);
 
-    if let Ok(message) = std::fs::metadata(&path) {
-        let key = (message.len(), message.modified().unwrap_or(SystemTime::UNIX_EPOCH));
+    if let Ok(meta) = std::fs::metadata(&path) {
+        let key = (meta.len(), meta.modified().unwrap_or(SystemTime::UNIX_EPOCH));
 
-        if character.logs.get(&thread_value.id).is_none_or(|log| log.stamp != key) {
-            let ev = store::events_tail(&thread_value.id, 512 << 10);
-            let end = ev.last().map_or(0, |error| error.ts);
-            let dir = thread_value.work_dir();
-            let notes = derive(&ev, &thread_value.agents)
+        if cache.logs.get(&thread.id).is_none_or(|log| log.stamp != key) {
+            let ev = store::events_tail(&thread.id, 512 << 10);
+            let end = ev.last().map_or(0, |event| event.ts);
+            let dir = thread.work_dir();
+            let notes = derive(&ev, &thread.agents)
                 .into_iter()
                 .map(|(kind, agents, ts, text)| Note {
-                    thread: thread_value.id.clone(),
-                    title: thread_value.title.clone(),
+                    thread: thread.id.clone(),
+                    title: thread.title.clone(),
                     dir: dir.clone(),
                     kind,
                     agents,
@@ -150,8 +145,8 @@ pub(super) fn read_thread(thread_value: &store::Thread, character: &mut Cache) {
                 })
                 .collect();
 
-            character.logs.insert(
-                thread_value.id.clone(),
+            cache.logs.insert(
+                thread.id.clone(),
                 LogSnapshot {
                     stamp: key,
                     notes,
@@ -162,20 +157,14 @@ pub(super) fn read_thread(thread_value: &store::Thread, character: &mut Cache) {
     }
 
     // unseen agent replies on comments: read when the comments file changed
-    let at = crate::domain::changes::comments_stamp(&thread_value.id);
+    let at = crate::domain::changes::comments_stamp(&thread.id);
 
-    if character
-        .replies
-        .get(&thread_value.id)
-        .is_none_or(|result| result.0 != at)
-    {
-        character
-            .replies
-            .insert(thread_value.id.clone(), (at, reply_notes(thread_value)));
+    if cache.replies.get(&thread.id).is_none_or(|cached| cached.0 != at) {
+        cache.replies.insert(thread.id.clone(), (at, reply_notes(thread)));
     }
 }
 /// The notes of every thread from the caches (0 read); a change wakes the UI.
-pub(super) fn publish(threads: &HashMap<String, store::Thread>, character: &Cache) {
+pub(super) fn publish(threads: &HashMap<String, store::Thread>, cache: &Cache) {
     let mut all = Vec::new();
     let mut last = HashMap::new();
     let mut ids: Vec<&String> = threads.keys().collect();
@@ -185,29 +174,29 @@ pub(super) fn publish(threads: &HashMap<String, store::Thread>, character: &Cach
 
     for id in ids {
         all.extend(
-            character
+            cache
                 .replies
                 .get(id)
                 .into_iter()
-                .flat_map(|result| result.1.iter().cloned()),
+                .flat_map(|cached| cached.1.iter().cloned()),
         );
 
-        if let Some(log) = character.logs.get(id) {
+        if let Some(log) = cache.logs.get(id) {
             all.extend(log.notes.iter().cloned());
             last.insert(id.clone(), log.latest);
         }
 
-        all.extend(character.prs.get(id).into_iter().flatten().cloned());
+        all.extend(cache.prs.get(id).into_iter().flatten().cloned());
     }
 
-    if let Ok(mut line) = LAST.get_or_init(|| Mutex::new(HashMap::new())).lock() {
-        *line = last;
+    if let Ok(mut latest) = LAST.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        *latest = last;
     }
 
-    if let Ok(mut count) = NOTES.lock()
-        && *count != all
+    if let Ok(mut notes) = NOTES.lock()
+        && *notes != all
     {
-        *count = all;
+        *notes = all;
         VERSION.fetch_add(1, Ordering::Relaxed);
         crate::infra::bus::wake();
     }
@@ -221,34 +210,33 @@ struct PullRequestNotes {
     seen: Vec<crate::domain::landed::PrSeen>,
 }
 
-pub(super) fn pr_pass(threads: &[store::Thread], character: &mut Cache) {
+pub(super) fn pr_pass(threads: &[store::Thread], cache: &mut Cache) {
     let now = crate::engine::now_ms();
     let mut live: HashSet<String> = HashSet::new();
 
-    character.prs.clear();
+    cache.prs.clear();
 
-    for thread_value in threads {
+    for thread in threads {
         let mut snapshot = PullRequestNotes::default();
-        let prs = crate::domain::pull_requests::remembered(&thread_value.id);
+        let prs = crate::domain::pull_requests::remembered(&thread.id);
 
-        read_pull_request_notes(character, now, &mut live, thread_value, &mut snapshot, &prs);
+        read_pull_request_notes(cache, now, &mut live, thread, &mut snapshot, &prs);
 
-        crate::domain::landed::set_prs(&thread_value.id, &snapshot.seen);
+        crate::domain::landed::set_prs(&thread.id, &snapshot.seen);
 
         // work after the merge (new commits, files): 0 archive offer
-        if all_merged(&snapshot.states) && !crate::domain::landed::of(&thread_value.id).is_some_and(|line| line.open())
-        {
-            let key = format!("merged:{}", thread_value.id);
-            let ts = *character.first.entry(key.clone()).or_insert(now);
+        if all_merged(&snapshot.states) && !crate::domain::landed::of(&thread.id).is_some_and(|land| land.open()) {
+            let key = format!("merged:{}", thread.id);
+            let ts = *cache.first.entry(key.clone()).or_insert(now);
 
             live.insert(key);
 
-            let text = text(&prs);
+            let text = merged_text(&prs);
 
             snapshot.notes.push(Note {
-                thread: thread_value.id.clone(),
-                title: thread_value.title.clone(),
-                dir: thread_value.work_dir(),
+                thread: thread.id.clone(),
+                title: thread.title.clone(),
+                dir: thread.work_dir(),
                 kind: Kind::Merged,
                 agents: Vec::new(),
                 ts,
@@ -258,54 +246,54 @@ pub(super) fn pr_pass(threads: &[store::Thread], character: &mut Cache) {
         }
 
         if !snapshot.notes.is_empty() {
-            character.prs.insert(thread_value.id.clone(), snapshot.notes);
+            cache.prs.insert(thread.id.clone(), snapshot.notes);
         }
     }
 
-    let before = character.first.len();
+    let before = cache.first.len();
 
-    character.first.retain(|key_value, _| live.contains(key_value));
+    cache.first.retain(|key, _| live.contains(key));
 
-    if character.first.len() != before || !live.is_empty() {
-        save_map("prs.json", &character.first);
+    if cache.first.len() != before || !live.is_empty() {
+        save_map("prs.json", &cache.first);
     }
 }
 
 fn read_pull_request_notes(
-    character: &mut Cache,
+    cache: &mut Cache,
     now: u64,
     live: &mut HashSet<String>,
-    thread_value: &store::Thread,
+    thread: &store::Thread,
     snapshot: &mut PullRequestNotes,
     prs: &[crate::infra::gh::PrRef],
 ) {
-    for result in prs {
-        let Ok(path) = gh::fetch(result) else {
+    for pr_ref in prs {
+        let Ok(pr) = gh::fetch(pr_ref) else {
             // a PR not read: 0 verdict on the thread
             snapshot.states.push(gh::State::Open);
             continue;
         };
 
-        snapshot.states.push(path.state);
+        snapshot.states.push(pr.state);
         snapshot.seen.push(crate::domain::landed::PrSeen {
-            label: result.label(),
-            state: path.state,
-            head: path.head.clone(),
-            head_oid: path.head_oid.clone(),
+            label: pr_ref.label(),
+            state: pr.state,
+            head: pr.head.clone(),
+            head_oid: pr.head_oid.clone(),
         });
 
-        if let ControlFlow::Break(()) = skip_closed_pull_request(&path) {
+        if let ControlFlow::Break(()) = skip_closed_pull_request(&pr) {
             continue;
         }
 
         let add = |kind: Kind, key: String, ts: Option<u64>, text: String| {
-            let ts = ts.unwrap_or_else(|| *character.first.entry(key.clone()).or_insert(now));
+            let ts = ts.unwrap_or_else(|| *cache.first.entry(key.clone()).or_insert(now));
 
             live.insert(key);
             snapshot.notes.push(Note {
-                thread: thread_value.id.clone(),
-                title: thread_value.title.clone(),
-                dir: thread_value.work_dir(),
+                thread: thread.id.clone(),
+                title: thread.title.clone(),
+                dir: thread.work_dir(),
                 kind,
                 agents: Vec::new(),
                 ts,
@@ -314,59 +302,54 @@ fn read_pull_request_notes(
             });
         };
 
-        report_pull_request(result, &path, add);
+        report_pull_request(pr_ref, &pr, add);
     }
 }
 
-fn report_pull_request(result: &gh::PrRef, path: &gh::Pr, mut add: impl FnMut(Kind, String, Option<u64>, String)) {
-    if path.conflicts() {
+fn report_pull_request(pr_ref: &gh::PrRef, pr: &gh::Pr, mut add: impl FnMut(Kind, String, Option<u64>, String)) {
+    if pr.conflicts() {
         add(
             Kind::Conflict,
-            format!("conflict:{}", result.key()),
+            format!("conflict:{}", pr_ref.key()),
             None,
-            format!("{}: merge conflict with {}", result.label(), path.base),
+            format!("{}: merge conflict with {}", pr_ref.label(), pr.base),
         );
     }
 
-    let failed: Vec<&str> = path
+    let failed: Vec<&str> = pr
         .checks
         .iter()
-        .filter(|x| x.verdict == gh::Verdict::Fail)
-        .map(|x| x.name.as_str())
+        .filter(|check| check.verdict == gh::Verdict::Fail)
+        .map(|check| check.name.as_str())
         .collect();
 
     if !failed.is_empty() {
         add(
             Kind::Ci,
-            format!("ci:{}:{}", result.key(), path.head_oid),
+            format!("ci:{}:{}", pr_ref.key(), pr.head_oid),
             None,
-            format!("{}: {} failed", result.label(), failed.join(", ")),
+            format!("{}: {} failed", pr_ref.label(), failed.join(", ")),
         );
     }
 
-    let latest = path
+    let latest = pr
         .threads
         .iter()
-        .flat_map(|thread_2| std::iter::once(&thread_2.root).chain(&thread_2.replies))
-        .filter(|message| !message.mine)
-        .max_by_key(|message_value| message_value.created);
+        .flat_map(|thread| std::iter::once(&thread.root).chain(&thread.replies))
+        .filter(|comment| !comment.mine)
+        .max_by_key(|comment| comment.created);
 
-    if let Some(message_2) = latest {
+    if let Some(comment) = latest {
         add(
             Kind::Review,
             String::new(),
-            Some(message_2.created * 1000),
-            format!(
-                "{}: {}: {}",
-                result.label(),
-                message_2.author,
-                first_line(&message_2.body)
-            ),
+            Some(comment.created * 1000),
+            format!("{}: {}: {}", pr_ref.label(), comment.author, first_line(&comment.body)),
         );
     }
 }
 
-fn text(prs: &[crate::infra::gh::PrRef]) -> String {
+fn merged_text(prs: &[crate::infra::gh::PrRef]) -> String {
     if prs.len() == 1 {
         format!("{} merged: archive the thread?", prs[0].label())
     } else {
@@ -374,11 +357,8 @@ fn text(prs: &[crate::infra::gh::PrRef]) -> String {
     }
 }
 
-fn skip_closed_pull_request(path: &crate::infra::gh::Pr) -> ControlFlow<()> {
-    if !matches!(
-        path.state,
-        crate::infra::gh::State::Open | crate::infra::gh::State::Draft
-    ) {
+fn skip_closed_pull_request(pr: &crate::infra::gh::Pr) -> ControlFlow<()> {
+    if !matches!(pr.state, crate::infra::gh::State::Open | crate::infra::gh::State::Draft) {
         return ControlFlow::Break(());
     }
 
@@ -386,20 +366,20 @@ fn skip_closed_pull_request(path: &crate::infra::gh::Pr) -> ControlFlow<()> {
 }
 
 fn dispatch_topic(
-    thread_7: Topic,
+    topic: Topic,
     open: &impl Fn(&store::Thread) -> bool,
     threads: &mut HashMap<String, store::Thread>,
     due: &mut HashSet<String>,
 ) {
-    match thread_7 {
+    match topic {
         Topic::Thread(id, Part::Meta) => {
-            start_topic_thread_id_part(open, threads, due, id);
+            reload_thread(open, threads, due, id);
         }
         Topic::Thread(id, Part::Log | Part::Comments) if threads.contains_key(&id) => {
             due.insert(id);
         }
-        Topic::Rescan(result) if result == crate::infra::watch::canon(&store::threads_dir()) => {
-            start_topic_rescan_result_if(open, threads, due);
+        Topic::Rescan(root) if root == crate::infra::watch::canon(&store::threads_dir()) => {
+            reload_open_threads(open, threads, due);
         }
         _ => {}
     }

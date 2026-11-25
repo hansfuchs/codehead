@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn detail_lines_show_thread_agents_threads_and_limits() {
-    let directory = Detail {
+    let detail = Detail {
         agents: vec![AgentUse {
             agent: "pk".into(),
             harness: "claude".into(),
@@ -24,7 +24,7 @@ fn detail_lines_show_thread_agents_threads_and_limits() {
     };
     let names = HashMap::from([("pk".to_string(), ("amon".to_string(), None))]);
     let titles = HashMap::from([("t1".to_string(), "codehead v2".to_string())]);
-    let text: Vec<String> = detail_lines(&directory, Some("t1"), &names, &titles, 70)
+    let text: Vec<String> = detail_lines(&detail, Some("t1"), &names, &titles, 70)
         .iter()
         .map(std::string::ToString::to_string)
         .collect();
@@ -46,7 +46,7 @@ fn detail_lines_show_thread_agents_threads_and_limits() {
         assert!(all.contains(want), "{want}: {all}");
     }
 
-    let none: String = detail_lines(&directory, None, &names, &titles, 70)
+    let none: String = detail_lines(&detail, None, &names, &titles, 70)
         .iter()
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()

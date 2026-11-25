@@ -2,31 +2,31 @@ use super::{Instant, MSGS_EVERY, Menu, Tab};
 
 impl Menu {
     pub(super) fn poll(&mut self) {
-        poll_messages(self);
+        poll_tabs(self);
     }
 }
 
-fn poll_messages(widget_state: &mut Menu) {
-    if widget_state.tab == Tab::Merge {
-        widget_state.prs.ensure();
-        widget_state.prs.poll();
+fn poll_tabs(menu: &mut Menu) {
+    if menu.tab == Tab::Merge {
+        menu.prs.ensure();
+        menu.prs.poll();
     }
 
     // the threads tab: a new read every 2s while it shows
-    widget_state.list.poll(widget_state.tab == Tab::Threads);
-    let due = |at: Option<Instant>, every| at.is_none_or(|thread_value: Instant| thread_value.elapsed() >= every);
+    menu.list.poll(menu.tab == Tab::Threads);
+    let due = |at: Option<Instant>, every| at.is_none_or(|read_at: Instant| read_at.elapsed() >= every);
 
-    if let Some(rx) = &widget_state.search_state.msgs_rx
-        && let Ok(message) = rx.try_recv()
+    if let Some(rx) = &menu.search_state.msgs_rx
+        && let Ok(msgs) = rx.try_recv()
     {
-        widget_state.search_state.msgs_rx = None;
-        widget_state.set_msgs(message);
+        menu.search_state.msgs_rx = None;
+        menu.set_msgs(msgs);
     }
 
     // the search tab: a new read on its 1st show, then every 5s while it shows
-    if widget_state.tab == Tab::Search
-        && widget_state.search_state.msgs_rx.is_none()
-        && due(widget_state.search_state.msgs_at, MSGS_EVERY)
+    if menu.tab == Tab::Search
+        && menu.search_state.msgs_rx.is_none()
+        && due(menu.search_state.msgs_at, MSGS_EVERY)
         && !cfg!(test)
     {
         let (tx, rx) = crate::infra::bus::channel();
@@ -35,9 +35,9 @@ fn poll_messages(widget_state: &mut Menu) {
             let _ = tx.send(crate::domain::search::load());
         });
 
-        widget_state.search_state.msgs_rx = Some(rx);
-        widget_state.search_state.msgs_at = Some(Instant::now());
+        menu.search_state.msgs_rx = Some(rx);
+        menu.search_state.msgs_at = Some(Instant::now());
     }
 
-    widget_state.refresh_hits();
+    menu.refresh_hits();
 }

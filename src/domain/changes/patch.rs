@@ -39,12 +39,12 @@ enum Role {
 }
 
 /// `-a,b` / `+c,d` of a hunk head: (start, count).
-fn range(width: &str) -> Option<(u32, u32)> {
-    let mut it = width.get(1..)?.split(',');
-    let text = it.next()?.parse().ok()?;
-    let character = it.next().map_or(Some(1), |x| x.parse().ok())?;
+fn range(field: &str) -> Option<(u32, u32)> {
+    let mut it = field.get(1..)?.split(',');
+    let start = it.next()?.parse().ok()?;
+    let count = it.next().map_or(Some(1), |text| text.parse().ok())?;
 
-    Some((text, character))
+    Some((start, count))
 }
 
 /// The patch of the changes of DIFF (1 file, unified, any -U) that P picks, for DIR. None: 0
@@ -175,9 +175,9 @@ impl PatchHeader {
         {
             mode.trim().clone_into(&mut self.mode);
         } else if let Some(path) = line.strip_prefix("--- ") {
-            old_path(path, self);
+            set_old_path(path, self);
         } else if let Some(path) = line.strip_prefix("+++ ") {
-            new_path(path, self);
+            set_new_path(path, self);
         }
     }
 
@@ -301,9 +301,9 @@ fn append_line(output: &mut String, role: Role, text: &str) {
 #[path = "patch_tests.rs"]
 mod tests;
 
-fn header_line(line: &str, model_state: &mut PatchSelection<'_>) -> Option<()> {
+fn header_line(line: &str, selection: &mut PatchSelection<'_>) -> Option<()> {
     let Some(header) = line.strip_prefix("@@ ") else {
-        model_state.header.line(line);
+        selection.header.line(line);
         return Some(());
     };
 
@@ -311,8 +311,8 @@ fn header_line(line: &str, model_state: &mut PatchSelection<'_>) -> Option<()> {
     let (old_start, old_count) = ranges.next().and_then(range)?;
     let (new_start, new_count) = ranges.next().and_then(range)?;
 
-    model_state.new_line = new_start;
-    model_state.hunks.push(PatchHunk {
+    selection.new_line = new_start;
+    selection.hunks.push(PatchHunk {
         range: HunkRange {
             old_start,
             old_count,
@@ -325,57 +325,53 @@ fn header_line(line: &str, model_state: &mut PatchSelection<'_>) -> Option<()> {
     Some(())
 }
 
-fn marker(line: &str, model_state: &mut PatchSelection<'_>) {
-    if !model_state.kept {
+fn marker(line: &str, selection: &mut PatchSelection<'_>) {
+    if !selection.kept {
         return;
     }
 
-    if let Some(hunk) = model_state.hunks.last_mut() {
+    if let Some(hunk) = selection.hunks.last_mut() {
         hunk.lines.push((Role::Mark, line.to_string()));
     }
 }
 
-fn role(prefix: u8, text: &str, model_state: &mut PatchSelection<'_>) -> Option<Role> {
+fn role(prefix: u8, text: &str, selection: &mut PatchSelection<'_>) -> Option<Role> {
     match prefix {
         b' ' => {
-            model_state.new_line += 1;
+            selection.new_line += 1;
             Some(Role::Ctx)
         }
         b'+' => {
-            let selected = model_state.pick.all || model_state.pick.adds.contains(&model_state.new_line);
+            let selected = selection.pick.all || selection.pick.adds.contains(&selection.new_line);
 
-            model_state.new_line += 1;
-            selected_role(selected, model_state.direction, Role::New)
+            selection.new_line += 1;
+            selected_role(selected, selection.direction, Role::New)
         }
         b'-' => {
-            let selected = model_state.pick.all
-                || model_state
+            let selected = selection.pick.all
+                || selection
                     .pick
                     .dels
-                    .contains(&(model_state.new_line, text.replace('\t', "    ")));
+                    .contains(&(selection.new_line, text.replace('\t', "    ")));
 
-            selected_role(selected, model_state.direction, Role::Old)
+            selected_role(selected, selection.direction, Role::Old)
         }
         _ => None,
     }
 }
 
-fn old_path(path: &str, model_state: &mut PatchHeader) {
-    model_state.old_null = path == "/dev/null";
+fn set_old_path(path: &str, header: &mut PatchHeader) {
+    header.old_null = path == "/dev/null";
 
-    if !model_state.old_null {
-        path.strip_prefix("a/")
-            .unwrap_or(path)
-            .clone_into(&mut model_state.old_path);
+    if !header.old_null {
+        path.strip_prefix("a/").unwrap_or(path).clone_into(&mut header.old_path);
     }
 }
 
-fn new_path(path: &str, model_state: &mut PatchHeader) {
-    model_state.new_null = path == "/dev/null";
+fn set_new_path(path: &str, header: &mut PatchHeader) {
+    header.new_null = path == "/dev/null";
 
-    if !model_state.new_null {
-        path.strip_prefix("b/")
-            .unwrap_or(path)
-            .clone_into(&mut model_state.new_path);
+    if !header.new_null {
+        path.strip_prefix("b/").unwrap_or(path).clone_into(&mut header.new_path);
     }
 }

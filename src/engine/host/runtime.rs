@@ -3,16 +3,17 @@ use super::{
     mpsc, pin_branch, serve, store,
 };
 
+/// Run the host of thread ID until idle or `stop`.
 pub(crate) fn run(id: &str) -> ! {
-    let Some(thread_value) = store::load(id) else {
+    let Some(thread) = store::load(id) else {
         eprintln!("codehead host: no thread {id}");
         std::process::exit(2)
     };
 
-    let (listener, _lock) = match bind(&thread_value.id) {
-        Ok(bytes) => bytes,
+    let (listener, lock) = match bind(&thread.id) {
+        Ok(bound) => bound,
         Err(error) => {
-            eprintln!("codehead host {}: {error}", thread_value.id);
+            eprintln!("codehead host {}: {error}", thread.id);
             std::process::exit(0)
         }
     };
@@ -21,32 +22,33 @@ pub(crate) fn run(id: &str) -> ! {
     crate::engine::warm::watch();
     let (tx, rx) = mpsc::channel::<Input>();
     let (htx, hrx) = mpsc::channel::<(String, Out)>();
-    let fwd = tx.clone();
+    let relay_tx = tx.clone();
 
-    std::thread::spawn(move || relay_harness(hrx, &fwd));
+    std::thread::spawn(move || relay_harness(hrx, &relay_tx));
 
-    let acc = tx.clone();
+    let accept_tx = tx.clone();
 
     std::thread::spawn(move || {
         for conn in listener.incoming().flatten() {
-            let tx = acc.clone();
+            let tx = accept_tx.clone();
 
             std::thread::spawn(move || serve(conn, &tx));
         }
     });
 
-    let mut host = new_host(&thread_value, htx);
+    let mut host = new_host(&thread, htx);
 
-    restore_host(&mut host, &thread_value, &tx);
+    restore_host(&mut host, &thread, &tx);
     receive_inputs(&mut host, &rx, &tx);
     host.stop();
+    drop(lock);
 
     std::process::exit(0)
 }
 
-fn new_host(thread_value: &store::Thread, htx: Sender<(String, Out)>) -> Host {
+fn new_host(thread: &store::Thread, htx: Sender<(String, Out)>) -> Host {
     Host {
-        id: thread_value.id.clone(),
+        id: thread.id.clone(),
         exe: crate::engine::exe(),
         sessions: HashMap::new(),
         asks: HashMap::new(),
@@ -64,21 +66,21 @@ fn new_host(thread_value: &store::Thread, htx: Sender<(String, Out)>) -> Host {
         held: Vec::new(),
         kid: Kid::default(),
         kids_at: Instant::now(),
-        resume: thread_value.resume.clone().into_iter().collect(),
+        resume: thread.resume.clone().into_iter().collect(),
     }
 }
 
-fn restore_host(host: &mut Host, thread_value: &store::Thread, tx: &Sender<Input>) {
+fn restore_host(host: &mut Host, thread: &store::Thread, tx: &Sender<Input>) {
     catch_signals();
     host.close_open_turns();
 
     // subagents the log has open ran in a process that is gone
-    let (subs, lost) = crate::engine::subagents::Tracker::from_log(&store::events(&thread_value.id));
+    let (subs, lost) = crate::engine::subagents::Tracker::from_log(&store::events(&thread.id));
 
     host.subagents = subs;
 
-    for (agent_value, key) in lost {
-        host.log(Some(&agent_value), key);
+    for (agent, kind) in lost {
+        host.log(Some(&agent), kind);
     }
 
     // ended subagents resumed while 0 host ran (or an older one missed it)
@@ -87,37 +89,33 @@ fn restore_host(host: &mut Host, thread_value: &store::Thread, tx: &Sender<Input
     }
 
     // the hooks of the repo change: each host start pins the worktree again
-    if let (Some(wt), Some(bytes_value), None) = (
-        thread_value.worktree.clone(),
-        thread_value.branch.clone(),
-        &thread_value.worktree_pending,
-    ) {
-        std::thread::spawn(move || pin_branch(Path::new(&wt), &bytes_value));
+    if let (Some(wt), Some(branch), None) = (thread.worktree.clone(), thread.branch.clone(), &thread.worktree_pending) {
+        std::thread::spawn(move || pin_branch(Path::new(&wt), &branch));
     }
 
-    if thread_value.worktree_pending.is_some() {
-        host.start_worktree(thread_value, tx.clone());
-    } else if thread_value.setup.as_deref() == Some("pending") {
-        host.start_setup(thread_value, tx.clone());
-    } else if thread_value.pull {
-        host.start_pull(thread_value, tx.clone());
+    if thread.worktree_pending.is_some() {
+        host.start_worktree(thread, tx.clone());
+    } else if thread.setup.as_deref() == Some("pending") {
+        host.start_setup(thread, tx.clone());
+    } else if thread.pull {
+        host.start_pull(thread, tx.clone());
     }
 
-    host.kickoff(thread_value);
+    host.kickoff(thread);
 }
 
 fn receive_inputs(host: &mut Host, rx: &mpsc::Receiver<Input>, tx: &Sender<Input>) {
     loop {
         // 1 s: a signal ends the host within a second
         match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(Input::Cmd(character, reply)) => {
-                run_ok_input_cmd_character(host, &character, &reply);
+            Ok(Input::Cmd(request, reply)) => {
+                reply_to_command(host, &request, &reply);
             }
-            Ok(Input::Subscribe(text)) => host.subscribe(text),
-            Ok(Input::Harness(agent_2, output_value)) => host.harness(agent_2, output_value),
+            Ok(Input::Subscribe(subscriber)) => host.subscribe(subscriber),
+            Ok(Input::Harness(agent, output)) => host.harness(agent, output),
             Ok(Input::Setup(label, ok, out)) => host.setup_done(&label, ok, out),
             Ok(Input::Pull(ok, out)) => host.pull_done(ok, out),
-            Ok(Input::Worktree(result_value)) => host.worktree_done(result_value, tx.clone()),
+            Ok(Input::Worktree(result)) => host.worktree_done(result, tx.clone()),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -132,24 +130,24 @@ fn receive_inputs(host: &mut Host, rx: &mpsc::Receiver<Input>, tx: &Sender<Input
     }
 }
 
-fn relay_harness(rx: mpsc::Receiver<(String, Out)>, fwd: &Sender<Input>) {
+fn relay_harness(rx: mpsc::Receiver<(String, Out)>, input_tx: &Sender<Input>) {
     for (agent, output) in rx {
-        if fwd.send(Input::Harness(agent, output)).is_err() {
+        if input_tx.send(Input::Harness(agent, output)).is_err() {
             return;
         }
     }
 }
 
-fn run_ok_input_cmd_character(host: &mut Host, character: &Value, reply: &Sender<Value>) {
-    let result = match host.cmd(character) {
-        Ok(mut value) => {
-            value["ok"] = json!(true);
-            value
+fn reply_to_command(host: &mut Host, request: &Value, reply: &Sender<Value>) {
+    let response = match host.cmd(request) {
+        Ok(mut reply) => {
+            reply["ok"] = json!(true);
+            reply
         }
-        Err(error_value) => json!({"ok": false, "error": error_value}),
+        Err(error) => json!({"ok": false, "error": error}),
     };
 
-    let _ = reply.send(result);
+    let _ = reply.send(response);
 
     host.deliver_later();
 }
@@ -165,7 +163,7 @@ fn poll_host(host: &mut Host) -> bool {
     host.run_resumes();
     host.kid_check();
     host.kids_check();
-    let busy = host.sessions.values().any(|line| line.busy);
+    let busy = host.sessions.values().any(|live| live.busy);
 
     // running subagents keep the host (and their harness process) alive; a resume waits too
     if !busy

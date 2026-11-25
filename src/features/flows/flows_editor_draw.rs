@@ -6,15 +6,15 @@ use super::{
 };
 
 impl FlowsTab {
-    pub(crate) fn draw_editor(&mut self, frame: &mut Frame, area_value: Rect, active: bool) {
-        draw_editor_flows_tab(self, frame, area_value, active);
+    pub(crate) fn draw_editor(&mut self, frame: &mut Frame, area: Rect, active: bool) {
+        draw_editor_flows_tab(self, frame, area, active);
     }
 
-    fn draw_editor_lst(
+    fn draw_field(
         context: EditorLayout<'_, '_, '_, '_, '_>,
         i: usize,
         label: &mut &'static str,
-        ta: &mut crate::ui::textarea::TextArea,
+        input: &mut crate::ui::textarea::TextArea,
         shared: &mut bool,
     ) -> ControlFlow<()> {
         let EditorLayout {
@@ -34,7 +34,7 @@ impl FlowsTab {
         }
 
         let on = i == field;
-        let lst = if on { theme::accent_bold() } else { theme::muted() };
+        let label_style = if on { theme::accent_bold() } else { theme::muted() };
 
         let label = if *shared {
             format!("{label} (shared)")
@@ -43,7 +43,7 @@ impl FlowsTab {
         };
 
         frame.render_widget(
-            Paragraph::new(Line::styled(label, lst)),
+            Paragraph::new(Line::styled(label, label_style)),
             Rect {
                 y: *y,
                 height: 1,
@@ -52,46 +52,42 @@ impl FlowsTab {
         );
         *y += 1;
 
-        let height_value = if ta.is_single() {
+        let input_h = if input.is_single() {
             1
         } else {
             multi_h.min(inner.bottom().saturating_sub(*y))
         };
 
-        let tr = Rect {
+        let input_area = Rect {
             y: *y,
-            height: height_value.max(1).min(inner.bottom().saturating_sub(*y).max(1)),
+            height: input_h.max(1).min(inner.bottom().saturating_sub(*y).max(1)),
             ..inner
         };
 
-        ta.render(frame, tr, active && on && focus == Focus::Editor);
-        field_rects.push((tr, i));
+        input.render(frame, input_area, active && on && focus == Focus::Editor);
+        field_rects.push((input_area, i));
 
         if on {
-            *cur_rect = tr;
+            *cur_rect = input_area;
         }
 
-        *y += tr.height;
+        *y += input_area.height;
 
         ControlFlow::Continue(())
     }
-    pub(crate) fn draw_editor_edit_step_count_value(lib: &Library, count_value: &String) -> (String, Option<String>) {
-        let users: Vec<String> = lib.users_of(count_value).iter().map(|file| file.name.clone()).collect();
+    pub(crate) fn step_editor_title(lib: &Library, name: &String) -> (String, Option<String>) {
+        let users: Vec<String> = lib.users_of(name).iter().map(|flow| flow.name.clone()).collect();
 
         (
-            format!(" step {count_value} "),
+            format!(" step {name} "),
             (!users.is_empty()).then(|| format!("! an edit changes {} flows: {}", users.len(), list_names(&users))),
         )
     }
-    pub(crate) fn draw_editor_edit_node_i_some(lib: &Library, i: usize, user: &String) -> (String, Option<String>) {
-        let users: Vec<String> = lib
-            .users_of(user)
-            .iter()
-            .map(|file_value| file_value.name.clone())
-            .collect();
+    pub(crate) fn shared_node_editor_title(lib: &Library, i: usize, step_name: &String) -> (String, Option<String>) {
+        let users: Vec<String> = lib.users_of(step_name).iter().map(|flow| flow.name.clone()).collect();
 
         (
-            format!(" {} · shared step {user} · used in {} flows ", i + 1, users.len()),
+            format!(" {} · shared step {step_name} · used in {} flows ", i + 1, users.len()),
             Some(format!(
                 "! done when + text: an edit changes {}: {} · ctrl+f: fork as a one-off",
                 if users.len() == 1 {
@@ -110,22 +106,12 @@ impl FlowsTab {
         draw_picker_flows_tab(self, frame, right, bounds);
     }
 }
-pub(crate) fn draw_picker_pickrow_step_count_value(
-    count_value: &String,
-    view_state: &mut FlowsTab,
-) -> (String, String) {
-    let text_value = view_state.lib.step(count_value);
+pub(crate) fn step_pick_text(name: &String, tab: &mut FlowsTab) -> (String, String) {
+    let step = tab.lib.step(name);
 
     (
-        format!("✓ {count_value}"),
-        text_value
-            .map(|text_2| {
-                format!(
-                    "{} · {} flows",
-                    text_2.description,
-                    view_state.lib.users_of(count_value).len()
-                )
-            })
+        format!("✓ {name}"),
+        step.map(|step| format!("{} · {} flows", step.description, tab.lib.users_of(name).len()))
             .unwrap_or_default(),
     )
 }
@@ -133,64 +119,70 @@ pub(crate) fn draw_picker_line(
     frame: &mut Frame<'_>,
     cur: usize,
     list: Rect,
-    off: usize,
-    key: usize,
+    offset: usize,
+    index: usize,
     row: &PickRow,
-    view_state: &mut FlowsTab,
+    tab: &mut FlowsTab,
 ) {
-    let rr = Rect {
-        y: list.y + (key - off) as u16,
+    let row_area = Rect {
+        y: list.y + (index - offset) as u16,
         height: 1,
         ..list
     };
-    let on = key == cur;
+    let on = index == cur;
 
     let (label, detail) = match row {
-        PickRow::OneOff(thread) => (
-            format!("◇ one-off: {thread}"),
+        PickRow::OneOff(text) => (
+            format!("◇ one-off: {text}"),
             "this flow only · s later: save as step".to_string(),
         ),
-        PickRow::NewStep(count) => (
-            format!("+ new step {count}"),
+        PickRow::NewStep(name) => (
+            format!("+ new step {name}"),
             "shared: every flow can use it".to_string(),
         ),
-        PickRow::Step(count_value) => draw_picker_pickrow_step_count_value(count_value, view_state),
+        PickRow::Step(name) => step_pick_text(name, tab),
     };
 
-    let st = if on {
+    let style = if on {
         theme::pill().add_modifier(Modifier::BOLD)
     } else {
         theme::text()
     };
 
-    let lw = 32.min(usize::from(rr.width) / 2);
+    let label_w = 32.min(usize::from(row_area.width) / 2);
     let line = Line::from(vec![
-        Span::styled(format!("{:<lw$} ", crate::ui::thread_card::fit(&label, lw)), st),
         Span::styled(
-            crate::ui::thread_card::fit(&detail, usize::from(rr.width).saturating_sub(lw + 1)),
-            if on { st } else { theme::muted() },
+            format!("{:<label_w$} ", crate::ui::thread_card::fit(&label, label_w)),
+            style,
+        ),
+        Span::styled(
+            crate::ui::thread_card::fit(&detail, usize::from(row_area.width).saturating_sub(label_w + 1)),
+            if on { style } else { theme::muted() },
         ),
     ]);
 
-    frame.render_widget(Paragraph::new(line).style(if on { st } else { Style::default() }), rr);
+    frame.render_widget(
+        Paragraph::new(line).style(if on { style } else { Style::default() }),
+        row_area,
+    );
 }
 
-fn draw_editor_flows_tab(state: &mut FlowsTab, frame: &mut Frame, area_value: Rect, active: bool) {
-    let Some(ed) = state.editor.as_mut() else { return };
+fn draw_editor_flows_tab(state: &mut FlowsTab, frame: &mut Frame, area: Rect, active: bool) {
+    let Some(editor) = state.editor.as_mut() else { return };
 
-    let (title, warn) = match &ed.what {
-        Edit::Step(count_value) => FlowsTab::draw_editor_edit_step_count_value(&state.lib, count_value),
-        Edit::Node(i, Some(user)) => FlowsTab::draw_editor_edit_node_i_some(&state.lib, *i, user),
+    let (title, warning) = match &editor.what {
+        Edit::Step(name) => FlowsTab::step_editor_title(&state.lib, name),
+        Edit::Node(i, Some(step_name)) => FlowsTab::shared_node_editor_title(&state.lib, *i, step_name),
         Edit::Node(i, None) => (format!(" {} · one-off step ", i + 1), None),
     };
 
-    let inner = draw_editor_frame(frame, area_value, title, ed.gate);
+    let inner = draw_editor_frame(frame, area, title, editor.gate);
     let mut y = inner.y;
 
-    if let Some(width_value) = warn {
+    if let Some(warning) = warning {
         frame.render_widget(
             Paragraph::new(Line::styled(
-                crate::ui::thread_card::fit(&width_value, usize::from(inner.width)),
+                crate::ui::thread_card::fit(&warning, usize::from(inner.width)),
                 theme::fg(theme::pal().caution()),
             )),
             Rect { y, height: 1, ..inner },
@@ -198,19 +190,19 @@ fn draw_editor_flows_tab(state: &mut FlowsTab, frame: &mut Frame, area_value: Re
         y += 1;
     }
 
-    let count_2 = ed.fields.len();
-    let singles = ed.fields.iter().filter(|(_, thread, _)| thread.is_single()).count() as u16;
-    let multis = (count_2 as u16).saturating_sub(singles).max(1);
+    let field_count = editor.fields.len();
+    let singles = editor.fields.iter().filter(|(_, input, _)| input.is_single()).count() as u16;
+    let multis = (field_count as u16).saturating_sub(singles).max(1);
     let room = inner.bottom().saturating_sub(y);
     let multi_h = (room.saturating_sub(singles * 2) / multis).saturating_sub(1).max(2);
     let mut cur_rect = Rect::default();
 
-    for (i, (label, ta, shared)) in ed.fields.iter_mut().enumerate() {
-        if let ControlFlow::Break(()) = FlowsTab::draw_editor_lst(
+    for (i, (label, input, shared)) in editor.fields.iter_mut().enumerate() {
+        if let ControlFlow::Break(()) = FlowsTab::draw_field(
             EditorLayout {
                 frame,
                 active,
-                field: ed.field,
+                field: editor.field,
                 focus: state.focus,
                 field_rects: &mut state.hit_regions.field_rects,
                 inner,
@@ -220,20 +212,22 @@ fn draw_editor_flows_tab(state: &mut FlowsTab, frame: &mut Frame, area_value: Re
             },
             i,
             label,
-            ta,
+            input,
             shared,
         ) {
             break;
         }
     }
 
-    let ta = &ed.fields[ed.field].1;
+    let input = &editor.fields[editor.field].1;
 
-    state.shortcuts.render(frame, ta, frame.area(), cur_rect);
+    state.shortcuts.render(frame, input, frame.area(), cur_rect);
 }
 
 fn draw_ask_flows_tab(state: &mut FlowsTab, frame: &mut Frame, right: Rect) {
-    let Some((what, ta)) = state.ask.as_mut() else { return };
+    let Some((what, input)) = state.ask.as_mut() else {
+        return;
+    };
 
     let label = match what {
         Ask::NewFlow => "new flow: name".to_string(),
@@ -247,11 +241,11 @@ fn draw_ask_flows_tab(state: &mut FlowsTab, frame: &mut Frame, right: Rect) {
         Ask::Outcome(..) => "gate outcome: label".into(),
     };
 
-    let width_value = right.width.min(64);
+    let width = right.width.min(64);
     let area = Rect {
         x: right.x,
         y: right.y + 2,
-        width: width_value,
+        width,
         height: 4,
     };
 
@@ -272,20 +266,23 @@ fn draw_ask_flows_tab(state: &mut FlowsTab, frame: &mut Frame, right: Rect) {
         ..inner
     };
 
-    ta.render(frame, inner, true);
+    input.render(frame, inner, true);
 }
 
 fn draw_picker_flows_tab(state: &mut FlowsTab, frame: &mut Frame, right: Rect, bounds: Rect) {
-    let Some((ta, cur)) = state.picker.as_ref() else { return };
-    let rows = state.pick_rows(&ta.text());
+    let Some((input, cur)) = state.picker.as_ref() else {
+        return;
+    };
+
+    let rows = state.pick_rows(&input.text());
     let cur = *cur;
-    let width_value = right.width.min(80);
-    let height_value = (rows.len() as u16 + 4).min(bounds.height.saturating_sub(4)).max(6);
+    let width = right.width.min(80);
+    let height = (rows.len() as u16 + 4).min(bounds.height.saturating_sub(4)).max(6);
     let area = Rect {
         x: right.x,
         y: right.y + 2,
-        width: width_value,
-        height: height_value.min(right.height.saturating_sub(2)),
+        width,
+        height: height.min(right.height.saturating_sub(2)),
     };
 
     frame.render_widget(Clear, area);
@@ -304,8 +301,8 @@ fn draw_picker_flows_tab(state: &mut FlowsTab, frame: &mut Frame, right: Rect, b
         ..inner
     };
 
-    if let Some((ta, _)) = state.picker.as_mut() {
-        ta.render(frame, Rect { height: 1, ..inner }, true);
+    if let Some((input, _)) = state.picker.as_mut() {
+        input.render(frame, Rect { height: 1, ..inner }, true);
     }
 
     let list = Rect {
@@ -313,14 +310,14 @@ fn draw_picker_flows_tab(state: &mut FlowsTab, frame: &mut Frame, right: Rect, b
         height: inner.height.saturating_sub(2),
         ..inner
     };
-    let off = crate::ui::dropdown::fit(0, cur, rows.len(), usize::from(list.height));
+    let offset = crate::ui::dropdown::fit(0, cur, rows.len(), usize::from(list.height));
 
-    for (key, row) in rows.iter().enumerate().skip(off).take(usize::from(list.height)) {
-        draw_picker_line(frame, cur, list, off, key, row, state);
+    for (index, row) in rows.iter().enumerate().skip(offset).take(usize::from(list.height)) {
+        draw_picker_line(frame, cur, list, offset, index, row, state);
     }
 }
 
-fn draw_editor_frame(frame: &mut Frame, area_value: Rect, title: String, gate: bool) -> Rect {
+fn draw_editor_frame(frame: &mut Frame, area: Rect, title: String, gate: bool) -> Rect {
     let block = Block::new()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -336,10 +333,10 @@ fn draw_editor_frame(frame: &mut Frame, area_value: Rect, title: String, gate: b
             )
             .right_aligned(),
         );
-    let inner = block.inner(area_value);
+    let inner = block.inner(area);
 
-    frame.render_widget(Clear, area_value);
-    frame.render_widget(block, area_value);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
 
     Rect {
         x: inner.x + 1,

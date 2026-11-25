@@ -79,14 +79,14 @@ fn protocol_from(var: impl Fn(&str) -> Option<String>) -> Option<ProtocolType> {
     // sixel terminals that say so in TERM
     if ["foot", "mlterm", "contour"]
         .iter()
-        .any(|thread| term.starts_with(thread))
+        .any(|prefix| term.starts_with(prefix))
     {
         return Some(ProtocolType::Sixel);
     }
 
     // over ssh 0 TERM_PROGRAM, iTerm2 still says LC_TERMINAL; a TERM_PROGRAM of another
     // terminal (vscode, Apple_Terminal): it wins over the leaked var
-    if program.is_empty() && var("LC_TERMINAL").is_some_and(|thread_value| thread_value.contains("iTerm")) {
+    if program.is_empty() && var("LC_TERMINAL").is_some_and(|name| name.contains("iTerm")) {
         return Some(ProtocolType::Iterm2);
     }
 
@@ -128,9 +128,9 @@ pub(crate) fn picker() -> Option<Picker> {
     }
 
     let proto = protocol()?;
-    let path = Picker::new(font_size(), proto);
+    let picker = Picker::new(font_size(), proto);
 
-    Some(path)
+    Some(picker)
 }
 
 /// A preview ready to draw: the encoded image, its line (`1920×1080 px · 812 KB`), its kitty id
@@ -172,10 +172,10 @@ pub(crate) fn build(path: &Path, kind: Kind, picker: &Picker, cols: u16, rows: u
         Kind::Heic | Kind::Pdf => raster(path, pw.max(ph))?,
     };
 
-    let (width_value, height_value) = (img.width(), img.height());
+    let (width, height) = (img.width(), img.height());
 
     // 1 fast downscale to the area's pixels: the encoder gets 0 more than it draws
-    let img = if width_value > pw || height_value > ph {
+    let img = if width > pw || height > ph {
         img.thumbnail(pw, ph)
     } else {
         img
@@ -190,8 +190,7 @@ pub(crate) fn build(path: &Path, kind: Kind, picker: &Picker, cols: u16, rows: u
             |px: u32, cell: u16, max: u16| (px.div_ceil(u32::from(cell.max(1))).min(u32::from(max)) as u16).max(1);
         let size = Size::new(cells(img.width(), fs.width, cols), cells(img.height(), fs.height, rows));
         let id = next_id();
-        let protocol =
-            Protocol::Kitty(Kitty::new(img, size, id, false, true).map_err(|error_value| error_value.to_string())?);
+        let protocol = Protocol::Kitty(Kitty::new(img, size, id, false, true).map_err(|error| error.to_string())?);
         let transmit = take_transmit(&protocol, size);
 
         (protocol, Some(id), transmit)
@@ -199,7 +198,7 @@ pub(crate) fn build(path: &Path, kind: Kind, picker: &Picker, cols: u16, rows: u
         (
             picker
                 .new_protocol(img, Size::new(cols, rows), &(Resize::Fit(None)))
-                .map_err(|error_2| error_2.to_string())?,
+                .map_err(|error| error.to_string())?,
             None,
             None,
         )
@@ -209,7 +208,7 @@ pub(crate) fn build(path: &Path, kind: Kind, picker: &Picker, cols: u16, rows: u
 
     Ok(Preview {
         protocol,
-        info: format!("{what}{width_value}×{height_value} px · {} KB", bytes.div_ceil(1024)),
+        info: format!("{what}{width}×{height} px · {} KB", bytes.div_ceil(1024)),
         kitty,
         transmit,
     })
@@ -254,14 +253,14 @@ fn decode(path: &Path) -> Result<DynamicImage, String> {
         .map_err(|error| error.to_string())?;
 
     reader.limits(limits.clone());
-    let mut decoder = reader.into_decoder().map_err(|error_value| error_value.to_string())?;
+    let mut decoder = reader.into_decoder().map_err(|error| error.to_string())?;
 
     // the pixel buffer counts too (from_decoder reserves 0 of it): 16384² RGBA = 1 GiB
     limits
         .reserve(decoder.total_bytes())
-        .map_err(|error_2| error_2.to_string())?;
-    let turn = decoder.orientation().map_err(|error_3| error_3.to_string())?;
-    let mut img = DynamicImage::from_decoder(decoder).map_err(|error_4| error_4.to_string())?;
+        .map_err(|error| error.to_string())?;
+    let turn = decoder.orientation().map_err(|error| error.to_string())?;
+    let mut img = DynamicImage::from_decoder(decoder).map_err(|error| error.to_string())?;
 
     img.apply_orientation(turn);
 
@@ -283,10 +282,10 @@ fn on_white(img: DynamicImage) -> DynamicImage {
     let mut rgba = img.into_rgba8();
 
     for px in rgba.pixels_mut() {
-        let agent = u16::from(px[3]);
+        let alpha = u16::from(px[3]);
 
-        for character in 0..3 {
-            px[character] = ((u16::from(px[character]) * agent + 255 * (255 - agent)) / 255) as u8;
+        for channel in 0..3 {
+            px[channel] = ((u16::from(px[channel]) * alpha + 255 * (255 - alpha)) / 255) as u8;
         }
 
         px[3] = 255;
@@ -296,8 +295,7 @@ fn on_white(img: DynamicImage) -> DynamicImage {
 }
 
 fn on_path(bin: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|directory| directory.join(bin).is_file()))
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
 }
 
 /// The rasterizers' dir: private (0700) under codehead's cache, made 1x. A tool never writes
@@ -312,8 +310,7 @@ fn raster_dir() -> Result<PathBuf, String> {
         .mode(0o700)
         .create(&dir)
         .map_err(|error| error.to_string())?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-        .map_err(|error_value| error_value.to_string())?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(|error| error.to_string())?;
     Ok(dir)
 }
 
@@ -327,7 +324,9 @@ fn raster(path: &Path, max: u32) -> Result<DynamicImage, String> {
         return Err("0 preview: a relative path".into());
     }
 
-    let is_pdf = path.extension().is_some_and(|error| error.eq_ignore_ascii_case("pdf"));
+    let is_pdf = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
     let pdftoppm = is_pdf && on_path("pdftoppm");
 
     if !pdftoppm && !cfg!(target_os = "macos") {
@@ -348,7 +347,7 @@ fn raster(path: &Path, max: u32) -> Result<DynamicImage, String> {
     let max = max.clamp(64, 4096).to_string();
 
     let argv: Vec<OsString> = if pdftoppm {
-        let mut agent: Vec<OsString> = [
+        let mut argv: Vec<OsString> = [
             "pdftoppm",
             "-png",
             "-f",
@@ -363,16 +362,16 @@ fn raster(path: &Path, max: u32) -> Result<DynamicImage, String> {
         .map(OsString::from)
         .collect();
 
-        agent.extend([path.as_os_str().to_owned(), stem.into_os_string()]);
-        agent
+        argv.extend([path.as_os_str().to_owned(), stem.into_os_string()]);
+        argv
     } else {
-        let mut agent_value: Vec<OsString> = ["sips", "-s", "format", "png", "-Z", &max]
+        let mut argv: Vec<OsString> = ["sips", "-s", "format", "png", "-Z", &max]
             .iter()
             .map(OsString::from)
             .collect();
 
-        agent_value.extend([path.as_os_str().to_owned(), "--out".into(), out.as_os_str().to_owned()]);
-        agent_value
+        argv.extend([path.as_os_str().to_owned(), "--out".into(), out.as_os_str().to_owned()]);
+        argv
     };
 
     let img = if run(&argv, RASTER_TIMEOUT) {
@@ -402,7 +401,7 @@ fn run(argv: &[OsString], timeout: Duration) -> bool {
 
     loop {
         match child.try_wait() {
-            Ok(Some(text)) => return text.success(),
+            Ok(Some(status)) => return status.success(),
             Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(10)),
             _ => {
                 let _ = child.kill();

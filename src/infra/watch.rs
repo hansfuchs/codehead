@@ -51,8 +51,8 @@ pub(crate) fn show(dir: &Path) -> Shown {
 }
 
 fn send(message: Msg) {
-    if let Ok(group) = TX.lock()
-        && let Some(tx) = group.as_ref()
+    if let Ok(sender) = TX.lock()
+        && let Some(tx) = sender.as_ref()
     {
         let _ = tx.send(message);
     }
@@ -72,21 +72,21 @@ pub(crate) fn start_at(threads: PathBuf) {
     let (tx, rx) = channel();
 
     {
-        let Ok(mut group) = TX.lock() else { return };
+        let Ok(mut sender) = TX.lock() else { return };
 
-        if group.is_some() {
+        if sender.is_some() {
             return;
         }
 
-        *group = Some(tx.clone());
+        *sender = Some(tx.clone());
     }
 
     let os_tx = tx.clone();
 
     let handler = move |result: notify::Result<notify::Event>| {
         let message = match result {
-            Ok(error) if error.need_rescan() => Msg::Rescan,
-            Ok(error_value) => Msg::Paths(error_value.paths),
+            Ok(event) if event.need_rescan() => Msg::Rescan,
+            Ok(event) => Msg::Paths(event.paths),
             Err(_) => Msg::Rescan,
         };
 
@@ -94,9 +94,9 @@ pub(crate) fn start_at(threads: PathBuf) {
     };
 
     let watcher = match notify::recommended_watcher(handler) {
-        Ok(width) => width,
-        Err(error_2) => {
-            crate::engine::trace(&format!("watch: {error_2}"));
+        Ok(watcher) => watcher,
+        Err(event) => {
+            crate::engine::trace(&format!("watch: {event}"));
             return;
         }
     };
@@ -117,26 +117,26 @@ fn roots(threads: &[store::Thread], shown: &[PathBuf]) -> (Vec<PathBuf>, Vec<Pat
     let mut works = HashSet::new();
 
     // archived threads: their kept branch → their repo's git dir only
-    for result in threads
+    for repo in threads
         .iter()
         .filter(|thread| thread.state == "archived")
         .filter_map(crate::domain::threads::repo_of_thread_store)
     {
-        if let Some((_, common, _)) = git_dirs(&result) {
+        if let Some((_, common, _)) = git_dirs(&repo) {
             gits.insert(canon(&common));
         }
     }
 
     let dirs = threads
         .iter()
-        .filter(|thread_value| thread_value.state != "archived" && thread_value.state != "deleted")
+        .filter(|thread| thread.state != "archived" && thread.state != "deleted")
         .flat_map(crate::engine::store::Thread::all_checkouts)
-        .map(|path| PathBuf::from(path.dir));
+        .map(|checkout| PathBuf::from(checkout.dir));
 
-    for directory in dirs.chain(shown.iter().cloned()) {
-        let Some((top, common, head)) = git_dirs(&directory) else {
+    for dir in dirs.chain(shown.iter().cloned()) {
+        let Some((top, common, head)) = git_dirs(&dir) else {
             // a view's dir without git (a transcript dir): watched as it is, 0 ignore rules
-            add_plain_root(&directory, shown, &mut works);
+            add_plain_root(&dir, shown, &mut works);
 
             continue;
         };
@@ -147,7 +147,7 @@ fn roots(threads: &[store::Thread], shown: &[PathBuf]) -> (Vec<PathBuf>, Vec<Pat
         let branch = std::fs::read_to_string(head.join("HEAD")).unwrap_or_default();
         let on_default = matches!(branch.trim().strip_prefix("ref: refs/heads/"), Some("main" | "master"));
 
-        if !on_default || shown.contains(&directory) {
+        if !on_default || shown.contains(&dir) {
             works.insert(canon(&top));
         }
     }
@@ -157,15 +157,15 @@ fn roots(threads: &[store::Thread], shown: &[PathBuf]) -> (Vec<PathBuf>, Vec<Pat
 
 /// (top dir, common git dir, own git dir) of the checkout that holds DIR. In-process, 0 git call.
 pub(crate) fn git_dirs(dir: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
-    for directory_value in dir.ancestors().filter(|directory| !directory.as_os_str().is_empty()) {
-        let group = directory_value.join(".git");
+    for ancestor in dir.ancestors().filter(|candidate| !candidate.as_os_str().is_empty()) {
+        let marker = ancestor.join(".git");
 
-        if group.is_dir() {
-            return Some((directory_value.to_path_buf(), group.clone(), group));
+        if marker.is_dir() {
+            return Some((ancestor.to_path_buf(), marker.clone(), marker));
         }
 
-        if group.is_file() {
-            return file_git_dirs(directory_value, &group);
+        if marker.is_file() {
+            return file_git_dirs(ancestor, &marker);
         }
     }
 
@@ -197,10 +197,10 @@ const MAX_VERDICTS: usize = 50_000;
 
 impl Watch {
     fn set(&mut self, gits: Vec<PathBuf>, works: Vec<PathBuf>) {
-        self.ignores.retain(|width, _| works.contains(width));
+        self.ignores.retain(|work, _| works.contains(work));
         self.plain = works
             .iter()
-            .filter(|width_value| !width_value.join(".git").exists())
+            .filter(|work| !work.join(".git").exists())
             .cloned()
             .collect();
         self.gits = gits;
@@ -220,22 +220,22 @@ impl Watch {
         collect_topics(self, paths, check)
     }
 
-    /// REL in work tree W: Some(true) ignored (itself or a dir above), Some(false) not, None unknown.
-    fn verdict(&self, path: &Path, rel: &Path) -> Option<bool> {
-        ignore_verdict(self, path, rel)
+    /// REL in work tree WORK: Some(true) ignored (itself or a dir above), Some(false) not, None unknown.
+    fn verdict(&self, work: &Path, rel: &Path) -> Option<bool> {
+        ignore_verdict(self, work, rel)
     }
 }
 
 /// REL's dirs from the top, then REL: `a/b/c` → `a`, `a/b`, `a/b/c`.
 fn ancestors(rel: &Path) -> Vec<PathBuf> {
-    let mut path: Vec<PathBuf> = rel
+    let mut dirs: Vec<PathBuf> = rel
         .ancestors()
-        .filter(|agent| !agent.as_os_str().is_empty())
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .collect();
 
-    path.reverse();
-    path
+    dirs.reverse();
+    dirs
 }
 
 /// The part of a git dir path REL that changes what a read shows: HEAD, index, refs, packed-refs
@@ -247,25 +247,25 @@ fn git_part(rel: &Path) -> Option<Git> {
         return None;
     }
 
-    if let Some(result) = text.strip_prefix("worktrees/") {
-        let (name, file) = result.split_once('/')?;
+    if let Some(rest) = text.strip_prefix("worktrees/") {
+        let (name, file) = rest.split_once('/')?;
 
         return matches!(file, "HEAD" | "index" | "MERGE_HEAD").then(|| Git::Worktree(name.to_string()));
     }
 
-    if let Some(bytes) = text.strip_prefix("refs/heads/") {
-        return Some(Git::Branch(bytes.to_string()));
+    if let Some(branch) = text.strip_prefix("refs/heads/") {
+        return Some(Git::Branch(branch.to_string()));
     }
 
-    if let Some(result_value) = text.strip_prefix("refs/remotes/") {
+    if let Some(remote_rest) = text.strip_prefix("refs/remotes/") {
         // <remote>/<branch>; <remote>/HEAD: the default branch moved, every checkout; <remote>
         // alone: its dir (its files come as events of their own)
-        let bytes_2 = result_value.split_once('/').map_or("", |(_, bytes_value)| bytes_value);
+        let branch = remote_rest.split_once('/').map_or("", |(_, branch)| branch);
 
-        return match bytes_2 {
+        return match branch {
             "" => None,
             "HEAD" => Some(Git::All),
-            bytes_3 => Some(Git::Remote(bytes_3.to_string())),
+            branch => Some(Git::Remote(branch.to_string())),
         };
     }
 
@@ -281,8 +281,8 @@ fn git_part(rel: &Path) -> Option<Git> {
     }
 }
 
-/// `git check-ignore` of RELS in work tree W: the ignored ones. 0 answer (git failed): 0 ignored.
-fn check_ignore(path: &Path, rels: &[PathBuf]) -> HashSet<PathBuf> {
+/// `git check-ignore` of RELS in work tree WORK: the ignored ones. 0 answer (git failed): 0 ignored.
+fn check_ignore(work: &Path, rels: &[PathBuf]) -> HashSet<PathBuf> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -292,7 +292,7 @@ fn check_ignore(path: &Path, rels: &[PathBuf]) -> HashSet<PathBuf> {
 
     let Ok(mut child) = Command::new("git")
         .arg("-C")
-        .arg(path)
+        .arg(work)
         .args(["check-ignore", "-z", "--stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -305,8 +305,8 @@ fn check_ignore(path: &Path, rels: &[PathBuf]) -> HashSet<PathBuf> {
     if let Some(mut i) = child.stdin.take() {
         let mut buf = Vec::new();
 
-        for result in rels {
-            buf.extend_from_slice(result.as_os_str().as_encoded_bytes());
+        for rel in rels {
+            buf.extend_from_slice(rel.as_os_str().as_encoded_bytes());
             buf.push(0);
         }
 
@@ -319,9 +319,9 @@ fn check_ignore(path: &Path, rels: &[PathBuf]) -> HashSet<PathBuf> {
 
     output
         .stdout
-        .split(|&bytes| bytes == 0)
-        .filter(|text| !text.is_empty())
-        .map(|path_value| PathBuf::from(String::from_utf8_lossy(path_value).into_owned()))
+        .split(|&byte| byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| PathBuf::from(String::from_utf8_lossy(part).into_owned()))
         .collect()
 }
 
@@ -329,21 +329,15 @@ fn check_ignore(path: &Path, rels: &[PathBuf]) -> HashSet<PathBuf> {
 #[path = "watch_tests.rs"]
 mod tests;
 
-fn classify_path(widget_state: &Watch, path: &Path) -> Class {
-    if let Ok(rel) = path.strip_prefix(&widget_state.threads) {
-        let mut character = rel.components();
+fn classify_path(watch: &Watch, path: &Path) -> Class {
+    if let Ok(rel) = path.strip_prefix(&watch.threads) {
+        let mut parts = rel.components();
 
-        let Some(id) = character
-            .next()
-            .and_then(|character_value| character_value.as_os_str().to_str())
-        else {
+        let Some(id) = parts.next().and_then(|part| part.as_os_str().to_str()) else {
             return Class::Drop;
         };
 
-        let part = match character
-            .next()
-            .and_then(|character_2| character_2.as_os_str().to_str())
-        {
+        let part = match parts.next().and_then(|part| part.as_os_str().to_str()) {
             Some("thread.json") => Part::Meta,
             Some("events.jsonl") => Part::Log,
             Some("comments.json") => Part::Comments,
@@ -354,45 +348,41 @@ fn classify_path(widget_state: &Watch, path: &Path) -> Class {
     }
 
     // a git dir (a main checkout's `.git` lies in its work tree: git first)
-    if let Some(group_2) = widget_state
+    if let Some(common) = watch
         .gits
         .iter()
-        .filter(|group| path.starts_with(group))
-        .max_by_key(|group_value| group_value.as_os_str().len())
+        .filter(|common| path.starts_with(common))
+        .max_by_key(|common| common.as_os_str().len())
     {
-        return git_part(path.strip_prefix(group_2).unwrap_or(path))
-            .map_or(Class::Drop, |key| Class::Topic(Topic::Git(group_2.clone(), key)));
+        return git_part(path.strip_prefix(common).unwrap_or(path))
+            .map_or(Class::Drop, |changed| Class::Topic(Topic::Git(common.clone(), changed)));
     }
 
-    let Some(width_2) = widget_state
+    let Some(work) = watch
         .works
         .iter()
-        .filter(|width| path.starts_with(width))
-        .max_by_key(|width_value| width_value.as_os_str().len())
+        .filter(|work| path.starts_with(work))
+        .max_by_key(|work| work.as_os_str().len())
     else {
         return Class::Drop;
     };
 
-    let rel = path.strip_prefix(width_2).unwrap_or(path);
+    let rel = path.strip_prefix(work).unwrap_or(path);
 
     // the root itself, or a dir without git (0 ignore rules)
-    if rel.as_os_str().is_empty() || widget_state.plain.contains(width_2) {
-        return Class::Topic(Topic::Work(width_2.clone()));
+    if rel.as_os_str().is_empty() || watch.plain.contains(work) {
+        return Class::Topic(Topic::Work(work.clone()));
     }
 
-    if rel
-        .components()
-        .next()
-        .is_some_and(|character_3| character_3.as_os_str() == ".git")
-    {
+    if rel.components().next().is_some_and(|first| first.as_os_str() == ".git") {
         return Class::Drop;
     }
 
-    Class::Work(width_2.clone(), rel.to_path_buf())
+    Class::Work(work.clone(), rel.to_path_buf())
 }
 
 fn collect_topics(
-    widget_state: &mut Watch,
+    watch: &mut Watch,
     paths: &[PathBuf],
     check: &mut dyn FnMut(&Path, &[PathBuf]) -> HashSet<PathBuf>,
 ) -> Vec<Topic> {
@@ -401,48 +391,45 @@ fn collect_topics(
     let mut pending: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
 
     for path in paths {
-        match widget_state.classify(path) {
-            Class::Topic(thread_value) => add_topic(thread_value, &mut out),
+        match watch.classify(path) {
+            Class::Topic(topic) => add_topic(topic, &mut out),
             Class::Drop => {}
-            Class::Work(width, rel) => {
-                classify_work(widget_state, width, rel, &mut pending, &mut out);
+            Class::Work(work, rel) => {
+                classify_work(watch, work, rel, &mut pending, &mut out);
             }
         }
     }
 
-    for (width_value, rels) in pending {
+    for (work, rels) in pending {
         // each unknown ancestor dir, then the path itself
-        let ask = unknown_ancestors(widget_state, &width_value, &rels);
+        let ask = unknown_ancestors(watch, &work, &rels);
 
-        let ignored = check(&width_value, &ask);
-        let message_value = widget_state.ignores.entry(width_value.clone()).or_default();
+        let ignored = check(&work, &ask);
+        let verdicts = watch.ignores.entry(work.clone()).or_default();
 
-        if message_value.len() + ask.len() > MAX_VERDICTS {
-            message_value.clear();
+        if verdicts.len() + ask.len() > MAX_VERDICTS {
+            verdicts.clear();
         }
 
-        for agent_value in ask {
-            let i = ignored.contains(&agent_value);
+        for dir in ask {
+            let i = ignored.contains(&dir);
 
-            message_value.insert(agent_value, i);
+            verdicts.insert(dir, i);
         }
 
-        if rels
-            .iter()
-            .any(|result| widget_state.verdict(&width_value, result) == Some(false))
-        {
-            add_topic(Topic::Work(width_value), &mut out);
+        if rels.iter().any(|rel| watch.verdict(&work, rel) == Some(false)) {
+            add_topic(Topic::Work(work), &mut out);
         }
     }
 
     out
 }
 
-fn ignore_verdict(widget_state: &Watch, path: &Path, rel: &Path) -> Option<bool> {
-    let message = widget_state.ignores.get(path)?;
+fn ignore_verdict(watch: &Watch, work: &Path, rel: &Path) -> Option<bool> {
+    let verdicts = watch.ignores.get(work)?;
 
-    for agent in ancestors(rel) {
-        match message.get(&agent) {
+    for dir in ancestors(rel) {
+        match verdicts.get(&dir) {
             Some(true) => return Some(true),
             Some(false) => {}
             None => return None,
@@ -456,77 +443,65 @@ fn ignore_verdict(widget_state: &Watch, path: &Path, rel: &Path) -> Option<bool>
 mod runtime;
 use runtime::run;
 
-fn add_plain_root(directory: &Path, shown: &[PathBuf], works: &mut HashSet<PathBuf>) {
-    if shown.iter().any(|path| path == directory) && directory.is_dir() {
-        works.insert(canon(directory));
+fn add_plain_root(dir: &Path, shown: &[PathBuf], works: &mut HashSet<PathBuf>) {
+    if shown.iter().any(|path| path == dir) && dir.is_dir() {
+        works.insert(canon(dir));
     }
 }
 
-fn file_git_dirs(directory_value: &Path, group: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
-    let text = std::fs::read_to_string(group).ok()?;
+fn file_git_dirs(top: &Path, marker: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    let text = std::fs::read_to_string(marker).ok()?;
     let own = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
 
-    let own = if own.is_relative() {
-        directory_value.join(own)
-    } else {
-        own
-    };
+    let own = if own.is_relative() { top.join(own) } else { own };
 
-    let common = std::fs::read_to_string(own.join("commondir")).ok().map(|path| {
-        let path_value = PathBuf::from(path.trim());
+    let common = std::fs::read_to_string(own.join("commondir")).ok().map(|content| {
+        let dir = PathBuf::from(content.trim());
 
-        if path_value.is_relative() {
-            own.join(path_value)
-        } else {
-            path_value
-        }
+        if dir.is_relative() { own.join(dir) } else { dir }
     });
 
-    Some((
-        directory_value.to_path_buf(),
-        common.unwrap_or_else(|| own.clone()),
-        own,
-    ))
+    Some((top.to_path_buf(), common.unwrap_or_else(|| own.clone()), own))
 }
 
 fn classify_work(
-    widget_state: &mut Watch,
-    width: PathBuf,
+    watch: &mut Watch,
+    work: PathBuf,
     rel: PathBuf,
     pending: &mut HashMap<PathBuf, Vec<PathBuf>>,
     out: &mut Vec<Topic>,
 ) {
     // a changed ignore file: every verdict of this work tree again
-    if rel.file_name().is_some_and(|count| count == ".gitignore") {
-        widget_state.ignores.remove(&width);
+    if rel.file_name().is_some_and(|name| name == ".gitignore") {
+        watch.ignores.remove(&work);
     }
 
-    match widget_state.verdict(&width, &rel) {
+    match watch.verdict(&work, &rel) {
         Some(true) => {}
-        Some(false) => add_topic(Topic::Work(width), out),
-        None => pending.entry(width).or_default().push(rel),
+        Some(false) => add_topic(Topic::Work(work), out),
+        None => pending.entry(work).or_default().push(rel),
     }
 }
 
-fn unknown_ancestors(widget_state: &Watch, width_value: &Path, rels: &[PathBuf]) -> Vec<PathBuf> {
+fn unknown_ancestors(watch: &Watch, work: &Path, rels: &[PathBuf]) -> Vec<PathBuf> {
     let mut ask = Vec::new();
 
-    for agent in rels.iter().flat_map(|rel| ancestors(rel)) {
-        if !ask.contains(&agent)
-            && !widget_state
+    for dir in rels.iter().flat_map(|rel| ancestors(rel)) {
+        if !ask.contains(&dir)
+            && !watch
                 .ignores
-                .get(width_value)
-                .is_some_and(|message| message.contains_key(&agent))
+                .get(work)
+                .is_some_and(|verdicts| verdicts.contains_key(&dir))
         {
-            ask.push(agent);
+            ask.push(dir);
         }
     }
 
     ask
 }
 
-fn add_topic(thread: Topic, out: &mut Vec<Topic>) {
-    if !out.contains(&thread) {
-        out.push(thread);
+fn add_topic(topic: Topic, out: &mut Vec<Topic>) {
+    if !out.contains(&topic) {
+        out.push(topic);
     }
 }

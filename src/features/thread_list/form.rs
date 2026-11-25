@@ -1,4 +1,4 @@
-use super::{Card, Form, FormOut, Path, TextArea, finish_open, open_branch, repo_name, theme};
+use super::{Card, Form, FormOut, Path, TextArea, build_form, push_repo, repo_name, theme};
 
 impl Form {
     pub(super) fn open(id: &str, cards: &[Card], roster: &[String]) -> Option<Form> {
@@ -8,41 +8,37 @@ impl Form {
             thread
                 .worktree
                 .as_deref()
-                .and_then(|path| crate::domain::threads::repo_root(Path::new(path)))
+                .and_then(|worktree| crate::domain::threads::repo_root(Path::new(worktree)))
         });
 
         let mut repos: Vec<Option<String>> = vec![None];
 
-        for result in cards
+        for repo in cards
             .iter()
-            .filter_map(|character| character.repo.as_ref())
-            .map(|path_value| path_value.display().to_string())
+            .filter_map(|card| card.repo.as_ref())
+            .map(|repo| repo.display().to_string())
             .chain(thread.repo.clone())
         {
-            open_branch(auto.as_ref(), &mut repos, result);
+            push_repo(auto.as_ref(), &mut repos, repo);
         }
 
-        repos[1..].sort_by_key(|result_value| result_value.as_deref().map(|path_2| repo_name(Path::new(path_2))));
+        repos[1..].sort_by_key(|repo| repo.as_deref().map(|path| repo_name(Path::new(path))));
         let repo_i = thread
             .repo
             .as_ref()
-            .and_then(|result_2| repos.iter().position(|x| x.as_ref() == Some(result_2)))
+            .and_then(|repo| repos.iter().position(|pick| pick.as_ref() == Some(repo)))
             .unwrap_or(0);
         let mut title = TextArea::new(true, "title");
 
         title.style = Some(theme::text());
         title.set_text(thread.title.lines().next().unwrap_or_default());
-        let mut agents: Vec<(String, bool)> = thread
-            .agents
-            .iter()
-            .map(|agent_value| (agent_value.clone(), true))
-            .collect();
+        let mut agents: Vec<(String, bool)> = thread.agents.iter().map(|agent| (agent.clone(), true)).collect();
 
-        for agent_2 in roster {
-            ensure_roster_agent(&mut agents, agent_2);
+        for agent in roster {
+            ensure_roster_agent(&mut agents, agent);
         }
 
-        Some(finish_open(&thread, auto, repos, repo_i, title, agents))
+        Some(build_form(&thread, auto, repos, repo_i, title, agents))
     }
     pub(super) fn n_rows(&self) -> usize {
         2 + self.projs.len() + self.links.len() + self.agents.len()
@@ -52,51 +48,50 @@ impl Form {
     }
 }
 
-fn ensure_roster_agent(agents: &mut Vec<(String, bool)>, agent_2: &String) {
-    if !agents.iter().any(|(count, _)| count == agent_2) {
-        agents.push((agent_2.clone(), false));
+fn ensure_roster_agent(agents: &mut Vec<(String, bool)>, agent: &String) {
+    if !agents.iter().any(|(name, _)| name == agent) {
+        agents.push((agent.clone(), false));
     }
 }
 
-fn save_form(state: &mut Form) -> FormOut {
-    let agents: Vec<String> = state
+fn save_form(form: &mut Form) -> FormOut {
+    let agents: Vec<String> = form
         .agents
         .iter()
         .filter(|agent| agent.1)
-        .map(|agent_value| agent_value.0.clone())
+        .map(|agent| agent.0.clone())
         .collect();
 
     if agents.is_empty() {
-        state.error = Some("1 agent at least".into());
+        form.error = Some("1 agent at least".into());
         return FormOut::Stay;
     }
 
-    if state.title.text().trim().is_empty() {
-        state.error = Some("title required".into());
-        state.row = 0;
+    if form.title.text().trim().is_empty() {
+        form.error = Some("title required".into());
+        form.row = 0;
         return FormOut::Stay;
     }
 
-    let error_value = crate::domain::threads::Edit {
-        title: state.title.text(),
-        repo: state.repos.get(state.repo_i).cloned().flatten(),
-        checkouts: state
+    let edit = crate::domain::threads::Edit {
+        title: form.title.text(),
+        repo: form.repos.get(form.repo_i).cloned().flatten(),
+        checkouts: form
             .links
             .iter()
-            .filter(|line| line.1)
-            .map(|line_value| line_value.0.clone())
+            .filter(|link| link.1)
+            .map(|link| link.0.clone())
             .collect(),
         agents,
-        projects: (!state.projs[0].1).then(|| {
-            state
-                .projs
+        projects: (!form.projs[0].1).then(|| {
+            form.projs
                 .iter()
                 .skip(1)
-                .filter(|path| path.1)
-                .map(|path_value| path_value.0.clone())
+                .filter(|project| project.1)
+                .map(|project| project.0.clone())
                 .collect()
         }),
     };
 
-    FormOut::Save(state.id.clone(), error_value)
+    FormOut::Save(form.id.clone(), edit)
 }

@@ -10,68 +10,68 @@ impl Merge {
     }
 }
 
-fn poll_merge(widget_state: &mut Merge, visible: bool) -> bool {
+fn poll_merge(merge: &mut Merge, visible: bool) -> bool {
     let mut dirty = false;
 
-    while let Ok(result) = widget_state.rx.try_recv() {
+    while let Ok(result) = merge.rx.try_recv() {
         dirty = true;
 
-        apply_result(widget_state, result);
+        apply_result(merge, result);
     }
 
-    if let Some(changes_2) = widget_state.tab().and_then(|changes_value| {
-        if changes_value.sub == Sub::Changes {
-            changes_value.changes.as_mut()
+    if let Some(view) = merge.tab().and_then(|tab| {
+        if tab.sub == Sub::Changes {
+            tab.changes.as_mut()
         } else {
             None
         }
-    }) && changes_2.poll()
+    }) && view.poll()
     {
         dirty = true;
     }
 
-    if !visible || widget_state.active.elapsed() > SLEEP || cfg!(test) {
+    if !visible || merge.active.elapsed() > SLEEP || cfg!(test) {
         return dirty;
     }
 
     // the thread's PR list
-    if widget_state.thread
-        && !widget_state.assoc_busy
-        && widget_state.sources.is_some()
-        && widget_state.assoc_at.is_none_or(|thread_3| thread_3.elapsed() > ASSOC)
+    if merge.thread
+        && !merge.assoc_busy
+        && merge.sources.is_some()
+        && merge.assoc_at.is_none_or(|read_at| read_at.elapsed() > ASSOC)
     {
-        widget_state.read_assoc();
+        merge.read_assoc();
     }
 
     // the PR in view
-    read_visible_request(widget_state, dirty)
+    read_visible_request(merge, dirty)
 }
 
-fn apply_associated_requests(widget_state: &mut Merge, result_2: Result<Vec<PrRef>, String>) {
-    widget_state.assoc_busy = false;
+fn apply_associated_requests(merge: &mut Merge, result: Result<Vec<PrRef>, String>) {
+    merge.assoc_busy = false;
 
-    match result_2 {
+    match result {
         Ok(list) => {
-            crate::screens::merge::pr_list::remember(&widget_state.thread_id, &list);
+            crate::screens::merge::pr_list::remember(&merge.thread_id, &list);
 
-            if list != widget_state.prs {
-                widget_state.version += 1;
+            if list != merge.prs {
+                merge.version += 1;
             }
 
-            let keep = widget_state.current().cloned();
+            let keep = merge.current().cloned();
 
-            widget_state.prs = list;
-            widget_state.cur = keep
-                .and_then(|key| widget_state.prs.iter().position(|path_value| *path_value == key))
+            merge.prs = list;
+            merge.cur = keep
+                .and_then(|kept| merge.prs.iter().position(|pr| *pr == kept))
                 .unwrap_or(0);
-            widget_state.assoc_error = None;
+            merge.assoc_error = None;
         }
-        Err(error_2) => widget_state.assoc_error = Some(error_2),
+        Err(error) => merge.assoc_error = Some(error),
     }
 }
 
-fn apply_operation_result(labels: &HashMap<String, Vec<gh::Label>>, pr: &PrRef, op: &Op, thread_2: &mut Tab) -> String {
-    let queue = thread_2.pr.as_ref().is_some_and(|path_2| path_2.queue);
+fn apply_operation_result(labels: &HashMap<String, Vec<gh::Label>>, pr: &PrRef, op: &Op, tab: &mut Tab) -> String {
+    let queue = tab.pr.as_ref().is_some_and(|pull_request| pull_request.queue);
 
     let note = match (&op, queue) {
         (Op::Merge(_, false), true) => "added to the merge queue".into(),
@@ -80,49 +80,49 @@ fn apply_operation_result(labels: &HashMap<String, Vec<gh::Label>>, pr: &PrRef, 
     };
 
     // the merge state at once on screen; the read confirms
-    if let Some(path_3) = thread_2.pr.as_mut() {
+    if let Some(pull_request) = tab.pr.as_mut() {
         match &op {
-            Op::Merge(message, true) => path_3.auto_merge = Some(message.clone()),
-            Op::Merge(_, false) if queue => path_3.queued = Some(gh::Queued::default()),
-            Op::Merge(_, false) => path_3.state = State::Merged,
-            Op::DisableAuto => path_3.auto_merge = None,
-            Op::Dequeue(_) => path_3.queued = None,
+            Op::Merge(method, true) => pull_request.auto_merge = Some(method.clone()),
+            Op::Merge(_, false) if queue => pull_request.queued = Some(gh::Queued::default()),
+            Op::Merge(_, false) => pull_request.state = State::Merged,
+            Op::DisableAuto => pull_request.auto_merge = None,
+            Op::Dequeue(_) => pull_request.queued = None,
             _ => {}
         }
     }
 
-    if let (Some(path_4), Op::AddLabel(line) | Op::RemoveLabel(line)) = (thread_2.pr.as_mut(), &op) {
+    if let (Some(pull_request), Op::AddLabel(name) | Op::RemoveLabel(name)) = (tab.pr.as_mut(), &op) {
         // at once on screen; the read confirms
         if matches!(op, Op::AddLabel(_)) {
             let color = labels
                 .get(&pr.repo)
-                .and_then(|ls| ls.iter().find(|x| &x.name == line))
+                .and_then(|repo_labels| repo_labels.iter().find(|x| &x.name == name))
                 .map(|x| x.color.clone())
                 .unwrap_or_default();
 
-            path_4.labels.push(gh::Label {
-                name: line.clone(),
+            pull_request.labels.push(gh::Label {
+                name: name.clone(),
                 color,
             });
         } else {
-            path_4.labels.retain(|x| &x.name != line);
+            pull_request.labels.retain(|x| &x.name != name);
         }
     }
 
     note
 }
 
-fn read_visible_request(widget_state: &mut Merge, dirty: bool) -> bool {
-    if let Some(pr) = widget_state.current().cloned() {
-        let thread_4 = widget_state.tabs.entry(pr.clone()).or_default();
+fn read_visible_request(merge: &mut Merge, dirty: bool) -> bool {
+    if let Some(pr) = merge.current().cloned() {
+        let tab = merge.tabs.entry(pr.clone()).or_default();
 
-        let every = if thread_4.reads.fast_until.is_some_and(|user| Instant::now() < user) {
+        let every = if tab.reads.fast_until.is_some_and(|until| Instant::now() < until) {
             POLL_FAST
-        } else if thread_4.pr.as_ref().is_some_and(|path_5| {
-            path_5
+        } else if tab.pr.as_ref().is_some_and(|pull_request| {
+            pull_request
                 .checks
                 .iter()
-                .any(|character_value| character_value.verdict == Verdict::Pending)
+                .any(|check| check.verdict == Verdict::Pending)
         }) {
             POLL_CHECKS
         } else {
@@ -130,73 +130,73 @@ fn read_visible_request(widget_state: &mut Merge, dirty: bool) -> bool {
         };
 
         // a merged / closed PR: rarely changes
-        let every = if thread_4
+        let every = if tab
             .pr
             .as_ref()
-            .is_some_and(|path_6| matches!(path_6.state, State::Merged | State::Closed))
+            .is_some_and(|pull_request| matches!(pull_request.state, State::Merged | State::Closed))
         {
             every * 6
         } else {
             every
         };
 
-        if !thread_4.reads.reading && thread_4.reads.read_at.is_none_or(|result_5| result_5.elapsed() > every) {
-            widget_state.read(pr);
+        if !tab.reads.reading && tab.reads.read_at.is_none_or(|read_at| read_at.elapsed() > every) {
+            merge.read(pr);
         }
     }
 
     dirty
 }
 
-fn apply_result(widget_state: &mut Merge, result: Res) {
+fn apply_result(merge: &mut Merge, result: Res) {
     match result {
-        Res::Pr(pr, result_value) => {
-            apply_pull_request(widget_state, pr, result_value);
+        Res::Pr(pr, read) => {
+            apply_pull_request(merge, pr, read);
         }
-        Res::Prs(result_2) => {
-            apply_associated_requests(widget_state, result_2);
+        Res::Prs(prs) => {
+            apply_associated_requests(merge, prs);
         }
-        Res::Op(pr, op, result_3) => {
-            let thread_2 = widget_state.tabs.entry(pr.clone()).or_default();
+        Res::Op(pr, op, done) => {
+            let tab = merge.tabs.entry(pr.clone()).or_default();
 
-            thread_2.input.busy = None;
-            thread_2.reads.fast_until = Some(Instant::now() + FAST_FOR);
+            tab.input.busy = None;
+            tab.reads.fast_until = Some(Instant::now() + FAST_FOR);
 
-            match result_3 {
+            match done {
                 Ok(()) => {
-                    widget_state.note = Some(apply_operation_result(&widget_state.labels, &pr, &op, thread_2));
-                    widget_state.read(pr);
+                    merge.note = Some(apply_operation_result(&merge.labels, &pr, &op, tab));
+                    merge.read(pr);
                 }
-                Err(error_3) => widget_state.note = Some(format!("gh: {error_3}")),
+                Err(error) => merge.note = Some(format!("gh: {error}")),
             }
         }
-        Res::Labels(repo, result_4) => match result_4 {
-            Ok(line_value) => {
-                widget_state.labels.insert(repo, line_value);
+        Res::Labels(repo, labels) => match labels {
+            Ok(labels) => {
+                merge.labels.insert(repo, labels);
             }
-            Err(error_4) => widget_state.note = Some(format!("labels: {error_4}")),
+            Err(error) => merge.note = Some(format!("labels: {error}")),
         },
     }
 }
 
-fn apply_pull_request(widget_state: &mut Merge, pr: PrRef, result_value: Box<Result<gh::PullRequest, String>>) {
-    let thread_value = widget_state.tabs.entry(pr).or_default();
+fn apply_pull_request(merge: &mut Merge, pr: PrRef, read: Box<Result<gh::PullRequest, String>>) {
+    let tab = merge.tabs.entry(pr).or_default();
 
-    thread_value.reads.reading = false;
+    tab.reads.reading = false;
 
-    match *result_value {
-        Ok(path) => {
-            if let Some(character) = thread_value.changes.as_mut() {
-                character.set_pr(&path);
+    match *read {
+        Ok(pull_request) => {
+            if let Some(view) = tab.changes.as_mut() {
+                view.set_pr(&pull_request);
             }
 
-            if thread_value.pr.as_ref() != Some(&path) {
-                widget_state.version += 1;
+            if tab.pr.as_ref() != Some(&pull_request) {
+                merge.version += 1;
             }
 
-            thread_value.pr = Some(path);
-            thread_value.error = None;
+            tab.pr = Some(pull_request);
+            tab.error = None;
         }
-        Err(error_value) => thread_value.error = Some(error_value),
+        Err(error) => tab.error = Some(error),
     }
 }

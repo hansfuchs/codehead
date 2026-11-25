@@ -8,16 +8,16 @@ impl ThreadList {
         draw_cards_thread_list(self, frame, list, tick);
     }
 
-    fn draw_cards_rect(
+    fn draw_card(
         frame: &mut Frame<'_>,
         list: Rect,
-        context: CardState<'_, '_, '_, '_>,
+        context: CardRow<'_, '_, '_, '_>,
         vis: &[usize],
-        height_value: impl Fn(usize) -> u16,
+        card_height: impl Fn(usize) -> u16,
         ys: &[u16],
         notes: &[crate::domain::notifications::Note],
     ) {
-        let CardState {
+        let CardRow {
             tick,
             focused,
             pos,
@@ -32,26 +32,26 @@ impl ThreadList {
 
         let rect = Rect {
             y: list.y + ys[pos] - offset,
-            height: height_value(pos),
+            height: card_height(pos),
             ..list
         };
-        let character = &cards[vis[pos]];
+        let card = &cards[vis[pos]];
 
         thread_card::draw_card(
             frame.buffer_mut(),
             rect,
-            character,
+            card,
             thread_card::Look {
                 cur: pos == cursor && focused,
-                here: here == Some(character.id.as_str()),
+                here: here == Some(card.id.as_str()),
                 age: true,
             },
             tick,
         );
-        crate::ui::notification_badge::card_badge(frame.buffer_mut(), rect, notes, &character.id);
+        crate::ui::notification_badge::card_badge(frame.buffer_mut(), rect, notes, &card.id);
 
         if mode == Mode::Manage {
-            draw_cards_rect_mark(frame, selected, rect, character);
+            draw_card_mark(frame, selected, rect, card);
         }
 
         rows.push((rect, pos));
@@ -63,13 +63,13 @@ impl ThreadList {
     }
 }
 
-fn draw_cards_rect_mark(
+fn draw_card_mark(
     frame: &mut Frame<'_>,
     selected: &std::collections::HashSet<String>,
     rect: Rect,
-    character: &thread_card::Card,
+    card: &thread_card::Card,
 ) {
-    let on = selected.contains(&character.id);
+    let on = selected.contains(&card.id);
 
     let mark = if on {
         Span::styled(" ◼ ", theme::accent_bold())
@@ -88,13 +88,13 @@ fn draw_cards_rect_mark(
     );
 }
 
-fn finish_draw_actions(
+fn draw_actions_list(
     frame: &mut Frame<'_>,
     cur: usize,
     acts: &[Act],
     area: Rect,
     title: String,
-    view_state: &mut ThreadList,
+    thread_list: &mut ThreadList,
 ) {
     let block = Block::new()
         .borders(Borders::ALL)
@@ -106,46 +106,46 @@ fn finish_draw_actions(
 
     frame.render_widget(block, area);
 
-    for (i, agent_value) in acts.iter().enumerate() {
-        let rr = Rect {
+    for (i, act) in acts.iter().enumerate() {
+        let row = Rect {
             y: inner.y + i as u16,
             height: 1,
             ..inner
         };
 
-        if rr.y >= inner.bottom() {
+        if row.y >= inner.bottom() {
             break;
         }
 
         let hl = i == cur.min(acts.len() - 1);
-        let st = if hl { theme::pill() } else { Style::default() };
+        let style = if hl { theme::pill() } else { Style::default() };
         let line = Line::from(vec![
             Span::styled(
-                format!(" {:<6}", agent_value.key()),
+                format!(" {:<6}", act.key()),
                 if hl {
-                    st.add_modifier(Modifier::BOLD)
+                    style.add_modifier(Modifier::BOLD)
                 } else {
                     theme::accent()
                 },
             ),
-            Span::styled(agent_value.label().to_string(), if hl { st } else { theme::text() }),
+            Span::styled(act.label().to_string(), if hl { style } else { theme::text() }),
         ]);
 
-        frame.render_widget(Paragraph::new(line).style(st), rr);
-        view_state.hit_regions.act_rows.push((rr, *agent_value));
+        frame.render_widget(Paragraph::new(line).style(style), row);
+        thread_list.hit_regions.act_rows.push((row, *act));
     }
 }
 
-fn draw_cards_msg(frame: &mut Frame<'_>, list: Rect, view_state: &mut ThreadList) {
-    let msg = if view_state.card_reads.loading.is_some() && view_state.cards.is_empty() {
+fn draw_cards_msg(frame: &mut Frame<'_>, list: Rect, thread_list: &mut ThreadList) {
+    let msg = if thread_list.card_reads.loading.is_some() && thread_list.cards.is_empty() {
         "reading threads…".to_string()
-    } else if !view_state.filter.text().trim().is_empty() {
+    } else if !thread_list.filter.text().trim().is_empty() {
         "0 matches".into()
-    } else if view_state.view == View::Archived {
+    } else if thread_list.view == View::Archived {
         "0 archived threads".into()
-    } else if view_state.stat_tab() != StatusTab::All {
-        format!("0 {} threads", view_state.stat_tab().label())
-    } else if view_state.repo_tab() != RepoTab::All {
+    } else if thread_list.stat_tab() != StatusTab::All {
+        format!("0 {} threads", thread_list.stat_tab().label())
+    } else if thread_list.repo_tab() != RepoTab::All {
         "0 threads in this repo".into()
     } else {
         "0 threads".into()
@@ -157,17 +157,17 @@ fn draw_cards_msg(frame: &mut Frame<'_>, list: Rect, view_state: &mut ThreadList
     );
 }
 
-struct CardState<'reference_0, 'reference_1, 'reference_2, 'reference_3> {
+struct CardRow<'cards, 'here, 'selected, 'rows> {
     tick: usize,
     focused: bool,
     pos: usize,
-    cards: &'reference_0 [crate::ui::thread_card::Card],
+    cards: &'cards [crate::ui::thread_card::Card],
     offset: u16,
     cursor: usize,
-    here: Option<&'reference_1 str>,
+    here: Option<&'here str>,
     mode: Mode,
-    selected: &'reference_2 std::collections::HashSet<String>,
-    rows: &'reference_3 mut Vec<(Rect, usize)>,
+    selected: &'selected std::collections::HashSet<String>,
+    rows: &'rows mut Vec<(Rect, usize)>,
 }
 
 fn draw_cards_thread_list(state: &mut ThreadList, frame: &mut Frame, list: Rect, tick: usize) {
@@ -180,7 +180,7 @@ fn draw_cards_thread_list(state: &mut ThreadList, frame: &mut Frame, list: Rect,
 
     state.cursor = state.cursor.min(vis.len() - 1);
     let cards = &state.cards;
-    let height_value = |pos: usize| thread_card::card_h(&cards[vis[pos]]);
+    let card_height = |pos: usize| thread_card::card_h(&cards[vis[pos]]);
 
     // virtual y of each card
     let mut ys = Vec::with_capacity(vis.len());
@@ -188,12 +188,12 @@ fn draw_cards_thread_list(state: &mut ThreadList, frame: &mut Frame, list: Rect,
 
     for pos in 0..vis.len() {
         ys.push(y);
-        y += height_value(pos);
+        y += card_height(pos);
     }
 
     let total = y;
     let top = ys[state.cursor];
-    let bottom = top + height_value(state.cursor);
+    let bottom = top + card_height(state.cursor);
 
     if top < state.offset {
         state.offset = top;
@@ -204,13 +204,13 @@ fn draw_cards_thread_list(state: &mut ThreadList, frame: &mut Frame, list: Rect,
     state.offset = state.offset.min(total.saturating_sub(list.height));
     let notes = crate::domain::notifications::unseen(state.here.as_deref());
     let focused = state.focus == Focus::List && !state.filtering;
-    let fits = |pos: usize| ys[pos] >= state.offset && ys[pos] + height_value(pos) <= state.offset + list.height;
+    let fits = |pos: usize| ys[pos] >= state.offset && ys[pos] + card_height(pos) <= state.offset + list.height;
 
-    for pos in (0..vis.len()).filter(|&path| fits(path)) {
-        ThreadList::draw_cards_rect(
+    for pos in (0..vis.len()).filter(|&pos| fits(pos)) {
+        ThreadList::draw_card(
             frame,
             list,
-            CardState {
+            CardRow {
                 tick,
                 focused,
                 pos,
@@ -223,18 +223,16 @@ fn draw_cards_thread_list(state: &mut ThreadList, frame: &mut Frame, list: Rect,
                 rows: &mut state.hit_regions.rows,
             },
             &vis,
-            height_value,
+            card_height,
             &ys,
             &notes,
         );
     }
 
     state.card_reads.fx.apply(frame, list, state.card_reads.version);
-    let above = (0..vis.len())
-        .filter(|&path_value| ys[path_value] < state.offset)
-        .count();
+    let above = (0..vis.len()).filter(|&pos| ys[pos] < state.offset).count();
     let below = (0..vis.len())
-        .filter(|&path_2| ys[path_2] + height_value(path_2) > state.offset + list.height)
+        .filter(|&pos| ys[pos] + card_height(pos) > state.offset + list.height)
         .count();
 
     draw_overflow(frame, list, above, below);
@@ -249,37 +247,37 @@ fn draw_actions_thread_list(state: &mut ThreadList, frame: &mut Frame, list: Rec
         return;
     }
 
-    let width_value = acts
+    let width = acts
         .iter()
-        .map(|agent| agent.label().chars().count() as u16 + 10)
+        .map(|act| act.label().chars().count() as u16 + 10)
         .max()
         .unwrap_or(20)
         .min(list.width);
-    let height_value = acts.len() as u16 + 2;
+    let height = acts.len() as u16 + 2;
     let anchor = state
         .hit_regions
         .rows
         .iter()
-        .find(|(_, path)| *path == state.cursor)
-        .map_or(list.y, |(result, _)| result.y + 2);
-    let y = anchor.min(list.bottom().saturating_sub(height_value)).max(list.y);
+        .find(|(_, pos)| *pos == state.cursor)
+        .map_or(list.y, |(rect, _)| rect.y + 2);
+    let y = anchor.min(list.bottom().saturating_sub(height)).max(list.y);
     let area = Rect {
-        x: list.right().saturating_sub(width_value + 1),
+        x: list.right().saturating_sub(width + 1),
         y,
-        width: width_value,
-        height: height_value.min(list.height),
+        width,
+        height: height.min(list.height),
     };
 
     frame.render_widget(Clear, area);
-    let count_value = state.targets().len();
+    let count = state.targets().len();
 
-    let title = if count_value > 1 {
-        format!(" {count_value} threads ")
+    let title = if count > 1 {
+        format!(" {count} threads ")
     } else {
         " actions ".into()
     };
 
-    finish_draw_actions(frame, cur, &acts, area, title, state);
+    draw_actions_list(frame, cur, &acts, area, title, state);
 }
 
 fn draw_overflow(frame: &mut Frame, list: Rect, above: usize, below: usize) {

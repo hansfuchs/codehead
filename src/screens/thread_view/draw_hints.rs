@@ -14,7 +14,7 @@ impl View {
         self.mode_spans(&mut to, shell);
 
         self.layout.hint_rect = hint;
-        let lead: u16 = to.iter().map(|text| text.content.chars().count() as u16).sum();
+        let lead: u16 = to.iter().map(|span| span.content.chars().count() as u16).sum();
         let mode = prompt_hint(self);
         let left_w = to_width(hint, mode);
 
@@ -23,7 +23,7 @@ impl View {
         // the dir input: right of `in`, half the row at most
         let mut cwd_rect = Rect::default();
 
-        if let Some(ta) = self.shell_state.cwd_edit.as_mut().filter(|_| shell) {
+        if let Some(input) = self.shell_state.cwd_edit.as_mut().filter(|_| shell) {
             cwd_rect = Rect {
                 x: hint.x + lead,
                 width: (hint.width / 2)
@@ -32,7 +32,7 @@ impl View {
                     .min(hint.width.saturating_sub(lead)),
                 ..hint
             };
-            ta.render(frame, cwd_rect, true);
+            input.render(frame, cwd_rect, true);
         }
 
         let keys = hint_keys(mode);
@@ -63,18 +63,18 @@ impl View {
     }
     pub(super) fn mode_spans(&mut self, to: &mut Vec<Span<'static>>, shell: bool) {
         if shell {
-            mode_spans_body(self, to);
+            shell_mode_spans(self, to);
         } else {
-            mode_spans_branch(self, to);
+            chat_mode_spans(self, to);
         }
     }
 }
 
-fn mode_spans_body(view: &mut View, to: &mut Vec<Span<'static>>) {
-    let sh = Style::default().fg(theme::shell());
+fn shell_mode_spans(view: &mut View, to: &mut Vec<Span<'static>>) {
+    let shell_style = Style::default().fg(theme::shell());
 
     *to = vec![
-        Span::styled("  ! shell mode", sh.add_modifier(Modifier::BOLD)),
+        Span::styled("  ! shell mode", shell_style.add_modifier(Modifier::BOLD)),
         Span::styled(" · in ", theme::muted()),
     ];
 
@@ -83,7 +83,7 @@ fn mode_spans_body(view: &mut View, to: &mut Vec<Span<'static>>) {
     }
 }
 
-fn mode_spans_branch(view: &mut View, to: &mut Vec<Span<'static>>) {
+fn chat_mode_spans(view: &mut View, to: &mut Vec<Span<'static>>) {
     if view.shell_state.shell_running > 0 {
         to.push(Span::styled(
             format!("  · ! {} running", view.shell_state.shell_running),
@@ -95,7 +95,7 @@ fn mode_spans_branch(view: &mut View, to: &mut Vec<Span<'static>>) {
     if view
         .checkout_state
         .spots_at
-        .is_none_or(|thread| thread.elapsed() > Duration::from_secs(3))
+        .is_none_or(|at| at.elapsed() > Duration::from_secs(3))
     {
         view.checkout_state.spots = crate::screens::thread_view::workspot::of_thread(&view.id);
         view.checkout_state.spots_at = Some(Instant::now());

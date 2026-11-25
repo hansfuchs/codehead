@@ -96,7 +96,7 @@ pub(crate) fn place(anchor: Rect, width: u16, rows: usize, bounds: Rect, above: 
 /// [`place`] with max. MAX rows in view.
 pub(crate) fn place_max(
     anchor: Rect,
-    width_value: u16,
+    max_width: u16,
     rows: usize,
     max: usize,
     bounds: Rect,
@@ -108,27 +108,22 @@ pub(crate) fn place_max(
     let (first, second) = if above { (up, down) } else { (down, up) };
     let use_first = first >= want || first >= second;
     let room = if use_first { first } else { second };
-    let height_value = want.min(room);
+    let height = want.min(room);
 
-    if height_value < 3 {
+    if height < 3 {
         return None;
     }
 
     let y = if use_first == above {
-        anchor.y - height_value
+        anchor.y - height
     } else {
         anchor.bottom()
     };
 
-    let width_2 = width_value.min(bounds.width);
-    let x = anchor.x.min(bounds.right().saturating_sub(width_2)).max(bounds.x);
+    let width = max_width.min(bounds.width);
+    let x = anchor.x.min(bounds.right().saturating_sub(width)).max(bounds.x);
 
-    Some(Rect {
-        x,
-        y,
-        width: width_2,
-        height: height_value,
-    })
+    Some(Rect { x, y, width, height })
 }
 
 /// Area of a submenu of ROWS rows and width W for the row at `ROW_Y` of PARENT: right of the parent,
@@ -150,48 +145,40 @@ pub(crate) fn place_beside(
 pub(crate) fn place_beside_max(
     parent: Rect,
     row_y: u16,
-    width_value: u16,
+    max_width: u16,
     rows: usize,
     max: usize,
     bounds: Rect,
     stack: Rect,
 ) -> Option<Rect> {
-    let height_value = (rows.clamp(1, max) as u16 + 2).min(bounds.height);
+    let height = (rows.clamp(1, max) as u16 + 2).min(bounds.height);
 
-    if height_value < 3 {
+    if height < 3 {
         return None;
     }
 
-    let width_2 = width_value.min(bounds.width);
+    let width = max_width.min(bounds.width);
 
-    let beside = beside_column(parent, stack, bounds, width_2);
+    let beside = beside_column(parent, stack, bounds, width);
 
     if let Some(x) = beside {
-        let y = row_y
-            .saturating_sub(1)
-            .min(bounds.bottom() - height_value)
-            .max(bounds.y);
+        let y = row_y.saturating_sub(1).min(bounds.bottom() - height).max(bounds.y);
 
-        return Some(Rect {
-            x,
-            y,
-            width: width_2,
-            height: height_value,
-        });
+        return Some(Rect { x, y, width, height });
     }
 
-    let x = parent.x.min(bounds.right() - width_2).max(bounds.x);
+    let x = parent.x.min(bounds.right() - width).max(bounds.x);
     let up = stack.y.saturating_sub(bounds.y);
     let down = bounds.bottom().saturating_sub(stack.bottom());
 
-    if up >= height_value || (up >= 3 && up >= down) {
-        let height_2 = height_value.min(up);
+    if up >= height || (up >= 3 && up >= down) {
+        let up_height = height.min(up);
 
         return Some(Rect {
             x,
-            y: stack.y - height_2,
-            width: width_2,
-            height: height_2,
+            y: stack.y - up_height,
+            width,
+            height: up_height,
         });
     }
 
@@ -199,31 +186,28 @@ pub(crate) fn place_beside_max(
         return Some(Rect {
             x,
             y: stack.bottom(),
-            width: width_2,
-            height: height_value.min(down),
+            width,
+            height: height.min(down),
         });
     }
 
-    let y = row_y
-        .saturating_sub(1)
-        .min(bounds.bottom() - height_value)
-        .max(bounds.y);
+    let y = row_y.saturating_sub(1).min(bounds.bottom() - height).max(bounds.y);
 
     Some(Rect {
-        x: bounds.right() - width_2,
+        x: bounds.right() - width,
         y,
-        width: width_2,
-        height: height_value,
+        width,
+        height,
     })
 }
 
 /// Frame of a dropdown in R: cleared, plain border, LABEL on top, NOTE bottom right. UP / DOWN:
 /// rows wait above / below → ▲ / ▼ on the right border. ACTIVE: the dropdown with the keys (accent
 /// border; a parent of an open submenu: gray). Returns the area of the rows.
-pub(crate) fn frame(frame_value: &mut Frame, area: Rect, label: &str, note: &str, state: FrameState) -> Rect {
+pub(crate) fn frame(frame: &mut Frame, area: Rect, label: &str, note: &str, state: FrameState) -> Rect {
     let FrameState { up, down, active } = state;
 
-    frame_value.render_widget(Clear, area);
+    frame.render_widget(Clear, area);
     let border = if active { theme::accent() } else { theme::line() };
     let mut block = Block::new()
         .borders(Borders::ALL)
@@ -241,19 +225,19 @@ pub(crate) fn frame(frame_value: &mut Frame, area: Rect, label: &str, note: &str
 
     let inner = block.inner(area);
 
-    frame_value.render_widget(block, area);
+    frame.render_widget(block, area);
 
     if inner.height > 0 && area.width > 0 {
-        frame_buf(frame_value, area, up, down, inner);
+        frame_buf(frame, area, up, down, inner);
     }
 
     inner
 }
 
-fn frame_buf(frame_value: &mut Frame<'_>, area: Rect, up: bool, down: bool, inner: Rect) {
+fn frame_buf(frame: &mut Frame<'_>, area: Rect, up: bool, down: bool, inner: Rect) {
     let x = area.right() - 1;
     let st = theme::accent_bold().bg(theme::pal().on_accent);
-    let buf = frame_value.buffer_mut();
+    let buf = frame.buffer_mut();
 
     if up && down && inner.height == 1 {
         buf[(x, inner.y)].set_symbol("↕").set_style(st);
@@ -295,12 +279,7 @@ pub(crate) fn list(frame: &mut Frame, area: Rect, content: List<'_>) -> (usize, 
 }
 
 /// [`list`]; ACTIVE: the dropdown with the keys (a parent of an open submenu: false, gray).
-pub(crate) fn list_in(
-    frame_value: &mut Frame,
-    area: Rect,
-    content: List<'_>,
-    active: bool,
-) -> (usize, Vec<(Rect, usize)>) {
+pub(crate) fn list_in(frame: &mut Frame, area: Rect, content: List<'_>, active: bool) -> (usize, Vec<(Rect, usize)>) {
     let List {
         label,
         note,
@@ -312,8 +291,8 @@ pub(crate) fn list_in(
     let count = rows.len();
     let shown = (area.height as usize).saturating_sub(2);
     let off = fit(offset, cur, count, shown);
-    let inner = frame(
-        frame_value,
+    let inner = self::frame(
+        frame,
         area,
         label,
         note,
@@ -325,7 +304,7 @@ pub(crate) fn list_in(
     );
 
     if count == 0 {
-        frame_value.render_widget(
+        frame.render_widget(
             Paragraph::new(Line::styled(format!(" {empty}"), theme::muted())),
             Rect {
                 height: inner.height.min(1),
@@ -336,11 +315,11 @@ pub(crate) fn list_in(
 
     let out = Vec::new();
 
-    draw_list_rows(frame_value, rows, cur, shown, off, inner, out)
+    draw_list_rows(frame, rows, cur, shown, off, inner, out)
 }
 
 fn draw_list_rows(
-    frame_value: &mut Frame<'_>,
+    frame: &mut Frame<'_>,
     rows: &[Row],
     cur: usize,
     shown: usize,
@@ -349,14 +328,14 @@ fn draw_list_rows(
     mut out: Vec<(Rect, usize)>,
 ) -> (usize, Vec<(Rect, usize)>) {
     for (j, it) in rows.iter().enumerate().skip(off).take(shown) {
-        draw_list_row(frame_value, cur, off, inner, &mut out, j, it);
+        draw_list_row(frame, cur, off, inner, &mut out, j, it);
     }
 
     (off, out)
 }
 
 fn draw_list_row(
-    frame_value: &mut Frame<'_>,
+    frame: &mut Frame<'_>,
     cur: usize,
     off: usize,
     inner: Rect,
@@ -387,10 +366,8 @@ fn draw_list_row(
         let (head, path) = it
             .detail
             .split_once(' ')
-            .filter(|(height_value, _)| *height_value == "worktree")
-            .map_or(("", it.detail.as_str()), |(height_2, path_value)| {
-                (height_2, path_value)
-            });
+            .filter(|(word, _)| *word == "worktree")
+            .map_or(("", it.detail.as_str()), |(word, path)| (word, path));
 
         let keep = half.saturating_sub(head.width() + 2);
         let tail: Vec<char> = path.chars().rev().take(keep).collect();
@@ -405,11 +382,11 @@ fn draw_list_row(
         it.detail.clone()
     };
 
-    draw_list_text(frame_value, out, j, it, &(detail), RowStyles { row, hl, st, dim, mark });
+    draw_list_text(frame, out, j, it, &(detail), RowStyles { row, hl, st, dim, mark });
 }
 
 fn draw_list_text(
-    frame_value: &mut Frame<'_>,
+    frame: &mut Frame<'_>,
     out: &mut Vec<(Rect, usize)>,
     j: usize,
     it: &Row,
@@ -443,7 +420,7 @@ fn draw_list_text(
     ]);
     let line = Line::from(spans);
 
-    frame_value.render_widget(Paragraph::new(line).style(st), row);
+    frame.render_widget(Paragraph::new(line).style(st), row);
     out.push((row, j));
 }
 
@@ -458,12 +435,12 @@ pub(crate) struct FrameState {
     pub active: bool,
 }
 
-fn beside_column(parent: Rect, stack: Rect, bounds: Rect, width_2: u16) -> Option<u16> {
-    if parent.right() + width_2 <= bounds.right() {
+fn beside_column(parent: Rect, stack: Rect, bounds: Rect, width: u16) -> Option<u16> {
+    if parent.right() + width <= bounds.right() {
         Some(parent.right())
-    } else if stack.x >= bounds.x + width_2 {
+    } else if stack.x >= bounds.x + width {
         // left of every open dropdown (left of the parent only: over the parent's parent)
-        Some(stack.x - width_2)
+        Some(stack.x - width)
     } else {
         None
     }

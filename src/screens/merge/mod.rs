@@ -121,17 +121,17 @@ enum Menu {
 }
 
 /// Enter on stop S of tab T: true on the 2nd enter within ARM (a 1st arms it).
-fn twice(thread: &mut Tab, text: Stop) -> bool {
-    if thread
+fn twice(tab: &mut Tab, stop: Stop) -> bool {
+    if tab
         .input
         .armed
-        .is_some_and(|(agent, at)| agent == text && at.elapsed() < ARM)
+        .is_some_and(|(armed, at)| armed == stop && at.elapsed() < ARM)
     {
-        thread.input.armed = None;
+        tab.input.armed = None;
         return true;
     }
 
-    thread.input.armed = Some((text, Instant::now()));
+    tab.input.armed = Some((stop, Instant::now()));
     false
 }
 
@@ -165,10 +165,10 @@ fn cache_read(pr: &PrRef) -> Option<Pr> {
     serde_json::from_slice(&std::fs::read(cache_path(pr)).ok()?).ok()
 }
 
-fn cache_write(path_value: &Pr) {
-    let path = cache_path(&path_value.pr);
+fn cache_write(pr: &Pr) {
+    let path = cache_path(&pr.pr);
 
-    if let (Some(dir), Ok(bytes)) = (path.parent(), serde_json::to_vec(path_value)) {
+    if let (Some(dir), Ok(bytes)) = (path.parent(), serde_json::to_vec(pr)) {
         let _ = std::fs::create_dir_all(dir);
         let _ = crate::engine::write_atomic(&path, &bytes);
     }
@@ -230,28 +230,28 @@ struct Row {
 }
 
 impl Row {
-    fn stop(line: Line<'static>, text: Stop) -> Row {
-        let width_value = line.width() as u16;
+    fn stop(line: Line<'static>, stop: Stop) -> Row {
+        let width = line.width() as u16;
 
         Row {
             line,
-            stops: vec![(0, width_value, text)],
+            stops: vec![(0, width, stop)],
             input: 0,
         }
     }
 }
 
-fn hex(character: &str) -> Color {
-    let value = u32::from_str_radix(character.trim_start_matches('#'), 16).unwrap_or(0x0080_8080);
+fn hex(code: &str) -> Color {
+    let rgb = u32::from_str_radix(code.trim_start_matches('#'), 16).unwrap_or(0x0080_8080);
 
-    Color::Rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
+    Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
 /// Text on a label of color BG: dark on light, light on dark.
 fn on(bg: Color) -> Color {
-    let (result, group, bytes) = theme::rgb(bg);
+    let (red, green, blue) = theme::rgb(bg);
 
-    if (u32::from(result) * 299 + u32::from(group) * 587 + u32::from(bytes) * 114) / 1000 > 140 {
+    if (u32::from(red) * 299 + u32::from(green) * 587 + u32::from(blue) * 114) / 1000 > 140 {
         Color::Rgb(20, 20, 24)
     } else {
         Color::Rgb(240, 240, 244)
@@ -287,55 +287,55 @@ enum MergeBtn {
 }
 
 impl MergeBtn {
-    fn of(path: &Pr) -> MergeBtn {
-        if path.queued.is_some() {
+    fn of(pr: &Pr) -> MergeBtn {
+        if pr.queued.is_some() {
             return MergeBtn::Dequeue;
         }
 
-        if path.auto_merge.is_some() {
+        if pr.auto_merge.is_some() {
             return MergeBtn::CancelAuto;
         }
 
-        match path.state {
+        match pr.state {
             State::Open => {}
             State::Draft => return MergeBtn::Off("a draft: mark it ready for review first"),
             State::Merged => return MergeBtn::Off("merged: 0 merge"),
             State::Closed => return MergeBtn::Off("closed: 0 merge"),
         }
 
-        if path.ready() == Ready::Mergeable {
+        if pr.ready() == Ready::Mergeable {
             MergeBtn::Now
-        } else if !path.auto_allowed {
+        } else if !pr.auto_allowed {
             MergeBtn::Off("auto-merge is off in the repo settings: merge once ready")
         } else {
             MergeBtn::WhenReady
         }
     }
 
-    fn op(&self, path: &Pr) -> Option<Op> {
+    fn op(&self, pr: &Pr) -> Option<Op> {
         match self {
-            MergeBtn::Now => Some(Op::Merge(path.method.clone(), false)),
-            MergeBtn::WhenReady => Some(Op::Merge(path.method.clone(), true)),
+            MergeBtn::Now => Some(Op::Merge(pr.method.clone(), false)),
+            MergeBtn::WhenReady => Some(Op::Merge(pr.method.clone(), true)),
             MergeBtn::CancelAuto => Some(Op::DisableAuto),
-            MergeBtn::Dequeue => Some(Op::Dequeue(path.id.clone())),
+            MergeBtn::Dequeue => Some(Op::Dequeue(pr.id.clone())),
             MergeBtn::Off(_) => None,
         }
     }
 
     /// What it does (a toast), or why not.
-    fn verb(&self, path: &Pr) -> String {
+    fn verb(&self, pr: &Pr) -> String {
         // `MERGE`: 0 method (0 "merge (merge)")
-        let message = if path.method == "MERGE" {
+        let method = if pr.method == "MERGE" {
             String::new()
         } else {
-            format!(" ({})", path.method.to_lowercase())
+            format!(" ({})", pr.method.to_lowercase())
         };
 
         match self {
-            MergeBtn::Now if path.queue => "add to the merge queue".into(),
-            MergeBtn::Now => format!("merge{message}"),
-            MergeBtn::WhenReady if path.queue => "auto-merge: join the merge queue when ready".into(),
-            MergeBtn::WhenReady => format!("merge when ready{message}"),
+            MergeBtn::Now if pr.queue => "add to the merge queue".into(),
+            MergeBtn::Now => format!("merge{method}"),
+            MergeBtn::WhenReady if pr.queue => "auto-merge: join the merge queue when ready".into(),
+            MergeBtn::WhenReady => format!("merge when ready{method}"),
             MergeBtn::CancelAuto => "auto-merge off".into(),
             MergeBtn::Dequeue => "out of the merge queue".into(),
             MergeBtn::Off(why) => why.to_string(),
@@ -343,23 +343,23 @@ impl MergeBtn {
     }
 
     /// The button's text, its color.
-    fn label(&self, path: &Pr) -> (String, Color) {
+    fn label(&self, pr: &Pr) -> (String, Color) {
         let pal = theme::pal();
 
-        let message = if path.method == "MERGE" {
+        let method = if pr.method == "MERGE" {
             String::new()
         } else {
-            format!("· {} ", path.method.to_lowercase())
+            format!("· {} ", pr.method.to_lowercase())
         };
 
         match self {
-            MergeBtn::Now if path.queue => (" add to merge queue ".into(), pal.success()),
-            MergeBtn::Now => (format!(" merge {message}"), pal.success()),
-            MergeBtn::WhenReady if path.queue => (" queue when ready ".into(), pal.success()),
-            MergeBtn::WhenReady => (format!(" merge when ready {message}"), pal.success()),
+            MergeBtn::Now if pr.queue => (" add to merge queue ".into(), pal.success()),
+            MergeBtn::Now => (format!(" merge {method}"), pal.success()),
+            MergeBtn::WhenReady if pr.queue => (" queue when ready ".into(), pal.success()),
+            MergeBtn::WhenReady => (format!(" merge when ready {method}"), pal.success()),
             MergeBtn::CancelAuto => (" cancel auto-merge ".into(), pal.attention()),
             MergeBtn::Dequeue => (" leave merge queue ".into(), pal.attention()),
-            MergeBtn::Off(_) if path.state == State::Draft => (" merge when ready ".into(), pal.overlay0),
+            MergeBtn::Off(_) if pr.state == State::Draft => (" merge when ready ".into(), pal.overlay0),
             MergeBtn::Off(_) => (" merge ".into(), pal.overlay0),
         }
     }
@@ -376,48 +376,45 @@ fn busy_label(op: &Op) -> Option<&'static str> {
     }
 }
 
-fn secs(text: u64) -> String {
-    match text {
+fn secs(total: u64) -> String {
+    match total {
         0 => String::new(),
-        text_value if text_value < 60 => format!("{text_value}s"),
-        text_2 if text_2 < 3600 => format!("{}m {}s", text_2 / 60, text_2 % 60),
-        text_3 => format!("{}h {}m", text_3 / 3600, (text_3 % 3600) / 60),
+        _ if total < 60 => format!("{total}s"),
+        _ if total < 3600 => format!("{}m {}s", total / 60, total % 60),
+        _ => format!("{}h {}m", total / 3600, (total % 3600) / 60),
     }
-    // ---------- keys ----------
-
-    // ---------- draw ----------
 }
 
-fn shift(message: Vec<usize>, by: usize) -> Vec<usize> {
-    message.into_iter().map(|x| x + by).collect()
+fn shift(marks: Vec<usize>, by: usize) -> Vec<usize> {
+    marks.into_iter().map(|x| x + by).collect()
 }
 
 /// `CI / lint` of check C.
-fn check_name(character: &gh::Check) -> String {
-    if character.group.is_empty() || character.group == "GitHub Actions" {
-        character.name.clone()
+fn check_name(check: &gh::Check) -> String {
+    if check.group.is_empty() || check.group == "GitHub Actions" {
+        check.name.clone()
     } else {
-        format!("{} / {}", character.group, character.name)
+        format!("{} / {}", check.group, check.name)
     }
 }
 
 /// The PRs of sources S: each checkout's branch (as head), then the log's links; 0 dupes.
-fn associate(text: &Sources) -> Result<Vec<PrRef>, String> {
+fn associate(sources: &Sources) -> Result<Vec<PrRef>, String> {
     let mut out: Vec<PrRef> = Vec::new();
     let mut err = None;
 
-    for (dir, stored) in &text.checkouts {
+    for (dir, stored) in &sources.checkouts {
         associate_repo(&mut out, &mut err, dir, stored.as_deref());
     }
 
-    for line in &text.links {
-        if !out.contains(line) {
-            out.push(line.clone());
+    for link in &sources.links {
+        if !out.contains(link) {
+            out.push(link.clone());
         }
     }
 
     match err {
-        Some(error_value) if out.is_empty() => Err(error_value),
+        Some(error) if out.is_empty() => Err(error),
         _ => Ok(out),
     }
 }
@@ -436,12 +433,12 @@ fn associate_repo(out: &mut Vec<PrRef>, err: &mut Option<String>, dir: &PathBuf,
             .stderr(std::process::Stdio::null())
             .output()
             .ok()
-            .filter(|output_value| output_value.status.success())
-            .map(|output_2| String::from_utf8_lossy(&output_2.stdout).trim().to_string())
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
     };
 
     let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"])
-        .filter(|bytes| bytes != "HEAD")
+        .filter(|head| head != "HEAD")
         .or_else(|| stored.map(str::to_string));
 
     let Some(branch) = branch else {
@@ -449,28 +446,27 @@ fn associate_repo(out: &mut Vec<PrRef>, err: &mut Option<String>, dir: &PathBuf,
     };
 
     let default = git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        .map(|directory| directory.trim_start_matches("origin/").to_string());
+        .map(|origin_head| origin_head.trim_start_matches("origin/").to_string());
 
+    // the default branch: its PRs are other people's
     if default.as_deref() == Some(branch.as_str()) || matches!(branch.as_str(), "main" | "master") {
         return;
     }
 
-    // the default branch: its PRs are other people's
-
     match gh::for_branch(&repo, &branch) {
-        Ok(ns) => {
-            associate_repo_result(out, &(repo), ns);
+        Ok(numbers) => {
+            push_new_prs(out, &repo, numbers);
         }
         Err(error) => *err = Some(error),
     }
 }
 
-fn associate_repo_result(out: &mut Vec<PrRef>, repo: &str, ns: Vec<u64>) {
-    for count in ns {
-        let result = PrRef::new(repo, count);
+fn push_new_prs(out: &mut Vec<PrRef>, repo: &str, numbers: Vec<u64>) {
+    for number in numbers {
+        let pr = PrRef::new(repo, number);
 
-        if !out.contains(&result) {
-            out.push(result);
+        if !out.contains(&pr) {
+            out.push(pr);
         }
     }
 }

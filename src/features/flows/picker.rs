@@ -6,60 +6,60 @@ impl FlowsTab {
     }
 }
 
-fn pick_rows_score(ql: &str, text: &flows::Step) -> Option<(i64, String)> {
-    if ql.is_empty() {
-        return Some((0, text.name.clone()));
+fn step_score(query_lower: &str, step: &flows::Step) -> Option<(i64, String)> {
+    if query_lower.is_empty() {
+        return Some((0, step.name.clone()));
     }
 
-    let score = if text.name == ql {
-        pick_rows_body_state()
-    } else if text.name.starts_with(ql) {
+    let score = if step.name == query_lower {
+        exact_score()
+    } else if step.name.starts_with(query_lower) {
         500
-    } else if text.name.contains(ql) {
+    } else if step.name.contains(query_lower) {
         300
-    } else if text.description.to_lowercase().contains(ql) {
+    } else if step.description.to_lowercase().contains(query_lower) {
         100
     } else {
         return None;
     };
 
-    Some((score, text.name.clone()))
+    Some((score, step.name.clone()))
 }
 
-fn pick_rows_body_state() -> i64 {
+fn exact_score() -> i64 {
     1000
 }
 
-fn pick_rows_body(query_value: &str, value: &mut Vec<PickRow>, hits: Vec<(i64, String)>) {
-    value.extend(hits.into_iter().map(|height_2| PickRow::Step(height_2.1)));
+fn push_query_rows(query: &str, rows: &mut Vec<PickRow>, hits: Vec<(i64, String)>) {
+    rows.extend(hits.into_iter().map(|hit| PickRow::Step(hit.1)));
 
-    if !query_value.is_empty() {
-        value.insert(0, PickRow::OneOff(query_value.to_string()));
-        value.insert(1, PickRow::NewStep(flows::slug(query_value)));
+    if !query.is_empty() {
+        rows.insert(0, PickRow::OneOff(query.to_string()));
+        rows.insert(1, PickRow::NewStep(flows::slug(query)));
     }
 }
 
 fn pick_rows_flows_tab(state: &FlowsTab, query: &str) -> Vec<PickRow> {
-    let query_value = query.trim();
-    let mut value = Vec::new();
-    let ql = query_value.to_lowercase();
+    let trimmed = query.trim();
+    let mut rows = Vec::new();
+    let query_lower = trimmed.to_lowercase();
 
     let mut hits: Vec<(i64, String)> = state
         .lib
         .steps
         .iter()
-        .filter_map(|text| pick_rows_score(&ql, text))
+        .filter_map(|step| step_score(&query_lower, step))
         .collect();
 
-    hits.sort_by(|agent, bytes| bytes.0.cmp(&agent.0).then(agent.1.cmp(&bytes.1)));
-    let exact = hits.first().is_some_and(|height| height.0 == 1000);
+    hits.sort_by(|first, second| second.0.cmp(&first.0).then(first.1.cmp(&second.1)));
+    let exact = hits.first().is_some_and(|hit| hit.0 == 1000);
 
     if exact {
-        value.extend(hits.into_iter().map(|height_value| PickRow::Step(height_value.1)));
-        value.push(PickRow::OneOff(query_value.to_string()));
+        rows.extend(hits.into_iter().map(|hit| PickRow::Step(hit.1)));
+        rows.push(PickRow::OneOff(trimmed.to_string()));
     } else {
-        pick_rows_body(query_value, &mut value, hits);
+        push_query_rows(trimmed, &mut rows, hits);
     }
 
-    value
+    rows
 }

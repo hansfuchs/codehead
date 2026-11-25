@@ -1,19 +1,19 @@
 use super::{Event, Read, Seek, SeekFrom, Tail, Write, events_path};
 
-/// Append E to thread ID's log: 1 `write` per line (`O_APPEND`: lines never interleave).
-pub(crate) fn append(id: &str, error: &Event) -> Result<(), String> {
+/// Append EVENT to thread ID's log: 1 `write` per line (`O_APPEND`: lines never interleave).
+pub(crate) fn append(id: &str, event: &Event) -> Result<(), String> {
     let path = events_path(id);
-    let mut line = serde_json::to_vec(error).map_err(|error_value| error_value.to_string())?;
+    let mut line = serde_json::to_vec(event).map_err(|error| error.to_string())?;
 
     line.push(b'\n');
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .map_err(|error_2| format!("{}: {error_2}", path.display()))?;
+        .map_err(|error| format!("{}: {error}", path.display()))?;
 
     file.write_all(&line)
-        .map_err(|error_3| format!("{}: {error_3}", path.display()))
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 /// The events in the last BYTES of thread ID's log (a cut 1st line left out).
 pub(crate) fn events_tail(id: &str, bytes: u64) -> Vec<Event> {
@@ -21,7 +21,7 @@ pub(crate) fn events_tail(id: &str, bytes: u64) -> Vec<Event> {
         return Vec::new();
     };
 
-    let len = file.metadata().map_or(0, |message| message.len());
+    let len = file.metadata().map_or(0, |metadata| metadata.len());
     let from = len.saturating_sub(bytes);
 
     if file.seek(SeekFrom::Start(from)).is_err() {
@@ -36,22 +36,22 @@ pub(crate) fn events_tail(id: &str, bytes: u64) -> Vec<Event> {
 
     let body = if from > 0 {
         buf.iter()
-            .position(|&bytes_value| bytes_value == b'\n')
+            .position(|&byte| byte == b'\n')
             .map_or(&[][..], |i| &buf[i + 1..])
     } else {
         &buf[..]
     };
 
-    body.split(|&bytes_2| bytes_2 == b'\n')
+    body.split(|&byte| byte == b'\n')
         .filter(|line| !line.is_empty())
-        .filter_map(|line_value| serde_json::from_slice(line_value).ok())
+        .filter_map(|line| serde_json::from_slice(line).ok())
         .collect()
 }
 /// Every event of thread ID.
 pub(crate) fn events(id: &str) -> Vec<Event> {
-    let mut thread = Tail::new(id);
+    let mut tail = Tail::new(id);
 
-    thread.read()
+    tail.read()
 }
 impl Tail {
     pub(crate) fn new(id: &str) -> Tail {
@@ -65,7 +65,7 @@ impl Tail {
     /// reads, the events before it are `head`'s.
     pub(crate) fn from_end(id: &str, bytes: u64) -> (Tail, u64) {
         let path = events_path(id);
-        let len = std::fs::metadata(&path).map_or(0, |message| message.len());
+        let len = std::fs::metadata(&path).map_or(0, |metadata| metadata.len());
 
         if len <= bytes {
             return (
@@ -119,9 +119,9 @@ pub(crate) fn head(id: &str, end: u64) -> Vec<Event> {
         return Vec::new();
     }
 
-    buf.split(|&bytes| bytes == b'\n')
+    buf.split(|&byte| byte == b'\n')
         .filter(|line| !line.is_empty())
-        .filter_map(|line_value| serde_json::from_slice(line_value).ok())
+        .filter_map(|line| serde_json::from_slice(line).ok())
         .collect()
 }
 impl Tail {
@@ -144,16 +144,16 @@ impl Tail {
         self.offset += buf.len() as u64;
         self.partial.extend_from_slice(&buf);
 
-        let Some(end) = self.partial.iter().rposition(|&bytes| bytes == b'\n') else {
+        let Some(end) = self.partial.iter().rposition(|&byte| byte == b'\n') else {
             return Vec::new();
         };
 
         let rest = self.partial.split_off(end + 1);
         let done = std::mem::replace(&mut self.partial, rest);
 
-        done.split(|&bytes_value| bytes_value == b'\n')
+        done.split(|&byte| byte == b'\n')
             .filter(|line| !line.is_empty())
-            .filter_map(|line_value| serde_json::from_slice(line_value).ok())
+            .filter_map(|line| serde_json::from_slice(line).ok())
             .collect()
     }
 }

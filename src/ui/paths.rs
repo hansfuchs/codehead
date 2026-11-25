@@ -71,44 +71,42 @@ fn split(word: &str) -> (&str, &str) {
 
 /// Entries of DIR: dirs first, then files, by name (case ignored). `.git`: left out.
 fn read(dir: &Path) -> Vec<(String, bool)> {
-    let mut value: Vec<(String, bool)> = std::fs::read_dir(dir)
+    let mut entries: Vec<(String, bool)> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
-        .map(|error| (error.file_name().to_string_lossy().into_owned(), error.path().is_dir()))
-        .filter(|(count, _)| count != ".git" && count != ".DS_Store")
+        .map(|entry| (entry.file_name().to_string_lossy().into_owned(), entry.path().is_dir()))
+        .filter(|(name, _)| name != ".git" && name != ".DS_Store")
         .collect();
 
-    value.sort_by_key(|agent| (!agent.1, agent.0.to_lowercase()));
-    value
+    entries.sort_by_key(|entry| (!entry.1, entry.0.to_lowercase()));
+    entries
 }
 
 /// Entries that match NAME: those that start with it (case ignored), then those that hold it.
 /// Hidden entries: only for a NAME that starts with `.`.
 fn filter(entries: &[(String, bool)], name: &str) -> Vec<(String, bool)> {
     let query = name.to_lowercase();
-    let shown = |count: &str| query.starts_with('.') || !count.starts_with('.');
-    let mut value: Vec<(String, bool)> = entries
+    let shown = |name: &str| query.starts_with('.') || !name.starts_with('.');
+    let mut matches: Vec<(String, bool)> = entries
         .iter()
-        .filter(|(count_value, _)| shown(count_value) && count_value.to_lowercase().starts_with(&query))
+        .filter(|(name, _)| shown(name) && name.to_lowercase().starts_with(&query))
         .cloned()
         .collect();
 
     // `.` + text: hidden entries by prefix only (`.` is in every file name with an extension)
     if !query.starts_with('.') {
-        value.extend(
+        matches.extend(
             entries
                 .iter()
-                .filter(|(count_2, _)| {
-                    shown(count_2)
-                        && !count_2.to_lowercase().starts_with(&query)
-                        && count_2.to_lowercase().contains(&query)
+                .filter(|(name, _)| {
+                    shown(name) && !name.to_lowercase().starts_with(&query) && name.to_lowercase().contains(&query)
                 })
                 .cloned(),
         );
     }
 
-    value
+    matches
 }
 
 impl Paths {
@@ -134,7 +132,7 @@ impl Paths {
     pub(crate) fn new(cwd: &Path) -> Paths {
         let mut roots: Vec<PathBuf> = crate::domain::threads::toplevel(cwd).into_iter().collect();
 
-        if !roots.iter().any(|result| result == cwd) {
+        if !roots.iter().any(|root| root == cwd) {
             roots.push(cwd.to_path_buf());
         }
 
@@ -146,8 +144,8 @@ impl Paths {
 
     /// The directory DIR (as typed) names: absolute, `~/…`, else below a root. None: 0 such dir.
     fn resolve(&self, dir: &str) -> Option<PathBuf> {
-        let found = if let Some(path) = crate::infra::config::resolve_alias(dir) {
-            Some(path)
+        let found = if let Some(target) = crate::infra::config::resolve_alias(dir) {
+            Some(target)
         } else if let Some(rest) = dir.strip_prefix("~/") {
             Some(crate::infra::config::home().join(rest))
         } else if dir.starts_with('/') {
@@ -155,21 +153,21 @@ impl Paths {
         } else {
             self.roots
                 .iter()
-                .map(|result| result.join(dir))
-                .find(|path_value| path_value.is_dir())
+                .map(|root| root.join(dir))
+                .find(|candidate| candidate.is_dir())
         };
 
-        found.filter(|path_2| path_2.is_dir())
+        found.filter(|dir| dir.is_dir())
     }
 
     fn entries(&mut self, dir: &Path) -> Vec<(String, bool)> {
         match &self.cache {
-            Some((directory, at, value)) if directory == dir && at.elapsed() < FRESH => value.clone(),
+            Some((cached_dir, at, entries)) if cached_dir == dir && at.elapsed() < FRESH => entries.clone(),
             _ => {
-                let value_value = read(dir);
+                let entries = read(dir);
 
-                self.cache = Some((dir.to_path_buf(), Instant::now(), value_value.clone()));
-                value_value
+                self.cache = Some((dir.to_path_buf(), Instant::now(), entries.clone()));
+                entries
             }
         }
     }
@@ -192,8 +190,8 @@ impl Paths {
         let typed = self
             .preview
             .typed(ta)
-            .filter(|(path_value, _)| *path_value == name_at)
-            .map(|(_, thread)| thread);
+            .filter(|(pos, _)| *pos == name_at)
+            .map(|(_, typed)| typed);
         let name = typed.as_deref().unwrap_or(name);
 
         // `/` alone (a slash in a sentence), `//`: not a path yet
@@ -205,14 +203,14 @@ impl Paths {
         let mut all = self.entries(&path);
 
         if self.dirs_only {
-            all.retain(|error| error.1);
+            all.retain(|entry| entry.1);
         }
 
         // `/name` can be a slash command: only names that start like it
         let entries: Vec<(String, bool)> = if dir == "/" {
             filter(&all, name)
                 .into_iter()
-                .filter(|(count_value, _)| count_value.to_lowercase().starts_with(&name.to_lowercase()))
+                .filter(|(name, _)| name.to_lowercase().starts_with(&name.to_lowercase()))
                 .collect()
         } else {
             filter(&all, name)
@@ -252,8 +250,8 @@ impl Paths {
 
     /// The entry into the text: a dir with `/` (its entries show next), a file with a space. A
     /// name with a space (or a quote char): the path gets a `"` in front (a file: one after it).
-    fn pick(&mut self, ta: &mut TextArea, output: &Open, i: usize) {
-        insert_entry(self, ta, output, i);
+    fn pick(&mut self, ta: &mut TextArea, open: &Open, i: usize) {
+        insert_entry(self, ta, open, i);
     }
 
     /// The dropdown shows (a path at the cursor, 1+ entries).
@@ -262,8 +260,8 @@ impl Paths {
     }
 
     /// Key for the dropdown. true: used (the input must not see it).
-    pub(crate) fn key(&mut self, key_value: KeyEvent, ta: &mut TextArea) -> bool {
-        handle_key(self, key_value, ta)
+    pub(crate) fn key(&mut self, key: KeyEvent, ta: &mut TextArea) -> bool {
+        handle_key(self, key, ta)
     }
 
     /// Not drawn this frame: 0 rows for hover / clicks.
@@ -273,11 +271,8 @@ impl Paths {
     }
 
     /// Row of the last draw at P (hover).
-    pub(crate) fn row_at(&self, path: Position) -> Option<Rect> {
-        self.rows
-            .iter()
-            .map(|(result, _)| *result)
-            .find(|result_value| result_value.contains(path))
+    pub(crate) fn row_at(&self, at: Position) -> Option<Rect> {
+        self.rows.iter().map(|(rect, _)| *rect).find(|rect| rect.contains(at))
     }
 
     /// Click on a row: inserted. Wheel: the cursor. true: used.
@@ -287,11 +282,15 @@ impl Paths {
 
     /// The dropdown for the path word of TA (TA rendered this frame), inside BOUNDS and never over
     /// AVOID (the prompt box): above it, at the column of the name (0 room above: below).
-    pub(crate) fn render(&mut self, frame_value: &mut Frame, ta: &TextArea, bounds: Rect, avoid: Rect) {
+    pub(crate) fn render(&mut self, frame: &mut Frame, ta: &TextArea, bounds: Rect, avoid: Rect) {
         self.rows.clear();
         self.area = Rect::default();
-        let Some(output) = self.open(ta) else { return };
-        let Some(path) = ta.screen_pos(output.at) else { return };
+        let Some(open) = self.open(ta) else { return };
+
+        let Some(cursor_pos) = ta.screen_pos(open.at) else {
+            return;
+        };
+
         let above = Rect {
             height: avoid.y.saturating_sub(bounds.y).min(bounds.height),
             ..bounds
@@ -303,23 +302,23 @@ impl Paths {
             ..bounds
         };
         let up = above.height >= 5 || above.height >= below.height;
-        let count = output.entries.len();
+        let count = open.entries.len();
 
-        let label: String = { render_directory(&output) };
+        let label: String = { dir_label(&open) };
 
-        let width_value = (output.entries.iter().map(|(name, _)| name.width()).max().unwrap_or(0) + 5)
+        let width = (open.entries.iter().map(|(name, _)| name.width()).max().unwrap_or(0) + 5)
             .max(label.width() + 6)
             .clamp(24, 72) as u16;
 
         let area = if up {
             dropdown::place(
                 Rect {
-                    x: path.x,
+                    x: cursor_pos.x,
                     y: avoid.y,
                     width: 1,
                     height: 1,
                 },
-                width_value,
+                width,
                 count,
                 above,
                 true,
@@ -327,12 +326,12 @@ impl Paths {
         } else {
             dropdown::place(
                 Rect {
-                    x: path.x,
+                    x: cursor_pos.x,
                     y: avoid.bottom().saturating_sub(1),
                     width: 1,
                     height: 1,
                 },
-                width_value,
+                width,
                 count,
                 below,
                 false,
@@ -342,17 +341,17 @@ impl Paths {
         let Some(area) = area else { return };
         let shown = (area.height as usize).saturating_sub(2);
 
-        draw_entries(frame_value, &(output), count, &(label), area, shown, self);
+        draw_entries(frame, &(open), count, &(label), area, shown, self);
     }
 }
 
-fn render_directory(output: &Open) -> String {
-    let directory: Vec<char> = output.dir.chars().collect();
+fn dir_label(open: &Open) -> String {
+    let chars: Vec<char> = open.dir.chars().collect();
 
-    if directory.len() > 40 {
-        format!("…{}", directory[directory.len() - 39..].iter().collect::<String>())
+    if chars.len() > 40 {
+        format!("…{}", chars[chars.len() - 39..].iter().collect::<String>())
     } else {
-        output.dir.clone()
+        open.dir.clone()
     }
 }
 
@@ -361,86 +360,83 @@ fn render_directory(output: &Open) -> String {
 mod tests;
 
 #[cfg(test)]
-fn matched_entries(widget_state: &mut Paths, ta: &TextArea) -> Vec<String> {
-    widget_state
+fn matched_entries(paths: &mut Paths, ta: &TextArea) -> Vec<String> {
+    paths
         .open(ta)
-        .map(|output| {
-            output
-                .entries
+        .map(|open| {
+            open.entries
                 .into_iter()
-                .map(|(count, directory)| if directory { format!("{count}/") } else { count })
+                .map(|(name, is_dir)| if is_dir { format!("{name}/") } else { name })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn insert_entry(_widget_state: &mut Paths, ta: &mut TextArea, output: &Open, i: usize) {
-    let Some((name, dir)) = output.entries.get(i) else {
+fn insert_entry(_paths: &mut Paths, ta: &mut TextArea, open: &Open, i: usize) {
+    let Some((name, dir)) = open.entries.get(i) else {
         return;
     };
 
     let end = if *dir {
         "/"
-    } else if output.quoted {
+    } else if open.quoted {
         "\" "
     } else {
         " "
     };
 
-    if output.quoted
+    if open.quoted
         || !name.chars().any(|character| {
             character.is_whitespace() || matches!(character, '(' | ')' | '[' | ']' | '\'' | '`' | '<' | '>' | ',')
         })
     {
-        ta.replace_to_cursor(output.at, &format!("{name}{end}"));
+        ta.replace_to_cursor(open.at, &format!("{name}{end}"));
     } else {
         let end = if *dir { "/" } else { "\" " };
 
-        ta.replace_to_cursor(output.word_at, &format!("\"{}{name}{end}", output.dir));
+        ta.replace_to_cursor(open.word_at, &format!("\"{}{name}{end}", open.dir));
     }
 }
 
-fn handle_key(widget_state: &mut Paths, key_value: KeyEvent, ta: &mut TextArea) -> bool {
-    let Some(output) = widget_state.open(ta) else {
+fn handle_key(paths: &mut Paths, key: KeyEvent, ta: &mut TextArea) -> bool {
+    let Some(open) = paths.open(ta) else {
         return false;
     };
 
-    if !key_value.modifiers.is_empty() {
+    if !key.modifiers.is_empty() {
         return false;
     }
 
-    let count = output.entries.len();
+    let count = open.entries.len();
 
-    match key_value.code {
+    match key.code {
         KeyCode::Up | KeyCode::Down => {
-            widget_state.cursor = if key_value.code == KeyCode::Up {
-                (widget_state.cursor + count - 1) % count
+            paths.cursor = if key.code == KeyCode::Up {
+                (paths.cursor + count - 1) % count
             } else {
-                (widget_state.cursor + 1) % count
+                (paths.cursor + 1) % count
             };
 
-            widget_state.moved = true;
+            paths.moved = true;
 
             // the row's name in the text at once (a name with a space: on enter / tab only)
-            let name = &output.entries[widget_state.cursor].0;
+            let name = &open.entries[paths.cursor].0;
 
-            if output.quoted
+            if open.quoted
                 || !name
                     .chars()
                     .any(|character| character.is_whitespace() || character == '"')
             {
-                widget_state.preview.show(ta, output.at, &output.name, name);
+                paths.preview.show(ta, open.at, &open.name, name);
             }
         }
-        KeyCode::Tab => widget_state.pick(ta, &output, widget_state.cursor),
+        KeyCode::Tab => paths.pick(ta, &open, paths.cursor),
         // enter stays the input's key, unless ↑↓ picked a row
-        KeyCode::Enter if widget_state.moved => widget_state.pick(ta, &output, widget_state.cursor),
-        KeyCode::Esc => widget_state.closed = Some(output.word_at),
+        KeyCode::Enter if paths.moved => paths.pick(ta, &open, paths.cursor),
+        KeyCode::Esc => paths.closed = Some(open.word_at),
         // a name char after a preview (not `/`: it goes into the previewed dir): the typed
         // name again, the char after it
-        KeyCode::Char(character_value)
-            if !character_value.is_whitespace() && character_value != '/' && widget_state.preview.revert(ta) =>
-        {
+        KeyCode::Char(ch) if !ch.is_whitespace() && ch != '/' && paths.preview.revert(ta) => {
             return false;
         }
         _ => return false,
@@ -449,28 +445,28 @@ fn handle_key(widget_state: &mut Paths, key_value: KeyEvent, ta: &mut TextArea) 
     true
 }
 
-fn handle_mouse(widget_state: &mut Paths, event: MouseEvent, ta: &mut TextArea) -> bool {
-    let path = Position {
+fn handle_mouse(paths: &mut Paths, event: MouseEvent, ta: &mut TextArea) -> bool {
+    let at = Position {
         x: event.column,
         y: event.row,
     };
 
-    if !widget_state.area.contains(path) {
+    if !paths.area.contains(at) {
         return false;
     }
 
-    let Some(output) = widget_state.open(ta) else {
+    let Some(open) = paths.open(ta) else {
         return false;
     };
 
-    let count = output.entries.len();
+    let count = open.entries.len();
 
     match event.kind {
-        MouseEventKind::ScrollUp => widget_state.cursor = widget_state.cursor.saturating_sub(3),
-        MouseEventKind::ScrollDown => widget_state.cursor = (widget_state.cursor + 3).min(count - 1),
+        MouseEventKind::ScrollUp => paths.cursor = paths.cursor.saturating_sub(3),
+        MouseEventKind::ScrollDown => paths.cursor = (paths.cursor + 3).min(count - 1),
         MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(&(_, i)) = widget_state.rows.iter().find(|(result, _)| result.contains(path)) {
-                widget_state.pick(ta, &output, i);
+            if let Some(&(_, i)) = paths.rows.iter().find(|(rect, _)| rect.contains(at)) {
+                paths.pick(ta, &open, i);
             }
         }
         _ => {}
@@ -480,19 +476,19 @@ fn handle_mouse(widget_state: &mut Paths, event: MouseEvent, ta: &mut TextArea) 
 }
 
 fn draw_entries(
-    frame_value: &mut Frame<'_>,
-    output: &Open,
+    frame: &mut Frame<'_>,
+    open: &Open,
     count: usize,
     label: &str,
     area: Rect,
     shown: usize,
-    widget_state: &mut Paths,
+    paths: &mut Paths,
 ) {
-    widget_state.offset = dropdown::fit(widget_state.offset, widget_state.cursor, count, shown);
-    let off = widget_state.offset;
-    let note = if widget_state.moved { "tab / enter" } else { "tab" };
+    paths.offset = dropdown::fit(paths.offset, paths.cursor, count, shown);
+    let off = paths.offset;
+    let note = if paths.moved { "tab / enter" } else { "tab" };
     let inner = dropdown::frame(
-        frame_value,
+        frame,
         area,
         label,
         note,
@@ -503,28 +499,20 @@ fn draw_entries(
         },
     );
 
-    widget_state.area = area;
+    paths.area = area;
 
-    for (i, (name, dir)) in output.entries.iter().enumerate().skip(off).take(shown) {
-        draw_entry(frame_value, off, inner, i, name, *dir, widget_state);
+    for (i, (name, dir)) in open.entries.iter().enumerate().skip(off).take(shown) {
+        draw_entry(frame, off, inner, i, name, *dir, paths);
     }
 }
 
-fn draw_entry(
-    frame_value: &mut Frame<'_>,
-    off: usize,
-    inner: Rect,
-    i: usize,
-    name: &str,
-    dir: bool,
-    widget_state: &mut Paths,
-) {
+fn draw_entry(frame: &mut Frame<'_>, off: usize, inner: Rect, i: usize, name: &str, dir: bool, paths: &mut Paths) {
     let row = Rect {
         y: inner.y + (i - off) as u16,
         height: 1,
         ..inner
     };
-    let hl = i == widget_state.cursor;
+    let hl = i == paths.cursor;
 
     let st = if hl {
         theme::pill().add_modifier(Modifier::BOLD)
@@ -548,6 +536,6 @@ fn draw_entry(
         Span::styled(if dir { "/" } else { "" }, dim),
     ]);
 
-    frame_value.render_widget(Paragraph::new(line).style(st), row);
-    widget_state.rows.push((row, i));
+    frame.render_widget(Paragraph::new(line).style(st), row);
+    paths.rows.push((row, i));
 }

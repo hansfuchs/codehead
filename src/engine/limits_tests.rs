@@ -14,24 +14,24 @@ fn the_rate_comes_from_the_latest_period_that_rose_enough() {
             sample(5.0, 29.0, 200), sample(6.0, 30.0, 200),
         ]},
     });
-    let width = parse(&value);
+    let windows = parse(&value);
 
-    assert_eq!(width.len(), 1, "{width:?}");
+    assert_eq!(windows.len(), 1, "{windows:?}");
     assert_eq!(
-        (width[0].label.as_str(), width[0].pct, width[0].resets),
+        (windows[0].label.as_str(), windows[0].pct, windows[0].resets),
         ("five_hour", 30.0, Some(200))
     );
-    assert_eq!(width[0].usd_per_pct, Some(0.4));
+    assert_eq!(windows[0].usd_per_pct, Some(0.4));
 
     // the new period rises 3 %: its own rate
-    let mut value_value = value;
+    let mut rose = value;
 
-    value_value["_cal"]["samples"]
+    rose["_cal"]["samples"]
         .as_array_mut()
         .unwrap()
         .push(sample(8.0, 32.0, 200));
 
-    assert_eq!(parse(&value_value)[0].usd_per_pct, Some(1.0));
+    assert_eq!(parse(&rose)[0].usd_per_pct, Some(1.0));
 
     // 0 samples: 0 rate
     assert_eq!(

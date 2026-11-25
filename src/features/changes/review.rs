@@ -42,8 +42,8 @@ pub(crate) fn cached(id: &str) -> Option<Review> {
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
 }
 
-pub(crate) fn store(id: &str, result: &Review) {
-    if let Ok(bytes) = serde_json::to_vec_pretty(result) {
+pub(crate) fn store(id: &str, review: &Review) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(review) {
         let _ = crate::engine::write_atomic(&path(id), &bytes);
     }
 }
@@ -77,12 +77,12 @@ fn schema() -> Value {
 
 /// Findings of Claude Code's JSON output OUT: only files of FILES, critical first.
 pub(crate) fn parse(out: &str, files: &[FileDiff]) -> Result<Vec<Finding>, String> {
-    let value: Value = serde_json::from_str(out.trim()).map_err(|error| format!("review: {error}"))?;
+    let output: Value = serde_json::from_str(out.trim()).map_err(|error| format!("review: {error}"))?;
 
-    if value["is_error"] == true {
+    if output["is_error"] == true {
         return Err(format!(
             "review: {}",
-            value["result"]
+            output["result"]
                 .as_str()
                 .unwrap_or("error")
                 .lines()
@@ -91,15 +91,16 @@ pub(crate) fn parse(out: &str, files: &[FileDiff]) -> Result<Vec<Finding>, Strin
         ));
     }
 
-    let data = if value["structured_output"].is_object() {
-        value["structured_output"].clone()
+    let data = if output["structured_output"].is_object() {
+        output["structured_output"].clone()
     } else {
-        serde_json::from_str::<Value>(value["result"].as_str().unwrap_or_default())
+        serde_json::from_str::<Value>(output["result"].as_str().unwrap_or_default())
             .map_err(|_| "review: 0 structured output".to_string())?
     };
 
-    let one = |x: &Value| {
-        x.as_str()
+    let one = |field: &Value| {
+        field
+            .as_str()
             .unwrap_or_default()
             .lines()
             .next()
@@ -112,26 +113,26 @@ pub(crate) fn parse(out: &str, files: &[FileDiff]) -> Result<Vec<Finding>, Strin
         .as_array()
         .ok_or("review: 0 findings list")?
         .iter()
-        .filter_map(|file_value| {
-            let file = file_value["file"].as_str()?.trim().to_string();
+        .filter_map(|item| {
+            let file = item["file"].as_str()?.trim().to_string();
 
-            files.iter().any(|x| x.path == file).then(|| Finding {
+            files.iter().any(|diff| diff.path == file).then(|| Finding {
                 file,
-                line: file_value["line"].as_u64().unwrap_or(1).max(1) as u32,
-                severity: one(&file_value["severity"]),
-                title: one(&file_value["title"]),
-                body: file_value["body"].as_str().unwrap_or_default().trim().to_string(),
+                line: item["line"].as_u64().unwrap_or(1).max(1) as u32,
+                severity: one(&item["severity"]),
+                title: one(&item["title"]),
+                body: item["body"].as_str().unwrap_or_default().trim().to_string(),
             })
         })
         .collect();
 
-    let rank = |text: &str| match text {
+    let rank = |severity: &str| match severity {
         "critical" => 0,
         "major" => 1,
         _ => 2,
     };
 
-    out.sort_by_key(|file_2| rank(&file_2.severity));
+    out.sort_by_key(|finding| rank(&finding.severity));
 
     Ok(out)
 }
@@ -149,18 +150,18 @@ pub(crate) fn run(id: &str, dir: &Path, files: &[FileDiff], model: &str) -> Resu
         .output()
         .map_err(|error| format!("review: claude: {error}"))?;
     let findings = parse(&String::from_utf8_lossy(&out.stdout), files)?;
-    let result = Review {
+    let review = Review {
         model: model.to_string(),
         findings,
     };
 
-    store(id, &result);
-    Ok(result)
+    store(id, &review);
+    Ok(review)
 }
 
-/// The comment text of finding F (for the batch to an agent).
-pub(crate) fn as_comment(file: &Finding) -> String {
-    format!("[{}] {}: {}", file.severity, file.title, file.body)
+/// The comment text of finding FINDING (for the batch to an agent).
+pub(crate) fn as_comment(finding: &Finding) -> String {
+    format!("[{}] {}: {}", finding.severity, finding.title, finding.body)
 }
 
 const INTRO: &str = "Review this change set as a senior engineer. Find real problems only: bugs, wrong logic, missing error handling, security issues, races, broken edge cases, API misuse, data loss. Skip style, naming and formatting.\n\

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn steps_round_trip_through_front_matter() {
-    let text_value = Step {
+    let step = Step {
         name: "x".into(),
         description: "d".into(),
         gate: true,
@@ -12,7 +12,7 @@ fn steps_round_trip_through_front_matter() {
         ..Default::default()
     };
 
-    assert_eq!(parse_step("x", &render_step(&text_value)), text_value);
+    assert_eq!(parse_step("x", &render_step(&step)), step);
 
     // 0 front matter: all body
     assert_eq!(parse_step("y", "just text").text, "just text");
@@ -22,25 +22,21 @@ fn steps_round_trip_through_front_matter() {
 /// step runs on the flow's agent), a save drops it.
 #[test]
 fn old_roles_parse_warn_and_go_on_save() {
-    let text_value = parse_step("rev", "---\nrole: reviewer\ngate: true\n---\nreview it");
+    let step = parse_step("rev", "---\nrole: reviewer\ngate: true\n---\nreview it");
 
-    assert_eq!(text_value.old_role.as_deref(), Some("reviewer"));
-    assert!(
-        !render_step(&text_value).contains("role"),
-        "{}",
-        render_step(&text_value)
-    );
+    assert_eq!(step.old_role.as_deref(), Some("reviewer"));
+    assert!(!render_step(&step).contains("role"), "{}", render_step(&step));
 
-    let file = parse_flow("t", "name = \"t\"\nroles = [\"lead\", \"tester\"]\n[[step]]\ntext = \"a\"\nrole = \"tester\"\n[[step]]\ntext = \"b\"\nrole = \"lead\"\n").unwrap();
-    let result = resolve(&file, &Library::default());
+    let flow = parse_flow("t", "name = \"t\"\nroles = [\"lead\", \"tester\"]\n[[step]]\ntext = \"a\"\nrole = \"tester\"\n[[step]]\ntext = \"b\"\nrole = \"lead\"\n").unwrap();
+    let nodes = resolve(&flow, &Library::default());
 
     assert_eq!(
-        result[0].errors,
+        nodes[0].errors,
         vec!["role tester: roles are gone, the step runs on the flow's agent".to_string()]
     );
-    assert!(result[1].errors.is_empty(), "role lead: 0 warning");
+    assert!(nodes[1].errors.is_empty(), "role lead: 0 warning");
 
-    let text = render_flow(&file).unwrap();
+    let text = render_flow(&flow).unwrap();
 
     assert!(!text.contains("role"), "{text}");
 }
@@ -52,52 +48,37 @@ fn every_builtin_parses_and_resolves_without_errors() {
     assert_eq!(lib.flows.len(), BUILTIN_FLOWS.len(), "{:?}", lib.errors);
     assert!(lib.errors.is_empty(), "{:?}", lib.errors);
 
-    for file in &lib.flows {
-        for result in resolve(file, &lib) {
-            assert!(
-                result.errors.is_empty(),
-                "{}: {}: {:?}",
-                file.slug,
-                result.id,
-                result.errors
-            );
-            assert!(!result.text.is_empty(), "{}: {} has 0 text", file.slug, result.id);
+    for flow in &lib.flows {
+        for node in resolve(flow, &lib) {
+            assert!(node.errors.is_empty(), "{}: {}: {:?}", flow.slug, node.id, node.errors);
+            assert!(!node.text.is_empty(), "{}: {} has 0 text", flow.slug, node.id);
         }
     }
 
-    let nf = lib.flow("new feature").unwrap();
-    let result_value = resolve(nf, &lib);
-    let gate = result_value
-        .iter()
-        .position(|count| count.title == "plan approval")
-        .unwrap();
+    let new_feature = lib.flow("new feature").unwrap();
+    let nodes = resolve(new_feature, &lib);
+    let gate = nodes.iter().position(|node| node.title == "plan approval").unwrap();
 
-    assert!(result_value[gate].gate);
+    assert!(nodes[gate].gate);
     assert_eq!(
-        result_value[gate].edges,
+        nodes[gate].edges,
         vec![(
             "changes".to_string(),
-            result_value
-                .iter()
-                .position(|count_value| count_value.id == "plan")
-                .unwrap()
+            nodes.iter().position(|node| node.id == "plan").unwrap()
         )]
     );
 
-    let ar = result_value
-        .iter()
-        .find(|count_2| count_2.id == "address-review")
-        .unwrap();
+    let address_review = nodes.iter().find(|node| node.id == "address-review").unwrap();
 
     assert_eq!(
-        ar.loops.as_ref().unwrap().0,
-        result_value.iter().position(|count_3| count_3.id == "review").unwrap()
+        address_review.loops.as_ref().unwrap().0,
+        nodes.iter().position(|node| node.id == "review").unwrap()
     );
 }
 
 #[test]
 fn loops_must_go_up_and_targets_must_exist() {
-    let file = parse_flow(
+    let flow = parse_flow(
         "t",
         r#"name = "t"
 [[step]]
@@ -110,27 +91,27 @@ gate = { back = "nowhere" }
 "#,
     )
     .unwrap();
-    let result = resolve(&file, &Library::default());
+    let nodes = resolve(&flow, &Library::default());
 
-    assert!(result[0].loops.is_none() && !result[0].errors.is_empty());
-    assert!(result[1].gate && result[1].edges.is_empty() && !result[1].errors.is_empty());
-    assert_eq!(result[0].id, "step-1");
-    assert_eq!(result[0].title, "a");
+    assert!(nodes[0].loops.is_none() && !nodes[0].errors.is_empty());
+    assert!(nodes[1].gate && nodes[1].edges.is_empty() && !nodes[1].errors.is_empty());
+    assert_eq!(nodes[0].id, "step-1");
+    assert_eq!(nodes[0].title, "a");
 }
 
 #[test]
 fn user_layer_wins_and_rename_and_delete_keep_flows_whole() {
-    let _g = crate::engine::ENV_LOCK
+    let env_lock = crate::engine::ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _ = std::fs::remove_dir_all(user_dir("steps").parent().unwrap());
     let lib = Library::load(None);
 
     // edit of a built-in: a user file over it
-    let mut text_value = lib.step("report").unwrap().clone();
+    let mut step = lib.step("report").unwrap().clone();
 
-    text_value.text = "my report".into();
-    lib.save_step(&text_value).unwrap();
+    step.text = "my report".into();
+    lib.save_step(&step).unwrap();
     let lib = Library::load(None);
 
     assert_eq!(lib.step("report").unwrap().text, "my report");
@@ -148,7 +129,7 @@ fn user_layer_wins_and_rename_and_delete_keep_flows_whole() {
         ..Default::default()
     })
     .unwrap();
-    let file = Flow {
+    let flow = Flow {
         slug: "my-flow".into(),
         name: "my flow".into(),
         steps: vec![Node {
@@ -159,7 +140,7 @@ fn user_layer_wins_and_rename_and_delete_keep_flows_whole() {
         ..Default::default()
     };
 
-    lib.save_flow(&file).unwrap();
+    lib.save_flow(&flow).unwrap();
     let lib = Library::load(None);
 
     assert_eq!(lib.users_of("mine").len(), 1);
@@ -171,16 +152,21 @@ fn user_layer_wins_and_rename_and_delete_keep_flows_whole() {
     assert_eq!(lib.delete_step("ours").unwrap(), 1);
 
     let lib = Library::load(None);
-    let count = &lib.flow("my-flow").unwrap().steps[0];
+    let node = &lib.flow("my-flow").unwrap().steps[0];
 
-    assert_eq!((count.uses.as_deref(), count.text.as_deref()), (None, Some("do mine")));
+    assert_eq!((node.uses.as_deref(), node.text.as_deref()), (None, Some("do mine")));
 
     // promote it back
-    let (text_2, n2) = promote(count, "again");
+    let (promoted_step, promoted_node) = promote(node, "again");
 
-    assert_eq!((text_2.text.as_str(), n2.uses.as_deref()), ("do mine", Some("again")));
+    assert_eq!(
+        (promoted_step.text.as_str(), promoted_node.uses.as_deref()),
+        ("do mine", Some("again"))
+    );
 
     let _ = std::fs::remove_dir_all(user_dir("steps").parent().unwrap());
+
+    drop(env_lock);
 }
 
 #[test]

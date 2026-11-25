@@ -4,77 +4,77 @@ use super::{EditState, PendingAct, Pr, resolve_pending};
 impl Merge {
     /// The changes view: a key on the bar rows. ←→: PR / view; ↑↓: row; ↓ from the views row,
     /// enter: into the diff.
-    pub(super) fn bar_key(&mut self, text: Stop, key: KeyEvent) -> Act {
-        dispatch_bar_key(self, text, key)
+    pub(super) fn bar_key(&mut self, stop: Stop, key: KeyEvent) -> Act {
+        dispatch_bar_key(self, stop, key)
     }
 
-    pub(super) fn edit_key(&mut self, key_value: KeyEvent) -> Act {
-        dispatch_edit_key(self, key_value)
+    pub(super) fn edit_key(&mut self, key: KeyEvent) -> Act {
+        dispatch_edit_key(self, key)
     }
 
-    pub(super) fn menu_key(&mut self, key_value: KeyEvent) -> Act {
-        dispatch_menu_key(self, key_value)
+    pub(super) fn menu_key(&mut self, key: KeyEvent) -> Act {
+        dispatch_menu_key(self, key)
     }
 }
 
-fn dispatch_bar_key(widget_state: &mut Merge, text: Stop, key: KeyEvent) -> Act {
-    let to = |message: &mut Merge, file: Option<Stop>| {
-        if let Some(thread) = message.tab() {
-            thread.focus = file;
+fn dispatch_bar_key(merge: &mut Merge, stop: Stop, key: KeyEvent) -> Act {
+    let to = |merge: &mut Merge, focus: Option<Stop>| {
+        if let Some(tab) = merge.tab() {
+            tab.focus = focus;
         }
     };
 
-    match (text, key.code) {
+    match (stop, key.code) {
         (Stop::Tabs, KeyCode::Left | KeyCode::Right) => {
-            let agent = widget_state.step_pr(if key.code == KeyCode::Right { 1 } else { -1 });
+            let act = merge.step_pr(if key.code == KeyCode::Right { 1 } else { -1 });
 
-            to(widget_state, Some(Stop::Tabs));
-            return agent;
+            to(merge, Some(Stop::Tabs));
+            return act;
         }
         (Stop::Subs, KeyCode::Left | KeyCode::Right) => {
-            let changes = widget_state.set_sub(if key.code == KeyCode::Right {
+            let act = merge.set_sub(if key.code == KeyCode::Right {
                 Sub::Changes
             } else {
                 Sub::Overview
             });
 
-            to(widget_state, Some(Stop::Subs));
-            return changes;
+            to(merge, Some(Stop::Subs));
+            return act;
         }
-        (Stop::Subs, KeyCode::Up | KeyCode::Char('k')) => to(widget_state, Some(Stop::Tabs)),
-        (Stop::Tabs, KeyCode::Down | KeyCode::Char('j')) => to(widget_state, Some(Stop::Subs)),
-        (Stop::Subs, KeyCode::Down | KeyCode::Char('j')) | (_, KeyCode::Enter) => to(widget_state, None),
+        (Stop::Subs, KeyCode::Up | KeyCode::Char('k')) => to(merge, Some(Stop::Tabs)),
+        (Stop::Tabs, KeyCode::Down | KeyCode::Char('j')) => to(merge, Some(Stop::Subs)),
+        (Stop::Subs, KeyCode::Down | KeyCode::Char('j')) | (_, KeyCode::Enter) => to(merge, None),
         _ => {}
     }
 
     Act::None
 }
 
-fn dispatch_edit_key(widget_state: &mut Merge, key_value: KeyEvent) -> Act {
-    let save = key_value.code == KeyCode::Enter
-        && (key_value
+fn dispatch_edit_key(merge: &mut Merge, key: KeyEvent) -> Act {
+    let save = key.code == KeyCode::Enter
+        && (key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER));
 
-    let Some(thread) = widget_state.tab() else {
+    let Some(tab) = merge.tab() else {
         return Act::None;
     };
 
-    let Some((error, ta)) = thread.input.edit.as_mut() else {
+    let Some((edit, textarea)) = tab.input.edit.as_mut() else {
         return Act::None;
     };
 
-    let single = matches!(error, Edit::Title);
+    let single = matches!(edit, Edit::Title);
 
     // esc: closes; edited text only on a 2nd esc (esc never drops edits unasked)
-    if key_value.code == KeyCode::Esc {
-        let dirty = ta.edited();
+    if key.code == KeyCode::Esc {
+        let dirty = textarea.edited();
 
-        if !crate::ui::textarea::esc_drops(&mut thread.input.esc_at, dirty) {
+        if !crate::ui::textarea::esc_drops(&mut tab.input.esc_at, dirty) {
             return Act::Toast("esc again: drop the edit · ctrl+⏎: save".into());
         }
 
-        thread.input.edit = None;
+        tab.input.edit = None;
         return if dirty {
             Act::Toast("edit dropped".into())
         } else {
@@ -82,32 +82,28 @@ fn dispatch_edit_key(widget_state: &mut Merge, key_value: KeyEvent) -> Act {
         };
     }
 
-    if save || (single && key_value.code == KeyCode::Enter) {
-        let text = ta.text();
-        let pending = save_edit(thread, text);
+    if save || (single && key.code == KeyCode::Enter) {
+        let text = textarea.text();
+        let pending = save_edit(tab, text);
 
-        return resolve_pending(widget_state, pending);
+        return resolve_pending(merge, pending);
     }
 
-    if let Outcome::Ignored = ta.key(key_value)
-        && key_value.code == KeyCode::Enter
+    if let Outcome::Ignored = textarea.key(key)
+        && key.code == KeyCode::Enter
         && !single
     {
-        ta.newline();
+        textarea.newline();
     }
 
     Act::None
 }
 
-fn save_edit(thread: &mut super::Tab, text: String) -> PendingAct {
-    let (error_value, _) = thread
-        .input
-        .edit
-        .take()
-        .unwrap_or((Edit::Title, TextArea::new(true, "")));
-    let pr = thread.pr.clone();
+fn save_edit(tab: &mut super::Tab, text: String) -> PendingAct {
+    let (edit, _) = tab.input.edit.take().unwrap_or((Edit::Title, TextArea::new(true, "")));
+    let pr = tab.pr.clone();
 
-    let op = match error_value {
+    let op = match edit {
         Edit::Title if text.trim().is_empty() => return PendingAct::Act(Act::Toast("a title needs text".into())),
         Edit::Title => Op::Title(text.trim().to_string()),
         Edit::Body => Op::Body(text),
@@ -117,81 +113,75 @@ fn save_edit(thread: &mut super::Tab, text: String) -> PendingAct {
         Edit::Change(_, _, kind, id) => Op::Edit(kind, id, text),
     };
 
-    if let Some(mut path) = pr {
+    // at once on screen (the read confirms)
+    if let Some(mut pr) = pr {
         match &op {
-            Op::Title(x) => path.title.clone_from(x),
-            Op::Body(x) => path.body.clone_from(x),
+            Op::Title(title) => pr.title.clone_from(title),
+            Op::Body(body) => pr.body.clone_from(body),
             _ => {}
         }
 
-        thread.pr = Some(path);
+        tab.pr = Some(pr);
     }
-
-    // at once on screen (the read confirms)
 
     PendingAct::Operation(op)
 }
 
-fn dispatch_menu_key(widget_state: &mut Merge, key_value: KeyEvent) -> Act {
-    let filter_text = match widget_state
-        .tab_ref()
-        .and_then(|thread_value| thread_value.input.menu.as_ref())
-    {
+fn dispatch_menu_key(merge: &mut Merge, key: KeyEvent) -> Act {
+    let filter_text = match merge.tab_ref().and_then(|tab| tab.input.menu.as_ref()) {
         Some(Menu::Labels { filter, .. }) => filter.text(),
         _ => String::new(),
     };
 
-    let label_opts = widget_state.label_opts(&filter_text);
-    let path = widget_state.tab_ref().and_then(|thread_2| thread_2.pr.clone());
+    let label_opts = merge.label_opts(&filter_text);
+    let pr = merge.tab_ref().and_then(|tab| tab.pr.clone());
 
-    let Some(thread_3) = widget_state.tab() else {
+    let Some(tab) = merge.tab() else {
         return Act::None;
     };
 
-    let pending = update_menu(thread_3, key_value, &label_opts, path.as_ref());
+    let pending = update_menu(tab, key, &label_opts, pr.as_ref());
 
-    resolve_pending(widget_state, pending)
+    resolve_pending(merge, pending)
 }
 
 fn update_menu(
-    thread_3: &mut super::Tab,
-    key_value: KeyEvent,
+    tab: &mut super::Tab,
+    key: KeyEvent,
     label_opts: &[crate::infra::gh::Label],
-    path: Option<&Pr>,
+    pr: Option<&Pr>,
 ) -> PendingAct {
-    let Some(menu) = thread_3.input.menu.as_mut() else {
+    let Some(menu) = tab.input.menu.as_mut() else {
         return PendingAct::Act(Act::None);
     };
 
-    if key_value.code == KeyCode::Esc {
-        thread_3.input.menu = None;
+    if key.code == KeyCode::Esc {
+        tab.input.menu = None;
         return PendingAct::Act(Act::None);
     }
 
     let count = match menu {
-        Menu::Status(_, output) => output.len(),
+        Menu::Status(_, options) => options.len(),
         Menu::Mine { .. } => 2,
         Menu::Labels { .. } => label_opts.len(),
     };
 
     let cur = match menu {
-        Menu::Status(character, _) | Menu::Mine { cur: character, .. } | Menu::Labels { cur: character, .. } => {
-            character
-        }
+        Menu::Status(cur, _) | Menu::Mine { cur, .. } | Menu::Labels { cur, .. } => cur,
     };
 
-    match key_value.code {
+    match key.code {
         KeyCode::Up => *cur = cur.saturating_sub(1),
         KeyCode::Down => *cur = (*cur + 1).min(count.saturating_sub(1)),
         KeyCode::Enter => {
             let selection = *cur;
 
-            return select_menu(thread_3, label_opts, path, selection);
+            return select_menu(tab, label_opts, pr, selection);
         }
 
         _ => {
             if let Menu::Labels { filter, cur } = menu {
-                filter.key(key_value);
+                filter.key(key);
                 *cur = 0;
             }
         }
@@ -201,52 +191,49 @@ fn update_menu(
 }
 
 fn select_menu(
-    thread_3: &mut super::Tab,
+    tab: &mut super::Tab,
     label_opts: &[crate::infra::gh::Label],
-    path: Option<&Pr>,
-    character_value: usize,
+    pr: Option<&Pr>,
+    selection: usize,
 ) -> PendingAct {
-    let Some(menu) = thread_3.input.menu.as_mut() else {
+    let Some(menu) = tab.input.menu.as_mut() else {
         return PendingAct::Act(Act::None);
     };
 
     match menu {
-        Menu::Status(_, output_value) => {
-            let op = output_value.get(character_value).map(|x| x.1.clone());
+        Menu::Status(_, options) => {
+            let op = options.get(selection).map(|x| x.1.clone());
 
             // close: a 2nd enter within ARM (the menu stays open for it)
-            if matches!(op, Some(Op::Close)) && !twice(thread_3, Stop::Status) {
+            if matches!(op, Some(Op::Close)) && !twice(tab, Stop::Status) {
                 return PendingAct::Act(Act::Toast("enter again: close the pull request".into()));
             }
 
-            thread_3.input.menu = None;
+            tab.input.menu = None;
 
             if let Some(op) = op {
                 return PendingAct::Operation(op);
             }
         }
         Menu::Mine {
-            thread,
-            comment: ck,
-            armed,
-            ..
+            thread, comment, armed, ..
         } => {
             let choice = CommentChoice {
-                selection: character_value,
+                selection,
                 thread: *thread,
-                comment: *ck,
+                comment: *comment,
                 armed: *armed,
             };
 
-            if let Some(value) = select_comment_action(&mut thread_3.input, path, choice) {
-                return value;
+            if let Some(pending) = select_comment_action(&mut tab.input, pr, choice) {
+                return pending;
             }
         }
         Menu::Labels { .. } => {
-            thread_3.input.menu = None;
+            tab.input.menu = None;
 
-            if let Some(line) = label_opts.get(character_value) {
-                return PendingAct::Operation(Op::AddLabel(line.name.clone()));
+            if let Some(label) = label_opts.get(selection) {
+                return PendingAct::Operation(Op::AddLabel(label.name.clone()));
             }
         }
     }
@@ -254,7 +241,7 @@ fn select_menu(
     PendingAct::Act(Act::None)
 }
 
-fn select_comment_action(input: &mut EditState, path: Option<&Pr>, choice: CommentChoice) -> Option<PendingAct> {
+fn select_comment_action(input: &mut EditState, pr: Option<&Pr>, choice: CommentChoice) -> Option<PendingAct> {
     let CommentChoice {
         selection,
         thread,
@@ -262,7 +249,7 @@ fn select_comment_action(input: &mut EditState, path: Option<&Pr>, choice: Comme
         armed,
     } = choice;
 
-    let Some(value) = path.and_then(|pr| pr.threads.get(thread)).and_then(|entry| {
+    let Some(chosen) = pr.and_then(|pr| pr.threads.get(thread)).and_then(|entry| {
         if comment == 0 {
             Some(entry.root.clone())
         } else {
@@ -275,12 +262,12 @@ fn select_comment_action(input: &mut EditState, path: Option<&Pr>, choice: Comme
 
     if selection == 0 {
         input.menu = None;
-        let mut text = TextArea::new(false, "");
+        let mut textarea = TextArea::new(false, "");
 
-        text.set_text(&value.body);
-        text.move_end();
-        input.edit = Some((Edit::Change(thread, comment, value.kind, value.id), text));
-    } else if value.kind == Kind::Review {
+        textarea.set_text(&chosen.body);
+        textarea.move_end();
+        input.edit = Some((Edit::Change(thread, comment, chosen.kind, chosen.id), textarea));
+    } else if chosen.kind == Kind::Review {
         input.menu = None;
         return Some(PendingAct::Act(Act::Toast(
             "a review's text cannot be deleted: edit it".into(),
@@ -293,11 +280,12 @@ fn select_comment_action(input: &mut EditState, path: Option<&Pr>, choice: Comme
         return Some(PendingAct::Act(Act::Toast("enter again: delete the comment".into())));
     } else {
         input.menu = None;
-        return Some(PendingAct::Operation(Op::Delete(value.kind, value.id)));
+        return Some(PendingAct::Operation(Op::Delete(chosen.kind, chosen.id)));
     }
 
     None
 }
+
 #[derive(Clone, Copy)]
 struct CommentChoice {
     selection: usize,

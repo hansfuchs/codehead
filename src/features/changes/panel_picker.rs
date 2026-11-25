@@ -2,8 +2,8 @@ use super::{Frame, Rect, View};
 
 impl View {
     /// PR mode: the commit picker's label (0: every commit).
-    pub(super) fn pick_label(&self, key: usize) -> (String, String) {
-        pick_label_view(self, key)
+    pub(super) fn pick_label(&self, index: usize) -> (String, String) {
+        pick_label_view(self, index)
     }
 
     /// PR mode: the picked commit as the picker's index.
@@ -12,19 +12,19 @@ impl View {
 
         src.commit
             .as_ref()
-            .and_then(|character| src.commits.iter().rev().position(|x| &x.oid == character))
-            .map_or(0, |path| path + 1)
+            .and_then(|oid| src.commits.iter().rev().position(|commit| &commit.oid == oid))
+            .map_or(0, |position| position + 1)
     }
 
-    /// PR mode: pick K of the picker (0: every commit).
-    pub(super) fn pick(&mut self, key: usize) {
-        let oid = if key == 0 {
+    /// PR mode: pick INDEX of the picker (0: every commit).
+    pub(super) fn pick(&mut self, index: usize) {
+        let oid = if index == 0 {
             None
         } else {
             self.pr_src
                 .as_ref()
-                .and_then(|text| text.commits.iter().rev().nth(key - 1))
-                .map(|character| character.oid.clone())
+                .and_then(|source| source.commits.iter().rev().nth(index - 1))
+                .map(|commit| commit.oid.clone())
         };
 
         self.scm.pick = None;
@@ -37,12 +37,12 @@ impl View {
     }
 }
 
-fn pick_label_view(view: &View, key: usize) -> (String, String) {
+fn pick_label_view(view: &View, index: usize) -> (String, String) {
     let Some(src) = &view.pr_src else {
         return (String::new(), String::new());
     };
 
-    if key == 0 {
+    if index == 0 {
         return (
             "all commits".into(),
             format!(
@@ -53,10 +53,10 @@ fn pick_label_view(view: &View, key: usize) -> (String, String) {
         );
     }
 
-    match src.commits.iter().rev().nth(key - 1) {
-        Some(character) => (
-            format!("{} {}", character.short, character.headline),
-            crate::infra::gh::stamp(character.date),
+    match src.commits.iter().rev().nth(index - 1) {
+        Some(commit) => (
+            format!("{} {}", commit.short, commit.headline),
+            crate::infra::gh::stamp(commit.date),
         ),
         None => (String::new(), String::new()),
     }
@@ -65,16 +65,16 @@ fn pick_label_view(view: &View, key: usize) -> (String, String) {
 fn draw_pick_view(view: &mut View, frame: &mut Frame, area: Rect) {
     view.scm.pick_rows.clear();
     let Some(cur) = view.scm.pick else { return };
-    let count = view.pr_src.as_ref().map_or(0, |text_value| text_value.commits.len()) + 1;
+    let count = view.pr_src.as_ref().map_or(0, |source| source.commits.len()) + 1;
 
     let rows: Vec<crate::ui::dropdown::Row> = (0..count)
-        .map(|key| {
-            let (text, detail) = view.pick_label(key);
+        .map(|index| {
+            let (text, detail) = view.pick_label(index);
 
             crate::ui::dropdown::Row {
                 text,
                 detail,
-                now: key == view.pick_index(),
+                now: index == view.pick_index(),
                 marks: Vec::new(),
             }
         })
@@ -85,19 +85,16 @@ fn draw_pick_view(view: &mut View, frame: &mut Frame, area: Rect) {
         height: 1,
         ..area
     };
-    let width_value = area.width.max(50);
-    let bounds = Rect {
-        width: width_value,
-        ..frame.area()
-    };
+    let width = area.width.max(50);
+    let bounds = Rect { width, ..frame.area() };
 
-    let Some(result) = crate::ui::dropdown::place(anchor, width_value, count, bounds, false) else {
+    let Some(rect) = crate::ui::dropdown::place(anchor, width, count, bounds, false) else {
         return;
     };
 
     let (_, hits) = crate::ui::dropdown::list(
         frame,
-        result,
+        rect,
         crate::ui::dropdown::List {
             label: "commits",
             note: "enter: show · esc",

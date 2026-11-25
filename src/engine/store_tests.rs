@@ -29,7 +29,7 @@ fn a_tail_from_the_end_starts_at_a_whole_line_and_the_head_holds_the_rest() {
 
     assert!(!head.is_empty() && !rest.is_empty());
 
-    let ts: Vec<u64> = head.iter().chain(&rest).map(|error| error.ts).collect();
+    let ts: Vec<u64> = head.iter().chain(&rest).map(|event| event.ts).collect();
 
     assert_eq!(ts, (0..20).collect::<Vec<_>>(), "every event once, in order");
 
@@ -45,13 +45,13 @@ fn a_tail_from_the_end_starts_at_a_whole_line_and_the_head_holds_the_rest() {
 fn events_round_trip_and_tail_reads_only_new_lines() {
     // the test process's data dir: 0 $CODEHEAD_HOME (a set var moves every other test's
     // threads mid-run: a stash written before it, read after it, is gone)
-    let thread_value = Thread::new("t", "do it", Path::new("/tmp"), vec!["ada".into()]);
+    let thread = Thread::new("t", "do it", Path::new("/tmp"), vec!["ada".into()]);
 
-    thread_value.save().unwrap();
-    let mut tail = Tail::new(&thread_value.id);
+    thread.save().unwrap();
+    let mut tail = Tail::new(&thread.id);
 
     append(
-        &thread_value.id,
+        &thread.id,
         &Event::new(
             None,
             Kind::Prompt {
@@ -63,7 +63,7 @@ fn events_round_trip_and_tail_reads_only_new_lines() {
     )
     .unwrap();
     append(
-        &thread_value.id,
+        &thread.id,
         &Event::new(Some("ada"), Kind::Text { text: "hello".into() }),
     )
     .unwrap();
@@ -71,36 +71,36 @@ fn events_round_trip_and_tail_reads_only_new_lines() {
     assert_eq!(tail.read().len(), 2);
     assert_eq!(tail.read(), [] as [crate::engine::store::Event; 0]);
 
-    append(&thread_value.id, &Event::new(Some("ada"), Kind::TurnStart)).unwrap();
-    let error = tail.read();
+    append(&thread.id, &Event::new(Some("ada"), Kind::TurnStart)).unwrap();
+    let events = tail.read();
 
-    assert_eq!(error.len(), 1);
-    assert_eq!(error[0].kind, Kind::TurnStart);
-    assert_eq!(load(&thread_value.id[..14]).unwrap().agents, vec!["ada".to_string()]);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, Kind::TurnStart);
+    assert_eq!(load(&thread.id[..14]).unwrap().agents, vec!["ada".to_string()]);
 
     // 8 writers at once (host, views, CLI): the lock keeps each update
     let writers: Vec<_> = (0..8)
-        .map(|width| {
-            let id = thread_value.id.clone();
+        .map(|writer| {
+            let id = thread.id.clone();
 
             std::thread::spawn(move || {
-                events_round_trip_and_tail_reads_only_new_lines_for_i_in_0_10(width, &id);
+                add_ten_agents(writer, &id);
             })
         })
         .collect();
 
-    for width_value in writers {
-        width_value.join().unwrap();
+    for handle in writers {
+        handle.join().unwrap();
     }
 
-    assert_eq!(load(&thread_value.id).unwrap().agents.len(), 81);
+    assert_eq!(load(&thread.id).unwrap().agents.len(), 81);
 
-    let _ = std::fs::remove_dir_all(thread_dir(&thread_value.id));
+    let _ = std::fs::remove_dir_all(thread_dir(&thread.id));
 }
 
-fn events_round_trip_and_tail_reads_only_new_lines_for_i_in_0_10(width: i32, id: &str) {
+fn add_ten_agents(writer: i32, id: &str) {
     for i in 0..10 {
-        update(id, |thread_2| thread_2.agents.push(format!("a{width}-{i}"))).unwrap();
+        update(id, |thread| thread.agents.push(format!("a{writer}-{i}"))).unwrap();
     }
 }
 

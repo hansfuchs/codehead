@@ -10,13 +10,13 @@ use crate::features::chat::ask::Picker;
 use crate::features::chat::{self, Colors, Fold, Look, Thoughts, Thread};
 
 fn thread(turns: usize) -> Thread {
-    let mut thread_value = Thread::default();
+    let mut thread = Thread::default();
 
-    for error in &fixture::events(turns) {
-        thread_value.push(error);
+    for event in &fixture::events(turns) {
+        thread.push(event);
     }
 
-    thread_value
+    thread
 }
 
 #[test]
@@ -24,7 +24,7 @@ fn thread(turns: usize) -> Thread {
 fn log_parse_2k_events() {
     let lines: String = fixture::events(250)
         .iter()
-        .map(|error| serde_json::to_string(error).unwrap() + "\n")
+        .map(|event| serde_json::to_string(event).unwrap() + "\n")
         .collect();
 
     bench("log parse 2k events", || {
@@ -43,8 +43,8 @@ fn thread_fold_2k_events() {
     bench("thread fold 2k events", || {
         let mut thread = Thread::default();
 
-        for error in &events {
-            thread.push(error);
+        for event in &events {
+            thread.push(event);
         }
 
         thread
@@ -54,7 +54,7 @@ fn thread_fold_2k_events() {
 #[test]
 #[ignore = "perf: just perf"]
 fn thread_draw_250_turns() {
-    let thread_value = thread(250);
+    let thread = thread(250);
     let none = HashSet::new();
     let fold = Fold {
         runs: &none,
@@ -67,7 +67,7 @@ fn thread_draw_250_turns() {
 
     for look in [Look::Bubbles, Look::Lines] {
         bench(&format!("thread draw 250 turns {look:?}"), || {
-            chat::draw(&thread_value, look, 120, &colors, &[], &fold, &Picker::default())
+            chat::draw(&thread, look, 120, &colors, &[], &fold, &Picker::default())
                 .rows
                 .len()
         });
@@ -79,24 +79,21 @@ fn thread_draw_250_turns() {
 #[test]
 #[ignore = "perf: just perf"]
 fn chat_search_1k_turns() {
-    let thread_value = thread(1000);
-    let mut text = crate::features::chat::chat_search::ChatSearch::default();
+    let thread = thread(1000);
+    let mut search = crate::features::chat::chat_search::ChatSearch::default();
 
-    text.open();
+    search.open();
     let mut count = 0u32;
 
-    bench(
-        &format!("chat search {} items (1 key)", thread_value.items.len()),
-        || {
-            count += 1;
-            text.ta.set_text(if count.is_multiple_of(2) {
-                "deploy fix"
-            } else {
-                "deploy fi"
-            });
-            text.refresh(&thread_value)
-        },
-    );
+    bench(&format!("chat search {} items (1 key)", thread.items.len()), || {
+        count += 1;
+        search.ta.set_text(if count.is_multiple_of(2) {
+            "deploy fix"
+        } else {
+            "deploy fi"
+        });
+        search.refresh(&thread)
+    });
 }
 
 #[test]
@@ -104,12 +101,12 @@ fn chat_search_1k_turns() {
 fn frame_paint_200x60() {
     let lines: Vec<_> = crate::ui::markdown::markdown(&fixture::markdown(20), 200, &[])
         .into_iter()
-        .map(|result| result.line)
+        .map(|rendered| rendered.line)
         .collect();
     let mut term = Terminal::new(TestBackend::new(200, 60)).unwrap();
 
     bench("frame paint 200x60", || {
-        term.draw(|file| file.render_widget(Paragraph::new(lines.clone()), file.area()))
+        term.draw(|frame| frame.render_widget(Paragraph::new(lines.clone()), frame.area()))
             .map(|_| ())
     });
 }
@@ -153,11 +150,9 @@ fn a_syntax_set_load() {
 #[test]
 #[ignore = "perf: just perf"]
 fn diff_parse_50_files() {
-    let directory = fixture::diff(50);
+    let diff = fixture::diff(50);
 
-    bench("diff parse 50 files", || {
-        crate::features::changes::parse(&directory).len()
-    });
+    bench("diff parse 50 files", || crate::features::changes::parse(&diff).len());
 }
 
 #[test]
@@ -215,17 +210,17 @@ fn mcp_edit_form_open_and_save() {
 
     let mut term = Terminal::new(TestBackend::new(160, 50)).unwrap();
 
-    let mut frame = |thread_2: &mut crate::features::settings::mcp_tab::McpTab| {
-        term.draw(|file| thread_2.draw(file, file.area(), true))
+    let mut draw_tab = |tab: &mut crate::features::settings::mcp_tab::McpTab| {
+        term.draw(|frame| tab.draw(frame, frame.area(), true))
             .map(|_| ())
             .unwrap();
     };
 
     bench_within("mcp form open", FORM, || {
-        let mut thread_3 = crate::features::settings::mcp_tab::McpTab::new();
+        let mut tab = crate::features::settings::mcp_tab::McpTab::new();
 
-        mcp_key(&mut thread_3, KeyCode::Char('a'), KeyModifiers::NONE);
-        frame(&mut thread_3);
+        mcp_key(&mut tab, KeyCode::Char('a'), KeyModifiers::NONE);
+        draw_tab(&mut tab);
     });
 
     let mut count = 0;
@@ -237,10 +232,10 @@ fn mcp_edit_form_open_and_save() {
             count += 1;
             mcp_form(count)
         },
-        |mut thread_5| {
-            mcp_key(&mut thread_5, KeyCode::Char('s'), KeyModifiers::CONTROL);
-            frame(&mut thread_5);
-            thread_5
+        |mut tab| {
+            mcp_key(&mut tab, KeyCode::Char('s'), KeyModifiers::CONTROL);
+            draw_tab(&mut tab);
+            tab
         },
     );
 
@@ -249,8 +244,10 @@ fn mcp_edit_form_open_and_save() {
     let saved = crate::engine::servers::load().unwrap();
 
     assert!(
-        saved.iter().any(|text_value| text_value.name == "perf-1"
-            && text_value.env.get("TOKEN").map(String::as_str) == Some("${PERF_TOKEN}")),
+        saved
+            .iter()
+            .any(|server| server.name == "perf-1"
+                && server.env.get("TOKEN").map(String::as_str) == Some("${PERF_TOKEN}")),
         "{saved:?}"
     );
 }

@@ -3,53 +3,49 @@ use super::{
 };
 
 impl Wizard {
-    pub(super) fn key(&mut self, key_value: KeyEvent) {
-        dispatch_key(self, key_value);
+    pub(super) fn key(&mut self, key: KeyEvent) {
+        dispatch_key(self, key);
     }
 }
 
-fn dispatch_key(widget_state: &mut Wizard, key_value: KeyEvent) {
-    if key_value.code == KeyCode::Char('c') && key_value.modifiers.contains(KeyModifiers::CONTROL) {
-        widget_state.quit = true;
+fn dispatch_key(wizard: &mut Wizard, key: KeyEvent) {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        wizard.quit = true;
         return;
     }
 
-    let scr = SCREENS[widget_state.screen];
+    let scr = SCREENS[wizard.screen];
 
-    match (scr, key_value.code) {
+    match (scr, key.code) {
         // every screen, every state
-        (_, KeyCode::Esc) => widget_state.back(),
-        (Screen::Harness, _) => key_harness(widget_state, key_value),
-        (Screen::Home, _) => key_home(widget_state, key_value),
-        (Screen::Crew, _) => key_crew(widget_state, key_value),
+        (_, KeyCode::Esc) => wizard.back(),
+        (Screen::Harness, _) => key_harness(wizard, key),
+        (Screen::Home, _) => key_home(wizard, key),
+        (Screen::Crew, _) => key_crew(wizard, key),
 
         // the tutorial ended without its last step (or failed to start): again, or skip it
-        (Screen::Try, KeyCode::Enter) => widget_state.launch = true,
-        (Screen::Try, KeyCode::Right) => widget_state.go(widget_state.screen + 1),
-        (Screen::Next, KeyCode::Enter) => widget_state.quit = true,
+        (Screen::Try, KeyCode::Enter) => wizard.launch = true,
+        (Screen::Try, KeyCode::Right) => wizard.go(wizard.screen + 1),
+        (Screen::Next, KeyCode::Enter) => wizard.quit = true,
         _ => {}
     }
 }
 
-fn copy_install_command(widget_state: &mut Wizard) {
-    if let Some(height) = widget_state.harness_rows().get(widget_state.harness_state.hcursor) {
-        widget_state.harness_state.note = if crate::infra::clip::copy(height.install) {
-            format!("copied: {}", height.install)
+fn copy_install_command(wizard: &mut Wizard) {
+    if let Some(harness) = wizard.harness_rows().get(wizard.harness_state.hcursor) {
+        wizard.harness_state.note = if crate::infra::clip::copy(harness.install) {
+            format!("copied: {}", harness.install)
         } else {
             "0 clipboard".into()
         };
     }
 }
 
-fn accept_home_choice(widget_state: &mut Wizard) {
-    let choice = HOME_CHOICES[widget_state.home_state.home].0;
+fn accept_home_choice(wizard: &mut Wizard) {
+    let choice = HOME_CHOICES[wizard.home_state.home].0;
 
-    if choice != HomeChoice::Skip
-        && widget_state.home_state.paths[widget_state.home_state.home]
-            .trim()
-            .is_empty()
-    {
-        widget_state.harness_state.note = if choice == HomeChoice::Clone {
+    if choice != HomeChoice::Skip && wizard.home_state.paths[wizard.home_state.home].trim().is_empty() {
+        wizard.harness_state.note = if choice == HomeChoice::Clone {
             "type or paste the git URL".into()
         } else {
             "type a path".into()
@@ -58,97 +54,93 @@ fn accept_home_choice(widget_state: &mut Wizard) {
         return;
     }
 
-    let skip_crew = choice == HomeChoice::Clone && !widget_state.dry;
-
-    widget_state.go(if skip_crew { 3 } else { 2 });
-
     // clone: its crew comes from home (the dry run shows the crew screen anyway)
+    let skip_crew = choice == HomeChoice::Clone && !wizard.dry;
+
+    wizard.go(if skip_crew { 3 } else { 2 });
 }
 
-fn key_harness(widget_state: &mut Wizard, key_value: KeyEvent) {
-    match key_value.code {
+fn key_harness(wizard: &mut Wizard, key: KeyEvent) {
+    match key.code {
         KeyCode::Up => {
-            widget_state.harness_state.hcursor = widget_state.harness_state.hcursor.saturating_sub(1);
+            wizard.harness_state.hcursor = wizard.harness_state.hcursor.saturating_sub(1);
         }
         KeyCode::Down => {
-            widget_state.harness_state.hcursor =
-                (widget_state.harness_state.hcursor + 1).min(widget_state.harness_rows().len().saturating_sub(1));
+            wizard.harness_state.hcursor =
+                (wizard.harness_state.hcursor + 1).min(wizard.harness_rows().len().saturating_sub(1));
         }
         KeyCode::Char('r') => {
-            widget_state.detect();
-            widget_state.harness_state.note = format!("{} ready", widget_state.harness_state.installed.len());
+            wizard.detect();
+            wizard.harness_state.note = format!("{} ready", wizard.harness_state.installed.len());
         }
         KeyCode::Char('c') => {
-            copy_install_command(widget_state);
+            copy_install_command(wizard);
         }
         KeyCode::Enter => {
-            if widget_state.harness_state.installed.is_empty() && !widget_state.dry {
-                widget_state.harness_state.note = "install 1 harness first, then r".into();
+            if wizard.harness_state.installed.is_empty() && !wizard.dry {
+                wizard.harness_state.note = "install 1 harness first, then r".into();
             } else {
-                widget_state.go(1);
+                wizard.go(1);
             }
         }
         _ => {}
     }
 }
 
-fn key_home(widget_state: &mut Wizard, key_value: KeyEvent) {
-    match key_value.code {
-        KeyCode::Up => widget_state.home_state.home = widget_state.home_state.home.saturating_sub(1),
+fn key_home(wizard: &mut Wizard, key: KeyEvent) {
+    match key.code {
+        KeyCode::Up => wizard.home_state.home = wizard.home_state.home.saturating_sub(1),
         KeyCode::Down => {
-            widget_state.home_state.home = (widget_state.home_state.home + 1).min(HOME_CHOICES.len() - 1);
+            wizard.home_state.home = (wizard.home_state.home + 1).min(HOME_CHOICES.len() - 1);
         }
-        KeyCode::Enter => accept_home_choice(widget_state),
-        _ if HOME_CHOICES[widget_state.home_state.home].0 != HomeChoice::Skip => {
-            edit(
-                &mut widget_state.home_state.paths[widget_state.home_state.home],
-                &key_value,
-            );
+        KeyCode::Enter => accept_home_choice(wizard),
+        _ if HOME_CHOICES[wizard.home_state.home].0 != HomeChoice::Skip => {
+            edit(&mut wizard.home_state.paths[wizard.home_state.home], &key);
         }
         _ => {}
     }
 }
 
-fn key_crew(widget_state: &mut Wizard, key_value: KeyEvent) {
-    match key_value.code {
+fn key_crew(wizard: &mut Wizard, key: KeyEvent) {
+    match key.code {
         KeyCode::Left => {
-            widget_state.crew_state.preset = (widget_state.crew_state.preset + PRESETS.len() - 1) % PRESETS.len();
-            widget_state.build_crew();
+            wizard.crew_state.preset = (wizard.crew_state.preset + PRESETS.len() - 1) % PRESETS.len();
+            wizard.build_crew();
         }
         KeyCode::Right => {
-            widget_state.crew_state.preset = (widget_state.crew_state.preset + 1) % PRESETS.len();
-            widget_state.build_crew();
+            wizard.crew_state.preset = (wizard.crew_state.preset + 1) % PRESETS.len();
+            wizard.build_crew();
         }
         KeyCode::Down => {
-            widget_state.crew_state.focus = (widget_state.crew_state.focus + 1) % widget_state.crew_state.crew.len();
+            wizard.crew_state.focus = (wizard.crew_state.focus + 1) % wizard.crew_state.crew.len();
         }
         KeyCode::Up => {
-            widget_state.crew_state.focus = (widget_state.crew_state.focus + widget_state.crew_state.crew.len() - 1)
-                % widget_state.crew_state.crew.len();
+            wizard.crew_state.focus =
+                (wizard.crew_state.focus + wizard.crew_state.crew.len() - 1) % wizard.crew_state.crew.len();
         }
         KeyCode::Char(' ') => {
-            let agent = widget_state.random_avatar();
-            let text = widget_state.spawn();
-            let message = &mut widget_state.crew_state.crew[widget_state.crew_state.focus];
+            let avatar = wizard.random_avatar();
+            let spawn = wizard.spawn();
+            let member = &mut wizard.crew_state.crew[wizard.crew_state.focus];
 
-            message.avatar = agent;
-            message.spawn = text;
+            member.avatar = avatar;
+            member.spawn = spawn;
         }
         KeyCode::Enter => {
-            if let Some(why) = widget_state.crew_problem() {
-                widget_state.harness_state.note = why;
+            if let Some(why) = wizard.crew_problem() {
+                wizard.harness_state.note = why;
             } else {
-                widget_state.go(3);
+                wizard.go(3);
             }
         }
         _ => {
-            let mut name = std::mem::take(&mut widget_state.crew_state.crew[widget_state.crew_state.focus].name);
+            let mut name = std::mem::take(&mut wizard.crew_state.crew[wizard.crew_state.focus].name);
 
-            if edit(&mut name, &key_value) {
+            if edit(&mut name, &key) {
                 name = clean_name(&name);
             }
 
-            widget_state.crew_state.crew[widget_state.crew_state.focus].name = name;
+            wizard.crew_state.crew[wizard.crew_state.focus].name = name;
         }
     }
 }

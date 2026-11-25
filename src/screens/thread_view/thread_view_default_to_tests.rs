@@ -42,7 +42,7 @@ fn a_message_without_a_name_goes_to_the_agents_of_the_last_one() {
 
     assert!(
         ops.iter()
-            .any(|output| output["op"] == "prompt" && output["to"] == serde_json::json!(["bob"])),
+            .any(|recorded| recorded["op"] == "prompt" && recorded["to"] == serde_json::json!(["bob"])),
         "{ops:?}"
     );
 

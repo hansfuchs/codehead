@@ -23,9 +23,9 @@ fn threads_tab_repo_tabs_and_the_claude_view() {
         },
     ];
     app.thread_list.tlist.set_cards(vec![
-        card("one", |character| character.repo = Some("/x/alpha".into())),
-        card("two", |character_value| character_value.repo = Some("/x/beta".into())),
-        card("three", |character_2| character_2.repo = Some("/x/beta".into())),
+        card("one", |card| card.repo = Some("/x/alpha".into())),
+        card("two", |card| card.repo = Some("/x/beta".into())),
+        card("three", |card| card.repo = Some("/x/beta".into())),
     ]);
     app.switch_tab(Tab::Threads);
     app.tabs_focus = false;
@@ -62,15 +62,15 @@ fn threads_tab_repo_tabs_and_the_claude_view() {
     assert_eq!(app.thread_list.tlist.view, crate::features::thread_list::View::Claude);
     assert_eq!(app.n_threads(), 1);
     assert_eq!(
-        app.current_session().map(|text_value| text_value.id.clone()),
+        app.current_session().map(|session| session.id.clone()),
         Some("s1".to_string())
     );
 
-    let text_2 = dump(&mut app, 120, 40);
+    let claude_view = dump(&mut app, 120, 40);
 
     assert!(
-        text_2.contains("claude work") && !text_2.contains("beta work"),
-        "{text_2}"
+        claude_view.contains("claude work") && !claude_view.contains("beta work"),
+        "{claude_view}"
     );
 
     // ↑ on its top row: the view tabs again
@@ -109,12 +109,12 @@ fn a_card_preview_uses_the_threads_full_read() {
     app.thread_list.worktrees = Some(vec![worktree]);
     app.thread_list
         .tlist
-        .set_cards(vec![card("a1", |character| character.title = "fix latency".into())]);
+        .set_cards(vec![card("a1", |card| card.title = "fix latency".into())]);
     app.switch_tab(Tab::Threads);
-    let mut thread = Terminal::new(TestBackend::new(100, 36)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(100, 36)).unwrap();
 
-    thread.draw(|file| app.draw(file)).unwrap();
-    let buffer = thread.backend().buffer();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let buffer = terminal.backend().buffer();
     let line = |y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>();
 
     assert!(line(app.preview.regions.preview.y).contains("fix latency"));
@@ -222,8 +222,8 @@ fn the_project_dropdown_filters_shows_the_brief_and_sees_new_projects() {
 
     assert!(app.project_selection.proj_menu.is_some());
 
-    for character in "bug".chars() {
-        key(&mut app, KeyCode::Char(character), KeyModifiers::NONE);
+    for letter in "bug".chars() {
+        key(&mut app, KeyCode::Char(letter), KeyModifiers::NONE);
     }
 
     let out = dump(&mut app, 130, 40);
@@ -270,8 +270,8 @@ fn the_flows_tab_draws_the_rail_with_its_arcs() {
 
     key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
 
-    for character in "rev".chars() {
-        key(&mut app, KeyCode::Char(character), KeyModifiers::NONE);
+    for letter in "rev".chars() {
+        key(&mut app, KeyCode::Char(letter), KeyModifiers::NONE);
     }
 
     let screen = dump(&mut app, 130, 30);
@@ -290,8 +290,8 @@ fn screens() {
 
     app.compose.field = Field::Title;
 
-    for character in "Fix deploy".chars() {
-        key(&mut app, KeyCode::Char(character), KeyModifiers::NONE);
+    for letter in "Fix deploy".chars() {
+        key(&mut app, KeyCode::Char(letter), KeyModifiers::NONE);
     }
 
     // title → repo → flow → agents → notes, enter: the notes picker

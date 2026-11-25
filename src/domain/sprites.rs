@@ -34,8 +34,8 @@ impl Sprite {
     }
 
     /// The live frame for status S.
-    pub(crate) fn frame(&self, text: Status) -> [String; HEIGHT] {
-        self.avatar.rows(text, crate::domain::avatar::now())
+    pub(crate) fn frame(&self, status: Status) -> [String; HEIGHT] {
+        self.avatar.rows(status, crate::domain::avatar::now())
     }
 }
 
@@ -46,18 +46,18 @@ pub(crate) fn from_id(id: &str) -> Option<Sprite> {
 
 /// FNV-1a: stable across builds (std hashers are not).
 fn fnv(text: &str) -> u64 {
-    text.bytes().fold(0xcbf2_9ce4_8422_2325, |height, bytes_value| {
-        (height ^ u64::from(bytes_value)).wrapping_mul(0x0100_0000_01b3)
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
     })
 }
 
 /// Avatar for an agent without a saved one: a stable regi pick.
 pub(crate) fn default_for(name: &str) -> Sprite {
-    let count_value = Cat::Regi.count() as u64;
+    let count = Cat::Regi.count() as u64;
 
     Sprite::of(Avatar {
         cat: Cat::Regi,
-        idx: (fnv(name) % count_value) as usize,
+        idx: (fnv(name) % count) as usize,
         ..Avatar::default()
     })
 }
@@ -66,7 +66,7 @@ pub(crate) fn default_for(name: &str) -> Sprite {
 pub(crate) fn random(cat: Cat) -> Sprite {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |directory| directory.as_nanos() as u64);
+        .map_or(0, |since| since.as_nanos() as u64);
 
     Sprite::of(Avatar {
         cat,

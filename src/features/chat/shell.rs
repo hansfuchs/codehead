@@ -4,23 +4,23 @@ use super::{Line, Modifier, Row, Span, Style, clock, markdown, theme};
 pub(super) const SHELL_LINES: usize = 20;
 /// The rows of the owner's shell COMMAND: `! command · 13:42 · exit 1`, its OUTPUT under it.
 pub(super) fn shell_rows(command: &str, output: &str, code: i32, ts: u64, dir: Option<&str>, width: usize) -> Vec<Row> {
-    let sh = Style::default().fg(theme::shell());
+    let shell = Style::default().fg(theme::shell());
     let mut head = vec![
-        Span::styled("! ", sh.add_modifier(Modifier::BOLD)),
+        Span::styled("! ", shell.add_modifier(Modifier::BOLD)),
         Span::styled(command.to_string(), theme::bold()),
         Span::styled(format!("  {}", clock(ts)), theme::muted()),
     ];
 
-    if let Some(directory) = dir {
+    if let Some(dir) = dir {
         let home = crate::infra::config::home().display().to_string();
 
-        let directory_value = match directory.strip_prefix(&home) {
+        let shown = match dir.strip_prefix(&home) {
             Some("") => "~".to_string(),
             Some(rest) if rest.starts_with('/') => format!("~{rest}"),
-            _ => directory.to_string(),
+            _ => dir.to_string(),
         };
 
-        head.push(Span::styled(format!(" · in {directory_value}"), theme::muted()));
+        head.push(Span::styled(format!(" · in {shown}"), theme::muted()));
     }
 
     if code != 0 {
@@ -38,7 +38,7 @@ pub(super) fn shell_rows(command: &str, output: &str, code: i32, ts: u64, dir: O
 
     let mut rows = vec![Row::plain(Line::from(head))];
     let lines: Vec<&str> = output.trim_end().lines().collect();
-    let bar = [Span::styled("  ⎿ ", sh)];
+    let bar = [Span::styled("  ⎿ ", shell)];
     let pad = [Span::raw("    ")];
 
     if lines.is_empty() {

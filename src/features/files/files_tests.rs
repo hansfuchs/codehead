@@ -22,13 +22,13 @@ fn agent_files_come_from_write_and_edit_calls_once() {
         )
     };
 
-    for error_value in [
+    for event in [
         tool("Write", serde_json::json!({"file_path": "/w/notes/plan.md"})),
         tool("Edit", serde_json::json!({"file_path": "src/a.rs"})),
         tool("Read", serde_json::json!({"file_path": "/w/README.md"})),
         tool("Edit", serde_json::json!({"file_path": "/w/notes/plan.md"})),
     ] {
-        store::append(&thread.id, &error_value).unwrap();
+        store::append(&thread.id, &event).unwrap();
     }
 
     assert_eq!(
@@ -41,60 +41,60 @@ fn agent_files_come_from_write_and_edit_calls_once() {
 
 #[test]
 fn notes_of_a_thread_by_their_1st_line() {
-    let directory = std::env::temp_dir().join(format!("codehead-notes-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
+    let dir = std::env::temp_dir().join(format!("codehead-notes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
 
-    std::fs::create_dir_all(directory.join("area/plans")).unwrap();
+    std::fs::create_dir_all(dir.join("area/plans")).unwrap();
     std::fs::write(
-        directory.join("area/plans/a.md"),
+        dir.join("area/plans/a.md"),
         "thread: abc123 · branch: main · status: open\n# A",
     )
     .unwrap();
-    std::fs::write(directory.join("area/plans/b.md"), "thread: other · branch: main\n").unwrap();
-    std::fs::write(directory.join("area/INDEX.md"), "- plans/a.md\n").unwrap();
+    std::fs::write(dir.join("area/plans/b.md"), "thread: other · branch: main\n").unwrap();
+    std::fs::write(dir.join("area/INDEX.md"), "- plans/a.md\n").unwrap();
 
-    assert_eq!(notes_of(&directory, "abc123"), [directory.join("area/plans/a.md")]);
+    assert_eq!(notes_of(&dir, "abc123"), [dir.join("area/plans/a.md")]);
 
-    let _ = std::fs::remove_dir_all(directory);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn share_commits_only_the_threads_home_files() {
-    let directory = std::env::temp_dir().join(format!("codehead-share-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
+    let dir = std::env::temp_dir().join(format!("codehead-share-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
 
-    std::fs::create_dir_all(directory.join("notes")).unwrap();
+    std::fs::create_dir_all(dir.join("notes")).unwrap();
 
-    let sh = |character: &str| {
+    let sh = |script: &str| {
         assert!(
             std::process::Command::new("sh")
                 .arg("-c")
-                .arg(character)
-                .current_dir(&directory)
+                .arg(script)
+                .current_dir(&dir)
                 .status()
                 .unwrap()
                 .success(),
-            "{character}"
+            "{script}"
         );
     };
 
     sh(
         "git init -q && git config user.email t@t && git config user.name t && echo x > other.md && git add -A && git commit -qm init",
     );
-    std::fs::write(directory.join("notes/plan.md"), "thread: t1\n").unwrap();
-    std::fs::write(directory.join("other.md"), "changed\n").unwrap();
-    let path = share(
-        &directory,
-        &[directory.join("notes/plan.md"), PathBuf::from("/elsewhere/x.rs")],
+    std::fs::write(dir.join("notes/plan.md"), "thread: t1\n").unwrap();
+    std::fs::write(dir.join("other.md"), "changed\n").unwrap();
+    let summary = share(
+        &dir,
+        &[dir.join("notes/plan.md"), PathBuf::from("/elsewhere/x.rs")],
         "fix deploy",
     )
     .unwrap();
 
-    assert_eq!(path, "home repo: 1 files committed (0 upstream: 0 push)");
+    assert_eq!(summary, "home repo: 1 files committed (0 upstream: 0 push)");
 
     let log = std::process::Command::new("git")
         .arg("-C")
-        .arg(&directory)
+        .arg(&dir)
         .args(["show", "--stat", "--format=%s", "HEAD"])
         .output()
         .unwrap();
@@ -105,11 +105,11 @@ fn share_commits_only_the_threads_home_files() {
         "{log}"
     );
     assert_eq!(
-        share(&directory, &[directory.join("notes/plan.md")], "x").unwrap(),
+        share(&dir, &[dir.join("notes/plan.md")], "x").unwrap(),
         "home repo: 0 changes to share"
     );
 
-    let _ = std::fs::remove_dir_all(directory);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

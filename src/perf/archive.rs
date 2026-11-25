@@ -72,8 +72,8 @@ fn settle(fixture: &ArchiveFixture) {
 }
 
 fn ignored_files(worktree: &Path) {
-    for directory in 0..50 {
-        let dir = worktree.join(format!("node_modules/p{directory}"));
+    for package in 0..50 {
+        let dir = worktree.join(format!("node_modules/p{package}"));
 
         std::fs::create_dir_all(&dir).unwrap();
         write_package(&dir);
@@ -81,8 +81,8 @@ fn ignored_files(worktree: &Path) {
 }
 
 fn write_package(dir: &Path) {
-    for file in 0..100 {
-        std::fs::write(dir.join(format!("f{file}.js")), "module.exports = 1;\n").unwrap();
+    for index in 0..100 {
+        std::fs::write(dir.join(format!("f{index}.js")), "module.exports = 1;\n").unwrap();
     }
 }
 

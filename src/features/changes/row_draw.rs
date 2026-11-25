@@ -12,7 +12,7 @@ impl View {
 
 fn head_details(file: &FileDiff) -> (String, usize, String) {
     let (name, skip) = match &file.old_path {
-        Some(output) => (format!("{output} → {}", file.path), output.chars().count() + 3),
+        Some(old) => (format!("{old} → {}", file.path), old.chars().count() + 3),
         None => (file.path.clone(), 0),
     };
 
@@ -55,11 +55,11 @@ fn hunk_line(
     )])
 }
 
-fn conflict_line(width: usize, character: &[String]) -> Line<'static> {
-    let files = if character.is_empty() {
+fn conflict_line(width: usize, conflicts: &[String]) -> Line<'static> {
+    let files = if conflicts.is_empty() {
         "0 conflicts".to_string()
     } else {
-        format!("{} conflicts: {}", character.len(), character.join(", "))
+        format!("{} conflicts: {}", conflicts.len(), conflicts.join(", "))
     };
 
     Line::from(vec![
@@ -79,31 +79,34 @@ fn comment_line(
     inner: usize,
     bar: impl Fn(Vec<Span<'static>>) -> Line<'static>,
     ci: usize,
-    comment: usize,
+    line: usize,
 ) -> Line<'static> {
-    let Some(comment_value) = view.comment_state.comments.get(ci) else {
+    let Some(comment) = view.comment_state.comments.get(ci) else {
         return bar(Vec::new());
     };
 
-    let st = theme::fg(theme::pal().progress());
+    let style = theme::fg(theme::pal().progress());
 
-    let text = |line: &str, indent: usize, st: Style| {
+    let text = |text_line: &str, indent: usize, style: Style| {
         bar(vec![
             Span::raw(" ".repeat(indent)),
-            Span::styled(crate::ui::thread_card::fit(line, inner.saturating_sub(indent)), st),
+            Span::styled(
+                crate::ui::thread_card::fit(text_line, inner.saturating_sub(indent)),
+                style,
+            ),
         ])
     };
 
-    match view.clines(comment_value).get(comment).copied().unwrap_or(CLine::Head) {
-        CLine::Text(j) => return text(comment_value.text.lines().nth(j).unwrap_or_default(), 2, st),
-        CLine::RText(result, j) => return reply_text_line(comment_value, text, result, j),
-        CLine::Reply(result) => return reply_head_line(inner, &bar, comment_value, result),
+    match view.clines(comment).get(line).copied().unwrap_or(CLine::Head) {
+        CLine::Text(j) => return text(comment.text.lines().nth(j).unwrap_or_default(), 2, style),
+        CLine::RText(reply, j) => return reply_text_line(comment, text, reply, j),
+        CLine::Reply(reply) => return reply_head_line(inner, &bar, comment, reply),
         CLine::Head => {}
     }
 
     // the 1st row: picked mark, severity, id, lines, author (you / @agent), sent; folded:
     // the count of the lines and replies out of view, the unseen replies
-    comment_head_line(view, inner, bar, comment_value, st)
+    comment_head_line(view, inner, bar, comment, style)
 }
 
 fn comment_head_line(
@@ -111,7 +114,7 @@ fn comment_head_line(
     inner: usize,
     bar: impl Fn(Vec<Span<'static>>) -> Line<'static>,
     comment: &super::Comment,
-    st: Style,
+    style: Style,
 ) -> Line<'static> {
     let pick = if view.scm.comment_picks.contains(&comment.id) {
         "● "
@@ -160,10 +163,10 @@ fn comment_head_line(
                 .fg(scm::level_color(comment.level))
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(head, st.add_modifier(Modifier::BOLD)),
+        Span::styled(head, style.add_modifier(Modifier::BOLD)),
         Span::styled(
             crate::ui::thread_card::fit(comment.text.lines().next().unwrap_or_default(), room),
-            st,
+            style,
         ),
         Span::styled(tail, theme::muted()),
         Span::styled(fresh, theme::accent_bold()),
@@ -223,7 +226,7 @@ fn review_thread_line(
     ti: usize,
     line_index: usize,
 ) -> Line<'static> {
-    let Some(thread) = view.pr_src.as_ref().and_then(|text| text.threads.get(ti)) else {
+    let Some(thread) = view.pr_src.as_ref().and_then(|src| src.threads.get(ti)) else {
         return bar(Vec::new());
     };
 
@@ -233,15 +236,15 @@ fn review_thread_line(
         return bar(Vec::new());
     };
 
-    let st = theme::fg(theme::pal().progress());
+    let style = theme::fg(theme::pal().progress());
 
     if *head {
         bar(vec![Span::styled(
             crate::ui::thread_card::fit(text, inner),
-            st.add_modifier(Modifier::BOLD),
+            style.add_modifier(Modifier::BOLD),
         )])
     } else {
-        bar(vec![Span::styled(crate::ui::thread_card::fit(text, inner), st)])
+        bar(vec![Span::styled(crate::ui::thread_card::fit(text, inner), style)])
     }
 }
 
@@ -252,30 +255,30 @@ fn finding_line(
     fi: usize,
     line_index: usize,
 ) -> Line<'static> {
-    let Some(x) = view.reviewer.review.as_ref().and_then(|result| result.findings.get(fi)) else {
+    let Some(finding) = view.reviewer.review.as_ref().and_then(|review| review.findings.get(fi)) else {
         return bar(Vec::new());
     };
 
-    let color = match x.severity.as_str() {
+    let color = match finding.severity.as_str() {
         "critical" => theme::pal().error(),
         "major" => theme::pal().caution(),
         _ => theme::pal().subtext0,
     };
 
-    let st = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
 
     if line_index == 0 {
-        let head = format!("⚠ {} · ", x.severity);
+        let head = format!("⚠ {} · ", finding.severity);
 
         bar(vec![
-            Span::styled(head.clone(), st),
+            Span::styled(head.clone(), style),
             Span::styled(
-                crate::ui::thread_card::fit(&x.title, inner.saturating_sub(head.width())),
-                st,
+                crate::ui::thread_card::fit(&finding.title, inner.saturating_sub(head.width())),
+                style,
             ),
         ])
     } else {
-        let line = x.body.lines().nth(line_index - 1).unwrap_or_default();
+        let line = finding.body.lines().nth(line_index - 1).unwrap_or_default();
 
         bar(vec![
             Span::raw("  "),
@@ -296,7 +299,7 @@ fn side_line(
     hunk_index: usize,
     columns: (Option<usize>, Option<usize>),
 ) -> Line<'static> {
-    let (ls, path) = (&file.hunks[hunk_index].lines, view.painted(file, hunk_index));
+    let (lines, painted) = (&file.hunks[hunk_index].lines, view.painted(file, hunk_index));
     let num_w = view.layout.num_w.get(&row.file).copied().unwrap_or(3);
     let half = inner.saturating_sub(3) / 2;
 
@@ -305,18 +308,18 @@ fn side_line(
             return vec![Span::raw(" ".repeat(half))];
         };
 
-        let line = &ls[line_index];
-        let count = if left { line.old } else { line.new }.unwrap_or(0);
-        let mut value = vec![
-            Span::styled(format!("{count:>num_w$}"), theme::muted()),
+        let line = &lines[line_index];
+        let number = if left { line.old } else { line.new }.unwrap_or(0);
+        let mut spans = vec![
+            Span::styled(format!("{number:>num_w$}"), theme::muted()),
             sign_span(line.kind),
         ];
 
-        if let Some(pl) = path.get(line_index) {
-            value.extend(painted_spans(pl, line.kind, half.saturating_sub(num_w + 3)));
+        if let Some(painted_line) = painted.get(line_index) {
+            spans.extend(painted_spans(painted_line, line.kind, half.saturating_sub(num_w + 3)));
         }
 
-        value
+        spans
     };
 
     let mut text = cell(columns.0, true);
@@ -332,13 +335,16 @@ fn group_line(view: &View, width: usize, group: Option<usize>, cat: Cat) -> Line
         view.classifier
             .rank
             .as_ref()
-            .and_then(|result| result.groups.get(group))
-            .map(|gr| (group, gr))
+            .and_then(|rank| rank.groups.get(group))
+            .map(|ranked| (group, ranked))
     }) {
-        Some((gi, gr)) => Line::from(vec![
-            Span::styled(format!(" {} · {}", gi + 1, gr.title), theme::accent_bold()),
+        Some((index, ranked)) => Line::from(vec![
+            Span::styled(format!(" {} · {}", index + 1, ranked.title), theme::accent_bold()),
             Span::styled(
-                crate::ui::thread_card::fit(&format!("  {}", gr.why), width.saturating_sub(gr.title.width() + 8)),
+                crate::ui::thread_card::fit(
+                    &format!("  {}", ranked.why),
+                    width.saturating_sub(ranked.title.width() + 8),
+                ),
                 theme::muted(),
             ),
         ]),
@@ -355,7 +361,7 @@ fn diff_line(
     hunk_index: usize,
     line_index: usize,
 ) -> Line<'static> {
-    let (line, path) = (
+    let (line, painted) = (
         &file.hunks[hunk_index].lines[line_index],
         view.painted(file, hunk_index),
     );
@@ -370,8 +376,8 @@ fn diff_line(
     let room = inner.saturating_sub(num.len() + 3);
     let mut spans = vec![Span::styled(num, theme::muted()), sign_span(line.kind)];
 
-    if let Some(pl) = path.get(line_index) {
-        spans.extend(painted_spans(pl, line.kind, room));
+    if let Some(painted_line) = painted.get(line_index) {
+        spans.extend(painted_spans(painted_line, line.kind, room));
     }
 
     bar(spans)
@@ -382,19 +388,15 @@ fn diff_line(
 fn border(i: usize, view: &View) -> Style {
     let on = match view.scm.file_at() {
         Some(file) => file == i,
-        None => view.layout.rows.get(view.at).is_some_and(|result| {
-            result.file == i
-                && !matches!(
-                    result.body,
-                    Body::Blank | Body::Group(..) | Body::Hits(_) | Body::Conflict
-                )
+        None => view.layout.rows.get(view.at).is_some_and(|row| {
+            row.file == i && !matches!(row.body, Body::Blank | Body::Group(..) | Body::Hits(_) | Body::Conflict)
         }),
     };
 
     if on { theme::accent() } else { theme::line() }
 }
 
-/// The head row of file I (F): reviewed mark, staged mark, path (filter hits marked), level,
+/// The head row of file I (FILE): reviewed mark, staged mark, path (filter hits marked), level,
 /// category, size.
 fn head_line(i: usize, file: &FileDiff, width: usize, view: &View) -> Line<'static> {
     let reviewed = view.is_reviewed(file);
@@ -430,11 +432,10 @@ fn head_line(i: usize, file: &FileDiff, width: usize, view: &View) -> Line<'stat
         .filter_state
         .hits
         .get(&i)
-        .map(|message| {
-            message
-                .iter()
-                .map(|x| x + skip)
-                .filter(|&x| x < fitted.chars().count())
+        .map(|hits| {
+            hits.iter()
+                .map(|hit| hit + skip)
+                .filter(|&hit| hit < fitted.chars().count())
                 .collect()
         })
         .unwrap_or_default();
@@ -450,7 +451,7 @@ fn head_line(i: usize, file: &FileDiff, width: usize, view: &View) -> Line<'stat
         head.push(Span::styled(" updated", theme::fg(theme::pal().attention())));
     }
 
-    let used: usize = head.iter().map(|text| text.content.width()).sum();
+    let used: usize = head.iter().map(|span| span.content.width()).sum();
     let padding = width.saturating_sub(used + right.width() + 3);
 
     head.push(Span::styled(format!(" {}", "─".repeat(padding)), border));
@@ -465,18 +466,18 @@ fn line_view(view: &View, i: usize) -> Line<'static> {
         return Line::raw("");
     };
 
-    let width = usize::from(view.layout.built.map_or(80, |bytes| bytes.0));
+    let width = usize::from(view.layout.built.map_or(80, |built| built.0));
     let inner = width.saturating_sub(4);
     let border = border(row.file, view);
 
     let bar = |mut spans: Vec<Span<'static>>| -> Line<'static> {
-        let used: usize = spans.iter().map(|text| text.content.width()).sum();
-        let mut value = vec![Span::styled("│ ", border)];
+        let used: usize = spans.iter().map(|span| span.content.width()).sum();
+        let mut line = vec![Span::styled("│ ", border)];
 
-        value.append(&mut spans);
-        value.push(Span::raw(" ".repeat(inner.saturating_sub(used))));
-        value.push(Span::styled(" │", border));
-        Line::from(value)
+        line.append(&mut spans);
+        line.push(Span::raw(" ".repeat(inner.saturating_sub(used))));
+        line.push(Span::styled(" │", border));
+        Line::from(line)
     };
 
     let Some(file) = view.changes.files.get(row.file) else {
@@ -485,9 +486,9 @@ fn line_view(view: &View, i: usize) -> Line<'static> {
 
     match row.body {
         Body::Conflict => {
-            let character = view.changes.stopped.clone().unwrap_or_default();
+            let conflicts = view.changes.stopped.clone().unwrap_or_default();
 
-            conflict_line(width, &character)
+            conflict_line(width, &conflicts)
         }
         Body::Blank => Line::raw(""),
         Body::Group(group, cat) => group_line(view, width, group, cat),
@@ -498,19 +499,19 @@ fn line_view(view: &View, i: usize) -> Line<'static> {
         Body::Head => head_line(row.file, file, width, view),
         Body::Foot => Line::styled(format!("└{}┘", "─".repeat(width.saturating_sub(2))), border),
         Body::Why => {
-            let why = view.ranked(&file.path).map(|x| x.2).unwrap_or_default();
+            let why = view.ranked(&file.path).map(|(_, _, why)| why).unwrap_or_default();
 
             bar(vec![Span::styled(
                 crate::ui::thread_card::fit(why, inner),
                 theme::muted().add_modifier(Modifier::ITALIC),
             )])
         }
-        Body::Note(count) => bar(vec![Span::styled(count.to_string(), theme::muted())]),
+        Body::Note(note) => bar(vec![Span::styled(note.to_string(), theme::muted())]),
         Body::Hunk(hunk_index) => hunk_line(inner, bar, file, hunk_index),
         Body::Diff(hunk_index, line_index) => diff_line(view, row, inner, bar, file, hunk_index, line_index),
-        Body::Side(hunk_index, dk, ak) => side_line(view, row, inner, bar, file, hunk_index, (dk, ak)),
+        Body::Side(hunk_index, removed, added) => side_line(view, row, inner, bar, file, hunk_index, (removed, added)),
         Body::Finding(fi, line_index) => finding_line(view, inner, bar, fi, line_index),
         Body::Gh(ti, line_index) => review_thread_line(view, inner, bar, ti, line_index),
-        Body::Comment(ci, comment) => comment_line(view, inner, bar, ci, comment),
+        Body::Comment(ci, line) => comment_line(view, inner, bar, ci, line),
     }
 }

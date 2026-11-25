@@ -7,35 +7,35 @@ impl View {
     }
 }
 
-fn refresh_view(state: &mut View, now: bool) {
-    state.source_reads.again |= now;
+fn refresh_view(view: &mut View, now: bool) {
+    view.source_reads.again |= now;
 
-    if !state.source_reads.again && state.source_reads.loaded.is_some() {
+    if !view.source_reads.again && view.source_reads.loaded.is_some() {
         return;
     }
 
-    state.source_reads.loaded = Some(Instant::now());
+    view.source_reads.loaded = Some(Instant::now());
 
     // tests: at once
     if cfg!(test) {
-        state.source_reads.again = false;
-        let files = load(&state.id, &state.dir);
-        let _ = state.apply(files);
+        view.source_reads.again = false;
+        let files = load(&view.id, &view.dir);
+        let _ = view.apply(files);
 
         return;
     }
 
     // a read under way: 1 more after it (the change came after its start)
-    if !state.source_reads.reads.waiting(&()) {
-        state.source_reads.again = false;
-        state.source_reads.reads.forget(&());
-        let (id, dir) = (state.id.clone(), state.dir.clone());
+    if !view.source_reads.reads.waiting(&()) {
+        view.source_reads.again = false;
+        view.source_reads.reads.forget(&());
+        let (id, dir) = (view.id.clone(), view.dir.clone());
 
-        state.source_reads.reads.request((), move || {
-            let value = load(&id, &dir);
+        view.source_reads.reads.request((), move || {
+            let files = load(&id, &dir);
 
             crate::infra::bus::wake();
-            value
+            files
         });
     }
 }

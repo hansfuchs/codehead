@@ -8,28 +8,23 @@ pub(crate) fn tasks(dir: &Path) -> Vec<Task> {
     let home = crate::infra::config::home();
     let (mut just, mut pkg, mut make) = (None, None, None);
 
-    for directory in dir.ancestors() {
-        let find = |names: &[&str]| {
-            names
-                .iter()
-                .map(|count| directory.join(count))
-                .find(|path| path.is_file())
-        };
+    for ancestor in dir.ancestors() {
+        let find = |names: &[&str]| names.iter().map(|name| ancestor.join(name)).find(|path| path.is_file());
 
         just = just.or_else(|| find(&["justfile", "Justfile", ".justfile"]));
-        pkg = pkg.or_else(|| find(&["package.json"]).map(|path_value| (path_value, directory.to_path_buf())));
+        pkg = pkg.or_else(|| find(&["package.json"]).map(|path| (path, ancestor.to_path_buf())));
         make = make.or_else(|| find(&["GNUmakefile", "makefile", "Makefile"]));
 
-        if directory.join(".git").exists() || directory == home {
+        if ancestor.join(".git").exists() || ancestor == home {
             break;
         }
     }
 
-    let read = |path_2: &Path| std::fs::read_to_string(path_2).unwrap_or_default();
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
     let mut out = Vec::new();
 
-    if let Some(path_3) = just {
-        out.extend(just_recipes(&read(&path_3)).into_iter().map(|(name, doc)| Task {
+    if let Some(justfile) = just {
+        out.extend(just_recipes(&read(&justfile)).into_iter().map(|(name, doc)| Task {
             runner: "just",
             run: format!("just {name}"),
             name,
@@ -37,11 +32,11 @@ pub(crate) fn tasks(dir: &Path) -> Vec<Task> {
         }));
     }
 
-    if let Some((path_4, root)) = pkg {
+    if let Some((package_json, root)) = pkg {
         let pm = package_manager(&root);
 
-        out.extend(package_scripts(&read(&path_4)).into_iter().map(|(name, doc)| {
-            let run = run(pm, &name);
+        out.extend(package_scripts(&read(&package_json)).into_iter().map(|(name, doc)| {
+            let run = script_command(pm, &name);
 
             Task {
                 runner: pm,
@@ -52,8 +47,8 @@ pub(crate) fn tasks(dir: &Path) -> Vec<Task> {
         }));
     }
 
-    if let Some(path_5) = make {
-        out.extend(make_targets(&read(&path_5)).into_iter().map(|(name, doc)| Task {
+    if let Some(makefile) = make {
+        out.extend(make_targets(&read(&makefile)).into_iter().map(|(name, doc)| Task {
             runner: "make",
             run: format!("make {name}"),
             name,
@@ -64,7 +59,7 @@ pub(crate) fn tasks(dir: &Path) -> Vec<Task> {
     out
 }
 
-fn run(pm: &str, name: &String) -> String {
+fn script_command(pm: &str, name: &String) -> String {
     if matches!(pm, "pnpm" | "yarn") {
         format!("{pm} {name}")
     } else {
@@ -75,12 +70,12 @@ fn run(pm: &str, name: &String) -> String {
 /// The package manager of the package in DIR (its lockfile, up to the repo top): pnpm, yarn,
 /// bun, else npm.
 pub(super) fn package_manager(dir: &Path) -> &'static str {
-    for directory in dir.ancestors() {
-        if let Some(value) = nearest_lockfile(directory) {
-            return value;
+    for ancestor in dir.ancestors() {
+        if let Some(pm) = lockfile_manager(ancestor) {
+            return pm;
         }
 
-        if directory.join(".git").exists() {
+        if ancestor.join(".git").exists() {
             break;
         }
     }
@@ -88,7 +83,7 @@ pub(super) fn package_manager(dir: &Path) -> &'static str {
     "npm"
 }
 
-fn nearest_lockfile(directory: &Path) -> Option<&'static str> {
+fn lockfile_manager(dir: &Path) -> Option<&'static str> {
     for (file, pm) in [
         ("pnpm-lock.yaml", "pnpm"),
         ("pnpm-workspace.yaml", "pnpm"),
@@ -97,7 +92,7 @@ fn nearest_lockfile(directory: &Path) -> Option<&'static str> {
         ("bun.lockb", "bun"),
         ("package-lock.json", "npm"),
     ] {
-        if directory.join(file).is_file() {
+        if dir.join(file).is_file() {
             return Some(pm);
         }
     }
@@ -116,34 +111,32 @@ pub(super) fn just_recipes(text: &str) -> Vec<(String, String)> {
             continue;
         }
 
-        let thread = line.trim();
+        let trimmed = line.trim();
 
-        if thread.is_empty() {
+        if trimmed.is_empty() {
             (doc, private) = (String::new(), false);
             continue;
         }
 
-        if let Some(character) = thread.strip_prefix('#') {
-            read_recipe_doc_comment(&mut doc, character);
+        if let Some(comment) = trimmed.strip_prefix('#') {
+            read_recipe_doc_comment(&mut doc, comment);
 
             continue;
         }
 
-        if let Some(agent) = thread.strip_prefix('[') {
-            private |= agent.starts_with("private");
+        if let Some(attribute) = trimmed.strip_prefix('[') {
+            private |= attribute.starts_with("private");
 
-            read_recipe_doc_attribute(&mut doc, agent);
+            read_recipe_doc_attribute(&mut doc, attribute);
 
             continue;
         }
 
-        let body = thread.strip_prefix('@').unwrap_or(thread);
+        let body = trimmed.strip_prefix('@').unwrap_or(trimmed);
 
         let name: String = body
             .chars()
-            .take_while(|character_value| {
-                character_value.is_alphanumeric() || *character_value == '_' || *character_value == '-'
-            })
+            .take_while(|character| character.is_alphanumeric() || *character == '_' || *character == '-')
             .collect();
 
         let rest = &body[name.len()..];
@@ -158,7 +151,7 @@ pub(super) fn just_recipes(text: &str) -> Vec<(String, String)> {
             && !rest.contains(":=")
             && !private
             && !name.starts_with('_')
-            && !out.iter().any(|(count, _)| *count == name)
+            && !out.iter().any(|(existing, _)| *existing == name)
         {
             out.push((name, std::mem::take(&mut doc)));
         }
@@ -169,18 +162,15 @@ pub(super) fn just_recipes(text: &str) -> Vec<(String, String)> {
     out
 }
 
-fn read_recipe_doc_attribute(doc: &mut String, agent: &str) {
-    if let Some(directory_value) = agent
-        .strip_prefix("doc(")
-        .and_then(|directory| directory.split('"').nth(1))
-    {
-        *doc = directory_value.to_string();
+fn read_recipe_doc_attribute(doc: &mut String, attribute: &str) {
+    if let Some(doc_text) = attribute.strip_prefix("doc(").and_then(|args| args.split('"').nth(1)) {
+        *doc = doc_text.to_string();
     }
 }
 
-fn read_recipe_doc_comment(doc: &mut String, character: &str) {
-    if !character.starts_with('!') {
-        *doc = character.trim().to_string();
+fn read_recipe_doc_comment(doc: &mut String, comment: &str) {
+    if !comment.starts_with('!') {
+        *doc = comment.trim().to_string();
     }
 }
 
@@ -192,11 +182,11 @@ pub(super) fn package_scripts(text: &str) -> Vec<(String, String)> {
 
     value
         .get("scripts")
-        .and_then(|text_value| text_value.as_object())
-        .map(|output| {
-            output
+        .and_then(|scripts| scripts.as_object())
+        .map(|scripts| {
+            scripts
                 .iter()
-                .map(|(key, value_value)| (key.clone(), value_value.as_str().unwrap_or_default().to_string()))
+                .map(|(key, command)| (key.clone(), command.as_str().unwrap_or_default().to_string()))
                 .collect()
         })
         .unwrap_or_default()
@@ -213,8 +203,8 @@ pub(super) fn make_targets(text: &str) -> Vec<(String, String)> {
             continue;
         }
 
-        if let Some(character) = line.strip_prefix('#') {
-            doc = character.trim_start_matches('#').trim().to_string();
+        if let Some(comment) = line.strip_prefix('#') {
+            doc = comment.trim_start_matches('#').trim().to_string();
             continue;
         }
 
@@ -230,7 +220,9 @@ pub(super) fn make_targets(text: &str) -> Vec<(String, String)> {
             continue;
         }
 
-        let own = rest.split_once("##").map(|(_, directory)| directory.trim().to_string());
+        let own = rest
+            .split_once("##")
+            .map(|(_, inline_doc)| inline_doc.trim().to_string());
 
         append_make_targets(&mut out, &doc, head, own.as_deref());
 
@@ -251,7 +243,7 @@ fn append_make_targets(out: &mut Vec<(String, String)>, doc: &str, head: &str, o
 }
 
 fn check_make_target(out: &[(String, String)], name: &str) -> ControlFlow<()> {
-    if name.starts_with('.') || name.contains(['%', '$', '(']) || out.iter().any(|(count, _)| count == name) {
+    if name.starts_with('.') || name.contains(['%', '$', '(']) || out.iter().any(|(existing, _)| existing == name) {
         return ControlFlow::Break(());
     }
 

@@ -33,24 +33,24 @@ fn keys_and_colors_tables_round_trip() {
     );
     assert_eq!(file.colors["accent"], "#112233");
 
-    let path = palette_of(&file);
+    let palette = palette_of(&file);
 
-    assert_eq!(path.accent, ratatui::style::Color::Rgb(0x11, 0x22, 0x33));
-    assert_eq!(path.text, crate::domain::palette::AMBER.text);
+    assert_eq!(palette.accent, ratatui::style::Color::Rgb(0x11, 0x22, 0x33));
+    assert_eq!(palette.text, crate::domain::palette::AMBER.text);
 
     // written back: same tables; unset keys go
-    let mut group = file.clone();
+    let mut edited = file.clone();
 
-    group.set("colors.accent", None);
-    group.set("keys.command", None);
+    edited.set("colors.accent", None);
+    edited.set("keys.command", None);
     let text = document(
         "[keys]\nmenu = \"ctrl+p\"\ncommand = \"%\"\n[colors]\nscheme = \"amber\"\naccent = \"#112233\"\n",
-        &group,
+        &edited,
     )
     .unwrap();
     let back = parse(&text).unwrap();
 
-    assert_eq!(back, group);
+    assert_eq!(back, edited);
 
     for bad in [
         "[keys]\nmenu = \"x\"",
@@ -65,13 +65,13 @@ fn keys_and_colors_tables_round_trip() {
         assert!(parse(bad).is_err(), "{bad}");
     }
 
-    let bytes = Bind::parse("ctrl+p").unwrap();
+    let ctrl_p = Bind::parse("ctrl+p").unwrap();
 
-    assert!(bytes.matches(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
-    assert!(!bytes.matches(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+    assert!(ctrl_p.matches(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+    assert!(!ctrl_p.matches(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
 
     // cmd+p (super) = ctrl+p
-    assert!(bytes.matches(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::SUPER)));
+    assert!(ctrl_p.matches(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::SUPER)));
     assert!(
         Bind::parse("F2")
             .unwrap()
@@ -95,12 +95,12 @@ fn rejects_unknown_and_non_string() {
 
 #[test]
 fn expands_home() {
-    let height = home();
+    let home = home();
 
-    assert_eq!(expand("~/a"), height.join("a"));
-    assert_eq!(expand("~"), height);
+    assert_eq!(expand("~/a"), home.join("a"));
+    assert_eq!(expand("~"), home);
     assert_eq!(expand("/abs"), PathBuf::from("/abs"));
-    assert_eq!(expand("rel"), height.join("rel"));
+    assert_eq!(expand("rel"), home.join("rel"));
 }
 
 #[test]
@@ -204,24 +204,24 @@ fn layers_merge_device_over_shared_and_save_each_key_to_its_file() {
     .unwrap();
     std::fs::write(home.join("codehead/devices/mbp.toml"), "# this mac\neditor = 'zed'\n").unwrap();
     let layers = read_layers(&local).unwrap();
-    let file_value = layers.merged();
+    let merged = layers.merged();
 
     assert_eq!(
         (
-            file_value.prefix.as_deref(),
-            file_value.editor.as_deref(),
-            file_value.device.as_deref()
+            merged.prefix.as_deref(),
+            merged.editor.as_deref(),
+            merged.device.as_deref()
         ),
         (Some("task"), Some("zed"), Some("mbp"))
     );
 
-    let mut group = file_value.clone();
+    let mut edited = merged.clone();
 
-    group.editor = Some("cursor".into());
-    group.messages = Some("lines".into());
-    let after = save_layers(&layers, &group).unwrap();
+    edited.editor = Some("cursor".into());
+    edited.messages = Some("lines".into());
+    let after = save_layers(&layers, &edited).unwrap();
 
-    assert_eq!(after.merged(), group);
+    assert_eq!(after.merged(), edited);
 
     let dev = std::fs::read_to_string(home.join("codehead/devices/mbp.toml")).unwrap();
 
@@ -235,19 +235,19 @@ fn layers_merge_device_over_shared_and_save_each_key_to_its_file() {
     assert_eq!(after.local.file.prefix, None);
 
     // a new device: only the pointer changes, the new device's file starts empty
-    let mut height = after.merged();
+    let mut moved_file = after.merged();
 
-    height.device = Some("mini".into());
-    height.editor = Some("idea".into());
-    let moved = save_layers(&after, &height).unwrap();
+    moved_file.device = Some("mini".into());
+    moved_file.editor = Some("idea".into());
+    let moved = save_layers(&after, &moved_file).unwrap();
 
     assert_eq!(moved.local.file.device.as_deref(), Some("mini"));
 
-    let message = moved.merged();
+    let merged = moved.merged();
 
     // editor: a device key (the save took it out of shared), mini: 0 file yet
     assert_eq!(
-        (message.editor.as_deref(), message.messages.as_deref()),
+        (merged.editor.as_deref(), merged.messages.as_deref()),
         (None, Some("lines"))
     );
     assert!(!home.join("codehead/devices/mini.toml").exists());

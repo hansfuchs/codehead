@@ -9,18 +9,18 @@ fn archive_removes_the_worktree_keeps_the_branch() {
 
     std::fs::create_dir_all(&base).unwrap();
 
-    let sh = |character: &str| {
+    let sh = |script: &str| {
         assert!(
             Command::new("sh")
                 .arg("-c")
-                .arg(character)
+                .arg(script)
                 .current_dir(&base)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()
                 .unwrap()
                 .success(),
-            "{character}"
+            "{script}"
         );
     };
 
@@ -63,19 +63,19 @@ fn verify_archive_removes_the_worktree_keeps_the_branch(base: PathBuf, repo: &Pa
         "feat: free for a new worktree"
     );
 
-    let agent = store::load(&thread.id).unwrap();
+    let stored = store::load(&thread.id).unwrap();
 
     assert_eq!(
         (
-            agent.state.as_str(),
-            agent.worktree.as_deref(),
-            agent.worktree_pending.as_deref(),
-            agent.port
+            stored.state.as_str(),
+            stored.worktree.as_deref(),
+            stored.worktree_pending.as_deref(),
+            stored.port
         ),
         ("archived", None, Some("feat"), None)
     );
     assert_eq!(
-        agent
+        stored
             .repo
             .as_deref()
             .map(PathBuf::from)
@@ -83,7 +83,7 @@ fn verify_archive_removes_the_worktree_keeps_the_branch(base: PathBuf, repo: &Pa
         std::fs::canonicalize(repo).ok()
     );
     assert!(
-        store::latest().is_none_or(|line| line.id != thread.id),
+        store::latest().is_none_or(|latest| latest.id != thread.id),
         "plain codehead: 0 archived thread"
     );
 
@@ -114,29 +114,29 @@ fn edit_sets_title_repo_and_linked_repos() {
         },
     ];
     thread.save().unwrap();
-    let error = Edit {
+    let form = Edit {
         title: "new title".into(),
         repo: Some("/repos/other".into()),
         checkouts: vec!["/b".into()],
         agents: vec!["ada".into()],
         projects: Some(vec!["ux".into()]),
     };
-    let out = edit(&thread.id, &error).unwrap();
+    let out = edit(&thread.id, &form).unwrap();
 
     assert!(
         out.contains("title") && out.contains("repo") && out.contains("linked repos") && out.contains("projects"),
         "{out}"
     );
 
-    let text = store::load(&thread.id).unwrap();
+    let stored = store::load(&thread.id).unwrap();
 
     assert_eq!(
-        (text.title.as_str(), text.repo.as_deref(), text.checkouts.len()),
+        (stored.title.as_str(), stored.repo.as_deref(), stored.checkouts.len()),
         ("new title", Some("/repos/other"), 1)
     );
 
     // the owner's title and projects: the agents' tools leave them
-    assert!(text.owner_choices.title_set && text.owner_choices.projects_set && text.projects == ["ux"]);
+    assert!(stored.owner_choices.title_set && stored.owner_choices.projects_set && stored.projects == ["ux"]);
     assert!(
         crate::domain::projects::set_title(&thread.id, "menu: other name", None)
             .unwrap()
@@ -149,14 +149,14 @@ fn edit_sets_title_repo_and_linked_repos() {
     );
 
     // projects back to auto
-    verify_edit_sets_title_repo_and_linked_repos(dir, &thread, error, &text);
+    verify_edit_sets_title_repo_and_linked_repos(dir, &thread, form, &stored);
 }
 
 fn verify_edit_sets_title_repo_and_linked_repos(
     dir: PathBuf,
     thread: &store::Thread,
-    error: Edit,
-    text: &store::Thread,
+    form: Edit,
+    stored: &store::Thread,
 ) {
     let out = edit(
         &thread.id,
@@ -177,8 +177,8 @@ fn verify_edit_sets_title_repo_and_linked_repos(
     assert!(!store::load(&thread.id).unwrap().owner_choices.projects_set);
 
     let lite = Thread {
-        repo: text.repo.clone(),
-        dir: Some(text.dir.clone()),
+        repo: stored.repo.clone(),
+        dir: Some(stored.dir.clone()),
         ..Default::default()
     };
 
@@ -188,7 +188,7 @@ fn verify_edit_sets_title_repo_and_linked_repos(
             &thread.id,
             &Edit {
                 agents: Vec::new(),
-                ..error
+                ..form
             }
         )
         .is_err(),
@@ -206,18 +206,18 @@ fn a_start_on_main_pulls_main_first_other_branches_not() {
 
     std::fs::create_dir_all(&base).unwrap();
 
-    let sh = |character: &str| {
+    let sh = |script: &str| {
         assert!(
             Command::new("sh")
                 .arg("-c")
-                .arg(character)
+                .arg(script)
                 .current_dir(&base)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()
                 .unwrap()
                 .success(),
-            "{character}"
+            "{script}"
         );
     };
 
@@ -229,28 +229,28 @@ fn a_start_on_main_pulls_main_first_other_branches_not() {
     sh(&format!(
         "git clone -q origin.git b && cd b && {cfg} && git commit -q --allow-empty -m 2 && git push -q origin main"
     ));
-    let agent = base.join("a");
+    let checkout = base.join("a");
     let head = |path: &Path| git(path, &["rev-parse", "HEAD"]).1;
 
-    assert_ne!(head(&agent), head(&base.join("b")));
-    assert!(matches!(update_default(&agent), Some(Ok(branch)) if branch == "main"));
-    assert_eq!(head(&agent), head(&base.join("b")), "main pulled");
+    assert_ne!(head(&checkout), head(&base.join("b")));
+    assert!(matches!(update_default(&checkout), Some(Ok(branch)) if branch == "main"));
+    assert_eq!(head(&checkout), head(&base.join("b")), "main pulled");
 
     // another branch: 0 pull; a branch without upstream: 0 pull
     sh("cd a && git switch -q -c feat");
 
-    assert!(update_default(&agent).is_none());
+    assert!(update_default(&checkout).is_none());
 
     sh("cd a && git switch -q main && git branch -q --unset-upstream");
 
-    assert!(update_default(&agent).is_none());
+    assert!(update_default(&checkout).is_none());
 
     // diverged: Err with git's line
     sh(
         "cd a && git branch -q -u origin/main && git commit -q --allow-empty -m local && cd ../b && git commit -q --allow-empty -m 3 && git push -q origin main",
     );
 
-    assert!(matches!(update_default(&agent), Some(Err(error)) if !error.is_empty()));
+    assert!(matches!(update_default(&checkout), Some(Err(error)) if !error.is_empty()));
 
     let _ = std::fs::remove_dir_all(base);
 }
@@ -264,17 +264,17 @@ fn checkouts_by_the_file_system_match_git() {
 
     std::fs::create_dir_all(&base).unwrap();
 
-    let sh = |character: &str| {
+    let sh = |script: &str| {
         assert!(
             std::process::Command::new("sh")
                 .arg("-c")
-                .arg(character)
+                .arg(script)
                 .current_dir(&base)
                 .output()
                 .unwrap()
                 .status
                 .success(),
-            "{character}"
+            "{script}"
         );
     };
 
@@ -286,10 +286,9 @@ fn checkouts_by_the_file_system_match_git() {
         let _ = std::fs::create_dir_all(&dir);
         let fs = checkouts_fs(&dir).expect("fs read");
 
-        let canon = |message: std::collections::HashMap<String, String>| {
-            message
-                .into_iter()
-                .map(|(bytes, path)| (bytes, std::fs::canonicalize(path).unwrap()))
+        let canon = |map: std::collections::HashMap<String, String>| {
+            map.into_iter()
+                .map(|(branch, path)| (branch, std::fs::canonicalize(path).unwrap()))
                 .collect::<std::collections::BTreeMap<_, _>>()
         };
 

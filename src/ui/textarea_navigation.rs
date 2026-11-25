@@ -3,115 +3,106 @@ use std::ops::ControlFlow;
 use super::{Pos, Seg, TextArea, cw, is_word, width_of, wrap};
 
 impl TextArea {
-    pub(super) fn left_of(&self, path: Pos) -> Pos {
-        if path.col > 0 {
+    pub(super) fn left_of(&self, pos: Pos) -> Pos {
+        if pos.col > 0 {
             Pos {
-                row: path.row,
-                col: path.col - 1,
+                row: pos.row,
+                col: pos.col - 1,
             }
-        } else if path.row > 0 {
+        } else if pos.row > 0 {
             Pos {
-                row: path.row - 1,
-                col: self.lines[path.row - 1].len(),
+                row: pos.row - 1,
+                col: self.lines[pos.row - 1].len(),
             }
         } else {
-            path
+            pos
         }
     }
 
-    pub(super) fn right_of(&self, path: Pos) -> Pos {
-        if path.col < self.lines[path.row].len() {
+    pub(super) fn right_of(&self, pos: Pos) -> Pos {
+        if pos.col < self.lines[pos.row].len() {
             Pos {
-                row: path.row,
-                col: path.col + 1,
+                row: pos.row,
+                col: pos.col + 1,
             }
-        } else if path.row + 1 < self.lines.len() {
+        } else if pos.row + 1 < self.lines.len() {
             Pos {
-                row: path.row + 1,
+                row: pos.row + 1,
                 col: 0,
             }
         } else {
-            path
+            pos
         }
     }
 
     /// Start of what a word delete (⌥⌫, ctrl+⌫, ctrl+w) takes left of P: the string back to the
     /// whitespace before it; in a path (a `/` in the string) 1 segment, its `/` stays
     /// (`cd ~/a/bc` → `cd ~/a/`, again → `cd ~/`).
-    pub(super) fn string_left(&self, path: Pos) -> Pos {
-        if path.col == 0 {
-            return self.left_of(path);
+    pub(super) fn string_left(&self, pos: Pos) -> Pos {
+        if pos.col == 0 {
+            return self.left_of(pos);
         }
 
-        let line = &self.lines[path.row];
-        let mut character = path.col;
+        let line = &self.lines[pos.row];
+        let mut col = pos.col;
 
-        while character > 0 && line[character - 1].is_whitespace() {
-            character -= 1;
+        while col > 0 && line[col - 1].is_whitespace() {
+            col -= 1;
         }
 
         // the slash(es) after a segment go with it
-        while character > 0 && line[character - 1] == '/' {
-            character -= 1;
+        while col > 0 && line[col - 1] == '/' {
+            col -= 1;
         }
 
-        while character > 0 && !line[character - 1].is_whitespace() && line[character - 1] != '/' {
-            character -= 1;
+        while col > 0 && !line[col - 1].is_whitespace() && line[col - 1] != '/' {
+            col -= 1;
         }
 
-        Pos {
-            row: path.row,
-            col: character,
-        }
+        Pos { row: pos.row, col }
     }
 
-    pub(super) fn word_left(&self, path: Pos) -> Pos {
-        if path.col == 0 {
-            return self.left_of(path);
+    pub(super) fn word_left(&self, pos: Pos) -> Pos {
+        if pos.col == 0 {
+            return self.left_of(pos);
         }
 
-        let line = &self.lines[path.row];
-        let mut character = path.col;
+        let line = &self.lines[pos.row];
+        let mut col = pos.col;
 
-        while character > 0 && !is_word(line[character - 1]) {
-            character -= 1;
+        while col > 0 && !is_word(line[col - 1]) {
+            col -= 1;
         }
 
-        while character > 0 && is_word(line[character - 1]) {
-            character -= 1;
+        while col > 0 && is_word(line[col - 1]) {
+            col -= 1;
         }
 
-        Pos {
-            row: path.row,
-            col: character,
-        }
+        Pos { row: pos.row, col }
     }
 
-    pub(super) fn word_right(&self, path: Pos) -> Pos {
-        let line = &self.lines[path.row];
+    pub(super) fn word_right(&self, pos: Pos) -> Pos {
+        let line = &self.lines[pos.row];
 
-        if path.col >= line.len() {
-            return self.right_of(path);
+        if pos.col >= line.len() {
+            return self.right_of(pos);
         }
 
-        let mut character = path.col;
+        let mut col = pos.col;
 
-        while character < line.len() && !is_word(line[character]) {
-            character += 1;
+        while col < line.len() && !is_word(line[col]) {
+            col += 1;
         }
 
-        while character < line.len() && is_word(line[character]) {
-            character += 1;
+        while col < line.len() && is_word(line[col]) {
+            col += 1;
         }
 
-        Pos {
-            row: path.row,
-            col: character,
-        }
+        Pos { row: pos.row, col }
     }
 
-    pub(super) fn move_to(&mut self, path: Pos, select: bool) {
-        move_cursor(self, path, select);
+    pub(super) fn move_to(&mut self, pos: Pos, select: bool) {
+        move_cursor(self, pos, select);
     }
 
     pub(super) fn atomic_ranges(&self, row: usize) -> Vec<(usize, usize)> {
@@ -124,12 +115,7 @@ impl TextArea {
         let text: String = self.lines[row].iter().collect();
 
         re.find_iter(&text)
-            .map(|message| {
-                (
-                    text[..message.start()].chars().count(),
-                    text[..message.end()].chars().count(),
-                )
-            })
+            .map(|hit| (text[..hit.start()].chars().count(), text[..hit.end()].chars().count()))
             .collect()
     }
 
@@ -140,8 +126,8 @@ impl TextArea {
     }
 
     /// Visual row index + x of a position.
-    pub(super) fn visual_of(&self, path: Pos) -> (usize, usize) {
-        locate_visual(self, path)
+    pub(super) fn visual_of(&self, pos: Pos) -> (usize, usize) {
+        locate_visual(self, pos)
     }
 
     /// Position at visual row VROW, display column X.
@@ -160,14 +146,14 @@ impl TextArea {
         let x = *self.want_x.get_or_insert(x);
         let target = vrow as isize + delta;
 
-        let path = if target < 0 {
+        let pos = if target < 0 {
             Pos { row: 0, col: 0 }
         } else if target as usize >= self.vis.len() {
-            let result = self.lines.len() - 1;
+            let last = self.lines.len() - 1;
 
             Pos {
-                row: result,
-                col: self.lines[result].len(),
+                row: last,
+                col: self.lines[last].len(),
             }
         } else {
             self.pos_at(target as usize, x)
@@ -175,7 +161,7 @@ impl TextArea {
 
         let keep = self.want_x;
 
-        self.move_to(path, select);
+        self.move_to(pos, select);
         self.want_x = keep;
     }
 
@@ -183,18 +169,18 @@ impl TextArea {
         self.layout();
         let (vrow, _) = self.visual_of(self.cur);
 
-        let path = match self.vis.get(vrow) {
-            Some(text) if end => Pos {
-                row: text.row,
-                col: if text.last {
-                    text.end
+        let pos = match self.vis.get(vrow) {
+            Some(seg) if end => Pos {
+                row: seg.row,
+                col: if seg.last {
+                    seg.end
                 } else {
-                    text.end.saturating_sub(1).max(text.start)
+                    seg.end.saturating_sub(1).max(seg.start)
                 },
             },
-            Some(text_value) => Pos {
-                row: text_value.row,
-                col: text_value.start,
+            Some(seg) => Pos {
+                row: seg.row,
+                col: seg.start,
             },
             // 0 layout yet (0 render): the logical row
             None => Pos {
@@ -203,87 +189,74 @@ impl TextArea {
             },
         };
 
-        self.move_to(path, select);
+        self.move_to(pos, select);
     }
 }
 
-fn move_cursor(widget_state: &mut TextArea, path: Pos, select: bool) {
-    let path_value = if select {
-        widget_state
-            .atomic_ranges(path.row)
+fn move_cursor(ta: &mut TextArea, pos: Pos, select: bool) {
+    let target = if select {
+        ta.atomic_ranges(pos.row)
             .into_iter()
-            .find(|&(agent, bytes)| path.col > agent && path.col < bytes)
-            .map_or(path, |(agent_value, bytes_value)| Pos {
-                row: path.row,
-                col: if path < widget_state.cur {
-                    agent_value
-                } else {
-                    bytes_value
-                },
+            .find(|&(start, end)| pos.col > start && pos.col < end)
+            .map_or(pos, |(start, end)| Pos {
+                row: pos.row,
+                col: if pos < ta.cur { start } else { end },
             })
     } else {
-        path
+        pos
     };
 
     if !select
-        && widget_state.range().is_none()
-        && let Some((agent_3, bytes_3)) =
-            widget_state
-                .atomic_ranges(path_value.row)
-                .into_iter()
-                .find(|&(agent_2, bytes_2)| {
-                    (path_value.col > agent_2 && path_value.col < bytes_2)
-                        || (path_value < widget_state.cur && path_value.col == bytes_2)
-                        || (path_value > widget_state.cur && path_value.col == agent_2)
-                })
+        && ta.range().is_none()
+        && let Some((start, end)) = ta.atomic_ranges(target.row).into_iter().find(|&(start, end)| {
+            (target.col > start && target.col < end)
+                || (target < ta.cur && target.col == end)
+                || (target > ta.cur && target.col == start)
+        })
     {
-        let (anchor, cur) = if path_value < widget_state.cur {
-            (bytes_3, agent_3)
-        } else {
-            (agent_3, bytes_3)
-        };
+        let (anchor, cur) = if target < ta.cur { (end, start) } else { (start, end) };
 
-        widget_state.anchor = Some(Pos {
-            row: path_value.row,
+        ta.anchor = Some(Pos {
+            row: target.row,
             col: anchor,
         });
-        widget_state.cur = Pos {
-            row: path_value.row,
+        ta.cur = Pos {
+            row: target.row,
             col: cur,
         };
-        widget_state.follow = true;
-        widget_state.last_op = None;
+        ta.follow = true;
+        ta.last_op = None;
         return;
     }
 
     if select {
-        if widget_state.anchor.is_none() {
-            widget_state.anchor = Some(widget_state.cur);
+        if ta.anchor.is_none() {
+            ta.anchor = Some(ta.cur);
         }
     } else {
-        widget_state.anchor = None;
+        ta.anchor = None;
     }
 
-    widget_state.cur = path_value;
-    widget_state.follow = true;
-    widget_state.last_op = None;
+    ta.cur = target;
+    ta.follow = true;
+    ta.last_op = None;
 }
 
-fn build_layout(widget_state: &mut TextArea) {
-    if widget_state.area.width == 0 {
+fn build_layout(ta: &mut TextArea) {
+    if ta.area.width == 0 {
         return;
     }
 
-    let width = widget_state.area.width.saturating_sub(1) as usize;
+    let width = ta.area.width.saturating_sub(1) as usize;
 
-    widget_state.vis.clear();
+    ta.vis.clear();
 
-    for (row, line) in widget_state.lines.iter().enumerate() {
+    for (row, line) in ta.lines.iter().enumerate() {
         let segs = wrap(line, width);
         let count = segs.len();
 
         for (i, (start, end)) in segs.into_iter().enumerate() {
-            widget_state.vis.push(Seg {
+            ta.vis.push(Seg {
                 row,
                 start,
                 end,
@@ -293,38 +266,38 @@ fn build_layout(widget_state: &mut TextArea) {
     }
 }
 
-fn locate_visual(widget_state: &TextArea, path: Pos) -> (usize, usize) {
-    let Some(line) = widget_state.lines.get(path.row) else {
+fn locate_visual(ta: &TextArea, pos: Pos) -> (usize, usize) {
+    let Some(line) = ta.lines.get(pos.row) else {
         return (0, 0);
     };
 
-    if path.col > line.len() {
+    if pos.col > line.len() {
         return (0, 0);
     }
 
-    for (i, text) in widget_state.vis.iter().enumerate() {
-        if text.row == path.row
-            && text.start <= line.len()
-            && path.col >= text.start
-            && (path.col < text.end || (text.last && path.col == text.end))
+    for (i, seg) in ta.vis.iter().enumerate() {
+        if seg.row == pos.row
+            && seg.start <= line.len()
+            && pos.col >= seg.start
+            && (pos.col < seg.end || (seg.last && pos.col == seg.end))
         {
-            return (i, width_of(&widget_state.lines[text.row][text.start..path.col]));
+            return (i, width_of(&ta.lines[seg.row][seg.start..pos.col]));
         }
     }
 
     (0, 0)
 }
 
-fn locate_text(widget_state: &TextArea, vrow: usize, x: usize) -> Pos {
-    let Some(text) = widget_state.vis.get(vrow.min(widget_state.vis.len().saturating_sub(1))) else {
+fn locate_text(ta: &TextArea, vrow: usize, x: usize) -> Pos {
+    let Some(seg) = ta.vis.get(vrow.min(ta.vis.len().saturating_sub(1))) else {
         return Pos::default();
     };
 
-    let Some(line) = widget_state.lines.get(text.row) else {
+    let Some(line) = ta.lines.get(seg.row) else {
         return Pos::default();
     };
 
-    let (end, mut col, mut width) = (text.end.min(line.len()), text.start.min(line.len()), 0);
+    let (end, mut col, mut width) = (seg.end.min(line.len()), seg.start.min(line.len()), 0);
 
     while col < end {
         if let ControlFlow::Break(()) = advance_character(x, line, &mut col, &mut width) {
@@ -332,26 +305,26 @@ fn locate_text(widget_state: &TextArea, vrow: usize, x: usize) -> Pos {
         }
     }
 
-    if !text.last && col == text.end && col > text.start {
+    if !seg.last && col == seg.end && col > seg.start {
         col -= 1;
     }
 
-    Pos { row: text.row, col }
+    Pos { row: seg.row, col }
 }
 
 fn advance_character(x: usize, line: &[char], col: &mut usize, width: &mut usize) -> ControlFlow<()> {
-    let character = cw(line[*col]);
+    let char_width = cw(line[*col]);
 
-    if *width + character > x {
+    if *width + char_width > x {
         // click on the right half of a wide char → after it
-        if character > 1 && x >= *width + character / 2 {
+        if char_width > 1 && x >= *width + char_width / 2 {
             *col += 1;
         }
 
         return ControlFlow::Break(());
     }
 
-    *width += character;
+    *width += char_width;
     *col += 1;
 
     ControlFlow::Continue(())

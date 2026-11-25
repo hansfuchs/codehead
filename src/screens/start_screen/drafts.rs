@@ -37,7 +37,7 @@ pub(crate) struct Draft {
 
 pub(crate) fn dir() -> PathBuf {
     std::env::var_os("CODEHEAD_DRAFTS")
-        .filter(|text| !text.is_empty())
+        .filter(|dir| !dir.is_empty())
         .map_or_else(
             || crate::infra::config::home().join(".cache/codehead/drafts"),
             PathBuf::from,
@@ -58,7 +58,7 @@ pub(crate) fn new_id() -> String {
 fn strings(value: &Value) -> Vec<String> {
     value
         .as_array()
-        .map(|agent| agent.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|items| items.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default()
 }
 
@@ -70,16 +70,16 @@ impl Draft {
 
     /// Name in the list: the title, else the 1st line of the prompt.
     pub(crate) fn name(&self) -> String {
-        let thread = self.title.trim();
+        let title = self.title.trim();
 
-        let name = if thread.is_empty() {
+        let name = if title.is_empty() {
             self.prompt
                 .lines()
                 .find(|line| !line.trim().is_empty())
                 .unwrap_or_default()
                 .trim()
         } else {
-            thread
+            title
         };
 
         name.to_string()
@@ -105,41 +105,41 @@ impl Draft {
 
     fn parse(id: &str, text: &str) -> Option<Draft> {
         let value: Value = serde_json::from_str(text).ok()?;
-        let text_value = |key: &str| value[key].as_str().unwrap_or_default().to_string();
+        let field = |key: &str| value[key].as_str().unwrap_or_default().to_string();
         let pair = |x: &Value| Some((x[0].as_str()?.to_string(), x[1].as_str()?.to_string()));
 
         Some(Draft {
             id: id.to_string(),
             saved: value["saved"].as_u64().unwrap_or(0),
-            place: text_value("place"),
-            title: text_value("title"),
-            prompt: text_value("prompt"),
+            place: field("place"),
+            title: field("title"),
+            prompt: field("prompt"),
             notes: strings(&value["notes"]),
             picks: strings(&value["picks"]),
-            place_choice: text_value("where"),
+            place_choice: field("where"),
             checkout: value["checkout"].as_bool().unwrap_or(true),
             stash: value["stash"].as_bool().unwrap_or(false),
             files: value["files"]
                 .as_array()
-                .map(|agent| agent.iter().filter_map(pair).collect())
+                .map(|pairs| pairs.iter().filter_map(pair).collect())
                 .unwrap_or_default(),
             carry: value["carry"]
                 .as_array()
-                .map(|values| parse_body(values))
+                .map(|values| parse_carry(values))
                 .unwrap_or_default(),
             kept: value["kept"].as_bool().unwrap_or(false),
         })
     }
 }
 
-fn parse_body(agent_value: &[Value]) -> Vec<(Option<String>, String, String)> {
-    agent_value
+fn parse_carry(values: &[Value]) -> Vec<(Option<String>, String, String)> {
+    values
         .iter()
-        .map(|character| {
+        .map(|entry| {
             (
-                character["thread"].as_str().map(String::from),
-                character["path"].as_str().unwrap_or_default().to_string(),
-                character["title"].as_str().unwrap_or_default().to_string(),
+                entry["thread"].as_str().map(String::from),
+                entry["path"].as_str().unwrap_or_default().to_string(),
+                entry["title"].as_str().unwrap_or_default().to_string(),
             )
         })
         .collect()
@@ -149,21 +149,21 @@ fn file(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.json"))
 }
 
-/// Write D (a temp file, then a rename: a crash mid-write keeps the last full draft).
-pub(crate) fn save(dir: &Path, directory: &Draft) -> Result<(), String> {
+/// Write DRAFT (a temp file, then a rename: a crash mid-write keeps the last full draft).
+pub(crate) fn save(dir: &Path, draft: &Draft) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
-    let mut value: Value = serde_json::from_str(&directory.content()).map_err(|error_value| error_value.to_string())?;
+    let mut value: Value = serde_json::from_str(&draft.content()).map_err(|error| error.to_string())?;
 
     value["saved"] = json!((crate::engine::now_ms() / 1000));
-    let tmp = dir.join(format!(".{}.tmp", directory.id));
+    let tmp = dir.join(format!(".{}.tmp", draft.id));
 
     std::fs::write(
         &tmp,
-        serde_json::to_string_pretty(&value).map_err(|error_2| error_2.to_string())?,
+        serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?,
     )
-    .map_err(|error_3| error_3.to_string())?;
+    .map_err(|error| error.to_string())?;
 
-    std::fs::rename(&tmp, file(dir, &directory.id)).map_err(|error_4| error_4.to_string())
+    std::fs::rename(&tmp, file(dir, &draft.id)).map_err(|error| error.to_string())
 }
 
 pub(crate) fn remove(dir: &Path, id: &str) {
@@ -177,39 +177,39 @@ pub(crate) fn path(dir: &Path, id: &str) -> PathBuf {
 /// Every draft but SKIP (the open task's own), oldest first. Drafts over `KEEP_DAYS` old: removed.
 pub(crate) fn load(dir: &Path, skip: &str) -> Vec<Draft> {
     let now = crate::engine::now_ms() / 1000;
-    let mut value = Vec::new();
+    let mut found = Vec::new();
 
-    for error in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = error.path();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
 
         if path.extension().is_none_or(|x| x != "json") {
             continue;
         }
 
-        let Some(id) = path.file_stem().map(|text| text.to_string_lossy().into_owned()) else {
+        let Some(id) = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()) else {
             continue;
         };
 
-        let Some(directory) = std::fs::read_to_string(&path)
+        let Some(draft) = std::fs::read_to_string(&path)
             .ok()
-            .and_then(|thread| Draft::parse(&id, &thread))
+            .and_then(|content| Draft::parse(&id, &content))
         else {
             continue;
         };
 
-        if !directory.kept && directory.saved > 0 && now.saturating_sub(directory.saved) > KEEP_DAYS * 86400 {
+        if !draft.kept && draft.saved > 0 && now.saturating_sub(draft.saved) > KEEP_DAYS * 86400 {
             let _ = std::fs::remove_file(&path);
 
             continue;
         }
 
-        if id != skip && !directory.is_empty() {
-            value.push(directory);
+        if id != skip && !draft.is_empty() {
+            found.push(draft);
         }
     }
 
-    value.sort_by(|agent, bytes| (agent.saved, &agent.id).cmp(&(bytes.saved, &bytes.id)));
-    value
+    found.sort_by(|left, right| (left.saved, &left.id).cmp(&(right.saved, &right.id)));
+    found
 }
 
 #[cfg(test)]

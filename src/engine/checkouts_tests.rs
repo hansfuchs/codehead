@@ -90,13 +90,18 @@ fn command_prefixes_are_not_the_command() {
 
 #[test]
 fn checkouts_without_an_edit_go() {
-    let co = |directory: &str| store::Checkout {
-        dir: directory.into(),
+    let checkout = |dir: &str| store::Checkout {
+        dir: dir.into(),
         branch: None,
     };
     let thread = store::Thread {
         dir: "/w".into(),
-        checkouts: vec![co("/notes"), co("/read"), co("/cache/clone"), co("/wt")],
+        checkouts: vec![
+            checkout("/notes"),
+            checkout("/read"),
+            checkout("/cache/clone"),
+            checkout("/wt"),
+        ],
         ..Default::default()
     };
 
@@ -160,7 +165,7 @@ fn checkouts_join_once() {
     let all = thread.all_checkouts();
 
     assert_eq!(
-        all.iter().map(|character| character.dir.as_str()).collect::<Vec<_>>(),
+        all.iter().map(|checkout| checkout.dir.as_str()).collect::<Vec<_>>(),
         vec!["/a", "/b"]
     );
 }

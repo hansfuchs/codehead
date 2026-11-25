@@ -39,9 +39,9 @@ impl App {
             Screen::Compose if self.compose.field == Field::Title => self.compose.title.insert(text),
             // like the thread view: a paste on any other field goes to the prompt
             Screen::Compose => {
-                let path = self.compose.paster.paste(text);
+                let pasted = self.compose.paster.paste(text);
 
-                self.paste_prompt(path);
+                self.paste_prompt(pasted);
             }
             Screen::Pick if self.thread_list.tlist.filtering => {
                 self.thread_list.tlist.filter.insert(text);
@@ -60,8 +60,8 @@ impl App {
     }
 }
 
-fn paste_inner_settings(app_state: &mut App, text: &str) {
-    if let Some(settings) = &mut app_state.settings {
+fn paste_inner_settings(app: &mut App, text: &str) {
+    if let Some(settings) = &mut app.settings {
         settings.paste(text);
     }
 }

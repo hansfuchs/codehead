@@ -76,83 +76,86 @@ fn len2(x: f32, y: f32) -> f32 {
     (x * x + y * y).sqrt()
 }
 
-fn rbox(path: Vector, bytes: Vector, result: f32) -> f32 {
-    let query = Vector(path.0.abs() - bytes.0, path.1.abs() - bytes.1, path.2.abs() - bytes.2);
+fn rbox(point: Vector, half: Vector, radius: f32) -> f32 {
+    let offset = Vector(point.0.abs() - half.0, point.1.abs() - half.1, point.2.abs() - half.2);
 
-    len2(len2(query.0.max(0.0), query.1.max(0.0)), query.2.max(0.0)) + query.0.max(query.1).max(query.2).min(0.0)
-        - result
+    len2(len2(offset.0.max(0.0), offset.1.max(0.0)), offset.2.max(0.0)) + offset.0.max(offset.1).max(offset.2).min(0.0)
+        - radius
 }
 
 /// Max over a plane set |p·n| - r: a convex solid with those face normals.
-fn planes(path: Vector, ns: &[Vector], result: f32) -> f32 {
-    ns.iter().map(|count| path.dot(*count).abs()).fold(f32::MIN, f32::max) - result
+fn planes(point: Vector, normals: &[Vector], radius: f32) -> f32 {
+    normals
+        .iter()
+        .map(|face| point.dot(*face).abs())
+        .fold(f32::MIN, f32::max)
+        - radius
 }
 
-fn normal(x: f32, y: f32, value: f32) -> Vector {
-    Vector(x, y, value).norm()
+fn normal(x: f32, y: f32, depth: f32) -> Vector {
+    Vector(x, y, depth).norm()
 }
 
 /// Polar fold of xz into 1 sector of an n-gon: (distance along the apothem, along the side).
-fn ngon(path: Vector, sides: u8) -> (f32, f32) {
+fn ngon(point: Vector, sides: u8) -> (f32, f32) {
     let sector = TAU / f32::from(sides);
-    let agent = path.2.atan2(path.0).rem_euclid(sector) - sector / 2.0;
-    let line = len2(path.0, path.2);
+    let angle = point.2.atan2(point.0).rem_euclid(sector) - sector / 2.0;
+    let radius = len2(point.0, point.2);
 
-    (line * agent.cos(), line * agent.sin())
+    (radius * angle.cos(), radius * angle.sin())
 }
 
 /// Distance to the segment A-B.
-fn seg(path: Vector, agent: Vector, bytes: Vector) -> f32 {
-    let pa = path - agent;
-    let ba = bytes - agent;
-    let height = (pa.dot(ba) / ba.dot(ba)).clamp(0.0, 1.0);
+fn seg(point: Vector, start: Vector, end: Vector) -> f32 {
+    let pa = point - start;
+    let ba = end - start;
+    let along = (pa.dot(ba) / ba.dot(ba)).clamp(0.0, 1.0);
 
-    (pa - ba * height).len()
+    (pa - ba * along).len()
 }
 
-fn tetra(path: Vector, result: f32) -> f32 {
-    ((path.0 + path.1).abs() - path.2).max((path.0 - path.1).abs() + path.2) / 3f32.sqrt() - result
+fn tetra(point: Vector, radius: f32) -> f32 {
+    ((point.0 + point.1).abs() - point.2).max((point.0 - point.1).abs() + point.2) / 3f32.sqrt() - radius
 }
 
-fn torus(path: Vector, big: f32, small: f32) -> f32 {
-    len2(len2(path.0, path.2) - big, path.1) - small
+fn torus(point: Vector, big: f32, small: f32) -> f32 {
+    len2(len2(point.0, point.2) - big, point.1) - small
 }
 
 impl Base {
-    pub(crate) fn dist(self, path: Vector) -> f32 {
+    pub(crate) fn dist(self, point: Vector) -> f32 {
         match self {
-            Base::Tetra => tetra(path, 0.5),
-            Base::Cube => rbox(path, Vector(0.62, 0.62, 0.62), 0.02),
-            Base::Octa => (path.0.abs() + path.1.abs() + path.2.abs() - 1.1) * 0.577,
-            Base::Dodeca => dodecahedron_distance(path),
-            Base::Icosa => icosahedron_distance(path),
-            Base::Star => tetra(path, 0.42).min(tetra(Vector(-path.0, path.1, -path.2).rot_y(PI / 2.0), 0.42)),
-            Base::Prism(text) => prism_distance(path, text),
-            Base::Pyramid(text_value, inv) => pyramid_distance(path, text_value, inv),
-            Base::Bipyramid(text_2) => bipyramid_distance(path, text_2),
-            Base::Torus(key_value) => torus(path, 0.8, key_value),
-            Base::SquareTorus => square_torus_distance(path),
-            Base::HexTorus => hex_torus_distance(path),
-            Base::BoxFrame => box_frame_distance(path),
-            Base::OctaFrame => octahedron_frame_distance(path),
-            Base::Cross => rbox(path, Vector(1.0, 0.22, 0.22), 0.0).min(rbox(path, Vector(0.22, 1.0, 0.22), 0.0)),
-            Base::Jack => rbox(path, Vector(0.95, 0.15, 0.15), 0.02)
-                .min(rbox(path, Vector(0.15, 0.95, 0.15), 0.02))
-                .min(rbox(path, Vector(0.15, 0.15, 0.95), 0.02)),
-            Base::Menger => menger_distance(path),
-            Base::Saturn => (path.len() - 0.55).min(torus(path.rot_x(0.4), 0.95, 0.06).max(-(path.len() - 0.7))),
-            Base::Stack(key_2) => stack_distance(path, key_2),
-            Base::Cylinder => (len2(path.0, path.2) - 0.65).max(path.1.abs() - 0.8),
-            Base::Cone => cone_distance(path),
-            Base::Lens => {
-                (Vector(path.0, path.1 - 0.9, path.2).len() - 1.2).max(Vector(path.0, path.1 + 0.9, path.2).len() - 1.2)
-            }
-            Base::Capsule => capsule_distance(path),
-            Base::Gyroid => gyroid_distance(path),
-            Base::Slab => rbox(path, Vector(0.44, 1.0, 0.1), 0.0),
-            Base::Steps => steps_distance(path),
-            Base::Arch => arch_distance(path),
-            Base::Ring2 => torus(path, 0.75, 0.09).min(torus(Vector(path.1, path.0, path.2), 0.75, 0.09)),
+            Base::Tetra => tetra(point, 0.5),
+            Base::Cube => rbox(point, Vector(0.62, 0.62, 0.62), 0.02),
+            Base::Octa => (point.0.abs() + point.1.abs() + point.2.abs() - 1.1) * 0.577,
+            Base::Dodeca => dodecahedron_distance(point),
+            Base::Icosa => icosahedron_distance(point),
+            Base::Star => tetra(point, 0.42).min(tetra(Vector(-point.0, point.1, -point.2).rot_y(PI / 2.0), 0.42)),
+            Base::Prism(sides) => prism_distance(point, sides),
+            Base::Pyramid(sides, inv) => pyramid_distance(point, sides, inv),
+            Base::Bipyramid(sides) => bipyramid_distance(point, sides),
+            Base::Torus(thickness) => torus(point, 0.8, thickness),
+            Base::SquareTorus => square_torus_distance(point),
+            Base::HexTorus => hex_torus_distance(point),
+            Base::BoxFrame => box_frame_distance(point),
+            Base::OctaFrame => octahedron_frame_distance(point),
+            Base::Cross => rbox(point, Vector(1.0, 0.22, 0.22), 0.0).min(rbox(point, Vector(0.22, 1.0, 0.22), 0.0)),
+            Base::Jack => rbox(point, Vector(0.95, 0.15, 0.15), 0.02)
+                .min(rbox(point, Vector(0.15, 0.95, 0.15), 0.02))
+                .min(rbox(point, Vector(0.15, 0.15, 0.95), 0.02)),
+            Base::Menger => menger_distance(point),
+            Base::Saturn => (point.len() - 0.55).min(torus(point.rot_x(0.4), 0.95, 0.06).max(-(point.len() - 0.7))),
+            Base::Stack(slabs) => stack_distance(point, slabs),
+            Base::Cylinder => (len2(point.0, point.2) - 0.65).max(point.1.abs() - 0.8),
+            Base::Cone => cone_distance(point),
+            Base::Lens => (Vector(point.0, point.1 - 0.9, point.2).len() - 1.2)
+                .max(Vector(point.0, point.1 + 0.9, point.2).len() - 1.2),
+            Base::Capsule => capsule_distance(point),
+            Base::Gyroid => gyroid_distance(point),
+            Base::Slab => rbox(point, Vector(0.44, 1.0, 0.1), 0.0),
+            Base::Steps => steps_distance(point),
+            Base::Arch => arch_distance(point),
+            Base::Ring2 => torus(point, 0.75, 0.09).min(torus(Vector(point.1, point.0, point.2), 0.75, 0.09)),
         }
     }
 
@@ -164,10 +167,10 @@ impl Base {
             Base::Dodeca => "dodecahedron".into(),
             Base::Icosa => "icosahedron".into(),
             Base::Star => "star tetrahedron".into(),
-            Base::Prism(text) => format!("{text}-gon prism"),
-            Base::Pyramid(text_value, inv) => format!("{}{text_value}-gon pyramid", if inv { "inverted " } else { "" }),
-            Base::Bipyramid(text_2) => format!("{text_2}-gon bipyramid"),
-            Base::Torus(key) => format!("ring {key:.2}"),
+            Base::Prism(sides) => format!("{sides}-gon prism"),
+            Base::Pyramid(sides, inv) => format!("{}{sides}-gon pyramid", if inv { "inverted " } else { "" }),
+            Base::Bipyramid(sides) => format!("{sides}-gon bipyramid"),
+            Base::Torus(thickness) => format!("ring {thickness:.2}"),
             Base::SquareTorus => "square ring".into(),
             Base::HexTorus => "hex ring".into(),
             Base::BoxFrame => "cube frame".into(),
@@ -176,7 +179,7 @@ impl Base {
             Base::Jack => "jack".into(),
             Base::Menger => "menger cube".into(),
             Base::Saturn => "saturn".into(),
-            Base::Stack(key_value) => format!("{key_value} stacked slabs"),
+            Base::Stack(slabs) => format!("{slabs} stacked slabs"),
             Base::Cylinder => "cylinder".into(),
             Base::Cone => "cone".into(),
             Base::Lens => "lens".into(),
@@ -190,31 +193,31 @@ impl Base {
     }
 }
 
-fn pyramid_distance(path: Vector, text_value: u8, inv: bool) -> f32 {
-    let y = if inv { -path.1 } else { path.1 } + 0.6;
-    let (agent_value, _) = ngon(path, text_value);
-    let (height, result) = (1.4, 0.85);
+fn pyramid_distance(point: Vector, sides: u8, inv: bool) -> f32 {
+    let y = if inv { -point.1 } else { point.1 } + 0.6;
+    let (apothem, _) = ngon(point, sides);
+    let (rise, run) = (1.4, 0.85);
 
-    ((agent_value * height + y * result - result * height) / len2(height, result)).max(-y)
+    ((apothem * rise + y * run - run * rise) / len2(rise, run)).max(-y)
 }
 
-fn box_frame_distance(path: Vector) -> f32 {
-    let (bytes, error) = (Vector(0.7, 0.7, 0.7), 0.08);
-    let path_value = Vector(path.0.abs() - bytes.0, path.1.abs() - bytes.1, path.2.abs() - bytes.2);
-    let query_value = Vector(
-        (path_value.0 + error).abs() - error,
-        (path_value.1 + error).abs() - error,
-        (path_value.2 + error).abs() - error,
+fn box_frame_distance(point: Vector) -> f32 {
+    let (half, edge) = (Vector(0.7, 0.7, 0.7), 0.08);
+    let outer = Vector(point.0.abs() - half.0, point.1.abs() - half.1, point.2.abs() - half.2);
+    let inner = Vector(
+        (outer.0 + edge).abs() - edge,
+        (outer.1 + edge).abs() - edge,
+        (outer.2 + edge).abs() - edge,
     );
 
-    let file = |agent_4: Vector| {
-        len2(len2(agent_4.0.max(0.0), agent_4.1.max(0.0)), agent_4.2.max(0.0))
-            + agent_4.0.max(agent_4.1).max(agent_4.2).min(0.0)
+    let box_distance = |offset: Vector| {
+        len2(len2(offset.0.max(0.0), offset.1.max(0.0)), offset.2.max(0.0))
+            + offset.0.max(offset.1).max(offset.2).min(0.0)
     };
 
-    file(Vector(path_value.0, query_value.1, query_value.2))
-        .min(file(Vector(query_value.0, path_value.1, query_value.2)))
-        .min(file(Vector(query_value.0, query_value.1, path_value.2)))
+    box_distance(Vector(outer.0, inner.1, inner.2))
+        .min(box_distance(Vector(inner.0, outer.1, inner.2)))
+        .min(box_distance(Vector(inner.0, inner.1, outer.2)))
 }
 
 impl Motion {
@@ -242,60 +245,60 @@ fn ease(x: f32) -> f32 {
 
 impl Geo {
     /// View rotation at time T: yaw, pitch, roll.
-    pub(crate) fn pose(&self, thread: f32) -> (f32, f32, f32) {
-        let thread_value = thread * self.speed + self.phase;
+    pub(crate) fn pose(&self, time: f32) -> (f32, f32, f32) {
+        let local = time * self.speed + self.phase;
 
         match self.motion {
             Motion::Spin | Motion::Twist | Motion::Pulse | Motion::Morph | Motion::Slice | Motion::Orbit => {
-                (thread_value * 0.9, 0.4, 0.0)
+                (local * 0.9, 0.4, 0.0)
             }
-            Motion::Tumble => (thread_value * 0.8, 0.4 + thread_value * 0.55, 0.25),
+            Motion::Tumble => (local * 0.8, 0.4 + local * 0.55, 0.25),
             Motion::Snap => {
-                let key = thread_value * 0.5;
-                let step = key.floor() + ease((key.fract() - 0.6) / 0.4);
+                let turns = local * 0.5;
+                let step = turns.floor() + ease((turns.fract() - 0.6) / 0.4);
 
                 (step * PI / 2.0, 0.45, 0.0)
             }
-            Motion::Wobble => (0.6 * (thread_value * 1.3).sin(), 0.4, 0.25 * (thread_value * 1.7).sin()),
-            Motion::Roll => (0.5, thread_value * 1.2, 0.0),
+            Motion::Wobble => (0.6 * (local * 1.3).sin(), 0.4, 0.25 * (local * 1.7).sin()),
+            Motion::Roll => (0.5, local * 1.2, 0.0),
         }
     }
 
     /// Distance at P, time T: the base, deformed or cut by the motion.
-    pub(crate) fn dist(&self, path: Vector, thread: f32) -> f32 {
-        let thread_value = thread * self.speed + self.phase;
+    pub(crate) fn dist(&self, point: Vector, time: f32) -> f32 {
+        let local = time * self.speed + self.phase;
 
         match self.motion {
             Motion::Twist => {
-                let key = 1.1 * (thread_value * 0.8).sin();
+                let twist = 1.1 * (local * 0.8).sin();
 
-                self.base.dist(path.rot_y(path.1 * key))
+                self.base.dist(point.rot_y(point.1 * twist))
             }
             Motion::Pulse => {
-                let text = 1.0 + 0.16 * (thread_value * 2.0).sin();
+                let scale = 1.0 + 0.16 * (local * 2.0).sin();
 
-                self.base.dist(path * (1.0 / text)) * text
+                self.base.dist(point * (1.0 / scale)) * scale
             }
             Motion::Morph => {
-                let message = ease(0.5 + 0.6 * (thread_value * 0.7).sin());
+                let blend = ease(0.5 + 0.6 * (local * 0.7).sin());
 
-                self.base.dist(path) * (1.0 - message) + (path.len() - 0.8) * message
+                self.base.dist(point) * (1.0 - blend) + (point.len() - 0.8) * blend
             }
             Motion::Slice => {
                 // the 2 halves part along y, leaving a gap, then close
-                let open = 0.22 * ease(0.5 + 0.7 * (thread_value * 0.9).sin());
-                let query = Vector(path.0, path.1 - path.1.signum() * open, path.2);
+                let open = 0.22 * ease(0.5 + 0.7 * (local * 0.9).sin());
+                let parted = Vector(point.0, point.1 - point.1.signum() * open, point.2);
 
-                self.base.dist(query).max(open - path.1.abs())
+                self.base.dist(parted).max(open - point.1.abs())
             }
             Motion::Orbit => {
-                let agent = thread_value * 2.2;
-                let o1 = Vector(agent.cos() * 1.05, 0.25 * (agent * 2.0).sin(), agent.sin() * 1.05);
-                let small = (path - o1).len().min((path + o1).len()) - 0.12;
+                let angle = local * 2.2;
+                let moon = Vector(angle.cos() * 1.05, 0.25 * (angle * 2.0).sin(), angle.sin() * 1.05);
+                let small = (point - moon).len().min((point + moon).len()) - 0.12;
 
-                (self.base.dist(path * (1.0 / 0.78)) * 0.78).min(small)
+                (self.base.dist(point * (1.0 / 0.78)) * 0.78).min(small)
             }
-            _ => self.base.dist(path),
+            _ => self.base.dist(point),
         }
     }
 }
@@ -356,13 +359,13 @@ fn motion_catalog(bases: Vec<(Base, &[Motion])>) -> Vec<Geo> {
     let mut out = Vec::new();
 
     for (base, motions) in bases {
-        for message in motions {
+        for motion in motions {
             let i = out.len() as f32;
 
             out.push(Geo {
-                name: format!("{} · {}", base.name(), message.name()),
+                name: format!("{} · {}", base.name(), motion.name()),
                 base,
-                motion: *message,
+                motion: *motion,
                 speed: 0.8 + 0.35 * ((i * 0.618).fract()),
                 phase: i * 1.37,
             });
@@ -378,9 +381,9 @@ pub(crate) fn all() -> &'static [Geo] {
     CATALOG.get_or_init(catalog)
 }
 
-fn dodecahedron_distance(path: Vector) -> f32 {
+fn dodecahedron_distance(point: Vector) -> f32 {
     planes(
-        path,
+        point,
         &[
             normal(0.0, 1.0, PHI),
             normal(0.0, 1.0, -PHI),
@@ -392,115 +395,114 @@ fn dodecahedron_distance(path: Vector) -> f32 {
         0.85,
     )
 }
-fn icosahedron_distance(path: Vector) -> f32 {
-    let key = 1.0 / PHI;
+fn icosahedron_distance(point: Vector) -> f32 {
+    let inverse = 1.0 / PHI;
 
     planes(
-        path,
+        point,
         &[
             normal(1.0, 1.0, 1.0),
             normal(-1.0, 1.0, 1.0),
             normal(1.0, -1.0, 1.0),
             normal(1.0, 1.0, -1.0),
-            normal(0.0, key, PHI),
-            normal(0.0, key, -PHI),
-            normal(key, PHI, 0.0),
-            normal(-key, PHI, 0.0),
-            normal(PHI, 0.0, key),
-            normal(-PHI, 0.0, key),
+            normal(0.0, inverse, PHI),
+            normal(0.0, inverse, -PHI),
+            normal(inverse, PHI, 0.0),
+            normal(-inverse, PHI, 0.0),
+            normal(PHI, 0.0, inverse),
+            normal(-PHI, 0.0, inverse),
         ],
         0.88,
     )
 }
-fn prism_distance(path: Vector, text: u8) -> f32 {
-    let (agent, _) = ngon(path, text);
+fn prism_distance(point: Vector, sides: u8) -> f32 {
+    let (apothem, _) = ngon(point, sides);
 
-    (agent - 0.7).max(path.1.abs() - 0.75)
+    (apothem - 0.7).max(point.1.abs() - 0.75)
 }
-fn bipyramid_distance(path: Vector, text_2: u8) -> f32 {
-    let (agent_2, _) = ngon(path, text_2);
-    let (height_value, result_value) = (1.1, 0.8);
+fn bipyramid_distance(point: Vector, sides: u8) -> f32 {
+    let (apothem, _) = ngon(point, sides);
+    let (rise, run) = (1.1, 0.8);
 
-    (agent_2 * height_value + path.1.abs() * result_value - result_value * height_value)
-        / len2(height_value, result_value)
+    (apothem * rise + point.1.abs() * run - run * rise) / len2(rise, run)
 }
-fn square_torus_distance(path: Vector) -> f32 {
-    let query = Vector(len2(path.0, path.2) - 0.75, path.1, 0.0);
+fn square_torus_distance(point: Vector) -> f32 {
+    let folded = Vector(len2(point.0, point.2) - 0.75, point.1, 0.0);
 
-    rbox(query, Vector(0.22, 0.22, 1.0), 0.02)
-        .max(query.0.abs() - 0.22)
-        .max(path.1.abs() - 0.22)
+    rbox(folded, Vector(0.22, 0.22, 1.0), 0.02)
+        .max(folded.0.abs() - 0.22)
+        .max(point.1.abs() - 0.22)
 }
-fn hex_torus_distance(path: Vector) -> f32 {
-    let (agent_3, _) = ngon(path, 6);
+fn hex_torus_distance(point: Vector) -> f32 {
+    let (apothem, _) = ngon(point, 6);
 
-    rbox(Vector(agent_3 - 0.75, path.1, 0.0), Vector(0.2, 0.2, 1.0), 0.01)
-        .max(path.1.abs() - 0.2)
-        .max((agent_3 - 0.75).abs() - 0.2)
+    rbox(Vector(apothem - 0.75, point.1, 0.0), Vector(0.2, 0.2, 1.0), 0.01)
+        .max(point.1.abs() - 0.2)
+        .max((apothem - 0.75).abs() - 0.2)
 }
-fn octahedron_frame_distance(path: Vector) -> f32 {
+fn octahedron_frame_distance(point: Vector) -> f32 {
     // the 12 edges of an octahedron, folded into the 1st octant: 3 bars
-    let query_2 = path.abs();
-    let (x, y, value) = (Vector(1.1, 0.0, 0.0), Vector(0.0, 1.1, 0.0), Vector(0.0, 0.0, 1.1));
+    let folded = point.abs();
+    let (on_x, on_y, on_z) = (Vector(1.1, 0.0, 0.0), Vector(0.0, 1.1, 0.0), Vector(0.0, 0.0, 1.1));
 
-    seg(query_2, x, y)
-        .min(seg(query_2, y, value))
-        .min(seg(query_2, value, x))
+    seg(folded, on_x, on_y)
+        .min(seg(folded, on_y, on_z))
+        .min(seg(folded, on_z, on_x))
         - 0.07
 }
-fn menger_distance(path: Vector) -> f32 {
-    let bytes_value = rbox(path, Vector(0.7, 0.7, 0.7), 0.0);
-    let height_2 = 0.24;
-    let character = rbox(path, Vector(2.0, height_2, height_2), 0.0)
-        .min(rbox(path, Vector(height_2, 2.0, height_2), 0.0))
-        .min(rbox(path, Vector(height_2, height_2, 2.0), 0.0));
+fn menger_distance(point: Vector) -> f32 {
+    let cube = rbox(point, Vector(0.7, 0.7, 0.7), 0.0);
+    let bar = 0.24;
+    let holes = rbox(point, Vector(2.0, bar, bar), 0.0)
+        .min(rbox(point, Vector(bar, 2.0, bar), 0.0))
+        .min(rbox(point, Vector(bar, bar, 2.0), 0.0));
 
-    bytes_value.max(-character)
+    cube.max(-holes)
 }
-fn stack_distance(path: Vector, key_2: u8) -> f32 {
-    let key_3 = f32::from(key_2);
-    let step = 1.6 / key_3;
-    let y = path.1 + 0.8;
-    let i = (y / step).floor().clamp(0.0, key_3 - 1.0);
-    let character_value = (i + 0.5) * step - 0.8;
-    let width = 0.85 - 0.5 * (i / (key_3 - 1.0).max(1.0));
+fn stack_distance(point: Vector, slabs: u8) -> f32 {
+    let count = f32::from(slabs);
+    let step = 1.6 / count;
+    let y = point.1 + 0.8;
+    let i = (y / step).floor().clamp(0.0, count - 1.0);
+    let center = (i + 0.5) * step - 0.8;
+    let width = 0.85 - 0.5 * (i / (count - 1.0).max(1.0));
 
     rbox(
-        Vector(path.0, path.1 - character_value, path.2),
+        Vector(point.0, point.1 - center, point.2),
         Vector(width, step * 0.32, width),
         0.02,
     )
 }
-fn cone_distance(path: Vector) -> f32 {
-    let (height_3, result_2) = (1.6, 0.8);
-    let y = path.1 + 0.8;
+fn cone_distance(point: Vector) -> f32 {
+    let (rise, run) = (1.6, 0.8);
+    let y = point.1 + 0.8;
 
-    ((len2(path.0, path.2) * height_3 + y * result_2 - result_2 * height_3) / len2(height_3, result_2)).max(-y)
+    ((len2(point.0, point.2) * rise + y * run - run * rise) / len2(rise, run)).max(-y)
 }
-fn capsule_distance(path: Vector) -> f32 {
-    let y = path.1.clamp(-0.55, 0.55);
+fn capsule_distance(point: Vector) -> f32 {
+    let y = point.1.clamp(-0.55, 0.55);
 
-    Vector(path.0, path.1 - y, path.2).len() - 0.45
+    Vector(point.0, point.1 - y, point.2).len() - 0.45
 }
-fn gyroid_distance(path: Vector) -> f32 {
-    let key_4 = 5.0;
-    let group = (path.0 * key_4).sin() * (path.1 * key_4).cos()
-        + (path.1 * key_4).sin() * (path.2 * key_4).cos()
-        + (path.2 * key_4).sin() * (path.0 * key_4).cos();
+fn gyroid_distance(point: Vector) -> f32 {
+    let frequency = 5.0;
+    let field = (point.0 * frequency).sin() * (point.1 * frequency).cos()
+        + (point.1 * frequency).sin() * (point.2 * frequency).cos()
+        + (point.2 * frequency).sin() * (point.0 * frequency).cos();
 
-    (path.len() - 0.95).max(group.abs() / key_4 - 0.06)
+    (point.len() - 0.95).max(field.abs() / frequency - 0.06)
 }
-fn steps_distance(path: Vector) -> f32 {
-    let agent_5 = rbox(Vector(path.0, path.1 + 0.5, path.2), Vector(0.8, 0.25, 0.8), 0.0);
-    let bytes_2 = rbox(Vector(path.0, path.1, path.2), Vector(0.55, 0.25, 0.55), 0.0);
-    let character_2 = rbox(Vector(path.0, path.1 - 0.5, path.2), Vector(0.3, 0.25, 0.3), 0.0);
+fn steps_distance(point: Vector) -> f32 {
+    let bottom = rbox(Vector(point.0, point.1 + 0.5, point.2), Vector(0.8, 0.25, 0.8), 0.0);
+    let middle = rbox(Vector(point.0, point.1, point.2), Vector(0.55, 0.25, 0.55), 0.0);
+    let top = rbox(Vector(point.0, point.1 - 0.5, point.2), Vector(0.3, 0.25, 0.3), 0.0);
 
-    agent_5.min(bytes_2).min(character_2)
+    bottom.min(middle).min(top)
 }
-fn arch_distance(path: Vector) -> f32 {
-    let outer = rbox(path, Vector(0.8, 0.9, 0.25), 0.0);
-    let hole = (len2(path.0, path.1 + 0.2) - 0.45).min(rbox(
-        Vector(path.0, path.1 + 0.6, path.2),
+fn arch_distance(point: Vector) -> f32 {
+    let outer = rbox(point, Vector(0.8, 0.9, 0.25), 0.0);
+    let hole = (len2(point.0, point.1 + 0.2) - 0.45).min(rbox(
+        Vector(point.0, point.1 + 0.6, point.2),
         Vector(0.45, 0.4, 1.0),
         0.0,
     ));

@@ -1,7 +1,7 @@
 use super::{Act, App, CARD_H, MouseButton, MouseEvent, MouseEventKind, Position, Row, Screen, Tab};
 
 pub(super) fn mouse_lists(
-    app_state: &mut App,
+    app: &mut App,
     event: MouseEvent,
     at: Position,
     list: ratatui::prelude::Rect,
@@ -12,15 +12,9 @@ pub(super) fn mouse_lists(
     let mut took = false;
 
     for (on, ta) in [
-        (app_state.note_list.filter_editing, &mut app_state.note_list.filter_ta),
-        (
-            app_state.thread_list.tlist.filtering,
-            &mut app_state.thread_list.tlist.filter,
-        ),
-        (
-            app_state.agent_list.afilter_editing,
-            &mut app_state.agent_list.afilter_ta,
-        ),
+        (app.note_list.filter_editing, &mut app.note_list.filter_ta),
+        (app.thread_list.tlist.filtering, &mut app.thread_list.tlist.filter),
+        (app.agent_list.afilter_editing, &mut app.agent_list.afilter_ta),
     ] {
         if on && ta.mouse(event) {
             took = true;
@@ -28,8 +22,8 @@ pub(super) fn mouse_lists(
         }
     }
 
-    if let Some(count_3) = copied {
-        app_state.toast(format!("copied {count_3} chars"), false);
+    if let Some(chars) = copied {
+        app.toast(format!("copied {chars} chars"), false);
     }
 
     if took {
@@ -39,34 +33,33 @@ pub(super) fn mouse_lists(
     // the preview: text selection (drag, 2 clicks: word, 3: row), copied at the release
     let wheel = matches!(event.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp);
 
-    if (in_preview && !wheel) || app_state.preview.psel.is_dragging() {
-        mouse_lists_thread(app_state, event);
+    if (in_preview && !wheel) || app.preview.psel.is_dragging() {
+        mouse_preview_selection(app, event);
         return;
     }
 
     if matches!(event.kind, MouseEventKind::Down(_)) {
-        app_state.preview.psel.clear();
+        app.preview.psel.clear();
     }
 
-    mouse_list_rows(app_state, event, at, list, in_list, in_preview);
+    mouse_list_rows(app, event, at, list, in_list, in_preview);
 }
 
-pub(super) fn mouse_lists_thread(app_state: &mut App, event: MouseEvent) {
+pub(super) fn mouse_preview_selection(app: &mut App, event: MouseEvent) {
     if matches!(event.kind, MouseEventKind::Down(_)) {
-        app_state.tabs_focus = false;
+        app.tabs_focus = false;
     }
 
-    if let Some(thread) =
-        app_state
-            .preview
-            .psel
-            .mouse(event, app_state.preview.regions.preview, &app_state.preview.last_frame)
+    if let Some(text) = app
+        .preview
+        .psel
+        .mouse(event, app.preview.regions.preview, &app.preview.last_frame)
     {
-        let ok = crate::infra::clip::copy(&thread);
+        let ok = crate::infra::clip::copy(&text);
 
-        app_state.toast(
+        app.toast(
             if ok {
-                format!("copied {} chars", thread.chars().count())
+                format!("copied {} chars", text.chars().count())
             } else {
                 "0 clipboard tools found (wl-copy, xclip, xsel)".into()
             },
@@ -76,7 +69,7 @@ pub(super) fn mouse_lists_thread(app_state: &mut App, event: MouseEvent) {
 }
 
 pub(super) fn mouse_list_rows(
-    app_state: &mut App,
+    app: &mut App,
     event: MouseEvent,
     at: Position,
     list: ratatui::prelude::Rect,
@@ -84,173 +77,162 @@ pub(super) fn mouse_list_rows(
     in_preview: bool,
 ) {
     match event.kind {
-        MouseEventKind::Down(MouseButton::Left) if in_list => mouse_list_click(app_state, event, at, list),
+        MouseEventKind::Down(MouseButton::Left) if in_list => mouse_list_click(app, event, at, list),
         MouseEventKind::ScrollDown if in_preview => {
-            app_state.preview.pscroll = app_state.preview.pscroll.saturating_add(3);
+            app.preview.pscroll = app.preview.pscroll.saturating_add(3);
         }
         MouseEventKind::ScrollUp if in_preview => {
-            app_state.preview.pscroll = app_state.preview.pscroll.saturating_sub(3);
+            app.preview.pscroll = app.preview.pscroll.saturating_sub(3);
         }
-        MouseEventKind::ScrollDown | MouseEventKind::ScrollUp if in_list => mouse_list_wheel(app_state, event, list),
+        MouseEventKind::ScrollDown | MouseEventKind::ScrollUp if in_list => mouse_list_wheel(app, event, list),
         _ => {}
     }
 }
 
-pub(super) fn mouse_list_wheel(app_state: &mut App, event: MouseEvent, list: ratatui::prelude::Rect) {
-    let event_value = if matches!(event.kind, MouseEventKind::ScrollDown) {
+pub(super) fn mouse_list_wheel(app: &mut App, event: MouseEvent, list: ratatui::prelude::Rect) {
+    let delta = if matches!(event.kind, MouseEventKind::ScrollDown) {
         3
     } else {
         -3
     };
 
-    if app_state.tab == Tab::Notes {
-        app_state.move_cursor(event_value);
-    } else if app_state.tab == Tab::Agents {
+    if app.tab == Tab::Notes {
+        app.move_cursor(delta);
+    } else if app.tab == Tab::Agents {
         // the card grid scrolls; the cursor stays on a card in view
-        app_state.agent_list.aoffset = (app_state.agent_list.aoffset as isize + event_value).max(0) as usize;
-        let (top, bottom) = (
-            app_state.agent_list.aoffset,
-            app_state.agent_list.aoffset + list.height as usize,
-        );
+        app.agent_list.aoffset = (app.agent_list.aoffset as isize + delta).max(0) as usize;
+        let (top, bottom) = (app.agent_list.aoffset, app.agent_list.aoffset + list.height as usize);
 
-        if let Some(&(i, _, _)) = app_state
+        if let Some(&(i, _, _)) = app
             .agent_list
             .aplace
             .iter()
             .find(|&&(_, _, y)| y >= top && y + CARD_H as usize <= bottom)
-            && !app_state.agent_list.aplace.iter().any(|&(character_3, _, y)| {
-                character_3 == app_state.agent_list.acursor && y >= top && y + CARD_H as usize <= bottom
-            })
+            && !app
+                .agent_list
+                .aplace
+                .iter()
+                .any(|&(card, _, y)| card == app.agent_list.acursor && y >= top && y + CARD_H as usize <= bottom)
         {
-            app_state.agent_list.acursor = i;
+            app.agent_list.acursor = i;
         }
 
-        app_state.preview.pscroll = 0;
+        app.preview.pscroll = 0;
     } else {
-        let count_4 = app_state.n_threads() as isize;
+        let count = app.n_threads() as isize;
 
-        app_state.thread_list.tcursor =
-            (app_state.thread_list.tcursor as isize + event_value).clamp(0, (count_4 - 1).max(0)) as usize;
-        app_state.preview.pscroll = 0;
+        app.thread_list.tcursor = (app.thread_list.tcursor as isize + delta).clamp(0, (count - 1).max(0)) as usize;
+        app.preview.pscroll = 0;
     }
 }
 
-pub(super) fn mouse_list_click(app_state: &mut App, event: MouseEvent, at: Position, list: ratatui::prelude::Rect) {
-    app_state.tabs_focus = false;
+pub(super) fn mouse_list_click(app: &mut App, event: MouseEvent, at: Position, list: ratatui::prelude::Rect) {
+    app.tabs_focus = false;
     let i = (event.row - list.y) as usize;
 
-    if app_state.tab == Tab::Notes {
-        mouse_list_click_character_(app_state, i);
-    } else if app_state.tab == Tab::Agents {
-        mouse_list_click_body(app_state, at, i);
+    if app.tab == Tab::Notes {
+        click_note_row(app, i);
+    } else if app.tab == Tab::Agents {
+        click_agent_card(app, at, i);
     }
 }
 
-pub(super) fn mouse_list_click_character_(app_state: &mut App, i: usize) {
-    let i = app_state.note_list.offset + i;
+pub(super) fn click_note_row(app: &mut App, i: usize) {
+    let i = app.note_list.offset + i;
 
-    if i >= app_state.note_list.rows.len() {
+    if i >= app.note_list.rows.len() {
         return;
     }
 
-    if i == app_state.note_list.cursor {
-        match &app_state.note_list.rows[i] {
+    if i == app.note_list.cursor {
+        match &app.note_list.rows[i] {
             Row::Dir { collapsed, .. } => {
-                let character_2 = *collapsed;
+                let collapsed = *collapsed;
 
-                app_state.fold(character_2);
+                app.fold(collapsed);
             }
-            _ => app_state.toggle_select(),
+            _ => app.toggle_select(),
         }
     } else {
-        app_state.note_list.cursor = i;
-        app_state.preview.pscroll = 0;
+        app.note_list.cursor = i;
+        app.preview.pscroll = 0;
     }
 }
 
-pub(super) fn mouse_list_click_body(app_state: &mut App, at: Position, i: usize) {
+pub(super) fn click_agent_card(app: &mut App, at: Position, i: usize) {
     let _ = i;
 
-    if let Some(&(_, i)) = app_state
-        .agent_list
-        .acards
-        .iter()
-        .find(|(result_9, _)| result_9.contains(at))
-    {
-        if i == app_state.agent_list.acursor {
-            app_state.run(Act::EditAgent);
+    if let Some(&(_, i)) = app.agent_list.acards.iter().find(|(rect, _)| rect.contains(at)) {
+        if i == app.agent_list.acursor {
+            app.run(Act::EditAgent);
         } else {
-            app_state.agent_list.acursor = i;
-            app_state.preview.pscroll = 0;
+            app.agent_list.acursor = i;
+            app.preview.pscroll = 0;
         }
     }
 }
 
-pub(super) fn mouse_thread_list(app_state: &mut App, event: MouseEvent, at: Position, down: bool) -> bool {
-    if app_state.compose.screen == Screen::Pick
-        && app_state.tab == Tab::Threads
-        && app_state.preview.regions.list.contains(at)
-        && !app_state.preview.psel.is_dragging()
+pub(super) fn mouse_thread_list(app: &mut App, event: MouseEvent, at: Position, down: bool) -> bool {
+    if app.compose.screen == Screen::Pick
+        && app.tab == Tab::Threads
+        && app.preview.regions.list.contains(at)
+        && !app.preview.psel.is_dragging()
     {
-        mouse_thread_list_count_value(app_state, event, at, down);
+        mouse_thread_list_view(app, event, at, down);
         return true;
     }
 
     false
 }
 
-pub(super) fn mouse_thread_list_count_value(app_state: &mut App, event: MouseEvent, at: Position, down: bool) {
+pub(super) fn mouse_thread_list_view(app: &mut App, event: MouseEvent, at: Position, down: bool) {
     use crate::features::thread_list::Out;
 
     if down {
-        app_state.tabs_focus = false;
+        app.tabs_focus = false;
     }
 
-    match app_state.thread_list.tlist.mouse(event) {
-        Out::Open(character_value) => {
-            app_state.open_card(&character_value);
+    match app.thread_list.tlist.mouse(event) {
+        Out::Open(card) => {
+            app.open_card(&card);
             return;
         }
-        Out::Pass if !app_state.thread_list.tlist.view.cards() && app_state.thread_list.tlist.list.contains(at) => {
-            mouse_thread_list_count_value_count_value(app_state, event);
+        Out::Pass if !app.thread_list.tlist.view.cards() && app.thread_list.tlist.list.contains(at) => {
+            mouse_thread_rows(app, event);
         }
         _ => {}
     }
 
-    app_state.preview.pscroll = 0;
+    app.preview.pscroll = 0;
 }
 
-pub(super) fn mouse_thread_list_count_value_count_value(app_state: &mut App, event: MouseEvent) {
-    let count_value = app_state.n_threads();
+pub(super) fn mouse_thread_rows(app: &mut App, event: MouseEvent) {
+    let count = app.n_threads();
 
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            mouse_thread_list_count_value_count_value_body(app_state, event, count_value);
+            click_thread_row(app, event, count);
         }
         MouseEventKind::ScrollDown => {
-            app_state.thread_list.tcursor = (app_state.thread_list.tcursor + 1).min(count_value.saturating_sub(1));
+            app.thread_list.tcursor = (app.thread_list.tcursor + 1).min(count.saturating_sub(1));
         }
         MouseEventKind::ScrollUp => {
-            app_state.thread_list.tcursor = app_state.thread_list.tcursor.saturating_sub(1);
+            app.thread_list.tcursor = app.thread_list.tcursor.saturating_sub(1);
         }
         _ => {}
     }
 }
 
-pub(super) fn mouse_thread_list_count_value_count_value_body(
-    app_state: &mut App,
-    event: MouseEvent,
-    count_value: usize,
-) {
-    let i = app_state.thread_list.toffset + (event.row - app_state.thread_list.tlist.list.y) as usize;
+pub(super) fn click_thread_row(app: &mut App, event: MouseEvent, count: usize) {
+    let i = app.thread_list.toffset + (event.row - app.thread_list.tlist.list.y) as usize;
 
-    if i < count_value {
-        app_state.thread_list.tlist.focus = crate::features::thread_list::Focus::List;
+    if i < count {
+        app.thread_list.tlist.focus = crate::features::thread_list::Focus::List;
 
-        if i == app_state.thread_list.tcursor {
-            app_state.open_thread();
+        if i == app.thread_list.tcursor {
+            app.open_thread();
         } else {
-            app_state.thread_list.tcursor = i;
+            app.thread_list.tcursor = i;
         }
     }
 }

@@ -8,10 +8,10 @@ fn a_pinned_worktree_switches_back_detached_and_rebase_pass_repo_hooks_run() {
 
     std::fs::create_dir_all(&base).unwrap();
 
-    let run = |character: &str| {
+    let run = |script: &str| {
         Command::new("sh")
             .arg("-c")
-            .arg(character)
+            .arg(script)
             .current_dir(&base)
             .env_remove("CODEHEAD_ALLOW_SWITCH")
             .stdout(Stdio::null())
@@ -21,24 +21,24 @@ fn a_pinned_worktree_switches_back_detached_and_rebase_pass_repo_hooks_run() {
             .success()
     };
 
-    let sh = |character_value: &str| assert!(run(character_value), "{character_value}");
+    let sh = |script: &str| assert!(run(script), "{script}");
     let cfg = "git config user.email t@t && git config user.name t";
 
     sh(&format!(
         "git init -q -b main r && cd r && {cfg} && mkdir .hooks && printf '#!/bin/sh\\ntouch \"$(git rev-parse --git-dir)/pre-commit-ran\"\\n' > .hooks/pre-commit && chmod +x .hooks/pre-commit && git add .hooks && git commit -qm a && git config core.hooksPath .hooks && git branch feat && git commit -q --allow-empty -m b && git switch -q -c other"
     ));
     sh("cd r && git worktree add -q ../w feat");
-    let width = base.join("w");
+    let wt = base.join("w");
 
-    pin(&width, "feat").unwrap_or_else(|error| panic!("{error}"));
-    let branch = || crate::domain::threads::current_branch(&width);
+    pin(&wt, "feat").unwrap_or_else(|error| panic!("{error}"));
+    let branch = || crate::domain::threads::current_branch(&wt);
 
     // a switch: back on feat, exit 1 (the `&&` chain stops), untracked files stay
     sh("cd w && echo u > u");
 
     assert!(!run("cd w && git checkout -q main && touch pulled"));
     assert_eq!(branch(), "feat");
-    assert!(width.join("u").exists() && !width.join("pulled").exists());
+    assert!(wt.join("u").exists() && !wt.join("pulled").exists());
     assert!(!run("cd w && git switch -q -c side"));
     assert_eq!(branch(), "feat");
 
@@ -52,7 +52,7 @@ fn a_pinned_worktree_switches_back_detached_and_rebase_pass_repo_hooks_run() {
     assert_eq!(branch(), "feat");
 
     // the repo's own hooks still run; the main checkout: 0 pin
-    let gitdir = PathBuf::from(git(&width, &["rev-parse", "--absolute-git-dir"]).1.trim());
+    let gitdir = PathBuf::from(git(&wt, &["rev-parse", "--absolute-git-dir"]).1.trim());
 
     assert!(gitdir.join("pre-commit-ran").exists());
 

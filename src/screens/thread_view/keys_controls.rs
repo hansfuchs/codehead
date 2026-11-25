@@ -16,7 +16,7 @@ impl View {
                 return Some(false);
             }
             KeyCode::Char('v') if ctrl => {
-                return Some(key_controls_path(self));
+                return Some(paste_clipboard(self));
             }
 
             _ => {}
@@ -26,11 +26,11 @@ impl View {
     }
 }
 
-fn key_controls_path(view: &mut View) -> bool {
-    let path = view.prompt.paster.clipboard();
+fn paste_clipboard(view: &mut View) -> bool {
+    let pasted = view.prompt.paster.clipboard();
 
-    match path {
-        Pasted::Text(thread) => view.prompt.input.paste(&thread),
+    match pasted {
+        Pasted::Text(text) => view.prompt.input.paste(&text),
         Pasted::File { path, marker } => {
             view.prompt.input.insert(&marker);
             view.prompt.attachments.push((marker, path));

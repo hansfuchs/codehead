@@ -2,7 +2,7 @@ use super::{HashSet, Path, Uncommitted, git, run, short, upstream};
 
 /// The backup ref of THREAD's last uncommit (the old HEAD).
 pub(crate) fn backup_ref(thread: &str) -> String {
-    let thread_value: String = thread
+    let safe: String = thread
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
@@ -13,7 +13,7 @@ pub(crate) fn backup_ref(thread: &str) -> String {
         })
         .collect();
 
-    format!("refs/codehead/uncommit/{thread_value}")
+    format!("refs/codehead/uncommit/{safe}")
 }
 /// Uncommit PICKS (oids) in DIR: they leave the history, the later commits get replayed on top
 /// of what stays. The worktree stays byte for byte; the picked changes show as uncommitted. A
@@ -34,14 +34,14 @@ pub(crate) fn uncommit(dir: &Path, picks: &[String], head: &str, thread: &str) -
         return Err("a rebase / merge stopped: finish it first".into());
     }
 
-    if let Some(user) = upstream(dir) {
-        let local: HashSet<String> = git(dir, &["rev-list", "HEAD", &format!("^{user}")])?
+    if let Some(tracking) = upstream(dir) {
+        let local: HashSet<String> = git(dir, &["rev-list", "HEAD", &format!("^{tracking}")])?
             .lines()
             .map(str::to_string)
             .collect();
 
-        if let Some(path_value) = picks.iter().find(|path| !local.contains(*path)) {
-            return Err(format!("{}: pushed (0 uncommit)", short(path_value)));
+        if let Some(pushed) = picks.iter().find(|oid| !local.contains(*oid)) {
+            return Err(format!("{}: pushed (0 uncommit)", short(pushed)));
         }
     }
 
@@ -65,21 +65,18 @@ fn replay_uncommitted_history(
 ) -> Result<Uncommitted, String> {
     for line in chain.lines() {
         let mut it = line.split_whitespace();
-        let Some(character) = it.next() else { continue };
+        let Some(oid) = it.next() else { continue };
         let parents: Vec<String> = it.map(str::to_string).collect();
 
         if parents.len() > 1 {
-            return Err(format!(
-                "{}: a merge commit in the range (0 uncommit)",
-                short(character)
-            ));
+            return Err(format!("{}: a merge commit in the range (0 uncommit)", short(oid)));
         }
 
-        if let Some(value) = collect_retained_commit(picked, &mut found, character, &parents) {
-            return value;
+        if let Some(error) = count_picked(picked, &mut found, oid, &parents) {
+            return error;
         }
 
-        range.push((character.to_string(), parents));
+        range.push((oid.to_string(), parents));
 
         if found == picked.len() {
             break;
@@ -97,20 +94,20 @@ fn replay_uncommitted_history(
         ..Default::default()
     };
 
-    for (character_value, parents) in &range {
-        if picked.contains(character_value.as_str()) {
+    for (oid, parents) in &range {
+        if picked.contains(oid.as_str()) {
             continue;
         }
 
-        let tree = replay(dir, &cur, character_value, &parents[0], &mut done)?;
+        let tree = replay(dir, &cur, oid, &parents[0], &mut done)?;
         let cur_tree = git(dir, &["rev-parse", &format!("{cur}^{{tree}}")])?.trim().to_string();
 
         if tree == cur_tree {
-            done.dropped.push(short(character_value).to_string());
+            done.dropped.push(short(oid).to_string());
             continue;
         }
 
-        cur = recommit(dir, character_value, &tree, &cur)?;
+        cur = recommit(dir, oid, &tree, &cur)?;
     }
 
     move_head(dir, now, &cur, thread, &mut done)?;
@@ -118,15 +115,15 @@ fn replay_uncommitted_history(
     Ok(done)
 }
 
-fn collect_retained_commit(
+fn count_picked(
     picked: &HashSet<&str>,
     found: &mut usize,
-    character: &str,
+    oid: &str,
     parents: &[String],
 ) -> Option<Result<Uncommitted, String>> {
-    if picked.contains(character) {
-        if let Some(value) = check_commit_parent(character, parents) {
-            return Some(value);
+    if picked.contains(oid) {
+        if let Some(error) = reject_root_commit(oid, parents) {
+            return Some(error);
         }
 
         *found += 1;
@@ -135,9 +132,9 @@ fn collect_retained_commit(
     None
 }
 
-fn check_commit_parent(character: &str, parents: &[String]) -> Option<Result<Uncommitted, String>> {
+fn reject_root_commit(oid: &str, parents: &[String]) -> Option<Result<Uncommitted, String>> {
     if parents.is_empty() {
-        return Some(Err(format!("{}: the root commit (0 uncommit)", short(character))));
+        return Some(Err(format!("{}: the root commit (0 uncommit)", short(oid))));
     }
 
     None
@@ -185,7 +182,7 @@ pub(crate) fn move_head(dir: &Path, old: &str, new: &str, thread: &str, done: &m
             ],
         )?;
         git(dir, &["update-ref", "-m", "codehead: uncommit", "HEAD", new, old])
-            .map_err(|error_value| format!("HEAD moved meanwhile: {error_value}"))?;
+            .map_err(|error| format!("HEAD moved meanwhile: {error}"))?;
 
         // HEAD moved: the new index in place through the lock file (as git writes it); a write
         // error: the old index stays (the note says so), 0 Err after HEAD moved
@@ -211,11 +208,11 @@ pub(crate) fn move_head(dir: &Path, old: &str, new: &str, thread: &str, done: &m
 pub(crate) fn replay(
     dir: &Path,
     cur: &str,
-    character: &str,
-    path_value: &str,
+    commit: &str,
+    parent: &str,
     done: &mut Uncommitted,
 ) -> Result<String, String> {
-    let base = format!("--merge-base={path_value}");
+    let base = format!("--merge-base={parent}");
 
     let (tree, conflicted) = match run(
         dir,
@@ -226,13 +223,13 @@ pub(crate) fn replay(
             "--no-messages",
             &base,
             cur,
-            character,
+            commit,
         ],
         &[],
         None,
     ) {
         Ok(output) => (output.lines().next().unwrap_or_default().to_string(), Vec::new()),
-        Err((1, output_value, _)) => replay_with_resolved_conflicts(&output_value),
+        Err((1, output, _)) => parse_conflicts(&output),
         // git < 2.40 (0 `--merge-base`): the newest commits still uncommit (0 replay)
         Err((_, _, error)) => {
             return Err(format!(
@@ -246,16 +243,16 @@ pub(crate) fn replay(
     }
 
     // a temp index: the merged tree, each conflicted path as CUR has it
-    let idx = std::env::temp_dir().join(format!("codehead-uncommit-{}-{}", std::process::id(), short(character)));
+    let idx = std::env::temp_dir().join(format!("codehead-uncommit-{}-{}", std::process::id(), short(commit)));
     let env = [("GIT_INDEX_FILE", idx.to_string_lossy().into_owned())];
     let result = (|| {
-        run(dir, &["read-tree", &tree], &env, None).map_err(|error_value| error_value.2)?;
+        run(dir, &["read-tree", &tree], &env, None).map_err(|error| error.2)?;
 
-        restore_conflicted_paths(dir, cur, character, done, &conflicted, &env)?;
+        restore_conflicted_paths(dir, cur, commit, done, &conflicted, &env)?;
 
         run(dir, &["write-tree"], &env, None)
-            .map(|thread_value| thread_value.trim().to_string())
-            .map_err(|error_4| error_4.2)
+            .map(|output| output.trim().to_string())
+            .map_err(|error| error.2)
     })();
     let _ = std::fs::remove_file(&idx);
 
@@ -265,7 +262,7 @@ pub(crate) fn replay(
 fn restore_conflicted_paths(
     dir: &Path,
     cur: &str,
-    character: &str,
+    commit: &str,
     done: &mut Uncommitted,
     conflicted: &[String],
     env: &[(&str, String); 1],
@@ -275,45 +272,45 @@ fn restore_conflicted_paths(
 
         match ls.split_whitespace().collect::<Vec<_>>().as_slice() {
             [mode, _, blob, ..] => {
-                blob_metadata(dir, env, path, mode, blob)?;
+                stage_blob(dir, env, path, mode, blob)?;
             }
             _ => {
-                run(dir, &["update-index", "--force-remove", "--", path], env, None).map_err(|error_3| error_3.2)?;
+                run(dir, &["update-index", "--force-remove", "--", path], env, None).map_err(|error| error.2)?;
             }
         }
 
-        done.cascaded.push((short(character).to_string(), path.clone()));
+        done.cascaded.push((short(commit).to_string(), path.clone()));
     }
 
     Ok(())
 }
 
-fn blob_metadata(dir: &Path, env: &[(&str, String); 1], path: &String, mode: &&str, blob: &&str) -> Result<(), String> {
+fn stage_blob(dir: &Path, env: &[(&str, String); 1], path: &String, mode: &&str, blob: &&str) -> Result<(), String> {
     run(
         dir,
         &["update-index", "--add", "--cacheinfo", &format!("{mode},{blob},{path}")],
         env,
         None,
     )
-    .map_err(|error_2| error_2.2)?;
+    .map_err(|error| error.2)?;
     Ok(())
 }
 
-fn replay_with_resolved_conflicts(output_value: &str) -> (String, Vec<String>) {
-    let mut lines = output_value.lines();
-    let thread = lines.next().unwrap_or_default().to_string();
+fn parse_conflicts(output: &str) -> (String, Vec<String>) {
+    let mut lines = output.lines();
+    let tree = lines.next().unwrap_or_default().to_string();
     let mut paths: Vec<String> = Vec::new();
 
-    for line_value in lines.take_while(|line| !line.is_empty()) {
-        if !paths.iter().any(|x| x == line_value) {
-            paths.push(line_value.to_string());
+    for path in lines.take_while(|line| !line.is_empty()) {
+        if !paths.iter().any(|known| known == path) {
+            paths.push(path.to_string());
         }
     }
 
-    (thread, paths)
+    (tree, paths)
 }
 /// A copy of commit C with TREE on PARENT: C's author, committer, dates, message.
-pub(crate) fn recommit(dir: &Path, character: &str, tree: &str, parent: &str) -> Result<String, String> {
+pub(crate) fn recommit(dir: &Path, commit: &str, tree: &str, parent: &str) -> Result<String, String> {
     let meta = git(
         dir,
         &[
@@ -321,30 +318,30 @@ pub(crate) fn recommit(dir: &Path, character: &str, tree: &str, parent: &str) ->
             "-1",
             "--format=%an%x00%ae%x00%ad%x00%cn%x00%ce%x00%cd",
             "--date=raw",
-            character,
+            commit,
         ],
     )?;
-    let file: Vec<&str> = meta.trim_end_matches('\n').split('\0').collect();
+    let fields: Vec<&str> = meta.trim_end_matches('\n').split('\0').collect();
 
-    if file.len() < 6 {
-        return Err(format!("{}: 0 metadata", short(character)));
+    if fields.len() < 6 {
+        return Err(format!("{}: 0 metadata", short(commit)));
     }
 
     // %B ends in a line break of its own: 1 line break kept (0 more per rewrite)
     let msg = format!(
         "{}\n",
-        git(dir, &["log", "-1", "--format=%B", character])?.trim_end_matches('\n')
+        git(dir, &["log", "-1", "--format=%B", commit])?.trim_end_matches('\n')
     );
     let env = [
-        ("GIT_AUTHOR_NAME", file[0].to_string()),
-        ("GIT_AUTHOR_EMAIL", file[1].to_string()),
-        ("GIT_AUTHOR_DATE", file[2].to_string()),
-        ("GIT_COMMITTER_NAME", file[3].to_string()),
-        ("GIT_COMMITTER_EMAIL", file[4].to_string()),
-        ("GIT_COMMITTER_DATE", file[5].to_string()),
+        ("GIT_AUTHOR_NAME", fields[0].to_string()),
+        ("GIT_AUTHOR_EMAIL", fields[1].to_string()),
+        ("GIT_AUTHOR_DATE", fields[2].to_string()),
+        ("GIT_COMMITTER_NAME", fields[3].to_string()),
+        ("GIT_COMMITTER_EMAIL", fields[4].to_string()),
+        ("GIT_COMMITTER_DATE", fields[5].to_string()),
     ];
 
     run(dir, &["commit-tree", tree, "-p", parent, "-F", "-"], &env, Some(&msg))
         .map(|output| output.trim().to_string())
-        .map_err(|error| format!("{}: {}", short(character), error.2))
+        .map_err(|error| format!("{}: {}", short(commit), error.2))
 }

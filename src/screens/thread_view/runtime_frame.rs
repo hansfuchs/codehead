@@ -131,8 +131,8 @@ impl Runtime {
         self.dirty |= self.view.merge_state.merge.poll(self.view.panes.pane == Pane::Merge);
         self.dirty |= self.view.panes.files.poll();
 
-        if let Some(message) = self.view.panes.files.take_toast() {
-            self.view.toast(message);
+        if let Some(toast) = self.view.panes.files.take_toast() {
+            self.view.toast(toast);
             self.dirty = true;
         }
 

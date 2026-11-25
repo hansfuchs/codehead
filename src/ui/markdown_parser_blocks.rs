@@ -3,17 +3,17 @@ use super::{Block, HeadingLevel, Line, MarkdownState, Piece, Row, Span, UnicodeW
 pub(super) fn start_paragraph(state: &mut MarkdownState<'_>, at: usize) {
     if state.block.is_none() {
         gap(state, at);
-        let message = margin(state.prefix, state.quote, state.lists.len());
+        let margin = margin(state.prefix, state.quote, state.lists.len());
 
         let rest = if state.lists.is_empty() {
-            message.clone()
+            margin.clone()
         } else {
-            [message.clone(), vec![Span::raw("  ")]].concat()
+            [margin.clone(), vec![Span::raw("  ")]].concat()
         };
 
         state.block = Some(Block {
             pieces: Vec::new(),
-            first: if state.lists.is_empty() { message } else { rest.clone() },
+            first: if state.lists.is_empty() { margin } else { rest.clone() },
             rest,
         });
     }
@@ -29,7 +29,7 @@ pub(super) fn start_heading(state: &mut MarkdownState<'_>, level: HeadingLevel, 
         _ => "### ",
     };
 
-    let message_value = margin(state.prefix, state.quote, 0);
+    let margin = margin(state.prefix, state.quote, 0);
 
     state.block = Some(Block {
         pieces: vec![Piece {
@@ -37,8 +37,8 @@ pub(super) fn start_heading(state: &mut MarkdownState<'_>, level: HeadingLevel, 
             style: theme::muted(),
             ..Default::default()
         }],
-        first: message_value.clone(),
-        rest: message_value,
+        first: margin.clone(),
+        rest: margin,
     });
     state.styles.push(theme::bold());
 }
@@ -76,20 +76,20 @@ pub(super) fn end_list(state: &mut MarkdownState<'_>) {
 
 pub(super) fn start_item(state: &mut MarkdownState<'_>) {
     flush(state);
-    let message_2 = margin(state.prefix, state.quote, state.lists.len());
+    let margin = margin(state.prefix, state.quote, state.lists.len());
 
     let mark = match state.lists.last_mut() {
-        Some(Some(count_value)) => {
-            let text_2 = format!("{count_value}. ");
+        Some(Some(number)) => {
+            let mark = format!("{number}. ");
 
-            *count_value += 1;
-            text_2
+            *number += 1;
+            mark
         }
         _ => "• ".into(),
     };
 
-    let rest = [message_2.clone(), vec![Span::raw(" ".repeat(mark.width()))]].concat();
-    let first = [message_2, vec![Span::styled(mark, theme::muted())]].concat();
+    let rest = [margin.clone(), vec![Span::raw(" ".repeat(mark.width()))]].concat();
+    let first = [margin, vec![Span::styled(mark, theme::muted())]].concat();
 
     state.block = Some(Block {
         pieces: Vec::new(),
@@ -100,17 +100,17 @@ pub(super) fn start_item(state: &mut MarkdownState<'_>) {
 
 pub(super) fn end_item(state: &mut MarkdownState<'_>) {
     match state.block.take() {
-        Some(bytes_value) if bytes_value.pieces.is_empty() => state.out.push(Row::plain(Line::from(bytes_value.first))),
-        bytes_2 => {
-            state.block = bytes_2;
+        Some(block) if block.pieces.is_empty() => state.out.push(Row::plain(Line::from(block.first))),
+        block => {
+            state.block = block;
             flush(state);
         }
     }
 }
 
 pub(super) fn task_marker(state: &mut MarkdownState<'_>, done: bool) {
-    if let Some(bytes_3) = state.block.as_mut() {
-        bytes_3.pieces.push(Piece {
+    if let Some(block) = state.block.as_mut() {
+        block.pieces.push(Piece {
             text: if done { "☑ ".into() } else { "☐ ".into() },
             style: theme::muted(),
             ..Default::default()
@@ -120,17 +120,13 @@ pub(super) fn task_marker(state: &mut MarkdownState<'_>, done: bool) {
 
 pub(super) fn rule(state: &mut MarkdownState<'_>) {
     flush(state);
-    let message_6 = margin(state.prefix, state.quote, 0);
-    let width_value = state
+    let margin = margin(state.prefix, state.quote, 0);
+    let width = state
         .width
-        .saturating_sub(message_6.iter().map(|text_3| text_3.content.width()).sum());
+        .saturating_sub(margin.iter().map(|span| span.content.width()).sum());
 
     state.out.push(Row::plain(Line::from(
-        [
-            message_6,
-            vec![Span::styled("─".repeat(width_value.min(40)), theme::line())],
-        ]
-        .concat(),
+        [margin, vec![Span::styled("─".repeat(width.min(40)), theme::line())]].concat(),
     )));
 }
 

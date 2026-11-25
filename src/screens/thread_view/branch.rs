@@ -2,6 +2,7 @@ use super::{Duration, Exit, Msg, View, store};
 use std::fmt::Write;
 
 impl View {
+    /// `> branch`: a copy of the thread, its view next.
     pub(super) fn branch(&mut self) -> bool {
         if !self.thread.busy.is_empty() {
             self.toast("branch: wait for the turn to end");
@@ -58,8 +59,6 @@ impl View {
         }
     }
 
-    /// `> handoff`: the review model writes the handoff document (on a thread); its end opens
-    /// the new thread with the document as its prompt draft.
     /// `>reload`: the idle sessions of the thread's agents end; each agent's next message starts
     /// a new harness process (resumed: the conversation stays) with the MCP servers and settings
     /// of now. A busy agent: after its turn.
@@ -75,13 +74,13 @@ impl View {
         // a host call per agent (5 s max each): off the UI thread, the result as a toast
         let run = move || {
             // 0 host: 0 session runs, the next message starts a new one anyway
-            reload_sessions_done(idle, &(busy), &(id))
+            reload_idle_sessions(idle, &busy, &id)
         };
 
         if cfg!(test) {
-            let message = run();
+            let toast = run();
 
-            return self.toast(message);
+            return self.toast(toast);
         }
 
         let tx = self.tx.clone();
@@ -91,6 +90,8 @@ impl View {
         });
     }
 
+    /// `> handoff`: the review model writes the handoff document (on a thread); its end opens
+    /// the new thread with the document as its prompt draft.
     pub(super) fn handoff(&mut self) {
         if !self.thread.busy.is_empty() {
             self.toast("handoff: wait for the turn to end");
@@ -148,7 +149,7 @@ impl View {
     }
 }
 
-fn reload_sessions_done(idle: Vec<String>, busy: &[String], id: &str) -> String {
+fn reload_idle_sessions(idle: Vec<String>, busy: &[String], id: &str) -> String {
     let done: Vec<String> = idle
         .into_iter()
         .filter(|agent| {
@@ -161,15 +162,15 @@ fn reload_sessions_done(idle: Vec<String>, busy: &[String], id: &str) -> String 
         })
         .collect();
 
-    let mut msg = if done.is_empty() {
+    let mut toast = if done.is_empty() {
         "reload: 0 sessions ran · the next message starts new ones".to_string()
     } else {
         format!("reload: {} · the next message starts a new session", done.join(", "))
     };
 
     if !busy.is_empty() {
-        let _ = write!(msg, " · mid-turn: {} (>reload after the turn)", busy.join(", "));
+        let _ = write!(toast, " · mid-turn: {} (>reload after the turn)", busy.join(", "));
     }
 
-    msg
+    toast
 }

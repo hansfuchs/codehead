@@ -6,10 +6,10 @@ fn where_row_branch_new_branch_worktree() {
     let _ = std::fs::remove_dir_all(&dir);
 
     std::fs::create_dir_all(&dir).unwrap();
-    let group = |args: &[&str]| assert!(threads::git(&dir, args).0, "git {args:?}");
+    let run = |args: &[&str]| assert!(threads::git(&dir, args).0, "git {args:?}");
 
-    group(&["init", "-q", "-b", "main"]);
-    group(&[
+    run(&["init", "-q", "-b", "main"]);
+    run(&[
         "-c",
         "user.name=t",
         "-c",
@@ -20,12 +20,12 @@ fn where_row_branch_new_branch_worktree() {
         "-m",
         "a",
     ]);
-    group(&["branch", "feature/x"]);
-    where_row_branch_new_branch_worktree_verify_cfg(&dir, group);
+    run(&["branch", "feature/x"]);
+    where_row_branch_new_branch_worktree_verify_cfg(&dir, run);
 }
 
-fn where_row_branch_new_branch_worktree_verify_cfg(dir: &Path, group: impl Fn(&[&str])) {
-    group(&["switch", "-q", "feature/x"]);
+fn where_row_branch_new_branch_worktree_verify_cfg(dir: &Path, run: impl Fn(&[&str])) {
+    run(&["switch", "-q", "feature/x"]);
     let cfg = Config {
         notes: dir.join("notes"),
         repo: Some(dir.to_path_buf()),
@@ -59,26 +59,26 @@ fn where_row_branch_new_branch_worktree_verify_cfg(dir: &Path, group: impl Fn(&[
     app.compose.field = Field::Where;
 
     // the dropdown, bottom up: main, new worktree, new branch, current (the cursor)
-    let pick_up = |app_value: &mut App, ups: usize| {
-        key(app_value, KeyCode::Enter, KeyModifiers::NONE);
+    let pick_up = |app: &mut App, ups: usize| {
+        key(app, KeyCode::Enter, KeyModifiers::NONE);
 
         for _ in 0..ups {
-            key(app_value, KeyCode::Up, KeyModifiers::NONE);
+            key(app, KeyCode::Up, KeyModifiers::NONE);
         }
 
-        key(app_value, KeyCode::Enter, KeyModifiers::NONE);
+        key(app, KeyCode::Enter, KeyModifiers::NONE);
 
-        assert!(app_value.repository.where_menu.is_none());
+        assert!(app.repository.where_menu.is_none());
     };
 
     pick_up(&mut app, 1);
 
-    assert!(matches!(app.target(), Ok(Target::NewBranch(bytes)) if bytes == "task/fix-deploy"));
+    assert!(matches!(app.target(), Ok(Target::NewBranch(branch)) if branch == "task/fix-deploy"));
     assert_eq!(app.checkout_box(), (false, false));
 
     pick_up(&mut app, 1);
 
-    assert!(matches!(app.target(), Ok(Target::Branch(bytes_value)) if bytes_value == "task/fix-deploy"));
+    assert!(matches!(app.target(), Ok(Target::Branch(branch)) if branch == "task/fix-deploy"));
     assert_eq!(app.where_chip(), "+ new branch + worktree");
 
     pick_up(&mut app, 1);
@@ -265,16 +265,12 @@ fn where_dropdown_orders_filters_picks_and_closes() {
 
     app.cfg.repo = Some(repo.clone());
     app.cfg.cwd = repo.clone();
-    let character = where_choices(&repo, &repo);
+    let choices = where_choices(&repo, &repo);
 
-    where_dropdown_orders_filters_picks_and_closes_verify_names(&dir, app, character);
+    where_dropdown_orders_filters_picks_and_closes_verify_names(&dir, app, choices);
 }
 
-fn where_dropdown_orders_filters_picks_and_closes_verify_names(
-    dir: &std::path::Path,
-    mut app: App,
-    character: Choices,
-) {
+fn where_dropdown_orders_filters_picks_and_closes_verify_names(dir: &std::path::Path, mut app: App, choices: Choices) {
     (
         app.repository.wheres,
         app.repository.checkouts,
@@ -282,23 +278,22 @@ fn where_dropdown_orders_filters_picks_and_closes_verify_names(
         app.repository.here_branch,
         app.repository.here_dir,
     ) = (
-        character.wheres,
-        character.checkouts,
-        character.repo_branch,
-        character.here_branch,
-        character.here_dir,
+        choices.wheres,
+        choices.checkouts,
+        choices.repo_branch,
+        choices.here_branch,
+        choices.here_dir,
     );
     app.repository.where_i = 0;
     app.compose.title.set_text("fix it");
     app.compose.field = Field::Where;
 
-    let names = |app_value: &App| {
-        app_value
-            .preview
+    let names = |app: &App| {
+        app.preview
             .regions
             .where_rows
             .iter()
-            .map(|(_, i)| app_value.where_label(&app_value.repository.wheres[*i]).0)
+            .map(|(_, i)| app.where_label(&app.repository.wheres[*i]).0)
             .collect::<Vec<_>>()
     };
 
@@ -345,10 +340,7 @@ fn where_dropdown_orders_filters_picks_and_closes_verify_out(
             .all(|(row, _)| row.y < app.preview.regions.where_row.y),
         "{out}"
     );
-    assert_eq!(
-        app.repository.where_menu.as_ref().map(|message| message.cursor),
-        Some(5)
-    );
+    assert_eq!(app.repository.where_menu.as_ref().map(|menu| menu.cursor), Some(5));
 
     // ↑↑↑: main; enter picks it and closes
     for _ in 0..3 {
@@ -366,13 +358,7 @@ fn where_dropdown_orders_filters_picks_and_closes_verify_out(
     // reopened: the cursor on main; type: filter (r types too: 0 repo switch), best at the bottom
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
-    assert_eq!(
-        app.repository
-            .where_menu
-            .as_ref()
-            .map(|message_value| message_value.cursor),
-        Some(2)
-    );
+    assert_eq!(app.repository.where_menu.as_ref().map(|menu| menu.cursor), Some(2));
 
     type_text(&mut app, "alp");
     let out = dump(&mut app, 110, 40);
@@ -393,10 +379,10 @@ fn where_dropdown_orders_filters_picks_and_closes_verify_out(
     type_text(&mut app, "zzz");
     let out = dump(&mut app, 110, 40);
 
-    where_dropdown_orders_filters_picks_and_closes_verify_width(dir, app, &out);
+    where_dropdown_orders_filters_picks_and_closes_verify_clicks(dir, app, &out);
 }
 
-fn where_dropdown_orders_filters_picks_and_closes_verify_width(dir: &std::path::Path, mut app: App, out: &str) {
+fn where_dropdown_orders_filters_picks_and_closes_verify_clicks(dir: &std::path::Path, mut app: App, out: &str) {
     assert!(out.contains("0 matches"), "{out}");
 
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -411,7 +397,7 @@ fn where_dropdown_orders_filters_picks_and_closes_verify_width(dir: &std::path::
         app.repository
             .where_menu
             .as_ref()
-            .map(|message_2| (message_2.query.as_str(), message_2.cursor)),
+            .map(|menu| (menu.query.as_str(), menu.cursor)),
         Some(("", 0))
     );
 
@@ -428,7 +414,7 @@ fn where_dropdown_orders_filters_picks_and_closes_verify_width(dir: &std::path::
 
     // mouse: a click on the where row opens it, on a row picks, next to it closes
     dump(&mut app, 110, 40);
-    let width = app.preview.regions.where_row;
+    let where_row = app.preview.regions.where_row;
     let click = |x: u16, y: u16| MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: x,
@@ -436,12 +422,12 @@ fn where_dropdown_orders_filters_picks_and_closes_verify_width(dir: &std::path::
         modifiers: KeyModifiers::NONE,
     };
 
-    app.mouse(click(width.x + 1, width.y));
+    app.mouse(click(where_row.x + 1, where_row.y));
 
     assert!(app.repository.where_menu.is_some());
 
     dump(&mut app, 110, 40);
-    let (row_value, i) = *app
+    let (row, i) = *app
         .preview
         .regions
         .where_rows
@@ -449,11 +435,11 @@ fn where_dropdown_orders_filters_picks_and_closes_verify_width(dir: &std::path::
         .find(|(_, i)| app.repository.wheres[*i] == Where::NewBranch)
         .unwrap();
 
-    app.mouse(click(row_value.x + 2, row_value.y));
+    app.mouse(click(row.x + 2, row.y));
 
     assert!(app.repository.where_menu.is_none() && app.repository.where_i == i);
 
-    app.mouse(click(width.x + 1, width.y));
+    app.mouse(click(where_row.x + 1, where_row.y));
     app.mouse(click(0, 0));
 
     assert!(app.repository.where_menu.is_none() && app.repository.wheres[app.repository.where_i] == Where::NewBranch);

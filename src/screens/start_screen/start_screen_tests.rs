@@ -60,31 +60,31 @@ pub(crate) fn app_with(drafts: Option<&std::path::Path>) -> App {
     app
 }
 
-pub(super) fn key(app: &mut App, code: KeyCode, message: KeyModifiers) {
+pub(super) fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     app.key(KeyEvent {
         code,
-        modifiers: message,
+        modifiers,
         kind: ratatui::crossterm::event::KeyEventKind::Press,
         state: KeyEventState::NONE,
     });
 }
 
 pub(super) fn dump(app: &mut App, width: u16, height: u16) -> String {
-    let mut thread = Terminal::new(TestBackend::new(width, height)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
 
     for _ in 0..30 {
-        thread.draw(|file| app.draw(file)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         app.tick();
     }
 
-    thread.draw(|file_value| app.draw(file_value)).unwrap();
-    let bytes = thread.backend().buffer().clone();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
 
     (0..height)
         .map(|y| {
             (0..width)
-                .map(|x| bytes[(x, y)].symbol().to_string())
+                .map(|x| buffer[(x, y)].symbol().to_string())
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -120,16 +120,16 @@ fn undo_redo(app: &mut App, text: impl Fn(&App) -> String) {
     assert_eq!(text(app), after);
 }
 
-pub(super) fn card(id: &str, file: impl FnOnce(&mut crate::ui::thread_card::Card)) -> crate::ui::thread_card::Card {
-    let mut character = crate::ui::thread_card::Card {
+pub(super) fn card(id: &str, edit: impl FnOnce(&mut crate::ui::thread_card::Card)) -> crate::ui::thread_card::Card {
+    let mut card = crate::ui::thread_card::Card {
         id: id.into(),
         title: format!("thread {id}"),
         state: "open".into(),
         ..Default::default()
     };
 
-    file(&mut character);
-    character
+    edit(&mut card);
+    card
 }
 
 #[path = "start_screen_repository_tests.rs"]

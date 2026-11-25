@@ -13,34 +13,34 @@ pub(super) fn history(shell: &mut ShellComp) -> Arc<Vec<String>> {
     shell.catalog.history.clone().unwrap_or_default()
 }
 
-/// Times each command starts a line of THREAD (the thread's `!commands`) and the history.
-pub(super) fn uses(thread: &[String], shell: &mut ShellComp) -> Arc<HashMap<String, usize>> {
+/// Times each command starts a line of the thread's `!commands` and the history.
+pub(super) fn uses(thread_commands: &[String], shell: &mut ShellComp) -> Arc<HashMap<String, usize>> {
     let hist = history(shell);
-    let key = (thread.len(), shell.catalog.history.is_some());
+    let key = (thread_commands.len(), shell.catalog.history.is_some());
 
-    if let Some((key_value, count)) = &shell.uses
-        && *key_value == key
+    if let Some((cached_key, cached)) = &shell.uses
+        && *cached_key == key
     {
-        return count.clone();
+        return cached.clone();
     }
 
-    let mut count_value: HashMap<String, usize> = HashMap::new();
+    let mut counts: HashMap<String, usize> = HashMap::new();
 
-    for character in thread.iter().chain(hist.iter()) {
-        if let Some(width) = character.split_whitespace().next() {
-            *count_value.entry(width.to_string()).or_default() += 1;
+    for command in thread_commands.iter().chain(hist.iter()) {
+        if let Some(name) = command.split_whitespace().next() {
+            *counts.entry(name.to_string()).or_default() += 1;
         }
     }
 
-    let count_2 = Arc::new(count_value);
+    let counts = Arc::new(counts);
 
-    shell.uses = Some((key, count_2.clone()));
+    shell.uses = Some((key, counts.clone()));
 
-    count_2
+    counts
 }
 
 /// The rows for CTX. None: nothing to offer.
-pub(super) fn entries(ctx: &Ctx, dir: &Path, thread: &[String], shell: &mut ShellComp) -> Vec<Entry> {
+pub(super) fn entries(ctx: &Ctx, dir: &Path, thread_commands: &[String], shell: &mut ShellComp) -> Vec<Entry> {
     let word = ctx.word.as_str();
     let lower = word.to_lowercase();
     let mut out: Vec<Entry> = Vec::new();
@@ -50,37 +50,37 @@ pub(super) fn entries(ctx: &Ctx, dir: &Path, thread: &[String], shell: &mut Shel
 
     // project tasks: by prefix, then those that hold the word
     let ranked = |hit: &dyn Fn(&Task) -> (bool, bool)| -> Vec<&Task> {
-        let mut agent: Vec<&Task> = tasks.iter().filter(|thread_value| hit(thread_value).0).collect();
+        let mut ranked_tasks: Vec<&Task> = tasks.iter().filter(|task| hit(task).0).collect();
 
-        agent.extend(tasks.iter().filter(|thread_2| !hit(thread_2).0 && hit(thread_2).1));
-        agent
+        ranked_tasks.extend(tasks.iter().filter(|task| !hit(task).0 && hit(task).1));
+        ranked_tasks
     };
 
     if first {
-        let hit = |thread_3: &Task| {
+        let hit = |task: &Task| {
             (
-                thread_3.name.to_lowercase().starts_with(&lower) || thread_3.run.starts_with(word),
-                thread_3.name.to_lowercase().contains(&lower),
+                task.name.to_lowercase().starts_with(&lower) || task.run.starts_with(word),
+                task.name.to_lowercase().contains(&lower),
             )
         };
 
-        out.extend(ranked(&hit).into_iter().map(|thread_4| Entry {
-            text: done(&thread_4.run),
-            detail: thread_4.doc.clone(),
+        out.extend(ranked(&hit).into_iter().map(|task| Entry {
+            text: done(&task.run),
+            detail: task.doc.clone(),
         }));
-    } else if let Some(result) = runner {
-        let hit = |thread_5: &Task| {
-            let own = own(thread_5, result);
+    } else if let Some(runner_name) = runner {
+        let hit = |task: &Task| {
+            let own = own(task, runner_name);
 
             (
-                own && thread_5.name.to_lowercase().starts_with(&lower),
-                own && thread_5.name.to_lowercase().contains(&lower),
+                own && task.name.to_lowercase().starts_with(&lower),
+                own && task.name.to_lowercase().contains(&lower),
             )
         };
 
-        out.extend(ranked(&hit).into_iter().map(|thread_6| Entry {
-            text: done(&thread_6.name),
-            detail: thread_6.doc.clone(),
+        out.extend(ranked(&hit).into_iter().map(|task| Entry {
+            text: done(&task.name),
+            detail: task.doc.clone(),
         }));
     }
 
@@ -91,13 +91,13 @@ pub(super) fn entries(ctx: &Ctx, dir: &Path, thread: &[String], shell: &mut Shel
         append_fish_entries(ctx, dir, shell, word, first, &mut rows);
 
         if first {
-            let uses = self::uses(thread, shell);
+            let uses = self::uses(thread_commands, shell);
 
             // used commands first (most used first), then fish's order
-            let mut idx: Vec<usize> = (0..rows.len()).collect();
+            let mut order: Vec<usize> = (0..rows.len()).collect();
 
-            idx.sort_by_key(|&i| std::cmp::Reverse(uses.get(&rows[i].0).copied().unwrap_or(0)));
-            rows = idx.into_iter().map(|i| rows[i].clone()).collect();
+            order.sort_by_key(|&i| std::cmp::Reverse(uses.get(&rows[i].0).copied().unwrap_or(0)));
+            rows = order.into_iter().map(|i| rows[i].clone()).collect();
         }
 
         for (text, detail) in rows {
@@ -121,8 +121,8 @@ fn append_fish_entries(
     rows: &mut Vec<(String, String)>,
 ) {
     if shell.fish {
-        if let Some(row) = shell.fish_rows.get(&ctx.line) {
-            rows.clone_from(row);
+        if let Some(cached) = shell.fish_rows.get(&ctx.line) {
+            rows.clone_from(cached);
         } else {
             request_fish_rows(shell, ctx, dir);
 
@@ -139,10 +139,10 @@ fn append_fish_entries(
             .catalog
             .commands
             .iter()
-            .flat_map(|character| character.iter())
-            .filter(|character_value| character_value.starts_with(word))
+            .flat_map(|commands| commands.iter())
+            .filter(|command| command.starts_with(word))
             .take(MAX)
-            .map(|character_2| (character_2.clone(), String::new()))
+            .map(|command| (command.clone(), String::new()))
             .collect();
     }
 }
@@ -156,7 +156,7 @@ fn request_command_catalog(shell: &mut ShellComp) {
 }
 
 pub(super) fn append_unique_entry(out: &mut Vec<Entry>, detail: String, text: String) {
-    if !out.iter().any(|error| error.text == text) {
+    if !out.iter().any(|entry| entry.text == text) {
         out.push(Entry { text, detail });
     }
 }
@@ -165,7 +165,7 @@ pub(super) fn append_unique_entry(out: &mut Vec<Entry>, detail: String, text: St
 pub(super) fn texts(ta: &TextArea, dir: &Path, shell: &mut ShellComp) -> Vec<String> {
     shell
         .open(ta, dir, &[])
-        .map(|(_, error)| error.into_iter().map(|error_value| error_value.text).collect())
+        .map(|(_, entries)| entries.into_iter().map(|entry| entry.text).collect())
         .unwrap_or_default()
 }
 

@@ -8,7 +8,7 @@ impl TextArea {
         let backend = ratatui::backend::TestBackend::new(width, 5);
         let mut term = ratatui::Terminal::new(backend).unwrap();
 
-        term.draw(|area| self.render(area, Rect::new(0, 0, width, 5), false))
+        term.draw(|frame| self.render(frame, Rect::new(0, 0, width, 5), false))
             .unwrap();
     }
 }

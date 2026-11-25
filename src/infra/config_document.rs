@@ -4,7 +4,7 @@ pub(crate) fn read_file(path: &std::path::Path) -> Result<(String, File), String
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error_value) => return Err(error_value.to_string()),
+        Err(error) => return Err(error.to_string()),
     };
 
     let file = parse(&text)?;
@@ -114,11 +114,11 @@ fn sync_values(table: &mut dyn toml_edit::TableLike, values: &BTreeMap<String, S
     }
 
     for (key, value) in values {
-        set_table_value(table, key, value, preserve_decor);
+        set_table_entry(table, key, value, preserve_decor);
     }
 }
 
-fn set_table_value(table: &mut dyn toml_edit::TableLike, key: &str, value: &str, preserve_decor: bool) {
+fn set_table_entry(table: &mut dyn toml_edit::TableLike, key: &str, value: &str, preserve_decor: bool) {
     if table.get(key).and_then(toml_edit::Item::as_str) == Some(value) {
         return;
     }
@@ -126,7 +126,7 @@ fn set_table_value(table: &mut dyn toml_edit::TableLike, key: &str, value: &str,
     let mut new = toml_edit::Value::from(value);
 
     if preserve_decor {
-        preserve_table_value(table, key, &mut new);
+        keep_value_decor(table, key, &mut new);
     }
 
     if preserve_decor && let Some(old) = table.get_mut(key) {
@@ -137,7 +137,7 @@ fn set_table_value(table: &mut dyn toml_edit::TableLike, key: &str, value: &str,
     table.insert(key, toml_edit::Item::Value(new));
 }
 
-fn preserve_table_value(table: &dyn toml_edit::TableLike, key: &str, new: &mut toml_edit::Value) {
+fn keep_value_decor(table: &dyn toml_edit::TableLike, key: &str, new: &mut toml_edit::Value) {
     if let Some(old) = table.get(key).and_then(toml_edit::Item::as_value) {
         new.decor_mut().clone_from(old.decor());
     }
@@ -200,7 +200,7 @@ pub(crate) fn save_file(path: &std::path::Path, base: &str, file: &File) -> Resu
         return Err("config changed outside codehead; reload before save".into());
     }
 
-    if let Some(parent) = path.parent().filter(|path_value| !path_value.as_os_str().is_empty()) {
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
 
@@ -212,17 +212,17 @@ pub(crate) fn save_file(path: &std::path::Path, base: &str, file: &File) -> Resu
             .write(true)
             .mode(0o600)
             .open(&tmp)
-            .map_err(|error_value| error_value.to_string())?;
+            .map_err(|error| error.to_string())?;
 
-        out.write_all(text.as_bytes()).map_err(|error_2| error_2.to_string())?;
-        out.sync_all().map_err(|error_3| error_3.to_string())?;
+        out.write_all(text.as_bytes()).map_err(|error| error.to_string())?;
+        out.sync_all().map_err(|error| error.to_string())?;
 
         // Check again after preparing the replacement.
         if read_file(path)?.0 != base {
             return Err("config changed outside codehead; reload before save".into());
         }
 
-        std::fs::rename(&tmp, path).map_err(|error_4| error_4.to_string())?;
+        std::fs::rename(&tmp, path).map_err(|error| error.to_string())?;
         Ok(text)
     })();
 

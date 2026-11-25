@@ -59,20 +59,20 @@ impl View {
     }
 
     /// A key / click of the notifications dropdown: a jump goes to the note's event.
-    pub(super) fn notes_pick(&mut self, path: crate::features::notifications::Pick) -> bool {
+    pub(super) fn notes_pick(&mut self, pick: crate::features::notifications::Pick) -> bool {
         use crate::features::notifications::Pick;
         self.stream.dirty = true;
 
-        match path {
+        match pick {
             Pick::Stay => false,
             Pick::Close => {
                 self.notes_panel = None;
                 false
             }
-            Pick::Jump(count) => {
+            Pick::Jump(note) => {
                 self.notes_panel = None;
 
-                note_jump(self, &count)
+                note_jump(self, &note)
             }
         }
     }
@@ -130,12 +130,12 @@ fn agent_menu_items(view: &View, index: usize, agent: &str) -> [crate::screens::
         format!("@{agent}: remove"),
         format!("@{agent}: replace with …"),
     ];
-    let mut key = 0;
+    let mut row = 0;
 
     labels.map(|label| {
-        let id = AGENT_ITEMS + index * 3 + key;
+        let id = AGENT_ITEMS + index * 3 + row;
 
-        key += 1;
+        row += 1;
         menu_item(label, "", id, "agents")
     })
 }
@@ -164,7 +164,7 @@ fn menu_command(view: &mut View, id: usize) -> bool {
         14 => view.panes.yazi = Some(view.cwd.clone()),
         16 => return view.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)),
         17 => view.focus_agents(None),
-        id if id >= AGENT_ITEMS => return menu_action_agent(view, id),
+        id if id >= AGENT_ITEMS => return menu_agent_row(view, id),
         _ => {}
     }
 
@@ -225,13 +225,13 @@ fn menu_jump(view: &mut View, thread: crate::ui::thread_card::Card, time: u64) -
     true
 }
 
-fn menu_pull_request(view: &mut View, error: crate::screens::merge::pr_list::Entry) -> bool {
+fn menu_pull_request(view: &mut View, entry: crate::screens::merge::pr_list::Entry) -> bool {
     view.menu = None;
 
-    match error.thread {
-        Some(thread) if thread.id == view.id => view.show_pr(&error.item.pr),
+    match entry.thread {
+        Some(thread) if thread.id == view.id => view.show_pr(&entry.item.pr),
         Some(thread) => {
-            open_pr(&thread.id, &error.item.pr);
+            open_pr(&thread.id, &entry.item.pr);
             view.exit = Exit::Open {
                 id: thread.id.clone(),
                 dir: thread.dir.clone(),
@@ -241,7 +241,7 @@ fn menu_pull_request(view: &mut View, error: crate::screens::merge::pr_list::Ent
             return true;
         }
         None => {
-            view.exit = Exit::Home(crate::screens::quick_menu::Home::Merge(Some(error.item.pr.clone())));
+            view.exit = Exit::Home(crate::screens::quick_menu::Home::Merge(Some(entry.item.pr.clone())));
             return true;
         }
     }
@@ -249,9 +249,9 @@ fn menu_pull_request(view: &mut View, error: crate::screens::merge::pr_list::Ent
     false
 }
 
-fn menu_action_agent(view: &mut View, id: usize) -> bool {
+fn menu_agent_row(view: &mut View, id: usize) -> bool {
     view.menu = None;
-    let (i, key) = ((id - AGENT_ITEMS) / 3, (id - AGENT_ITEMS) % 3);
+    let (i, row) = ((id - AGENT_ITEMS) / 3, (id - AGENT_ITEMS) % 3);
 
     let Some(agent) = view
         .agents
@@ -263,32 +263,32 @@ fn menu_action_agent(view: &mut View, id: usize) -> bool {
         return false;
     };
 
-    if key == 0 {
+    if row == 0 {
         view.open_flow(&agent, false);
     } else {
         view.focus_agents(Some(&agent));
 
-        set_agent_menu_focus(view, key);
+        set_agent_menu_focus(view, row);
     }
 
     false
 }
 
-fn note_jump(view: &mut View, count: &crate::domain::notifications::Note) -> bool {
-    if !count.comment.is_empty() {
-        crate::domain::changes::threads::jump_to(&count.thread, &count.comment);
+fn note_jump(view: &mut View, note: &crate::domain::notifications::Note) -> bool {
+    if !note.comment.is_empty() {
+        crate::domain::changes::threads::jump_to(&note.thread, &note.comment);
     }
 
-    view.menu_action(crate::screens::quick_menu::Action::Jump(count.card(), count.ts))
+    view.menu_action(crate::screens::quick_menu::Action::Jump(note.card(), note.ts))
 }
-fn set_agent_menu_focus(view: &mut View, key: usize) {
-    if let Some(fo) = view.agents.agents_focus.as_mut() {
-        fo.cur = key;
+fn set_agent_menu_focus(view: &mut View, row: usize) {
+    if let Some(focus) = view.agents.agents_focus.as_mut() {
+        focus.cur = row;
 
-        if key == 1 {
-            fo.armed = true;
+        if row == 1 {
+            focus.armed = true;
         } else {
-            fo.replace = Some((0, 0));
+            focus.replace = Some((0, 0));
         }
     }
 }

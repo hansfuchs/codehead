@@ -12,7 +12,7 @@ impl App {
         let vis = self.tvisible();
 
         if vis.is_empty() {
-            draw_threads_msg(self, frame, area);
+            draw_threads_empty(self, frame, area);
             return;
         }
 
@@ -31,29 +31,29 @@ impl App {
             height: area.height.saturating_sub(1),
             ..area
         };
-        let height_value = height.saturating_sub(1);
+        let rows = height.saturating_sub(1);
 
         self.thread_list.tcursor = self.thread_list.tcursor.min(vis.len() - 1);
 
         if self.thread_list.tcursor < self.thread_list.toffset {
             self.thread_list.toffset = self.thread_list.tcursor;
-        } else if self.thread_list.tcursor >= self.thread_list.toffset + height_value {
-            self.thread_list.toffset = self.thread_list.tcursor + 1 - height_value;
+        } else if self.thread_list.tcursor >= self.thread_list.toffset + rows {
+            self.thread_list.toffset = self.thread_list.tcursor + 1 - rows;
         }
 
-        self.thread_list.toffset = self.thread_list.toffset.min(vis.len().saturating_sub(height_value));
+        self.thread_list.toffset = self.thread_list.toffset.min(vis.len().saturating_sub(rows));
         let nw = items.len();
         let dim = self.tabs_focus
             || self.thread_list.tlist.focus != crate::features::thread_list::Focus::List
             || self.thread_list.tlist.modal();
 
-        for (result, &i) in vis.iter().enumerate().skip(self.thread_list.toffset).take(height_value) {
+        for (row, &i) in vis.iter().enumerate().skip(self.thread_list.toffset).take(rows) {
             let rect = Rect {
-                y: area.y + (result - self.thread_list.toffset) as u16,
+                y: area.y + (row - self.thread_list.toffset) as u16,
                 height: 1,
                 ..area
             };
-            let hl = result == self.thread_list.tcursor;
+            let hl = row == self.thread_list.tcursor;
             let style = self.row_style(hl && !dim);
             let spans = thread_row_spans(self, i, nw, items, hl, dim);
 
@@ -63,7 +63,7 @@ impl App {
 }
 
 fn thread_row_spans(
-    app_state: &App,
+    app: &App,
     i: usize,
     nw: usize,
     items: &[super::Worktree],
@@ -72,19 +72,19 @@ fn thread_row_spans(
 ) -> Vec<Span<'static>> {
     let on_pill = hl && !dim;
 
-    let fg = |style_value: Style| {
+    let fg = |style: Style| {
         if on_pill {
-            style_value.fg(theme::pal().on_accent)
+            style.fg(theme::pal().on_accent)
         } else {
-            style_value
+            style
         }
     };
 
     let muted = fg(theme::muted());
 
     if i >= nw {
-        let character = &app_state.thread_list.sessions[i - nw];
-        let ctx = app_state.in_context(&character.key());
+        let session = &app.thread_list.sessions[i - nw];
+        let ctx = app.in_context(&session.key());
 
         vec![
             Span::raw(" "),
@@ -93,36 +93,36 @@ fn thread_row_spans(
             } else {
                 Span::styled("› ", fg(theme::line()))
             },
-            Span::styled(character.place(), fg(theme::bold())),
+            Span::styled(session.place(), fg(theme::bold())),
             Span::raw("  "),
-            Span::styled(character.title.chars().take(60).collect::<String>(), fg(theme::text())),
-            Span::styled(format!(" {}", character.when), muted),
+            Span::styled(session.title.chars().take(60).collect::<String>(), fg(theme::text())),
+            Span::styled(format!(" {}", session.when), muted),
         ]
     } else {
-        let width = &items[i];
+        let worktree = &items[i];
         let mut spans = vec![
             Span::raw(" "),
             Span::styled("› ", fg(theme::line())),
-            Span::styled(width.branch.clone(), fg(theme::bold())),
-            Span::styled(format!("  {}", width.path), muted),
+            Span::styled(worktree.branch.clone(), fg(theme::bold())),
+            Span::styled(format!("  {}", worktree.path), muted),
         ];
 
-        if width.unpushed > 0 {
+        if worktree.unpushed > 0 {
             spans.push(Span::styled(
-                format!(" {} unpushed", width.unpushed),
+                format!(" {} unpushed", worktree.unpushed),
                 fg(theme::fg(theme::pal().attention())),
             ));
         }
 
-        spans.push(Span::styled(format!(" {}", width.when), muted));
+        spans.push(Span::styled(format!(" {}", worktree.when), muted));
         spans
     }
 }
 
-fn draw_threads_msg(app_state: &App, frame: &mut Frame<'_>, area: Rect) {
-    let msg = if !app_state.thread_list.tlist.query().trim().is_empty() {
+fn draw_threads_empty(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let msg = if !app.thread_list.tlist.query().trim().is_empty() {
         "0 matches"
-    } else if app_state.thread_list.tlist.view == crate::features::thread_list::View::Claude {
+    } else if app.thread_list.tlist.view == crate::features::thread_list::View::Claude {
         "0 Claude Code sessions"
     } else {
         "0 worktrees without thread"

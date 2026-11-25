@@ -2,25 +2,25 @@ use super::*;
 use crate::engine::store::{Event, Kind};
 use ratatui::crossterm::event::KeyModifiers;
 
-fn thread(texts: &[&str]) -> chat::Thread {
-    let mut thread_value = chat::Thread::default();
+fn thread_of(texts: &[&str]) -> chat::Thread {
+    let mut thread = chat::Thread::default();
 
-    for (i, x) in texts.iter().enumerate() {
-        thread_value.push(&Event {
+    for (i, text) in texts.iter().enumerate() {
+        thread.push(&Event {
             ts: i as u64 + 1,
             agent: Some("ada".into()),
-            kind: Kind::Text { text: x.to_string() },
+            kind: Kind::Text { text: text.to_string() },
         });
     }
 
-    thread_value
+    thread
 }
 
-fn typed(text_value: &mut ChatSearch, thread: &chat::Thread, text: &str) -> Act {
+fn typed(search: &mut ChatSearch, thread: &chat::Thread, text: &str) -> Act {
     let mut last = Act::None;
 
     for character in text.chars() {
-        last = text_value.key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE), thread);
+        last = search.key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE), thread);
     }
 
     last
@@ -28,91 +28,91 @@ fn typed(text_value: &mut ChatSearch, thread: &chat::Thread, text: &str) -> Act 
 
 #[test]
 fn matches_cycle_from_the_newest_and_wrap() {
-    let thread_value = thread(&["deploy the app", "unrelated", "the deploy failed", "redeployed it"]);
-    let mut text = ChatSearch::default();
+    let thread = thread_of(&["deploy the app", "unrelated", "the deploy failed", "redeployed it"]);
+    let mut search = ChatSearch::default();
 
-    text.open();
+    search.open();
 
     assert_eq!(
-        typed(&mut text, &thread_value, "deploy"),
+        typed(&mut search, &thread, "deploy"),
         Act::Show(3),
         "the newest match first"
     );
-    assert_eq!(text.label(), "3/3");
+    assert_eq!(search.label(), "3/3");
 
     let older = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
 
-    assert_eq!(text.key(older, &thread_value), Act::Show(2));
-    assert_eq!(text.key(older, &thread_value), Act::Show(0));
-    assert_eq!(text.key(older, &thread_value), Act::Show(3), "wraps");
+    assert_eq!(search.key(older, &thread), Act::Show(2));
+    assert_eq!(search.key(older, &thread), Act::Show(0));
+    assert_eq!(search.key(older, &thread), Act::Show(3), "wraps");
     assert_eq!(
-        text.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &thread_value),
+        search.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &thread),
         Act::Show(0)
     );
-    assert!(text.is_hit(2) && !text.is_hit(1));
+    assert!(search.is_hit(2) && !search.is_hit(1));
 }
 
 #[test]
 fn zero_matches_label_and_esc_closes() {
-    let thread_value = thread(&["hello"]);
-    let mut text_value = ChatSearch::default();
+    let thread = thread_of(&["hello"]);
+    let mut search = ChatSearch::default();
 
-    text_value.open();
-    typed(&mut text_value, &thread_value, "zzz");
+    search.open();
+    typed(&mut search, &thread, "zzz");
 
-    assert_eq!(text_value.label(), "0 matches");
+    assert_eq!(search.label(), "0 matches");
     assert_eq!(
-        text_value.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &thread_value),
+        search.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &thread),
         Act::Close
     );
-    assert!(!text_value.open && text_value.ta.text().is_empty());
+    assert!(!search.open && search.ta.text().is_empty());
 }
 
 #[test]
 fn new_items_keep_the_shown_match() {
-    let mut thread_value = thread(&["fix a", "fix b"]);
-    let mut text_value = ChatSearch::default();
+    let mut thread = thread_of(&["fix a", "fix b"]);
+    let mut search = ChatSearch::default();
 
-    text_value.open();
-    typed(&mut text_value, &thread_value, "fix");
-    text_value.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &thread_value);
+    search.open();
+    typed(&mut search, &thread, "fix");
+    search.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &thread);
 
-    assert_eq!(text_value.current(), Some(0));
+    assert_eq!(search.current(), Some(0));
 
-    thread_value.push(&Event {
+    thread.push(&Event {
         ts: 9,
         agent: Some("ada".into()),
         kind: Kind::Text { text: "fix c".into() },
     });
 
-    assert_eq!(text_value.refresh(&thread_value), None, "a new message: 0 jump");
-    assert_eq!((text_value.current(), text_value.label().as_str()), (Some(0), "1/3"));
+    assert_eq!(search.refresh(&thread), None, "a new message: 0 jump");
+    assert_eq!((search.current(), search.label().as_str()), (Some(0), "1/3"));
 }
 
 /// A rebuilt stream (the log's head in front) and items that grow in place: the matches
 /// follow (0 stale text by index).
 #[test]
 fn a_rebuilt_stream_and_grown_items_keep_the_matches_right() {
-    let thread_value = thread(&["fix it", "other"]);
-    let mut text_value = ChatSearch::default();
+    let thread = thread_of(&["fix it", "other"]);
+    let mut search = ChatSearch::default();
 
-    text_value.open();
-    typed(&mut text_value, &thread_value, "fix");
+    search.open();
+    typed(&mut search, &thread, "fix");
 
-    assert!(text_value.is_hit(0));
+    assert!(search.is_hit(0));
 
     // the head comes in front: the hit is item 2 now
-    let thread_2 = thread(&["head 1", "head 2", "fix it", "other"]);
+    let rebuilt = thread_of(&["head 1", "head 2", "fix it", "other"]);
 
-    text_value.reset(2);
-    text_value.refresh(&thread_2);
+    search.reset(2);
+    search.refresh(&rebuilt);
 
-    assert!(text_value.is_hit(2) && !text_value.is_hit(0), "{:?}", text_value.hits);
-    assert_eq!(text_value.label(), "1/1");
-    assert_eq!(text_value.current(), Some(2), "the shown match stays");
+    assert!(search.is_hit(2) && !search.is_hit(0), "{:?}", search.hits);
+    assert_eq!(search.label(), "1/1");
+    assert_eq!(search.current(), Some(2), "the shown match stays");
 
     // an open run further back than the last items gets a call: found
-    let mut thread_3 = chat::Thread::default();
+    let mut with_run = chat::Thread::default();
     let tool = |id: &str, file: &str| Event {
         ts: 1,
         agent: Some("ada".into()),
@@ -123,10 +123,10 @@ fn a_rebuilt_stream_and_grown_items_keep_the_matches_right() {
         },
     };
 
-    thread_3.push(&tool("1", "src/a.rs"));
+    with_run.push(&tool("1", "src/a.rs"));
 
     for i in 0..6 {
-        thread_3.push(&Event {
+        with_run.push(&Event {
             ts: 2,
             agent: Some("zed".into()),
             kind: Kind::Text {
@@ -135,29 +135,25 @@ fn a_rebuilt_stream_and_grown_items_keep_the_matches_right() {
         });
     }
 
-    let mut text_2 = ChatSearch::default();
+    let mut run_search = ChatSearch::default();
 
-    text_2.open();
-    typed(&mut text_2, &thread_3, "special");
+    run_search.open();
+    typed(&mut run_search, &with_run, "special");
 
-    assert_eq!(text_2.label(), "0 matches");
+    assert_eq!(run_search.label(), "0 matches");
 
-    thread_3.push(&tool("2", "src/special.rs"));
-    text_2.refresh(&thread_3);
+    with_run.push(&tool("2", "src/special.rs"));
+    run_search.refresh(&with_run);
 
-    assert!(text_2.is_hit(0), "{} items", thread_3.items.len());
+    assert!(run_search.is_hit(0), "{} items", with_run.items.len());
 }
 
 #[test]
 fn mark_splits_spans_at_the_hits() {
     let line = Line::from(vec![Span::raw("the De"), Span::raw("ploy ok")]);
-    let message = mark(&line, &["deploy".into()]);
-    let text: Vec<&str> = message
-        .spans
-        .iter()
-        .map(|text_value| text_value.content.as_ref())
-        .collect();
+    let marked = mark(&line, &["deploy".into()]);
+    let pieces: Vec<&str> = marked.spans.iter().map(|span| span.content.as_ref()).collect();
 
-    assert_eq!(text, vec!["the ", "De", "ploy", " ok"]);
-    assert!(message.spans[1].style.bg.is_some() && message.spans[0].style.bg.is_none());
+    assert_eq!(pieces, vec!["the ", "De", "ploy", " ok"]);
+    assert!(marked.spans[1].style.bg.is_some() && marked.spans[0].style.bg.is_none());
 }

@@ -2,8 +2,8 @@ use super::*;
 use ratatui::crossterm::event::KeyModifiers;
 use std::path::Path;
 
-fn key(path: &mut Paths, ta: &mut TextArea, code: KeyCode) -> bool {
-    path.key(KeyEvent::new(code, KeyModifiers::NONE), ta)
+fn key(paths: &mut Paths, ta: &mut TextArea, code: KeyCode) -> bool {
+    paths.key(KeyEvent::new(code, KeyModifiers::NONE), ta)
 }
 
 fn typed(ta: &mut TextArea, text: &str) {
@@ -18,27 +18,27 @@ fn a_name_with_a_space_gets_quotes_and_the_dropdown_goes_on_inside() {
 
     std::fs::create_dir_all(dir.join("My Notes/sub dir")).unwrap();
     std::fs::write(dir.join("My Notes/a b.md"), "x").unwrap();
-    let mut path = Paths::new(&dir);
+    let mut paths = Paths::new(&dir);
     let mut ta = TextArea::new(false, "");
 
     typed(&mut ta, "see ./M");
 
-    assert!(key(&mut path, &mut ta, KeyCode::Tab));
+    assert!(key(&mut paths, &mut ta, KeyCode::Tab));
     assert_eq!(ta.text(), "see \"./My Notes/");
 
     // inside the quote: the entries of the dir with the space
-    assert_eq!(path.names(&ta), ["sub dir/", "a b.md"]);
+    assert_eq!(paths.names(&ta), ["sub dir/", "a b.md"]);
 
-    key(&mut path, &mut ta, KeyCode::Down);
+    key(&mut paths, &mut ta, KeyCode::Down);
 
-    assert!(key(&mut path, &mut ta, KeyCode::Tab));
+    assert!(key(&mut paths, &mut ta, KeyCode::Tab));
     assert_eq!(ta.text(), "see \"./My Notes/a b.md\" ");
 
     // dirs only: 0 files
-    path.dirs_only = true;
+    paths.dirs_only = true;
     typed(&mut ta, "\"./My Notes/");
 
-    assert_eq!(path.names(&ta), ["sub dir/"]);
+    assert_eq!(paths.names(&ta), ["sub dir/"]);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -48,76 +48,76 @@ fn lists_the_directory_as_the_path_is_typed() {
     let dir = std::env::temp_dir().join(format!("codehead-paths-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
 
-    for directory in ["apps/web/src", "apps/api", "docs", ".hidden"] {
-        std::fs::create_dir_all(dir.join(directory)).unwrap();
+    for sub in ["apps/web/src", "apps/api", "docs", ".hidden"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
     }
 
-    for file in ["apps/readme.md", "apps/web/index.ts", "apps/.env", "notes.txt"] {
-        std::fs::write(dir.join(file), "x").unwrap();
+    for name in ["apps/readme.md", "apps/web/index.ts", "apps/.env", "notes.txt"] {
+        std::fs::write(dir.join(name), "x").unwrap();
     }
 
-    let mut path = Paths::new(&dir);
+    let mut paths = Paths::new(&dir);
     let mut ta = TextArea::new(false, "");
 
     // relative: `apps/` → its entries, dirs first; hidden ones only after a `.`
     typed(&mut ta, "look at apps/");
 
-    assert_eq!(path.names(&ta), ["api/", "web/", "readme.md"]);
+    assert_eq!(paths.names(&ta), ["api/", "web/", "readme.md"]);
 
     typed(&mut ta, "look at apps/.");
 
-    assert_eq!(path.names(&ta), [".env"]);
+    assert_eq!(paths.names(&ta), [".env"]);
 
     // typed name: entries that start with it, then entries that hold it
     typed(&mut ta, "apps/e");
 
-    assert_eq!(path.names(&ta), ["web/", "readme.md"]);
+    assert_eq!(paths.names(&ta), ["web/", "readme.md"]);
 
     // tab: the entry in; a dir keeps the dropdown open on its entries
     typed(&mut ta, "see apps/w");
 
-    assert!(key(&mut path, &mut ta, KeyCode::Tab));
+    assert!(key(&mut paths, &mut ta, KeyCode::Tab));
     assert_eq!(ta.text(), "see apps/web/");
-    assert_eq!(path.names(&ta), ["src/", "index.ts"]);
+    assert_eq!(paths.names(&ta), ["src/", "index.ts"]);
 
     // enter: the input's key, until ↑↓ picked a row
-    assert!(!key(&mut path, &mut ta, KeyCode::Enter));
-    assert!(key(&mut path, &mut ta, KeyCode::Down));
-    assert!(key(&mut path, &mut ta, KeyCode::Enter));
+    assert!(!key(&mut paths, &mut ta, KeyCode::Enter));
+    assert!(key(&mut paths, &mut ta, KeyCode::Down));
+    assert!(key(&mut paths, &mut ta, KeyCode::Enter));
     assert_eq!(ta.text(), "see apps/web/index.ts ");
-    assert_eq!(path.names(&ta), [] as [std::string::String; 0]);
+    assert_eq!(paths.names(&ta), [] as [std::string::String; 0]);
 
     // a full file name: nothing to offer
     typed(&mut ta, "apps/web/index.ts");
 
-    assert_eq!(path.names(&ta), [] as [std::string::String; 0]);
+    assert_eq!(paths.names(&ta), [] as [std::string::String; 0]);
 
-    assert_path_modes(&dir, &mut path, &mut ta);
+    assert_path_modes(&dir, &mut paths, &mut ta);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn root_entries_only_by_prefix() {
-    let mut path = Paths::new(&std::env::temp_dir());
+    let mut paths = Paths::new(&std::env::temp_dir());
     let mut ta = TextArea::new(false, "");
 
     // `/us` → /usr (a prefix); `/zz-no-such` (a slash command): 0 dropdown
     typed(&mut ta, "/us");
 
     assert!(
-        path.names(&ta).iter().any(|count| count == "usr/"),
+        paths.names(&ta).iter().any(|name| name == "usr/"),
         "{:?}",
-        path.names(&ta)
+        paths.names(&ta)
     );
 
     typed(&mut ta, "/general:antislop");
 
-    assert_eq!(path.names(&ta), [] as [std::string::String; 0]);
+    assert_eq!(paths.names(&ta), [] as [std::string::String; 0]);
 
     typed(&mut ta, "/usr/");
 
-    assert!(path.names(&ta).iter().any(|count_value| count_value == "bin/"));
+    assert!(paths.names(&ta).iter().any(|name| name == "bin/"));
 }
 
 #[test]
@@ -181,52 +181,52 @@ fn configured_aliases_complete_paths_and_expand_sent_text() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-fn assert_path_modes(dir: &Path, path: &mut Paths, ta: &mut TextArea) {
+fn assert_path_modes(dir: &Path, paths: &mut Paths, ta: &mut TextArea) {
     // absolute and ./ paths
     typed(ta, &format!("{}/apps/", dir.display()));
 
-    assert_eq!(path.names(ta), ["api/", "web/", "readme.md"]);
+    assert_eq!(paths.names(ta), ["api/", "web/", "readme.md"]);
 
     typed(ta, "./do");
 
-    assert_eq!(path.names(ta), ["docs/"]);
+    assert_eq!(paths.names(ta), ["docs/"]);
 
     // 0 such dir, a url, a lone slash, an @ word: 0 dropdown, keys pass
     for text in ["and/or", "https://example.com/a", "a / b /", "@apps/", "x >apps/"] {
         typed(ta, text);
 
-        assert!(path.names(ta).is_empty(), "{text}");
-        assert!(!key(path, ta, KeyCode::Tab), "{text}");
+        assert!(paths.names(ta).is_empty(), "{text}");
+        assert!(!key(paths, ta, KeyCode::Tab), "{text}");
     }
 
     // esc: closed for this word; a new word opens again
     typed(ta, "apps/");
 
-    assert!(key(path, ta, KeyCode::Esc));
-    assert_eq!(path.names(ta), [] as [std::string::String; 0]);
+    assert!(key(paths, ta, KeyCode::Esc));
+    assert_eq!(paths.names(ta), [] as [std::string::String; 0]);
 
     ta.insert("w");
 
-    assert_eq!(path.names(ta), [] as [std::string::String; 0]);
+    assert_eq!(paths.names(ta), [] as [std::string::String; 0]);
 
     ta.insert(" docs/../apps/");
 
-    assert_eq!(path.names(ta).len(), 3);
+    assert_eq!(paths.names(ta).len(), 3);
 
     // drawn above the prompt box
     let backend = ratatui::backend::TestBackend::new(60, 20);
     let mut term = ratatui::Terminal::new(backend).unwrap();
     let input = Rect::new(0, 14, 60, 4);
 
-    term.draw(|file_value| {
-        ta.render(file_value, input, true);
-        path.render(file_value, ta, file_value.area(), input);
+    term.draw(|frame| {
+        ta.render(frame, input, true);
+        paths.render(frame, ta, frame.area(), input);
     })
     .unwrap();
 
     assert!(
-        path.area.height == 5 && path.area.bottom() <= input.y,
+        paths.area.height == 5 && paths.area.bottom() <= input.y,
         "{:?}",
-        path.area
+        paths.area
     );
 }

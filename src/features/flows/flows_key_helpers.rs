@@ -2,14 +2,13 @@ use super::{
     Ask, Edit, Flow, FlowsTab, Focus, Gate, KeyCode, KeyEvent, KeyModifiers, Layer, Node, Out, Outcome, PickRow, Step,
     Sub, Target, TextArea, flows, input,
 };
-use std::ops::ControlFlow;
 
 impl FlowsTab {
     pub(super) fn list_key(&mut self, key: KeyEvent) -> Out {
         list_key_flows_tab(self, key)
     }
 
-    fn list_key_body_state(&mut self) {
+    fn toggle_sub(&mut self) {
         self.sub = if self.sub == Sub::Flows { Sub::Steps } else { Sub::Flows };
         self.at = 0;
         self.filter.clear();
@@ -20,57 +19,53 @@ impl FlowsTab {
         rail_key_flows_tab(self, key);
     }
 
-    pub(super) fn target_key(&mut self, key: KeyEvent, thread: Target) {
-        target_key_flows_tab(self, key, thread);
+    pub(super) fn target_key(&mut self, key: KeyEvent, target: Target) {
+        target_key_flows_tab(self, key, target);
     }
 
-    pub(super) fn ask_key(&mut self, key_value: KeyEvent) {
-        ask_key_flows_tab(self, key_value);
+    pub(super) fn ask_key(&mut self, key: KeyEvent) {
+        ask_key_flows_tab(self, key);
     }
 
-    pub(super) fn picker_key(&mut self, key_value: KeyEvent) {
-        picker_key_flows_tab(self, key_value);
+    pub(super) fn picker_key(&mut self, key: KeyEvent) {
+        picker_key_flows_tab(self, key);
     }
 
-    pub(super) fn editor_key(&mut self, key_value: KeyEvent) {
-        editor_key_flows_tab(self, key_value);
+    pub(super) fn editor_key(&mut self, key: KeyEvent) {
+        editor_key_flows_tab(self, key);
     }
 }
 
-fn editor_key_body(thread: &mut FlowsTab) {
-    thread.focus = if thread.sub == Sub::Flows {
+fn leave_editor(tab: &mut FlowsTab) {
+    tab.focus = if tab.sub == Sub::Flows {
         Focus::Rail
     } else {
         Focus::List
     }
 }
 
-fn rail_key_keycode_char_g_if(file: &Flow, view_state: &mut FlowsTab) {
-    let lib_gate = file.steps[view_state.node]
+fn toggle_gate(flow: &Flow, tab: &mut FlowsTab) {
+    let lib_gate = flow.steps[tab.node]
         .uses
         .as_deref()
-        .and_then(|user| view_state.lib.step(user))
-        .is_some_and(|text| text.gate);
+        .and_then(|step_name| tab.lib.step(step_name))
+        .is_some_and(|step| step.gate);
 
-    if let Some(nd) = view_state
-        .flow
-        .as_mut()
-        .and_then(|fl| fl.steps.get_mut(view_state.node))
-    {
-        rail_key_keycode_char_g_if_body(lib_gate, nd);
+    if let Some(node) = tab.flow.as_mut().and_then(|flow| flow.steps.get_mut(tab.node)) {
+        flip_gate(lib_gate, node);
     }
 
-    view_state.save_flow();
+    tab.save_flow();
 }
 
-fn rail_key_keycode_char_g_if_body(lib_gate: bool, nd: &mut Node) {
-    let on = match &nd.gate {
-        Some(Gate::Flag(bytes)) => *bytes,
+fn flip_gate(lib_gate: bool, node: &mut Node) {
+    let on = match &node.gate {
+        Some(Gate::Flag(flag)) => *flag,
         Some(Gate::Edges(_)) => true,
         None => lib_gate,
     };
 
-    nd.gate = if on {
+    node.gate = if on {
         if lib_gate { Some(Gate::Flag(false)) } else { None }
     } else if lib_gate {
         None
@@ -79,31 +74,31 @@ fn rail_key_keycode_char_g_if_body(lib_gate: bool, nd: &mut Node) {
     };
 }
 
-fn picker_key_keycode_enter_keycode_tab(ta: TextArea, cur: usize, rows: &[PickRow], view_state: &mut FlowsTab) {
+fn add_picked_step(query: TextArea, cur: usize, rows: &[PickRow], tab: &mut FlowsTab) {
     let Some(row) = rows.get(cur).cloned() else {
-        view_state.picker = Some((ta, cur));
+        tab.picker = Some((query, cur));
         return;
     };
 
     let node = match &row {
-        PickRow::Step(text_value) => Node {
-            uses: Some(text_value.clone()),
+        PickRow::Step(name) => Node {
+            uses: Some(name.clone()),
             ..Default::default()
         },
-        PickRow::OneOff(thread) => Node {
-            text: Some(thread.clone()),
+        PickRow::OneOff(text) => Node {
+            text: Some(text.clone()),
             ..Default::default()
         },
         PickRow::NewStep(name) => {
-            let text_2 = Step {
+            let step = Step {
                 name: name.clone(),
-                text: ta.text().trim().to_string(),
+                text: query.text().trim().to_string(),
                 layer: Layer::User,
                 ..Default::default()
             };
 
-            if !view_state.save_step(&text_2) {
-                view_state.picker = Some((ta, cur));
+            if !tab.save_step(&step) {
+                tab.picker = Some((query, cur));
                 return;
             }
 
@@ -114,98 +109,91 @@ fn picker_key_keycode_enter_keycode_tab(ta: TextArea, cur: usize, rows: &[PickRo
         }
     };
 
-    let at = match view_state.flow.as_ref() {
-        Some(file) if file.steps.is_empty() => 0,
-        Some(_) => view_state.node + 1,
+    let at = match tab.flow.as_ref() {
+        Some(flow) if flow.steps.is_empty() => 0,
+        Some(_) => tab.node + 1,
         None => return,
     };
 
-    if let Some(file_value) = view_state.flow.as_mut() {
-        file_value.steps.insert(at, node);
+    if let Some(flow) = tab.flow.as_mut() {
+        flow.steps.insert(at, node);
     }
 
-    view_state.node = at;
-    view_state.save_flow();
-
-    if !matches!(row, PickRow::Step(_)) {
-        view_state.open_node_editor(at);
-    }
+    tab.node = at;
+    tab.save_flow();
 
     // a new text: straight into its editor
+    if !matches!(row, PickRow::Step(_)) {
+        tab.open_node_editor(at);
+    }
 }
 
-fn list_key_keycode_char_d(view_state: &mut FlowsTab) {
-    let base = match view_state.sub {
-        Sub::Flows => view_state.flow.as_ref().map(|file| format!("{} copy", file.name)),
-        Sub::Steps => view_state
+fn ask_duplicate(tab: &mut FlowsTab) {
+    let base = match tab.sub {
+        Sub::Flows => tab.flow.as_ref().map(|flow| format!("{} copy", flow.name)),
+        Sub::Steps => tab
             .cur_step()
-            .map(|text_value| view_state.lib.free_step_name(&format!("{}-copy", text_value.name))),
+            .map(|step| tab.lib.free_step_name(&format!("{}-copy", step.name))),
     };
 
-    if let Some(bytes) = base {
-        view_state.ask = Some((
-            if view_state.sub == Sub::Flows {
+    if let Some(name) = base {
+        tab.ask = Some((
+            if tab.sub == Sub::Flows {
                 Ask::DuplicateFlow
             } else {
                 Ask::DuplicateStep
             },
-            input(true, "name", &bytes),
+            input(true, "name", &name),
         ));
     }
 }
 
-fn rail_key_directory(key: KeyEvent, view_state: &mut FlowsTab) {
-    let directory: i64 = if key.code == KeyCode::Char('+') { 1 } else { -1 };
+fn change_loop_max(key: KeyEvent, tab: &mut FlowsTab) {
+    let delta: i64 = if key.code == KeyCode::Char('+') { 1 } else { -1 };
 
-    if let Some(line) = view_state
+    if let Some(loops) = tab
         .flow
         .as_mut()
-        .and_then(|fl| fl.steps.get_mut(view_state.node))
-        .and_then(|nd| nd.loops.as_mut())
+        .and_then(|flow| flow.steps.get_mut(tab.node))
+        .and_then(|node| node.loops.as_mut())
     {
-        line.max = (i64::from(line.max) + directory).clamp(1, 99) as u32;
+        loops.max = (i64::from(loops.max) + delta).clamp(1, 99) as u32;
     }
 
-    view_state.save_flow();
+    tab.save_flow();
 }
 
-fn rail_key_branch(count: usize, view_state: &mut FlowsTab) -> ControlFlow<()> {
-    if !view_state.armed {
-        view_state.armed = true;
-        return ControlFlow::Break(());
+fn delete_node(count: usize, tab: &mut FlowsTab) {
+    if !tab.armed {
+        tab.armed = true;
+        return;
     }
 
-    view_state.armed = false;
+    tab.armed = false;
 
-    if let Some(fl) = view_state.flow.as_mut() {
-        fl.steps.remove(view_state.node);
+    if let Some(flow) = tab.flow.as_mut() {
+        flow.steps.remove(tab.node);
     }
 
-    view_state.node = view_state.node.min(count.saturating_sub(2));
-    view_state.save_flow();
-
-    ControlFlow::Continue(())
+    tab.node = tab.node.min(count.saturating_sub(2));
+    tab.save_flow();
 }
 
-fn rail_key_branch_state(file: &Flow, count: usize, view_state: &mut FlowsTab) {
-    if file.steps[view_state.node].loops.is_some() {
-        if let Some(nd) = view_state
-            .flow
-            .as_mut()
-            .and_then(|fl| fl.steps.get_mut(view_state.node))
-        {
-            nd.loops = None;
+fn toggle_loop(flow: &Flow, node_count: usize, tab: &mut FlowsTab) {
+    if flow.steps[tab.node].loops.is_some() {
+        if let Some(node) = tab.flow.as_mut().and_then(|flow| flow.steps.get_mut(tab.node)) {
+            node.loops = None;
         }
 
-        view_state.save_flow();
-    } else if count > 0 {
-        view_state.target = Some(Target::Loop(view_state.node));
+        tab.save_flow();
+    } else if node_count > 0 {
+        tab.target = Some(Target::Loop(tab.node));
     }
 }
 
-fn list_key_body(view_state: &mut FlowsTab) {
-    view_state.ask = Some((
-        if view_state.sub == Sub::Flows {
+fn ask_new(tab: &mut FlowsTab) {
+    tab.ask = Some((
+        if tab.sub == Sub::Flows {
             Ask::NewFlow
         } else {
             Ask::NewStep
@@ -229,7 +217,7 @@ fn list_key_flows_tab(state: &mut FlowsTab, key: KeyEvent) -> Out {
             state.load_flow();
         }
         KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') => {
-            state.list_key_body_state();
+            state.toggle_sub();
         }
         KeyCode::Enter => match state.sub {
             Sub::Flows if state.flow.is_some() => {
@@ -237,18 +225,18 @@ fn list_key_flows_tab(state: &mut FlowsTab, key: KeyEvent) -> Out {
                 state.node = 0;
             }
             Sub::Steps => {
-                list_key_flows_tab_sub_steps(state);
+                edit_current_step(state);
             }
             Sub::Flows => {}
         },
         KeyCode::Char('n') => {
-            list_key_body(state);
+            ask_new(state);
         }
         KeyCode::Char('D') => {
-            list_key_keycode_char_d(state);
+            ask_duplicate(state);
         }
         KeyCode::Char('R') => {
-            list_key_flows_tab_keycode_char_r(state);
+            ask_rename(state);
         }
         // ctrl+d ctrl+d: an edited built-in back to its default (as ctrl+d in settings)
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -262,7 +250,7 @@ fn list_key_flows_tab(state: &mut FlowsTab, key: KeyEvent) -> Out {
             state.reset();
         }
         KeyCode::Char('d') | KeyCode::Delete => {
-            if let Some(value) = list_key_flows_tab_keycode_char_d_keycode(state) {
+            if let Some(value) = arm_or_delete(state) {
                 return value;
             }
         }
@@ -278,7 +266,7 @@ fn list_key_flows_tab(state: &mut FlowsTab, key: KeyEvent) -> Out {
     state.out()
 }
 
-fn list_key_flows_tab_keycode_char_d_keycode(state: &mut FlowsTab) -> Option<Out> {
+fn arm_or_delete(state: &mut FlowsTab) -> Option<Out> {
     if !state.armed {
         state.armed = true;
         return Some(Out::None);
@@ -290,30 +278,30 @@ fn list_key_flows_tab_keycode_char_d_keycode(state: &mut FlowsTab) -> Option<Out
     None
 }
 
-fn list_key_flows_tab_sub_steps(state: &mut FlowsTab) {
-    if let Some(text) = state.cur_step().cloned() {
-        state.open_step_editor(&text);
+fn edit_current_step(state: &mut FlowsTab) {
+    if let Some(step) = state.cur_step().cloned() {
+        state.open_step_editor(&step);
     }
 }
 
-fn list_key_flows_tab_keycode_char_r(state: &mut FlowsTab) {
-    let cur = match state.sub {
-        Sub::Flows => state.flow.as_ref().map(|file_value| file_value.name.clone()),
-        Sub::Steps => state.cur_step().map(|text_2| text_2.name.clone()),
+fn ask_rename(state: &mut FlowsTab) {
+    let name = match state.sub {
+        Sub::Flows => state.flow.as_ref().map(|flow| flow.name.clone()),
+        Sub::Steps => state.cur_step().map(|step| step.name.clone()),
     };
 
-    if let Some(character) = cur {
-        rename_current_item(state, &character);
+    if let Some(name) = name {
+        rename_current_item(state, &name);
     }
 }
 
 fn rail_key_flows_tab(state: &mut FlowsTab, key: KeyEvent) {
-    let Some(file) = state.flow.clone() else {
+    let Some(flow) = state.flow.clone() else {
         state.focus = Focus::List;
         return;
     };
 
-    let count = file.steps.len();
+    let count = flow.steps.len();
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
 
@@ -330,36 +318,36 @@ fn rail_key_flows_tab(state: &mut FlowsTab, key: KeyEvent) {
         }
         KeyCode::Enter | KeyCode::Char('e') if count > 0 => state.open_node_editor(state.node),
         KeyCode::Char('d') | KeyCode::Delete if count > 0 => {
-            if let ControlFlow::Break(()) = rail_key_branch(count, state) {}
+            delete_node(count, state);
         }
         KeyCode::Char('g') if count > 0 => {
-            rail_key_keycode_char_g_if(&file, state);
+            toggle_gate(&flow, state);
         }
         KeyCode::Char('L' | 'l') if count > 0 && !shift || key.code == KeyCode::Char('L') => {
             // a loop there: it goes; else pick its target
-            rail_key_branch_state(&file, count, state);
+            toggle_loop(&flow, count, state);
         }
         KeyCode::Char('o') if count > 0 => state.target = Some(Target::Outcome(state.node)),
         KeyCode::Char('O') if count > 0 => {
-            if let Some(nd) = state.flow.as_mut().and_then(|fl| fl.steps.get_mut(state.node))
-                && matches!(nd.gate, Some(Gate::Edges(_)))
+            if let Some(node) = state.flow.as_mut().and_then(|flow| flow.steps.get_mut(state.node))
+                && matches!(node.gate, Some(Gate::Edges(_)))
             {
-                nd.gate = Some(Gate::Flag(true));
+                node.gate = Some(Gate::Flag(true));
             }
 
             state.save_flow();
         }
         KeyCode::Char('+' | '-') if count > 0 => {
-            rail_key_directory(key, state);
+            change_loop_max(key, state);
         }
         KeyCode::Char('s') if count > 0 => {
-            if file.steps[state.node].uses.is_some() {
+            if flow.steps[state.node].uses.is_some() {
                 return state.fail("a shared step already");
             }
 
             let base = state
                 .lib
-                .free_step_name(&flows::slug(&flows::node_title(&file.steps[state.node])));
+                .free_step_name(&flows::slug(&flows::node_title(&flow.steps[state.node])));
 
             state.ask = Some((Ask::Promote(state.node), input(true, "step name", &base)));
         }
@@ -367,12 +355,12 @@ fn rail_key_flows_tab(state: &mut FlowsTab, key: KeyEvent) {
     }
 }
 
-fn target_key_flows_tab(state: &mut FlowsTab, key: KeyEvent, thread: Target) {
-    let count = state.flow.as_ref().map_or(0, |file| file.steps.len());
+fn target_key_flows_tab(state: &mut FlowsTab, key: KeyEvent, target: Target) {
+    let count = state.flow.as_ref().map_or(0, |flow| flow.steps.len());
 
     match key.code {
         KeyCode::Esc => {
-            let (Target::Loop(i) | Target::Outcome(i)) = thread;
+            let (Target::Loop(i) | Target::Outcome(i)) = target;
 
             state.node = i;
             state.target = None;
@@ -382,7 +370,7 @@ fn target_key_flows_tab(state: &mut FlowsTab, key: KeyEvent, thread: Target) {
         KeyCode::Enter => {
             state.target = None;
 
-            match thread {
+            match target {
                 Target::Loop(from) => configure_loop_target(state, from),
                 Target::Outcome(from) => {
                     let to = state.node;
@@ -399,85 +387,87 @@ fn target_key_flows_tab(state: &mut FlowsTab, key: KeyEvent, thread: Target) {
     }
 }
 
-fn ask_key_flows_tab(state: &mut FlowsTab, key_value: KeyEvent) {
-    let Some((what, mut ta)) = state.ask.take() else { return };
+fn ask_key_flows_tab(state: &mut FlowsTab, key: KeyEvent) {
+    let Some((what, mut answer)) = state.ask.take() else {
+        return;
+    };
 
-    match key_value.code {
+    match key.code {
         KeyCode::Esc => {
             state.error = None;
         }
         KeyCode::Enter => {
-            let value = ta.text().trim().to_string();
+            let value = answer.text().trim().to_string();
 
             if value.is_empty() && !matches!(what, Ask::LoopUntil(..)) {
-                state.ask = Some((what, ta));
+                state.ask = Some((what, answer));
                 return state.fail("empty");
             }
 
-            if let Err(error_value) = state.apply_ask(&what, &value) {
-                state.ask = Some((what, ta));
-                return state.fail(error_value);
+            if let Err(error) = state.apply_ask(&what, &value) {
+                state.ask = Some((what, answer));
+                return state.fail(error);
             }
 
             state.error = None;
         }
         _ => {
-            ta.key(key_value);
-            state.ask = Some((what, ta));
+            answer.key(key);
+            state.ask = Some((what, answer));
         }
     }
 }
 
-fn picker_key_flows_tab(state: &mut FlowsTab, key_value: KeyEvent) {
-    let Some((mut ta, mut cur)) = state.picker.take() else {
+fn picker_key_flows_tab(state: &mut FlowsTab, key: KeyEvent) {
+    let Some((mut query, mut cur)) = state.picker.take() else {
         return;
     };
 
-    let rows = state.pick_rows(&ta.text());
+    let rows = state.pick_rows(&query.text());
 
-    match key_value.code {
+    match key.code {
         KeyCode::Esc => return,
         KeyCode::Up => cur = cur.saturating_sub(1),
         KeyCode::Down => cur = (cur + 1).min(rows.len().saturating_sub(1)),
         KeyCode::Enter | KeyCode::Tab => {
-            picker_key_keycode_enter_keycode_tab(ta, cur, &rows, state);
+            add_picked_step(query, cur, &rows, state);
             return;
         }
         _ => {
-            ta.key(key_value);
+            query.key(key);
             cur = 0;
         }
     }
 
-    state.picker = Some((ta, cur));
+    state.picker = Some((query, cur));
 }
 
-fn editor_key_flows_tab(state: &mut FlowsTab, key_value: KeyEvent) {
-    let ctrl = key_value.modifiers.contains(KeyModifiers::CONTROL);
+fn editor_key_flows_tab(state: &mut FlowsTab, key: KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-    let back = |thread: &mut FlowsTab| {
-        editor_key_body(thread);
+    let back = |tab: &mut FlowsTab| {
+        leave_editor(tab);
     };
 
     // the `#` dropdown of the field
-    if let Some(ed) = state.editor.as_mut() {
-        let ta = &mut ed.fields[ed.field].1;
+    if let Some(editor) = state.editor.as_mut() {
+        let field = &mut editor.fields[editor.field].1;
 
-        if state.shortcuts.key(key_value, ta) {
+        if state.shortcuts.key(key, field) {
             return;
         }
     }
 
-    let Some(ed) = state.editor.as_mut() else {
+    let Some(editor) = state.editor.as_mut() else {
         return back(state);
     };
 
-    let count = ed.fields.len();
+    let count = editor.fields.len();
 
-    match key_value.code {
+    match key.code {
         // esc: closes without a save; edits only on a 2nd esc (ctrl+s saves)
         KeyCode::Esc => {
-            let dirty = ed.gate != ed.gate0 || ed.fields.iter().any(|(_, thread_value, _)| thread_value.edited());
+            let dirty = editor.gate != editor.gate0 || editor.fields.iter().any(|(_, field, _)| field.edited());
 
             if !crate::ui::textarea::esc_drops(&mut state.esc_at, dirty) {
                 state.note = Some("esc again: drop the edits · ctrl+s: save".into());
@@ -494,16 +484,16 @@ fn editor_key_flows_tab(state: &mut FlowsTab, key_value: KeyEvent) {
                 back(state);
             }
         }
-        KeyCode::Char('g') if ctrl => ed.gate = !ed.gate,
+        KeyCode::Char('g') if ctrl => editor.gate = !editor.gate,
         KeyCode::Char('f') if ctrl => {
-            if let Edit::Node(i, Some(_)) = ed.what {
+            if let Edit::Node(i, Some(_)) = editor.what {
                 state.editor = None;
                 state.fork(i);
             }
         }
-        KeyCode::Down if ed.fields[ed.field].1.on_last_row() => ed.field = (ed.field + 1) % count,
-        KeyCode::Up if ed.fields[ed.field].1.on_first_row() => ed.field = ed.field.saturating_sub(1),
-        _ => edit_field_key(ed, key_value, count),
+        KeyCode::Down if editor.fields[editor.field].1.on_last_row() => editor.field = (editor.field + 1) % count,
+        KeyCode::Up if editor.fields[editor.field].1.on_first_row() => editor.field = editor.field.saturating_sub(1),
+        _ => edit_field_key(editor, key, count),
     }
 }
 

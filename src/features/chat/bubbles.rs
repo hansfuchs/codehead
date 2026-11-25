@@ -5,14 +5,14 @@ use super::{
 
 /// The owner's message TEXT as a bubble on the right of a W wide stream: content-sized (max. 3/4),
 /// the time (+ `TO_NOTE`) in its top border, attached files below it.
-pub(super) fn owner_bubble(directory: &mut Drawn, width_value: usize, text: &str, to_note: &str, ts: u64) {
+pub(super) fn owner_bubble(drawn: &mut Drawn, width: usize, text: &str, to_note: &str, ts: u64) {
     let (body, files) = attachments(text);
     let body = body.trim_end();
-    let cap = (width_value * 3 / 4 + 1).min(width_value);
+    let cap = (width * 3 / 4 + 1).min(width);
     let stamp = clock(ts);
     let want = body
         .lines()
-        .map(|line_value| line_value.replace('\t', "    ").width())
+        .map(|line| line.replace('\t', "    ").width())
         .max()
         .unwrap_or(0)
         + 4;
@@ -25,7 +25,7 @@ pub(super) fn owner_bubble(directory: &mut Drawn, width_value: usize, text: &str
         })
         .min(cap)
         .max(8);
-    let left = width_value - bw;
+    let left = width - bw;
     let border = Style::default().fg(theme::pal().surface1);
     let pad = Span::raw(" ".repeat(left));
 
@@ -37,7 +37,7 @@ pub(super) fn owner_bubble(directory: &mut Drawn, width_value: usize, text: &str
 
     let (top, _) = top_border(bw, border, lead, false, &stamp);
 
-    directory.rows.push(Row {
+    drawn.rows.push(Row {
         line: Line::from([vec![pad.clone()], top.line.spans].concat()),
         ..Default::default()
     });
@@ -50,8 +50,8 @@ pub(super) fn owner_bubble(directory: &mut Drawn, width_value: usize, text: &str
     rows.push(Row::plain(Line::from(bar.to_vec())));
 
     finish_owner_bubble(
-        directory,
-        width_value,
+        drawn,
+        width,
         text,
         &files,
         OwnerBubbleLayout { bw, left, border, pad },
@@ -60,8 +60,8 @@ pub(super) fn owner_bubble(directory: &mut Drawn, width_value: usize, text: &str
 }
 
 fn finish_owner_bubble(
-    directory: &mut Drawn,
-    width_value: usize,
+    drawn: &mut Drawn,
+    width: usize,
     text: &str,
     files: &[Attachment],
     context: OwnerBubbleLayout,
@@ -76,7 +76,7 @@ fn finish_owner_bubble(
             .spans
             .push(Span::raw(" ".repeat((left + bw - 1).saturating_sub(rw))));
         row.line.spans.push(Span::styled("│", border));
-        directory.rows.push(row);
+        drawn.rows.push(row);
     }
 
     // the bottom border: a copy button on the right (the message as sent)
@@ -86,7 +86,7 @@ fn finish_owner_bubble(
         let fill = bw - 2 - button.width() - 2;
         let at = (left + 1 + fill) as u16;
 
-        directory.rows.push(Row {
+        drawn.rows.push(Row {
             line: Line::from(vec![
                 pad,
                 Span::styled(format!("└{}", "─".repeat(fill)), border),
@@ -97,22 +97,22 @@ fn finish_owner_bubble(
             ..Default::default()
         });
     } else {
-        directory.rows.push(Row::plain(Line::from(vec![
+        drawn.rows.push(Row::plain(Line::from(vec![
             pad,
             Span::styled(format!("└{}┘", "─".repeat(bw - 2)), border),
         ])));
     }
 
-    directory.rows.extend(
+    drawn.rows.extend(
         files
             .iter()
-            .map(|agent| clip_row(agent, agent.name(), theme::muted(), width_value)),
+            .map(|file| clip_row(file, file.name(), theme::muted(), width)),
     );
 }
 /// A divider in an agent's box: `├──────── 13:42 ─┤`, joined to both borders (the time where
 /// the top border has it). Full width W: the close adds 0 right border to it.
-pub(super) fn minute_divider(width_value: usize, border: Style, at: &str) -> Row {
-    let fill = width_value.saturating_sub(1 + at.width() + 2 + 2);
+pub(super) fn minute_divider(width: usize, border: Style, at: &str) -> Row {
+    let fill = width.saturating_sub(1 + at.width() + 2 + 2);
 
     Row::plain(Line::from(vec![
         Span::styled(format!("├{}", "─".repeat(fill)), border),
@@ -147,7 +147,7 @@ pub(super) fn kid_rows(title: &str, state: &str, text: &str, width: usize, bar: 
 
     if !title.trim().is_empty() {
         let max = width
-            .saturating_sub(bar.iter().map(|text_value| text_value.content.width()).sum::<usize>() + 4)
+            .saturating_sub(bar.iter().map(|span| span.content.width()).sum::<usize>() + 4)
             .max(1);
 
         let task = if title.chars().count() > max {
@@ -190,26 +190,26 @@ pub(super) fn bottom_border(width: usize, border: Style, left: Vec<Span<'static>
 }
 /// LEFT cut to ROOM columns, its last char `…` when cut.
 pub(super) fn cut_spans(left: Vec<Span<'static>>, room: usize) -> Vec<Span<'static>> {
-    if left.iter().map(|text_value| text_value.content.width()).sum::<usize>() <= room {
+    if left.iter().map(|span| span.content.width()).sum::<usize>() <= room {
         return left;
     }
 
     let mut out = Vec::new();
     let mut used = 0;
 
-    for text_2 in left {
-        let sw = text_2.content.width();
+    for span in left {
+        let sw = span.content.width();
 
         if used + sw < room {
             used += sw;
-            out.push(text_2);
+            out.push(span);
             continue;
         }
 
-        let mut text = cut_span_text(&text_2, room, &mut used);
+        let mut text = cut_span_text(&span, room, &mut used);
 
         text.push('…');
-        out.push(Span::styled(text, text_2.style));
+        out.push(Span::styled(text, span.style));
         break;
     }
 
@@ -217,7 +217,7 @@ pub(super) fn cut_spans(left: Vec<Span<'static>>, room: usize) -> Vec<Span<'stat
 }
 /// A border of width W between the corners ENDS: LEFT (cut to fit), a wave's room, RIGHT.
 pub(super) fn edge(
-    width_value: usize,
+    width: usize,
     border: Style,
     left: Vec<Span<'static>>,
     wave: bool,
@@ -228,11 +228,11 @@ pub(super) fn edge(
     let rw = if right.is_empty() { 0 } else { right.width() + 2 };
     let left = cut_spans(
         left,
-        width_value
+        width
             .saturating_sub(2 + 1 + if wave { 4 } else { 0 } + 1 + rw + 2)
             .max(1),
     );
-    let lw: usize = left.iter().map(|text| text.content.width()).sum();
+    let lw: usize = left.iter().map(|span| span.content.width()).sum();
     let mut used = 2;
 
     if lw > 0 {
@@ -248,12 +248,12 @@ pub(super) fn edge(
         used += 4;
     }
 
-    if lw > 0 && used < width_value {
+    if lw > 0 && used < width {
         spans.push(Span::styled(" ", border));
         used += 1;
     }
 
-    let fill = width_value.saturating_sub(used + rw + 2);
+    let fill = width.saturating_sub(used + rw + 2);
 
     spans.push(Span::styled("─".repeat(fill), border));
 

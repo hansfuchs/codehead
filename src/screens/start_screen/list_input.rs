@@ -9,10 +9,10 @@ impl App {
             return;
         }
 
-        let character = (self.note_list.cursor as isize + delta).clamp(0, count as isize - 1) as usize;
+        let cursor = (self.note_list.cursor as isize + delta).clamp(0, count as isize - 1) as usize;
 
-        if character != self.note_list.cursor {
-            self.note_list.cursor = character;
+        if cursor != self.note_list.cursor {
+            self.note_list.cursor = cursor;
             self.preview.pscroll = 0;
         }
     }
@@ -21,7 +21,7 @@ impl App {
         let Some(row) = self.current().cloned() else { return };
 
         if let Row::Dir { path, collapsed, .. } = &row
-            && fold_branch(self, open, path, *collapsed).is_break()
+            && fold_dir(self, open, path, *collapsed).is_break()
         {
             return;
         }
@@ -31,16 +31,16 @@ impl App {
         }
 
         // ← on a file / closed folder: fold the parent, cursor onto it
-        let path_value = row.path().trim_end_matches('/');
+        let path = row.path().trim_end_matches('/');
 
-        if let Some((parent, _)) = path_value.rsplit_once('/') {
+        if let Some((parent, _)) = path.rsplit_once('/') {
             fold_parent(self, parent);
         }
     }
 
     pub(super) fn notes_key(&mut self, key: KeyEvent) {
         if self.note_list.filter_editing {
-            notes_key_body(self, key);
+            notes_filter_key(self, key);
             return;
         }
 
@@ -67,22 +67,22 @@ impl App {
                 self.compose.field = Field::Notes;
             }
             _ => {
-                notes_key_name(self, key);
+                run_note_command(self, key);
             }
         }
     }
 
     /// Repo of threads tab item I (worktrees ++ sessions).
     pub(super) fn trepo_of(&self, i: usize) -> Option<&Path> {
-        let wts = self.thread_list.worktrees.as_deref().unwrap_or(&[]);
+        let worktrees = self.thread_list.worktrees.as_deref().unwrap_or(&[]);
 
-        match wts.get(i) {
-            Some(width) => width.repo.as_deref(),
+        match worktrees.get(i) {
+            Some(worktree) => worktree.repo.as_deref(),
             None => self
                 .thread_list
                 .sessions
-                .get(i - wts.len())
-                .and_then(|text| text.repo.as_deref()),
+                .get(i - worktrees.len())
+                .and_then(|session| session.repo.as_deref()),
         }
     }
 
@@ -112,15 +112,15 @@ impl App {
                 self.thread_list.tlist.query(),
             )
         {
-            threads_key_body(self, &before);
+            threads_view_changed(self, &before);
         }
 
         match out {
             Out::None | Out::Home => {}
             Out::Up => self.tabs_focus = true,
-            Out::Open(character) => self.open_card(&character),
+            Out::Open(card) => self.open_card(&card),
             Out::Pass => {
-                threads_key_name(self, key);
+                threads_other_key(self, key);
             }
         }
     }
@@ -133,10 +133,10 @@ impl App {
 
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                rows_key_branch(self);
+                rows_up(self);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                rows_key_branch_state(self, count);
+                rows_down(self, count);
             }
             KeyCode::Enter => self.open_thread(),
             _ => return self.thread_list.tlist.key(key),
@@ -147,12 +147,12 @@ impl App {
 
     pub(super) fn agents_key(&mut self, key: KeyEvent) {
         if self.agent_list.afilter_editing {
-            agents_key_body(self, key);
+            agents_filter_key(self, key);
             return;
         }
 
-        let step = |agent: &mut Self, i: Option<usize>| {
-            agents_key_branch(agent, i);
+        let step = |app: &mut Self, i: Option<usize>| {
+            select_agent(app, i);
         };
 
         match key.code {
@@ -176,7 +176,7 @@ impl App {
             }
             KeyCode::Enter => self.run(Act::EditAgent),
             _ => {
-                agents_key_name(self, key);
+                run_agent_command(self, key);
             }
         }
     }
@@ -188,7 +188,7 @@ impl App {
 
         let name = agent.name.clone();
 
-        if let Some(i) = self.compose.picks.iter().position(|path| *path == name) {
+        if let Some(i) = self.compose.picks.iter().position(|pick| *pick == name) {
             self.compose.picks.remove(i);
         } else {
             self.compose.picks.push(name);
@@ -196,165 +196,145 @@ impl App {
     }
 }
 
-fn agents_key_branch(agent: &mut App, i: Option<usize>) {
+fn select_agent(app: &mut App, i: Option<usize>) {
     if let Some(i) = i {
-        agent.agent_list.acursor = i;
-        agent.preview.pscroll = 0;
+        app.agent_list.acursor = i;
+        app.preview.pscroll = 0;
     }
 }
 
-fn notes_key_body(app_state: &mut App, key: KeyEvent) {
+fn notes_filter_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
-            app_state.note_list.filter = None;
-            app_state.note_list.filter_editing = false;
-            app_state.rebuild();
+            app.note_list.filter = None;
+            app.note_list.filter_editing = false;
+            app.rebuild();
         }
-        KeyCode::Enter => app_state.note_list.filter_editing = false,
-        KeyCode::Up => app_state.move_cursor(-1),
-        KeyCode::Down => app_state.move_cursor(1),
+        KeyCode::Enter => app.note_list.filter_editing = false,
+        KeyCode::Up => app.move_cursor(-1),
+        KeyCode::Down => app.move_cursor(1),
         // backspace on an empty filter: filter closed
-        KeyCode::Backspace if app_state.note_list.filter_ta.is_empty() => {
-            app_state.note_list.filter = None;
-            app_state.note_list.filter_editing = false;
-            app_state.note_list.cursor = 0;
-            app_state.rebuild();
+        KeyCode::Backspace if app.note_list.filter_ta.is_empty() => {
+            app.note_list.filter = None;
+            app.note_list.filter_editing = false;
+            app.note_list.cursor = 0;
+            app.rebuild();
         }
         _ => {
-            if matches!(app_state.note_list.filter_ta.key(key), Input::Handled) {
-                app_state.sync_filter();
+            if matches!(app.note_list.filter_ta.key(key), Input::Handled) {
+                app.sync_filter();
             }
         }
     }
 }
 
-fn fold_branch(app_state: &mut App, open: bool, path: &String, collapsed: bool) -> ControlFlow<()> {
+fn fold_dir(app: &mut App, open: bool, path: &String, collapsed: bool) -> ControlFlow<()> {
     if open && collapsed {
-        app_state.note_list.collapsed.remove(path);
-        app_state.rebuild();
+        app.note_list.collapsed.remove(path);
+        app.rebuild();
         return ControlFlow::Break(());
     }
 
     if open {
-        app_state.move_cursor(1);
+        app.move_cursor(1);
         return ControlFlow::Break(());
     }
 
     if !collapsed {
-        app_state.note_list.collapsed.insert(path.clone());
-        app_state.rebuild();
+        app.note_list.collapsed.insert(path.clone());
+        app.rebuild();
         return ControlFlow::Break(());
     }
 
     ControlFlow::Continue(())
 }
 
-fn threads_key_name(app_state: &mut App, key: KeyEvent) {
+fn threads_other_key(app: &mut App, key: KeyEvent) {
     if let KeyCode::Char('c') = key.code {
-        app_state.toggle_context();
+        app.toggle_context();
     } else {
-        threads_key_name_name(app_state, key);
+        run_thread_command(app, key);
     }
 }
 
-fn threads_key_name_name(app_state: &mut App, key: KeyEvent) {
+fn run_thread_command(app: &mut App, key: KeyEvent) {
     let name = key_name(&key);
 
-    if let Some(character_2) = app_state
-        .commands()
-        .0
-        .into_iter()
-        .find(|character_value| character_value.key == name)
-    {
-        app_state.run(character_2.act);
+    if let Some(command) = app.commands().0.into_iter().find(|command| command.key == name) {
+        app.run(command.act);
     }
 }
 
-fn rows_key_branch(app_state: &mut App) {
-    if app_state.thread_list.tcursor == 0 {
-        app_state.thread_list.tlist.focus_views();
+fn rows_up(app: &mut App) {
+    if app.thread_list.tcursor == 0 {
+        app.thread_list.tlist.focus_views();
     } else {
-        app_state.thread_list.tcursor -= 1;
-        app_state.preview.pscroll = 0;
+        app.thread_list.tcursor -= 1;
+        app.preview.pscroll = 0;
     }
 }
 
-fn agents_key_body(app_state: &mut App, key: KeyEvent) {
+fn agents_filter_key(app: &mut App, key: KeyEvent) {
     match key.code {
-        KeyCode::Esc | KeyCode::Enter => app_state.agent_list.afilter_editing = false,
+        KeyCode::Esc | KeyCode::Enter => app.agent_list.afilter_editing = false,
         KeyCode::Up => {
-            if let Some(i) = app_state.agent_step(0, -1) {
-                app_state.agent_list.acursor = i;
+            if let Some(i) = app.agent_step(0, -1) {
+                app.agent_list.acursor = i;
             }
         }
         KeyCode::Down => {
-            if let Some(i) = app_state.agent_step(0, 1) {
-                app_state.agent_list.acursor = i;
+            if let Some(i) = app.agent_step(0, 1) {
+                app.agent_list.acursor = i;
             }
         }
         _ => {
-            if matches!(app_state.agent_list.afilter_ta.key(key), Input::Handled) {
-                app_state.sync_afilter();
+            if matches!(app.agent_list.afilter_ta.key(key), Input::Handled) {
+                app.sync_afilter();
             }
         }
     }
 
-    app_state.preview.pscroll = 0;
+    app.preview.pscroll = 0;
 }
 
-fn fold_parent(app_state: &mut App, parent: &str) {
+fn fold_parent(app: &mut App, parent: &str) {
     let parent = format!("{parent}/");
 
-    app_state.note_list.collapsed.insert(parent.clone());
-    app_state.rebuild();
+    app.note_list.collapsed.insert(parent.clone());
+    app.rebuild();
 
-    if let Some(i) = app_state
-        .note_list
-        .rows
-        .iter()
-        .position(|result| result.path() == parent)
-    {
-        app_state.note_list.cursor = i;
+    if let Some(i) = app.note_list.rows.iter().position(|row| row.path() == parent) {
+        app.note_list.cursor = i;
     }
 }
 
-fn notes_key_name(app_state: &mut App, key: KeyEvent) {
+fn run_note_command(app: &mut App, key: KeyEvent) {
     let name = key_name(&key);
 
-    if let Some(character_value) = app_state
-        .commands()
-        .0
-        .into_iter()
-        .find(|character| character.key == name)
-    {
-        app_state.run(character_value.act);
+    if let Some(command) = app.commands().0.into_iter().find(|command| command.key == name) {
+        app.run(command.act);
     }
 }
 
-fn threads_key_body(app_state: &mut App, before: &(usize, crate::features::thread_list::View, String)) {
-    app_state.preview.pscroll = 0;
+fn threads_view_changed(app: &mut App, before: &(usize, crate::features::thread_list::View, String)) {
+    app.preview.pscroll = 0;
 
-    if before.1 != app_state.thread_list.tlist.view || before.2 != app_state.thread_list.tlist.query() {
-        app_state.thread_list.tcursor = 0;
+    if before.1 != app.thread_list.tlist.view || before.2 != app.thread_list.tlist.query() {
+        app.thread_list.tcursor = 0;
     }
 }
 
-fn agents_key_name(app_state: &mut App, key: KeyEvent) {
+fn run_agent_command(app: &mut App, key: KeyEvent) {
     let name = key_name(&key);
 
-    if let Some(character_value) = app_state
-        .commands()
-        .0
-        .into_iter()
-        .find(|character| character.key == name)
-    {
-        app_state.run(character_value.act);
+    if let Some(command) = app.commands().0.into_iter().find(|command| command.key == name) {
+        app.run(command.act);
     }
 }
 
-fn rows_key_branch_state(app_state: &mut App, count: usize) {
-    if app_state.thread_list.tcursor + 1 < count {
-        app_state.thread_list.tcursor += 1;
-        app_state.preview.pscroll = 0;
+fn rows_down(app: &mut App, count: usize) {
+    if app.thread_list.tcursor + 1 < count {
+        app.thread_list.tcursor += 1;
+        app.preview.pscroll = 0;
     }
 }

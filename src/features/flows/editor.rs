@@ -1,8 +1,8 @@
 use super::{Edit, Editor, FlowsTab, Focus, Gate, Node, Step, TextArea, flows, input};
 
 impl FlowsTab {
-    pub(super) fn open_step_editor(&mut self, text_value: &Step) {
-        open_step_editor_flows_tab(self, text_value);
+    pub(super) fn open_step_editor(&mut self, step: &Step) {
+        open_step_editor_flows_tab(self, step);
     }
     pub(super) fn open_node_editor(&mut self, i: usize) {
         open_node_editor_flows_tab(self, i);
@@ -13,35 +13,38 @@ impl FlowsTab {
         store_editor_flows_tab(self)
     }
 
-    fn store_editor_body(&mut self, val: impl Fn(&str) -> String, text_3: Step) -> Option<bool> {
-        let (done, text) = (val("done when").trim().to_string(), val("text").trim_end().to_string());
+    fn store_shared_step(&mut self, field_text: impl Fn(&str) -> String, step: Step) -> Option<bool> {
+        let (done, text) = (
+            field_text("done when").trim().to_string(),
+            field_text("text").trim_end().to_string(),
+        );
 
-        if (text_3.done != done || text_3.text != text) && !save_shared_step_text(text_3, done, text, self) {
+        if (step.done != done || step.text != text) && !save_shared_step_text(step, done, text, self) {
             return Some(false);
         }
 
         None
     }
 
-    fn store_editor_edit_step_name(&mut self, ed_gate: bool, val: impl Fn(&str) -> String, name: &str) -> Option<bool> {
-        let Some(text_2) = self.lib.step(name).cloned() else {
+    fn store_step_editor(&mut self, gate: bool, field_text: impl Fn(&str) -> String, name: &str) -> Option<bool> {
+        let Some(old) = self.lib.step(name).cloned() else {
             return Some(true);
         };
 
         let new = Step {
-            description: val("description").trim().to_string(),
-            done: val("done when").trim().to_string(),
-            needs: val("needs")
+            description: field_text("description").trim().to_string(),
+            done: field_text("done when").trim().to_string(),
+            needs: field_text("needs")
                 .split(',')
                 .map(|x| x.trim().to_string())
                 .filter(|x| !x.is_empty())
                 .collect(),
-            text: val("text").trim_end().to_string(),
-            gate: ed_gate,
-            ..text_2.clone()
+            text: field_text("text").trim_end().to_string(),
+            gate,
+            ..old.clone()
         };
 
-        if new != text_2 && !self.save_step(&new) {
+        if new != old && !self.save_step(&new) {
             return Some(false);
         }
 
@@ -49,17 +52,17 @@ impl FlowsTab {
     }
 }
 
-fn store_editor_body_state(val: impl Fn(&str) -> String, opt: impl Fn(String) -> Option<String>, count: &mut Node) {
-    count.done = opt(val("done when"));
-    count.text = Some(val("text").trim_end().to_string());
+fn store_inline_step(
+    field_text: impl Fn(&str) -> String,
+    non_empty: impl Fn(String) -> Option<String>,
+    node: &mut Node,
+) {
+    node.done = non_empty(field_text("done when"));
+    node.text = Some(field_text("text").trim_end().to_string());
 }
 
-fn open_node_editor_some_user_value(
-    count: &Node,
-    user_value: &str,
-    view_state: &mut FlowsTab,
-) -> Vec<(&'static str, TextArea, bool)> {
-    let text_value = view_state.lib.step(user_value).cloned().unwrap_or_default();
+fn shared_node_fields(node: &Node, step_name: &str, tab: &mut FlowsTab) -> Vec<(&'static str, TextArea, bool)> {
+    let step = tab.lib.step(step_name).cloned().unwrap_or_default();
 
     vec![
         (
@@ -67,7 +70,7 @@ fn open_node_editor_some_user_value(
             input(
                 true,
                 "the step's name in this flow (empty: the step name)",
-                count.label.as_deref().unwrap_or_default(),
+                node.label.as_deref().unwrap_or_default(),
             ),
             false,
         ),
@@ -76,12 +79,12 @@ fn open_node_editor_some_user_value(
             input(
                 false,
                 "text for this flow only, after the step's text",
-                count.note.as_deref().unwrap_or_default(),
+                node.note.as_deref().unwrap_or_default(),
             ),
             false,
         ),
-        ("done when", input(true, "exit criteria", &text_value.done), true),
-        ("text", input(false, "the step's instruction", &text_value.text), true),
+        ("done when", input(true, "exit criteria", &step.done), true),
+        ("text", input(false, "the step's instruction", &step.text), true),
     ]
 }
 
@@ -91,22 +94,22 @@ fn save_shared_step_text(mut step: Step, done: String, text: String, state: &mut
     state.save_step(&step)
 }
 
-fn open_step_editor_flows_tab(state: &mut FlowsTab, text_value: &Step) {
+fn open_step_editor_flows_tab(state: &mut FlowsTab, step: &Step) {
     state.editor = Some(Editor {
-        what: Edit::Step(text_value.name.clone()),
+        what: Edit::Step(step.name.clone()),
         fields: vec![
             (
                 "description",
-                input(true, "1 line: what the step does", &text_value.description),
+                input(true, "1 line: what the step does", &step.description),
                 false,
             ),
-            ("done when", input(true, "exit criteria", &text_value.done), false),
+            ("done when", input(true, "exit criteria", &step.done), false),
             (
                 "needs",
                 input(
                     true,
                     "skill:<name>, mcp:<server>, harness:<name>",
-                    &text_value.needs.join(", "),
+                    &step.needs.join(", "),
                 ),
                 false,
             ),
@@ -115,39 +118,39 @@ fn open_step_editor_flows_tab(state: &mut FlowsTab, text_value: &Step) {
                 input(
                     false,
                     "the instruction the agent gets · #shortcuts expand at the step's start",
-                    &text_value.text,
+                    &step.text,
                 ),
                 false,
             ),
         ],
         field: 4,
-        gate: text_value.gate,
-        gate0: text_value.gate,
+        gate: step.gate,
+        gate0: step.gate,
     });
     state.focus = Focus::Editor;
 }
 
 fn open_node_editor_flows_tab(state: &mut FlowsTab, i: usize) {
-    let Some(file) = state.flow.clone() else { return };
+    let Some(flow) = state.flow.clone() else { return };
 
-    let Some(count) = file.steps.get(i).cloned() else {
+    let Some(node) = flow.steps.get(i).cloned() else {
         return;
     };
 
-    let result = flows::resolve(&file, &state.lib).get(i).cloned().unwrap_or_default();
-    let shared = count.uses.clone().filter(|user| state.lib.step(user).is_some());
+    let resolved = flows::resolve(&flow, &state.lib).get(i).cloned().unwrap_or_default();
+    let shared = node.uses.clone().filter(|uses| state.lib.step(uses).is_some());
 
     let fields = match &shared {
-        Some(user_value) => open_node_editor_some_user_value(&count, user_value, state),
+        Some(step_name) => shared_node_fields(&node, step_name, state),
         None => vec![
             (
                 "label",
-                input(true, "short name", count.label.as_deref().unwrap_or_default()),
+                input(true, "short name", node.label.as_deref().unwrap_or_default()),
                 false,
             ),
             (
                 "done when",
-                input(true, "exit criteria", count.done.as_deref().unwrap_or_default()),
+                input(true, "exit criteria", node.done.as_deref().unwrap_or_default()),
                 false,
             ),
             (
@@ -155,7 +158,7 @@ fn open_node_editor_flows_tab(state: &mut FlowsTab, i: usize) {
                 input(
                     false,
                     "the instruction · #shortcuts expand at the step's start",
-                    count.text.as_deref().unwrap_or_default(),
+                    node.text.as_deref().unwrap_or_default(),
                 ),
                 false,
             ),
@@ -168,68 +171,70 @@ fn open_node_editor_flows_tab(state: &mut FlowsTab, i: usize) {
         what: Edit::Node(i, shared),
         fields,
         field,
-        gate: result.gate,
-        gate0: result.gate,
+        gate: resolved.gate,
+        gate0: resolved.gate,
     });
     state.focus = Focus::Editor;
 }
 
 fn store_editor_flows_tab(state: &mut FlowsTab) -> bool {
-    let Some(ed) = state.editor.as_ref() else { return true };
-    let vals: Vec<(&'static str, String)> = ed
+    let Some(editor) = state.editor.as_ref() else {
+        return true;
+    };
+
+    let texts: Vec<(&'static str, String)> = editor
         .fields
         .iter()
-        .map(|(line, thread, _)| (*line, thread.text()))
+        .map(|(label, area, _)| (*label, area.text()))
         .collect();
-    let (what, ed_gate) = (ed.what.clone(), ed.gate);
+    let (what, gate) = (editor.what.clone(), editor.gate);
 
-    let val = |key: &str| {
-        vals.iter()
-            .find(|(line_value, _)| *line_value == key)
-            .map(|(_, thread_value)| thread_value.clone())
+    let field_text = |key: &str| {
+        texts
+            .iter()
+            .find(|(label, _)| *label == key)
+            .map(|(_, text)| text.clone())
             .unwrap_or_default()
     };
 
-    let opt = |text_value: String| Some(text_value.trim().to_string()).filter(|x| !x.is_empty());
+    let non_empty = |text: String| Some(text.trim().to_string()).filter(|x| !x.is_empty());
 
     match what {
         Edit::Step(name) => {
-            if let Some(value) = state.store_editor_edit_step_name(ed_gate, val, &name) {
+            if let Some(value) = state.store_step_editor(gate, field_text, &name) {
                 return value;
             }
         }
         Edit::Node(i, shared) => {
-            let gate = ed_gate;
-
-            if let Some(user) = &shared
-                && let Some(text_3) = state.lib.step(user).cloned()
-                && let Some(value) = state.store_editor_body(val, text_3)
+            if let Some(step_name) = &shared
+                && let Some(step) = state.lib.step(step_name).cloned()
+                && let Some(value) = state.store_shared_step(field_text, step)
             {
                 return value;
             }
 
             let lib_gate = shared
                 .as_deref()
-                .and_then(|user_value| state.lib.step(user_value))
-                .is_some_and(|text_4| text_4.gate);
-            let Some(file) = state.flow.as_mut() else { return true };
+                .and_then(|step_name| state.lib.step(step_name))
+                .is_some_and(|step| step.gate);
+            let Some(flow) = state.flow.as_mut() else { return true };
 
-            let Some(count) = file.steps.get_mut(i) else {
+            let Some(node) = flow.steps.get_mut(i) else {
                 return true;
             };
 
-            count.label = opt(val("label"));
+            node.label = non_empty(field_text("label"));
 
             if shared.is_some() {
-                count.note = opt(val("note"));
+                node.note = non_empty(field_text("note"));
             } else {
-                store_editor_body_state(val, opt, count);
+                store_inline_step(field_text, non_empty, node);
             }
 
-            count.gate = match (&count.gate, gate) {
-                (Some(Gate::Edges(error)), true) => Some(Gate::Edges(error.clone())),
-                (_, group) if group == lib_gate => None,
-                (_, group_value) => Some(Gate::Flag(group_value)),
+            node.gate = match (&node.gate, gate) {
+                (Some(Gate::Edges(edges)), true) => Some(Gate::Edges(edges.clone())),
+                (_, flag) if flag == lib_gate => None,
+                (_, flag) => Some(Gate::Flag(flag)),
             };
 
             state.save_flow();

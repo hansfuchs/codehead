@@ -3,10 +3,10 @@ use super::{App, Field, Outcome, claude, flow_default_set};
 impl App {
     /// The thread's title: the title field, else the prompt's 1st line (max. 80 chars).
     pub(super) fn task_title(&self) -> String {
-        let thread = self.compose.title.text().trim().to_string();
+        let title = self.compose.title.text().trim().to_string();
 
-        if !thread.is_empty() {
-            return thread;
+        if !title.is_empty() {
+            return title;
         }
 
         let line = self
@@ -15,7 +15,7 @@ impl App {
             .text()
             .lines()
             .map(str::trim)
-            .find(|line_value| !line_value.is_empty())
+            .find(|line| !line.is_empty())
             .unwrap_or_default()
             .to_string();
 
@@ -47,7 +47,7 @@ impl App {
                 .note_list
                 .selected
                 .iter()
-                .map(|path| format!("- {}", self.note_list.notes.abs(path).display()))
+                .map(|note| format!("- {}", self.note_list.notes.abs(note).display()))
                 .collect();
 
             parts.push(format!("Read these notes first:\n{}", list.join("\n")));
@@ -64,8 +64,8 @@ impl App {
             .compose
             .files
             .iter()
-            .filter(|(message, _)| prompt.contains(message.as_str()))
-            .map(|(message_value, path_value)| format!("- {message_value}: {}", path_value.display()))
+            .filter(|(marker, _)| prompt.contains(marker.as_str()))
+            .map(|(marker, path)| format!("- {marker}: {}", path.display()))
             .collect();
 
         if !files.is_empty() {
@@ -99,41 +99,41 @@ impl App {
     }
 }
 
-fn start_agents(app_state: &mut App, target: super::Target) {
-    let agents: Vec<String> = app_state
+fn start_agents(app: &mut App, target: super::Target) {
+    let agents: Vec<String> = app
         .agent_list
         .agents
         .iter()
-        .filter(|agent| app_state.compose.picks.contains(&agent.name))
-        .map(|agent_value| agent_value.name.clone())
+        .filter(|agent| app.compose.picks.contains(&agent.name))
+        .map(|agent| agent.name.clone())
         .collect();
 
     // each agent's flow (its start step); the lead's: the repo's next default
     let flows: Vec<(String, String, usize)> = agents
         .iter()
-        .map(|agent_2| (agent_2.clone(), app_state.flow_of(agent_2)))
-        .filter(|(_, (text, _))| !text.is_empty())
-        .map(|(agent_3, (text_value, st))| (agent_3, text_value, st))
+        .map(|agent| (agent.clone(), app.flow_of(agent)))
+        .filter(|(_, (slug, _))| !slug.is_empty())
+        .map(|(agent, (slug, step))| (agent, slug, step))
         .collect();
 
     if let Some(lead) = agents.first()
-        && let Some((_, slug, _)) = flows.iter().find(|(agent_4, _, _)| agent_4 == lead)
+        && let Some((_, slug, _)) = flows.iter().find(|(agent, _, _)| agent == lead)
     {
-        flow_default_set(&app_state.flow_key(), slug);
+        flow_default_set(&app.flow_key(), slug);
     }
 
-    let projects = app_state
+    let projects = app
         .project_selection
         .proj_picks
         .clone()
-        .filter(|_| app_state.cfg.repo.is_some());
-    let title_set = !app_state.compose.title.text().trim().is_empty();
+        .filter(|_| app.cfg.repo.is_some());
+    let title_set = !app.compose.title.text().trim().is_empty();
 
-    app_state.outcome = Some(Outcome::New {
-        message: app_state.message(),
+    app.outcome = Some(Outcome::New {
+        message: app.message(),
         target,
         agents,
-        clone: app_state.clone_first(),
+        clone: app.clone_first(),
         flows,
         projects,
         title_set,

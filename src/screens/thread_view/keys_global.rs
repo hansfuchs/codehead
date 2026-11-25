@@ -8,8 +8,8 @@ impl View {
         }
 
         // notifications (ctrl+n): over everything, the menu too
-        if let Some(path) = self.notes_panel.as_mut() {
-            let pick = path.key(key);
+        if let Some(panel) = self.notes_panel.as_mut() {
+            let pick = panel.key(key);
 
             return Some(self.notes_pick(pick));
         }
@@ -21,10 +21,10 @@ impl View {
             return Some(false);
         }
 
-        if let Some(message) = self.menu.as_mut() {
-            let agent = message.key(key);
+        if let Some(menu) = self.menu.as_mut() {
+            let action = menu.key(key);
 
-            return Some(self.menu_action(agent));
+            return Some(self.menu_action(action));
         }
 
         // the menu key (ctrl+p): the menu from every field, box and dropdown
@@ -34,10 +34,10 @@ impl View {
         }
 
         // the context menu (ctrl+.): its keys first
-        if let Some(message) = self.ctx.as_mut() {
-            let out = message.key(key);
+        if let Some(ctx) = self.ctx.as_mut() {
+            let out = ctx.key(key);
 
-            return Some(self.ctx_out(&(out)));
+            return Some(self.ctx_out(&out));
         }
 
         if crate::ui::context_menu::is_key(&key) {
@@ -53,7 +53,7 @@ impl View {
             && self.ide.ide_pick.is_none()
             && !self.tab_is_local()
         {
-            return Some(key_focus_body(self, key));
+            return Some(cycle_focus(self, key));
         }
 
         if self.agents.agents_focus.is_some() {
@@ -73,7 +73,7 @@ impl View {
     }
 }
 
-fn key_focus_body(view: &mut View, key: KeyEvent) -> bool {
+fn cycle_focus(view: &mut View, key: KeyEvent) -> bool {
     view.cycle(if key.code == KeyCode::Tab { 1 } else { -1 });
     false
 }

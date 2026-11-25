@@ -23,11 +23,11 @@ impl Cell {
     };
 }
 
-pub(crate) fn mix(agent: Rgb, bytes: Rgb, thread: f32) -> Rgb {
-    let thread_value = thread.clamp(0.0, 1.0);
-    let file = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * thread_value).round() as u8;
+pub(crate) fn mix(from: Rgb, to: Rgb, amount: f32) -> Rgb {
+    let clamped = amount.clamp(0.0, 1.0);
+    let channel = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * clamped).round() as u8;
 
-    (file(agent.0, bytes.0), file(agent.1, bytes.1), file(agent.2, bytes.2))
+    (channel(from.0, to.0), channel(from.1, to.1), channel(from.2, to.2))
 }
 
 /// Color of a lit value.
@@ -77,14 +77,14 @@ impl Opts {
 
 /// The view in a W x H cell grid, row-major. A cell: ~1:2 (w:h), so 1 cell = 1/H of the height
 /// in x, 2/H in y.
-pub(crate) fn render(view: &View, width: usize, height: usize, output: Opts) -> Vec<Cell> {
+pub(crate) fn render(view: &View, width: usize, height: usize, opts: Opts) -> Vec<Cell> {
     let at = |cx: f32, cy: f32| -> Px {
-        let user = (cx - width as f32 / 2.0) / height as f32;
-        let value = 1.0 - 2.0 * cy / height as f32;
-        let mut px = view.sample(user, value);
+        let screen_x = (cx - width as f32 / 2.0) / height as f32;
+        let screen_y = 1.0 - 2.0 * cy / height as f32;
+        let mut px = view.sample(screen_x, screen_y);
 
         if px.hit {
-            px.lum = ((output.floor + (1.0 - output.floor) * px.lum) * output.gain).clamp(0.0, 1.0);
+            px.lum = ((opts.floor + (1.0 - opts.floor) * px.lum) * opts.gain).clamp(0.0, 1.0);
         }
 
         px
@@ -96,14 +96,14 @@ pub(crate) fn render(view: &View, width: usize, height: usize, output: Opts) -> 
         for x in 0..width {
             let (fx, fy) = (x as f32, y as f32);
 
-            out[y * width + x] = braille_cell(output, at, y, x, fx, fy);
+            out[y * width + x] = braille_cell(opts, at, y, x, fx, fy);
         }
     }
 
     out
 }
 
-fn braille_cell(output: Opts, at: impl Fn(f32, f32) -> Px, y: usize, x: usize, fx: f32, fy: f32) -> Cell {
+fn braille_cell(opts: Opts, at: impl Fn(f32, f32) -> Px, y: usize, x: usize, fx: f32, fy: f32) -> Cell {
     const DOT_BITS: [u32; 8] = [0x01, 0x08, 0x02, 0x10, 0x04, 0x20, 0x40, 0x80];
     let (mut bits, mut sum, mut count) = (0, 0.0, 0);
     let mut eye = Px::default();
@@ -120,7 +120,7 @@ fn braille_cell(output: Opts, at: impl Fn(f32, f32) -> Px, y: usize, x: usize, f
             eye = pixel;
         }
 
-        if pixel.lum > bayer(x * 2 + dx + output.jitter, y * 4 + dy + output.jitter / 2) {
+        if pixel.lum > bayer(x * 2 + dx + opts.jitter, y * 4 + dy + opts.jitter / 2) {
             bits |= bit;
         }
 

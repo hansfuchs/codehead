@@ -56,12 +56,12 @@ pub(super) fn report_mcp_errors(harness: &str, errors: &[(String, String)], tx: 
 
     let rows = errors
         .iter()
-        .map(|(count, error_value)| {
+        .map(|(server, why)| {
             (
-                count.clone(),
+                server.clone(),
                 super::servers::Status {
                     state: "failed".into(),
-                    error: error_value.clone(),
+                    error: why.clone(),
                     source: "codehead".into(),
                     at,
                     ..Default::default()
@@ -152,7 +152,7 @@ impl Driver for super::acp::Conn {
         self.answer(id, input["_option"].as_str(), &["allow_once", "allow_always"])
     }
 
-    fn deny(&mut self, id: &str, _why: &str) -> Result<(), String> {
+    fn deny(&mut self, id: &str, _: &str) -> Result<(), String> {
         self.answer(id, None, &["reject_once", "reject_always"])
     }
 
@@ -196,9 +196,9 @@ impl Session {
 
         // SAFETY: kill(2) on the process group this session's spawn created (process_group(0)).
         unsafe { libc::kill(group, libc::SIGTERM) };
-        let at = std::time::Instant::now();
+        let started = std::time::Instant::now();
 
-        kill_while_at_elapsed_std_time_duration(at, self);
+        wait_for_exit(started, self);
 
         // SAFETY: as above; children left after the leader's exit go too.
         unsafe { libc::kill(group, libc::SIGKILL) };
@@ -234,17 +234,17 @@ mod harness_parser;
 mod harness_prompt;
 pub(crate) use harness_prompt::*;
 
-fn finish_process_exit(model_state: &mut Session) -> ControlFlow<()> {
-    if !matches!(model_state.child.try_wait(), Ok(None)) {
+fn stop_on_exit(session: &mut Session) -> ControlFlow<()> {
+    if !matches!(session.child.try_wait(), Ok(None)) {
         return ControlFlow::Break(());
     }
 
     ControlFlow::Continue(())
 }
 
-fn kill_while_at_elapsed_std_time_duration(at: std::time::Instant, model_state: &mut Session) {
-    while at.elapsed() < std::time::Duration::from_secs(2) {
-        if let ControlFlow::Break(()) = finish_process_exit(model_state) {
+fn wait_for_exit(started: std::time::Instant, session: &mut Session) {
+    while started.elapsed() < std::time::Duration::from_secs(2) {
+        if let ControlFlow::Break(()) = stop_on_exit(session) {
             break;
         }
 

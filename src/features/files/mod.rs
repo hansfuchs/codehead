@@ -110,7 +110,7 @@ impl View {
         // the work dir (agent files) and the home repo (notes): their changes read the list again
         let roots: Vec<PathBuf> = std::iter::once(dir.to_path_buf())
             .chain(crate::infra::config::home_repo())
-            .filter(|result| result.is_dir())
+            .filter(|root| root.is_dir())
             .collect();
 
         Self {
@@ -143,14 +143,8 @@ impl View {
                 loaded: None,
                 again: false,
                 topics: crate::infra::bus::subscribe(),
-                roots: roots
-                    .iter()
-                    .map(|result_value| crate::infra::watch::canon(result_value))
-                    .collect(),
-                _shown: roots
-                    .iter()
-                    .map(|result_2| crate::infra::watch::show(result_2))
-                    .collect(),
+                roots: roots.iter().map(|root| crate::infra::watch::canon(root)).collect(),
+                _shown: roots.iter().map(|root| crate::infra::watch::show(root)).collect(),
                 reads: crate::infra::background::Reads::default(),
                 list_version: 0,
                 list_fx: Dissolve::default(),
@@ -166,13 +160,12 @@ impl View {
         }
     }
 
-    /// A finished read of the list: in. True: the list changed.
     /// The S S share ended: its toast.
     pub(crate) fn take_toast(&mut self) -> Option<String> {
-        let message = self.share_task.shared.as_ref()?.try_recv().ok()?;
+        let toast = self.share_task.shared.as_ref()?.try_recv().ok()?;
 
         self.share_task.shared = None;
-        Some(message)
+        Some(toast)
     }
 
     pub(crate) fn count(&self) -> usize {
@@ -181,29 +174,25 @@ impl View {
 
     /// E's name in the list: an attachment's marker + file name (its paste dir says 0), else
     /// its path as shown.
-    fn label(&self, error: &Entry) -> String {
-        match &error.source {
-            Source::Attached(message) => label_source_attached_message(error, message.as_ref()),
-            _ => self.shown(&error.path),
+    fn label(&self, entry: &Entry) -> String {
+        match &entry.source {
+            Source::Attached(marker) => attachment_label(entry, marker.as_ref()),
+            _ => self.shown(&entry.path),
         }
     }
 }
 
-fn label_source_attached_message(error: &Entry, message: Option<&String>) -> String {
-    let name = error.path.file_name().map_or_else(
-        || error.path.display().to_string(),
-        |count| count.to_string_lossy().into_owned(),
+fn attachment_label(entry: &Entry, marker: Option<&String>) -> String {
+    let name = entry.path.file_name().map_or_else(
+        || entry.path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
     );
 
     // `[Pasted text #1 +40 lines]`: `[Pasted text #1]`
-    message.as_ref().map_or(name.clone(), |message_value| {
+    marker.as_ref().map_or(name.clone(), |marker| {
         format!(
             "{}] {name}",
-            message_value
-                .split(" +")
-                .next()
-                .unwrap_or(message_value)
-                .trim_end_matches(']')
+            marker.split(" +").next().unwrap_or(marker).trim_end_matches(']')
         )
     })
 }

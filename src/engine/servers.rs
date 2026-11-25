@@ -68,8 +68,8 @@ struct FileRec {
 }
 
 pub(crate) fn path() -> PathBuf {
-    if let Some(path_2) = std::env::var_os("CODEHEAD_MCP").filter(|path_value| !path_value.is_empty()) {
-        return PathBuf::from(path_2);
+    if let Some(path) = std::env::var_os("CODEHEAD_MCP").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
     }
 
     // tests never read or write the owner's servers
@@ -83,29 +83,29 @@ pub(crate) fn path() -> PathBuf {
 /// Server names: a letter, then letters, digits, `-` or `_`; max. 40 chars (tool names:
 /// `mcp__<name>__<tool>`).
 pub(crate) fn valid_name(name: &str) -> bool {
-    let mut character = name.chars();
+    let mut chars = name.chars();
 
-    character.next().is_some_and(|file| file.is_ascii_alphabetic())
+    chars.next().is_some_and(|first| first.is_ascii_alphabetic())
         && name.len() <= 40
-        && character.all(|x| x.is_ascii_alphanumeric() || x == '-' || x == '_')
+        && chars.all(|rest| rest.is_ascii_alphanumeric() || rest == '-' || rest == '_')
 }
 
 /// Every server, by name. A missing file: 0 servers; a broken one: Err.
 pub(crate) fn load() -> Result<Vec<Server>, String> {
-    let path_value = path();
+    let path = path();
 
-    let text = match std::fs::read_to_string(&path_value) {
-        Ok(thread) => thread,
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error_value) => return Err(format!("{}: {error_value}", path_value.display())),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
     };
 
-    let file: FileRec = toml::from_str(&text).map_err(|error_2| format!("{}: {error_2}", path_value.display()))?;
+    let file: FileRec = toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
 
     Ok(file
         .servers
         .into_iter()
-        .map(|(name, text_value)| Server { name, ..text_value })
+        .map(|(name, server)| Server { name, ..server })
         .collect())
 }
 
@@ -115,24 +115,24 @@ pub(crate) fn all() -> Vec<Server> {
 }
 
 pub(crate) fn save(servers: &[Server]) -> Result<(), String> {
-    for text_value in servers {
-        text_value.check()?;
+    for server in servers {
+        server.check()?;
     }
 
     let file = FileRec {
         servers: servers
             .iter()
-            .map(|text_2| (text_2.name.clone(), text_2.clone()))
+            .map(|server| (server.name.clone(), server.clone()))
             .collect(),
     };
     let text = toml::to_string_pretty(&file).map_err(|error| error.to_string())?;
-    let path_value = path();
+    let path = path();
 
-    if let Some(directory) = path_value.parent() {
-        std::fs::create_dir_all(directory).map_err(|error_value| format!("{}: {error_value}", directory.display()))?;
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
     }
 
-    super::write_atomic(&path_value, text.as_bytes()).map_err(|error_2| format!("{}: {error_2}", path_value.display()))
+    super::write_atomic(&path, text.as_bytes()).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 impl Server {
@@ -146,19 +146,14 @@ impl Server {
         }
 
         match self.kind.as_str() {
-            "stdio"
-                if self
-                    .command
-                    .as_deref()
-                    .is_none_or(|character| character.trim().is_empty()) =>
-            {
+            "stdio" if self.command.as_deref().is_none_or(|command| command.trim().is_empty()) => {
                 Err(format!("{}: stdio needs a command", self.name))
             }
-            "http" | "sse" if self.url.as_deref().is_none_or(|user| !user.starts_with("http")) => {
+            "http" | "sse" if self.url.as_deref().is_none_or(|url| !url.starts_with("http")) => {
                 Err(format!("{}: {} needs an http(s) URL", self.name, self.kind))
             }
             "stdio" | "http" | "sse" => Ok(()),
-            key => Err(format!("{}: type {key:?}: stdio, http or sse", self.name)),
+            kind => Err(format!("{}: type {kind:?}: stdio, http or sse", self.name)),
         }
     }
 
@@ -192,9 +187,9 @@ pub(crate) fn is_ref(value: &str) -> bool {
 }
 
 fn env_ref(value: &str) -> Option<&str> {
-    value.strip_prefix("${")?.strip_suffix('}').filter(|count| {
-        !count.is_empty()
-            && count
+    value.strip_prefix("${")?.strip_suffix('}').filter(|var| {
+        !var.is_empty()
+            && var
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric() || character == '_')
     })
@@ -204,32 +199,31 @@ fn env_ref(value: &str) -> Option<&str> {
 /// the caller offers a `${VAR}` reference).
 pub(crate) fn store_secret(server: &str, key: &str, secret: &str) -> Result<String, String> {
     let account = format!("{server}/{key}");
-    let error_value = keyring::Entry::new(SERVICE, &account).map_err(|error| format!("keychain: {error}"))?;
+    let entry = keyring::Entry::new(SERVICE, &account).map_err(|error| format!("keychain: {error}"))?;
 
-    error_value
+    entry
         .set_password(secret)
-        .map_err(|error_2| format!("keychain: {error_2}"))?;
+        .map_err(|error| format!("keychain: {error}"))?;
     Ok(format!("keychain:{account}"))
 }
 
 /// The keychain entry of reference V, if it is one, gone.
 pub(crate) fn forget_secret(value: &str) {
     if let Some(account) = value.strip_prefix("keychain:")
-        && let Ok(error) = keyring::Entry::new(SERVICE, account)
+        && let Ok(entry) = keyring::Entry::new(SERVICE, account)
     {
-        let _ = error.delete_credential();
+        let _ = entry.delete_credential();
     }
 }
 
 /// The value of V: a keychain entry, an env var, else V itself.
 pub(crate) fn resolve(value: &str) -> Result<String, String> {
     if let Some(account) = value.strip_prefix("keychain:") {
-        let error_value =
-            keyring::Entry::new(SERVICE, account).map_err(|error| format!("keychain {account}: {error}"))?;
+        let entry = keyring::Entry::new(SERVICE, account).map_err(|error| format!("keychain {account}: {error}"))?;
 
-        return error_value
+        return entry
             .get_password()
-            .map_err(|error_2| format!("keychain {account}: {error_2}"));
+            .map_err(|error| format!("keychain {account}: {error}"));
     }
 
     if let Some(name) = env_ref(value) {
@@ -249,21 +243,21 @@ pub(crate) fn for_agent(agent: &Agent) -> Vec<Server> {
 
     all()
         .into_iter()
-        .filter(|text| agent.mcp.contains(&text.name))
+        .filter(|server| agent.mcp.contains(&server.name))
         .collect()
 }
 
 /// A short stamp of what agent A's servers are: a session with another stamp runs an old set.
 pub(crate) fn stamp(agent: &Agent) -> String {
     use std::hash::{Hash, Hasher};
-    let mut height = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
 
-    for text in for_agent(agent) {
-        toml::to_string(&text).unwrap_or_default().hash(&mut height);
-        text.name.hash(&mut height);
+    for server in for_agent(agent) {
+        toml::to_string(&server).unwrap_or_default().hash(&mut hasher);
+        server.name.hash(&mut hasher);
     }
 
-    format!("{:016x}", height.finish())
+    format!("{:016x}", hasher.finish())
 }
 
 /// Claude Code: the `mcpServers` entries of SERVERS and the env the harness process gets. Secrets
@@ -278,36 +272,34 @@ pub(crate) fn claude_config(servers: &[Server]) -> ClaudeConfig {
     let mut env = Vec::new();
     let mut errors = Vec::new();
 
-    for text in servers {
-        let mut secret = |value_value: &str| -> Result<String, String> {
-            let value = resolve(value_value)?;
+    for server in servers {
+        let mut secret = |reference: &str| -> Result<String, String> {
+            let value = resolve(reference)?;
             let var = format!("CODEHEAD_MCP_{}", env.len());
 
             env.push((var.clone(), value));
             Ok(format!("${{{var}}}"))
         };
 
-        let mut map = |message: &BTreeMap<String, String>| -> Result<serde_json::Map<String, Value>, String> {
-            message
+        let mut map = |values: &BTreeMap<String, String>| -> Result<serde_json::Map<String, Value>, String> {
+            values
                 .iter()
-                .map(|(key, value_2)| Ok((key.clone(), Value::String(secret(value_2)?))))
+                .map(|(key, value)| Ok((key.clone(), Value::String(secret(value)?))))
                 .collect()
         };
 
-        let error = match text.kind.as_str() {
-            "stdio" => map(&text.env)
-                .map(|env| json!({"type": "stdio", "command": text.command, "args": text.args, "env": env})),
-            key_value => {
-                map(&text.headers).map(|height| json!({"type": key_value, "url": text.url, "headers": height}))
-            }
+        let entry = match server.kind.as_str() {
+            "stdio" => map(&server.env)
+                .map(|env| json!({"type": "stdio", "command": server.command, "args": server.args, "env": env})),
+            kind => map(&server.headers).map(|headers| json!({"type": kind, "url": server.url, "headers": headers})),
         };
 
-        match error {
-            Ok(value_3) => {
-                entries.insert(text.name.clone(), value_3);
+        match entry {
+            Ok(entry) => {
+                entries.insert(server.name.clone(), entry);
             }
             Err(why) => {
-                errors.push((text.name.clone(), why));
+                errors.push((server.name.clone(), why));
             }
         }
     }
@@ -322,26 +314,26 @@ pub(crate) fn acp_config(servers: &[Server], http: bool, sse: bool) -> (Vec<Valu
     let mut out = Vec::new();
     let mut errors = Vec::new();
 
-    for text in servers {
-        let pairs = |message: &BTreeMap<String, String>| -> Result<Vec<Value>, String> {
-            message
+    for server in servers {
+        let pairs = |values: &BTreeMap<String, String>| -> Result<Vec<Value>, String> {
+            values
                 .iter()
                 .map(|(key, value)| Ok(json!({"name": key, "value": resolve(value)?})))
                 .collect()
         };
 
-        let entry = match text.kind.as_str() {
-            "stdio" => pairs(&text.env)
-                .map(|env| json!({"name": text.name, "command": text.command, "args": text.args, "env": env})),
+        let entry = match server.kind.as_str() {
+            "stdio" => pairs(&server.env)
+                .map(|env| json!({"name": server.name, "command": server.command, "args": server.args, "env": env})),
             "http" if !http => Err("harness: 0 HTTP MCP support (ACP mcpCapabilities.http)".into()),
             "sse" if !sse => Err("harness: 0 SSE MCP support (ACP mcpCapabilities.sse)".into()),
-            key_value => pairs(&text.headers)
-                .map(|height| json!({"type": key_value, "name": text.name, "url": text.url, "headers": height})),
+            kind => pairs(&server.headers)
+                .map(|headers| json!({"type": kind, "name": server.name, "url": server.url, "headers": headers})),
         };
 
         match entry {
-            Ok(value_value) => out.push(value_value),
-            Err(error) => errors.push((text.name.clone(), error)),
+            Ok(entry) => out.push(entry),
+            Err(error) => errors.push((server.name.clone(), error)),
         }
     }
 
@@ -350,15 +342,15 @@ pub(crate) fn acp_config(servers: &[Server], http: bool, sse: bool) -> (Vec<Valu
 
 /// An ACP tool call TOOL (its title) of an auto-allowed server among SERVERS.
 pub(crate) fn acp_auto_allowed(tool: &str, servers: &[Server]) -> bool {
-    let thread = tool.to_ascii_lowercase();
+    let tool = tool.to_ascii_lowercase();
 
-    servers.iter().filter(|text| text.auto_allow).any(|text_value| {
-        let count = text_value.name.to_ascii_lowercase();
+    servers.iter().filter(|server| server.auto_allow).any(|server| {
+        let name = server.name.to_ascii_lowercase();
 
         ["__", "_", ".", "/", ":", " "].iter().any(|sep| {
-            thread.starts_with(&format!("{count}{sep}"))
-                || thread.contains(&format!("mcp__{count}__"))
-                || thread.contains(&format!(" {count}{sep}"))
+            tool.starts_with(&format!("{name}{sep}"))
+                || tool.contains(&format!("mcp__{name}__"))
+                || tool.contains(&format!(" {name}{sep}"))
         })
     })
 }
@@ -389,7 +381,7 @@ fn status_path() -> PathBuf {
 pub(crate) fn statuses() -> BTreeMap<String, BTreeMap<String, Status>> {
     std::fs::read(status_path())
         .ok()
-        .and_then(|thread| serde_json::from_slice(&thread).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
 }
 
@@ -405,12 +397,12 @@ pub(crate) fn record(harness: &str, rows: Vec<(String, Status)>) {
 
     let _ = super::locked(&dir.join("mcp-status.lock"), || {
         let mut all = statuses();
-        let height = all.entry(harness.to_string()).or_default();
+        let known = all.entry(harness.to_string()).or_default();
 
-        for (name, mut text) in rows {
-            retain_tool_count(height, &name, &mut text);
+        for (name, mut status) in rows {
+            retain_tool_count(known, &name, &mut status);
 
-            height.insert(name, text);
+            known.insert(name, status);
         }
 
         super::write_atomic(
@@ -420,9 +412,9 @@ pub(crate) fn record(harness: &str, rows: Vec<(String, Status)>) {
     });
 }
 
-fn retain_tool_count(height: &mut BTreeMap<String, Status>, name: &String, text: &mut Status) {
-    if text.tools.is_none() {
-        text.tools = height.get(name).and_then(|output| output.tools);
+fn retain_tool_count(known: &mut BTreeMap<String, Status>, name: &String, status: &mut Status) {
+    if status.tools.is_none() {
+        status.tools = known.get(name).and_then(|last| last.tools);
     }
 }
 
@@ -442,20 +434,20 @@ pub(crate) fn from_init(value: &Value) -> Vec<(String, Status)> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|text| {
-            let name = text["name"].as_str()?.to_string();
+        .filter_map(|entry| {
+            let name = entry["name"].as_str()?.to_string();
 
             // codehead's own server; `pending`: still connecting at init, 0 news
-            if name == "codehead" || text["status"] == "pending" {
+            if name == "codehead" || entry["status"] == "pending" {
                 return None;
             }
 
-            let key: String = name.chars().map(server_name_character).collect();
+            let key: String = name.chars().map(sanitized_char).collect();
 
             let prefix = format!("mcp__{key}__");
-            let count_value = tools.iter().filter(|thread| thread.starts_with(&prefix)).count();
+            let tools_count = tools.iter().filter(|tool| tool.starts_with(&prefix)).count();
 
-            let state = match text["status"].as_str().unwrap_or_default() {
+            let state = match entry["status"].as_str().unwrap_or_default() {
                 "connected" => "connected",
                 "needs-auth" | "needs_auth" => "needs-auth",
                 "failed" => "failed",
@@ -463,13 +455,13 @@ pub(crate) fn from_init(value: &Value) -> Vec<(String, Status)> {
                 _ => "unknown",
             };
 
-            let source = text["source"].as_str().unwrap_or_default().to_string();
+            let source = entry["source"].as_str().unwrap_or_default().to_string();
 
             Some((
                 name,
                 Status {
                     state: state.into(),
-                    tools: (state == "connected").then_some(count_value),
+                    tools: (state == "connected").then_some(tools_count),
                     error: String::new(),
                     source,
                     at,
@@ -479,7 +471,7 @@ pub(crate) fn from_init(value: &Value) -> Vec<(String, Status)> {
         .collect()
 }
 
-fn server_name_character(character: char) -> char {
+fn sanitized_char(character: char) -> char {
     if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
         character
     } else {

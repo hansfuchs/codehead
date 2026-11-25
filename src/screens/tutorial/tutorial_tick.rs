@@ -2,9 +2,9 @@ use super::{Coach, Task};
 
 impl Coach {
     /// Task T done when it is the next one. true: a change.
-    pub(super) fn tick(&mut self, thread: Task) -> bool {
-        if self.current() == Some(thread) {
-            self.done.push(thread);
+    pub(super) fn tick(&mut self, task: Task) -> bool {
+        if self.current() == Some(task) {
+            self.done.push(task);
             return true;
         }
 

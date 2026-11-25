@@ -2,10 +2,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// `sh -c C` in DIR (must pass).
-pub(crate) fn sh(dir: &Path, character: &str) {
+pub(crate) fn sh(dir: &Path, script: &str) {
     let ok = Command::new("sh")
         .arg("-c")
-        .arg(character)
+        .arg(script)
         .current_dir(dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -13,62 +13,62 @@ pub(crate) fn sh(dir: &Path, character: &str) {
         .unwrap()
         .success();
 
-    assert!(ok, "{character}");
+    assert!(ok, "{script}");
 }
 
 /// `sh -c C` in DIR: its stdout, trimmed.
-pub(crate) fn out(dir: &Path, character: &str) -> String {
-    let output_value = Command::new("sh")
+pub(crate) fn out(dir: &Path, script: &str) -> String {
+    let output = Command::new("sh")
         .arg("-c")
-        .arg(character)
+        .arg(script)
         .current_dir(dir)
         .output()
         .unwrap();
 
-    String::from_utf8_lossy(&output_value.stdout).trim().to_string()
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 /// A checkout on branch `feat`: `init` on origin/main; c1, c2 pushed (origin/feat); c3, c4
 /// local. c1-c4 each add `<name>.txt`.
 pub(crate) fn repo(name: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!("codehead-commits-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
+    let root = std::env::temp_dir().join(format!("codehead-commits-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
 
-    std::fs::create_dir_all(directory.join("w")).unwrap();
-    sh(&directory, "git init -q --bare -b main origin.git");
-    let width = directory.join("w");
+    std::fs::create_dir_all(root.join("w")).unwrap();
+    sh(&root, "git init -q --bare -b main origin.git");
+    let work = root.join("w");
 
     sh(
-        &width,
+        &work,
         "git init -q -b main && git config user.email t@t && git config user.name t && git config commit.gpgsign false && git config core.hooksPath /dev/null",
     );
     sh(
-        &width,
+        &work,
         "seq 1 5 > x.txt && echo y > y.txt && git add -A && git commit -qm init && git remote add origin ../origin.git && git push -q -u origin main",
     );
-    sh(&width, "git switch -q -c feat");
+    sh(&work, "git switch -q -c feat");
 
-    for character in ["c1", "c2"] {
+    for commit in ["c1", "c2"] {
         sh(
-            &width,
+            &work,
             &format!(
-                "echo {character} > {character}.txt && git add -A && git commit -qm '{character} subject' -m '{character} body'"
+                "echo {commit} > {commit}.txt && git add -A && git commit -qm '{commit} subject' -m '{commit} body'"
             ),
         );
     }
 
-    sh(&width, "git push -q -u origin feat");
+    sh(&work, "git push -q -u origin feat");
 
-    for character_value in ["c3", "c4"] {
+    for commit in ["c3", "c4"] {
         sh(
-            &width,
+            &work,
             &format!(
-                "echo {character_value} > {character_value}.txt && git add -A && git commit -qm '{character_value} subject' -m '{character_value} body'"
+                "echo {commit} > {commit}.txt && git add -A && git commit -qm '{commit} subject' -m '{commit} body'"
             ),
         );
     }
 
-    width
+    work
 }
 
 /// The oid of REV in DIR.
@@ -77,7 +77,7 @@ pub(crate) fn oid(dir: &Path, rev: &str) -> String {
 }
 
 pub(crate) fn drop(dir: &Path) {
-    if let Some(path) = dir.parent() {
-        let _ = std::fs::remove_dir_all(path);
+    if let Some(root) = dir.parent() {
+        let _ = std::fs::remove_dir_all(root);
     }
 }

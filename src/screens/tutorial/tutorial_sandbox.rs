@@ -29,9 +29,9 @@ pub(super) fn git(dir: &Path, args: &[&str]) -> Result<(), String> {
 }
 
 /// The ACP harness a scripted agent runs as: the member's when it speaks ACP, else opencode.
-pub(super) fn acp_harness(height: &str) -> String {
-    match crate::engine::harnesses::get(height) {
-        Some(x) if matches!(x.drive, crate::engine::harnesses::Drive::Acp(_)) => height.to_string(),
+pub(super) fn acp_harness(member: &str) -> String {
+    match crate::engine::harnesses::get(member) {
+        Some(harness) if matches!(harness.drive, crate::engine::harnesses::Drive::Acp(_)) => member.to_string(),
         _ => "opencode".into(),
     }
 }
@@ -58,7 +58,7 @@ pub(super) fn seed(repo: &Path, builder: &str) -> Result<String, String> {
     thread.save()?;
     let readme = repo.join("README.md").display().to_string();
 
-    for error in [
+    for event in [
         Event::new(
             None,
             Kind::Prompt {
@@ -92,7 +92,7 @@ pub(super) fn seed(repo: &Path, builder: &str) -> Result<String, String> {
         ),
         Event::new(Some(builder), turn_end()),
     ] {
-        store::append(&thread.id, &error)?;
+        store::append(&thread.id, &event)?;
     }
 
     Ok(thread.id)
@@ -110,10 +110,10 @@ pub(super) fn sandbox(
     configure_tutorial(look, crew)?;
     install_crew(crew)?;
 
-    let by = |result: &str| {
+    let by = |role: &str| {
         crew.iter()
-            .find(|message_value| message_value.role == result)
-            .map(|message_2| message_2.name.clone())
+            .find(|member| member.role == role)
+            .map(|member| member.name.clone())
             .unwrap_or_default()
     };
 
@@ -133,25 +133,25 @@ pub(super) fn sandbox(
     ])?;
     let repo = root.join("hello");
 
-    std::fs::create_dir_all(&repo).map_err(|error_value| error_value.to_string())?;
-    std::fs::create_dir_all(root.join("paste")).map_err(|error_2| error_2.to_string())?;
-    std::fs::write(style_path(root), STYLE).map_err(|error_3| error_3.to_string())?;
+    std::fs::create_dir_all(&repo).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(root.join("paste")).map_err(|error| error.to_string())?;
+    std::fs::write(style_path(root), STYLE).map_err(|error| error.to_string())?;
 
     // the home repo: the new tab's repo list and notes come from it
     let home = root.join("home-repo");
 
-    std::fs::create_dir_all(home.join("notes")).map_err(|error_4| error_4.to_string())?;
-    std::fs::write(home.join("AGENTS.md"), format!("# home\n\nsteering for every agent: read me first.\n\n## Other repos\n\n- hello: the tutorial's repo. `{}`\n", repo.display())).map_err(|error_5| error_5.to_string())?;
+    std::fs::create_dir_all(home.join("notes")).map_err(|error| error.to_string())?;
+    std::fs::write(home.join("AGENTS.md"), format!("# home\n\nsteering for every agent: read me first.\n\n## Other repos\n\n- hello: the tutorial's repo. `{}`\n", repo.display())).map_err(|error| error.to_string())?;
     std::fs::write(
         home.join("notes/greetings.md"),
         "# greetings\n\nhow the crew greets: lower case, short.\n",
     )
-    .map_err(|error_6| error_6.to_string())?;
+    .map_err(|error| error.to_string())?;
     git(&home, &["init", "-q", "-b", "main"])?;
     git(&home, &["add", "."])?;
     git(&home, &["commit", "-q", "-m", "home"])?;
-    std::fs::write(repo.join("hello.md"), "hello\n").map_err(|error_7| error_7.to_string())?;
-    std::fs::write(repo.join("README.md"), "# hello\n\nteh crew says hi.\n").map_err(|error_8| error_8.to_string())?;
+    std::fs::write(repo.join("hello.md"), "hello\n").map_err(|error| error.to_string())?;
+    std::fs::write(repo.join("README.md"), "# hello\n\nteh crew says hi.\n").map_err(|error| error.to_string())?;
     git(&repo, &["init", "-q", "-b", "main"])?;
     git(&repo, &["add", "."])?;
     git(&repo, &["commit", "-q", "-m", "hello"])?;
@@ -160,9 +160,9 @@ pub(super) fn sandbox(
     let _ = std::fs::write(repo.join(".git/codehead-tutorial-reviewer"), by("reviewer"));
 
     // the seeded thread's fix: in the work tree (its changes tab shows it)
-    std::fs::write(repo.join("README.md"), "# hello\n\nthe crew says hi.\n").map_err(|error_9| error_9.to_string())?;
+    std::fs::write(repo.join("README.md"), "# hello\n\nthe crew says hi.\n").map_err(|error| error.to_string())?;
     let seeded = seed(&repo, &by("builder"))?;
-    let names: Vec<String> = crew.iter().map(|message_4| message_4.name.clone()).collect();
+    let names: Vec<String> = crew.iter().map(|member| member.name.clone()).collect();
     let thread = store::Thread::new("tutorial", "", &repo, names);
 
     thread.save()?;
@@ -189,47 +189,45 @@ pub(super) fn run_dir(pid: u32) -> PathBuf {
 /// dirs deleted.
 pub(super) fn sweep() {
     for base in [std::env::temp_dir(), PathBuf::from("/tmp")] {
-        sweep_name(&base);
+        sweep_dir(&base);
     }
 }
 
-fn sweep_name(base: &Path) {
+fn sweep_dir(base: &Path) {
     let Ok(rd) = std::fs::read_dir(base) else {
         return;
     };
 
-    for error in rd.flatten() {
-        sweep_name_name(&error);
+    for entry in rd.flatten() {
+        sweep_entry(&entry);
     }
 }
 
-fn sweep_name_name(error: &std::fs::DirEntry) {
-    let name = error.file_name().to_string_lossy().into_owned();
+fn sweep_entry(entry: &std::fs::DirEntry) {
+    let name = entry.file_name().to_string_lossy().into_owned();
 
     let Some(pid) = name
         .strip_prefix("codehead-tutorial-")
-        .and_then(|path_value| path_value.parse::<i32>().ok())
+        .and_then(|suffix| suffix.parse::<i32>().ok())
     else {
         return;
     };
 
+    // signal 0: the process is there (EPERM: there, another user's)
     let alive = unsafe { libc::kill(pid, 0) } == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
 
     if alive {
         return;
     }
 
-    if let Ok(sockets) = std::fs::read_dir(error.path()) {
-        for text in sockets.flatten() {
-            stop_sandbox_host(text.path());
+    // hosts of a gone sandbox: they run on, idle, until stopped
+    if let Ok(sockets) = std::fs::read_dir(entry.path()) {
+        for socket in sockets.flatten() {
+            stop_sandbox_host(socket.path());
         }
     }
 
-    let _ = std::fs::remove_dir_all(error.path());
-
-    // signal 0: the process is there (EPERM: there, another user's)
-
-    // hosts of a gone sandbox: they run on, idle, until stopped
+    let _ = std::fs::remove_dir_all(entry.path());
 }
 
 fn configure_tutorial(look: &crate::infra::config::File, crew: &[Member]) -> Result<(), String> {
@@ -240,7 +238,7 @@ fn configure_tutorial(look: &crate::infra::config::File, crew: &[Member]) -> Res
         thoughts: look.thoughts.clone(),
         menu_key: look.menu_key.clone(),
         command_key: look.command_key.clone(),
-        agent: crew.first().map(|message| message.name.clone()),
+        agent: crew.first().map(|member| member.name.clone()),
         // the review buttons of the changes view: 0 model calls
         review: Some("off".into()),
         rank: Some("off".into()),
@@ -257,20 +255,20 @@ fn configure_tutorial(look: &crate::infra::config::File, crew: &[Member]) -> Res
 fn install_crew(crew: &[Member]) -> Result<(), String> {
     let exe = crate::engine::exe();
 
-    let by = |result: &str| {
+    let by = |role: &str| {
         crew.iter()
-            .find(|message_value| message_value.role == result)
-            .map(|message_2| message_2.name.clone())
+            .find(|member| member.role == role)
+            .map(|member| member.name.clone())
             .unwrap_or_default()
     };
 
-    for message_3 in crew {
-        let avatar = crate::domain::avatar::Avatar::parse(&message_3.avatar).unwrap_or_default();
-        let agent_value = crate::engine::roster::Agent {
-            name: message_3.name.clone(),
-            harness: acp_harness(&message_3.harness),
+    for member in crew {
+        let avatar = crate::domain::avatar::Avatar::parse(&member.avatar).unwrap_or_default();
+        let agent = crate::engine::roster::Agent {
+            name: member.name.clone(),
+            harness: acp_harness(&member.harness),
             mode: "autopilot".into(),
-            color: Some(message_3.color.clone()),
+            color: Some(member.color.clone()),
             sprite: Some(crate::engine::roster::SpriteRec {
                 id: avatar.id(),
                 rows: avatar.rows(crate::domain::avatar::Status::Idle, 0.0).to_vec(),
@@ -278,22 +276,22 @@ fn install_crew(crew: &[Member]) -> Result<(), String> {
             command: Some(format!(
                 "'{}' tutor-agent role={} builder={} reviewer={}",
                 exe.display(),
-                message_3.role,
+                member.role,
                 by("builder"),
                 by("reviewer")
             )),
             ..Default::default()
         };
 
-        crate::engine::roster::save(&agent_value)?;
+        crate::engine::roster::save(&agent)?;
     }
 
     Ok(())
 }
 
 fn stop_sandbox_host(path: PathBuf) {
-    if let Ok(character) = std::os::unix::net::UnixStream::connect(path) {
-        let mut character_value = character;
-        let _ = writeln!(character_value, "{}", json!({"op": "stop"}));
+    if let Ok(stream) = std::os::unix::net::UnixStream::connect(path) {
+        let mut writer = stream;
+        let _ = writeln!(writer, "{}", json!({"op": "stop"}));
     }
 }

@@ -127,17 +127,17 @@ pub(crate) struct FlowsTab {
 }
 
 fn input(single: bool, placeholder: &str, text: &str) -> TextArea {
-    let mut thread = TextArea::new(single, placeholder);
+    let mut area = TextArea::new(single, placeholder);
 
-    thread.style = Some(theme::panel());
-    thread.set_text(text);
-    thread.move_end();
-    thread
+    area.style = Some(theme::panel());
+    area.set_text(text);
+    area.move_end();
+    area
 }
 
 impl FlowsTab {
     pub(crate) fn new(dir: Option<PathBuf>) -> FlowsTab {
-        let mut area = Self {
+        let mut tab = Self {
             sub: Sub::Flows,
             lib: Library::default(),
             dir,
@@ -167,8 +167,8 @@ impl FlowsTab {
             },
         };
 
-        area.reload();
-        area
+        tab.reload();
+        tab
     }
 
     /// The tab shows: the files read again.
@@ -182,7 +182,7 @@ impl FlowsTab {
         self.filter.clear();
         self.reload();
 
-        if let Some(i) = self.lib.flows.iter().position(|file| file.slug == slug) {
+        if let Some(i) = self.lib.flows.iter().position(|flow| flow.slug == slug) {
             self.at = i;
             self.load_flow();
             self.focus = Focus::Rail;
@@ -250,17 +250,17 @@ impl FlowsTab {
 pub(crate) fn rail_rows(nodes: &[flows::Resolved]) -> Vec<flow_rail::Row> {
     nodes
         .iter()
-        .map(|style| {
-            let (mark, st) = if style.step.is_some() {
+        .map(|node| {
+            let (mark, mark_style) = if node.step.is_some() {
                 ("✓", Style::default().fg(theme::pal().success()))
             } else {
                 ("◇", theme::muted())
             };
 
-            let mut row = crate::features::flows::flow_bar::rail_row(style, mark, st);
+            let mut row = crate::features::flows::flow_bar::rail_row(node, mark, mark_style);
 
-            if style.step.is_none() {
-                row.tags.retain(|(thread, _)| thread != "◇");
+            if node.step.is_none() {
+                row.tags.retain(|(tag, _)| tag != "◇");
                 row.tags.push(("one-off".into(), theme::muted()));
             }
 
@@ -269,24 +269,24 @@ pub(crate) fn rail_rows(nodes: &[flows::Resolved]) -> Vec<flow_rail::Row> {
         .collect()
 }
 
-/// The head of flow FL (its NODES): name · n steps · layer.
-pub(crate) fn head_line(fl: &flows::Flow, nodes: &[flows::Resolved]) -> Line<'static> {
-    let layer = match (fl.layer, fl.edited) {
+/// The head of FLOW (its NODES): name · n steps · layer.
+pub(crate) fn head_line(flow: &flows::Flow, nodes: &[flows::Resolved]) -> Line<'static> {
+    let layer = match (flow.layer, flow.edited) {
         (_, true) => "edited built-in".to_string(),
-        (line, _) => line.label().to_string(),
+        (layer, _) => layer.label().to_string(),
     };
 
     Line::from(vec![
-        Span::styled(fl.name.clone(), theme::bold()),
+        Span::styled(flow.name.clone(), theme::bold()),
         Span::styled(format!(" · {} steps · {layer}", nodes.len()), theme::muted()),
     ])
 }
 
-fn list_names(value: &[String]) -> String {
-    if value.len() <= 3 {
-        value.join(", ")
+fn list_names(names: &[String]) -> String {
+    if names.len() <= 3 {
+        names.join(", ")
     } else {
-        format!("{}, +{}", value[..3].join(", "), value.len() - 3)
+        format!("{}, +{}", names[..3].join(", "), names.len() - 3)
     }
 }
 
@@ -325,18 +325,11 @@ struct HitRegionsState {
     field_rects: Vec<(Rect, usize)>,
 }
 
-fn reload_keep(view_state: &mut FlowsTab) {
-    let keep = view_state.flow.as_ref().map(|file| file.slug.clone());
+fn reload_keep(tab: &mut FlowsTab) {
+    let keep = tab.flow.as_ref().map(|flow| flow.slug.clone());
 
-    match keep.and_then(|text| {
-        view_state
-            .lib
-            .flows
-            .iter()
-            .find(|file_value| file_value.slug == text)
-            .cloned()
-    }) {
-        Some(file_2) if view_state.focus != Focus::List => view_state.flow = Some(file_2),
-        _ => view_state.load_flow(),
+    match keep.and_then(|slug| tab.lib.flows.iter().find(|flow| flow.slug == slug).cloned()) {
+        Some(flow) if tab.focus != Focus::List => tab.flow = Some(flow),
+        _ => tab.load_flow(),
     }
 }

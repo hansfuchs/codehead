@@ -186,22 +186,19 @@ pub(crate) fn draw(
     ask: &Picker,
 ) -> Drawn {
     // `@name` of an agent: in its color, in every message and note of this draw
-    let mut marks: Vec<(String, Color)> = colors
-        .iter()
-        .map(|(count, character)| (count.clone(), *character))
-        .collect();
+    let mut marks: Vec<(String, Color)> = colors.iter().map(|(name, color)| (name.clone(), *color)).collect();
 
-    marks.sort_by(|agent, bytes| agent.0.cmp(&bytes.0));
+    marks.sort_by(|left, right| left.0.cmp(&right.0));
     markdown::set_marks(marks);
 
-    let directory = match look {
+    let drawn = match look {
         Look::Lines => draw_lines(thread, width, colors, roster, fold, ask),
         Look::Bubbles => draw_bubbles(thread, width, colors, roster, fold, ask),
     };
 
     memo::sweep();
 
-    directory
+    drawn
 }
 
 mod memo;

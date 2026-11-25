@@ -91,13 +91,13 @@ pub(crate) fn mention_colors(line: &[char], marks: &[(String, Color)]) -> Vec<Op
     let mut i = 0;
 
     while i < line.len() {
-        mention_colors_mut(line, marks, &mut out, name_char, &mut i);
+        color_mention_at(line, marks, &mut out, name_char, &mut i);
     }
 
     out
 }
 
-fn mention_colors_mut(
+fn color_mention_at(
     line: &[char],
     marks: &[(String, Color)],
     out: &mut [Option<Color>],
@@ -118,8 +118,8 @@ fn mention_colors_mut(
 
     let name: String = line[*i + 1..j].iter().collect();
 
-    if let Some((_, character_value)) = marks.iter().find(|(count_value, _)| *count_value == name) {
-        out[*i..j].iter_mut().for_each(|x| *x = Some(*character_value));
+    if let Some((_, color)) = marks.iter().find(|(mark_name, _)| *mark_name == name) {
+        out[*i..j].iter_mut().for_each(|slot| *slot = Some(*color));
 
         // `@new (replaces @old)`: the note in the color of NEW, `@old` in the color of OLD
         if let Some((end, old, oc)) = marks.iter().find_map(|(old, oc)| {
@@ -127,7 +127,7 @@ fn mention_colors_mut(
 
             line[j..].starts_with(&note).then_some((j + note.len(), old, oc))
         }) {
-            out[j + 1..end].iter_mut().for_each(|x| *x = Some(*character_value));
+            out[j + 1..end].iter_mut().for_each(|slot| *slot = Some(*color));
             let at = end - 1 - old.chars().count() - 1;
 
             out[at..end - 1].iter_mut().for_each(|x| *x = Some(*oc));
@@ -151,7 +151,7 @@ thread_local! {
 
 /// Read time of the next keys (None: the time of the call).
 pub(crate) fn stamp(at: Option<Instant>) {
-    KEY_AT.with(|character| character.set(at));
+    KEY_AT.with(|key_at| key_at.set(at));
 }
 
 /// Markdown list item at the start of LINE: (indent, marker width incl. its space, marker of the
@@ -165,32 +165,29 @@ fn list_item(line: &[char]) -> Option<(usize, usize, String)> {
         _ => None,
     };
 
-    if let Some(bytes_value) = bullet {
+    if let Some(mark) = bullet {
         if let ['[', ' ' | 'x' | 'X', ']', ' ', ..] = &rest[2..] {
-            return Some((indent, 6, format!("{bytes_value} [ ] ")));
+            return Some((indent, 6, format!("{mark} [ ] ")));
         }
 
-        return Some((indent, 2, format!("{bytes_value} ")));
+        return Some((indent, 2, format!("{mark} ")));
     }
 
-    let digits = rest
-        .iter()
-        .take_while(|character_value| character_value.is_ascii_digit())
-        .count();
+    let digits = rest.iter().take_while(|ch| ch.is_ascii_digit()).count();
 
     if (1..=9).contains(&digits) && matches!(rest.get(digits), Some('.' | ')')) && rest.get(digits + 1) == Some(&' ') {
-        let count_value: u64 = rest[..digits].iter().collect::<String>().parse().ok()?;
+        let number: u64 = rest[..digits].iter().collect::<String>().parse().ok()?;
 
-        return Some((indent, digits + 2, format!("{}{} ", count_value + 1, rest[digits])));
+        return Some((indent, digits + 2, format!("{}{} ", number + 1, rest[digits])));
     }
 
     None
 }
 
 fn is_fence(line: &[char]) -> bool {
-    let thread: Vec<&char> = line.iter().skip_while(|character| **character == ' ').collect();
+    let rest: Vec<&char> = line.iter().skip_while(|character| **character == ' ').collect();
 
-    thread.len() >= 3 && thread[..3].iter().all(|character_value| **character_value == '`')
+    rest.len() >= 3 && rest[..3].iter().all(|ch| **ch == '`')
 }
 
 /// Per line: syntax colors of the fenced code (None: prose or a fence line), and fence lines.
@@ -200,13 +197,13 @@ fn fence_colors(lines: &[Vec<char>]) -> (Vec<Option<Vec<ratatui::style::Color>>>
     let mut i = 0;
 
     while i < lines.len() {
-        fence_colors_tag(lines, &mut colors, &fence, &mut i);
+        color_fence_block(lines, &mut colors, &fence, &mut i);
     }
 
     (colors, fence)
 }
 
-fn fence_colors_tag(lines: &[Vec<char>], colors: &mut [Option<Vec<Color>>], fence: &[bool], i: &mut usize) {
+fn color_fence_block(lines: &[Vec<char>], colors: &mut [Option<Vec<Color>>], fence: &[bool], i: &mut usize) {
     if !fence[*i] {
         *i += 1;
         return;
@@ -223,7 +220,7 @@ fn fence_colors_tag(lines: &[Vec<char>], colors: &mut [Option<Vec<Color>>], fenc
     if end > *i + 1 {
         let body: String = lines[*i + 1..end]
             .iter()
-            .map(|line_value| line_value.iter().collect::<String>())
+            .map(|line| line.iter().collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -235,10 +232,10 @@ fn fence_colors_tag(lines: &[Vec<char>], colors: &mut [Option<Vec<Color>>], fenc
 
         let hl = crate::ui::code::highlight(&body, lang);
 
-        for (key, row) in (*i + 1..end).enumerate() {
+        for (offset, row) in (*i + 1..end).enumerate() {
             colors[row] = hl
-                .get(key)
-                .map(|line_2| line_2.iter().map(|(character_value, _)| *character_value).collect());
+                .get(offset)
+                .map(|colored| colored.iter().map(|(color, _)| *color).collect());
         }
     }
 
@@ -248,18 +245,18 @@ fn fence_colors_tag(lines: &[Vec<char>], colors: &mut [Option<Vec<Color>>], fenc
 /// TEXT without its trailing empty Markdown list items (a marker an Enter left, e.g. `7.`), only
 /// after other lines, trimmed at the end. A sent message: 0 stray marker the view hides.
 pub(crate) fn without_empty_items(text: &str) -> &str {
-    let mut thread = text.trim_end();
+    let mut rest = text.trim_end();
 
-    while let Some(i) = thread.rfind('\n') {
-        let line: Vec<char> = thread[i + 1..].chars().chain([' ']).collect();
+    while let Some(i) = rest.rfind('\n') {
+        let line: Vec<char> = rest[i + 1..].chars().chain([' ']).collect();
 
         match list_item(&line) {
-            Some((indent, width, _)) if line.len() == indent + width => thread = thread[..i].trim_end(),
+            Some((indent, width, _)) if line.len() == indent + width => rest = rest[..i].trim_end(),
             _ => break,
         }
     }
 
-    thread
+    rest
 }
 
 /// $`CODEHEAD_KEYLOG`=<file>: every key of every input goes there (ms since the 1st key, code, modifiers).
@@ -268,18 +265,18 @@ fn keylog(key: &KeyEvent, now: Instant) {
     static LOG: std::sync::OnceLock<Option<(std::sync::Mutex<std::fs::File>, Instant)>> = std::sync::OnceLock::new();
 
     let log = LOG.get_or_init(|| {
-        let path = std::env::var_os("CODEHEAD_KEYLOG").filter(|path_value| !path_value.is_empty())?;
+        let path = std::env::var_os("CODEHEAD_KEYLOG").filter(|path| !path.is_empty())?;
         let file = std::fs::OpenOptions::new().create(true).append(true).open(path).ok()?;
 
         Some((std::sync::Mutex::new(file), now))
     });
 
-    if let Some((file_value, t0)) = log
-        && let Ok(mut file_2) = file_value.lock()
+    if let Some((file, t0)) = log
+        && let Ok(mut file) = file.lock()
     {
         use std::io::Write;
         let _ = writeln!(
-            file_2,
+            file,
             "{:>8.1}ms {:?} {:?}",
             now.saturating_duration_since(*t0).as_secs_f64() * 1000.0,
             key.code,
@@ -302,8 +299,8 @@ fn is_word(character: char) -> bool {
 
 /// The modifiers of the row keys (⌫: to the row's start, ←→: row start / end): ⌘ (super, kitty
 /// protocol), alt off macOS. On macOS a terminal's alt is ⌥, the key of the word keys.
-pub(crate) fn line_mod(message: KeyModifiers) -> bool {
-    message.contains(KeyModifiers::SUPER) || (!cfg!(target_os = "macos") && message.contains(KeyModifiers::ALT))
+pub(crate) fn line_mod(modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::SUPER) || (!cfg!(target_os = "macos") && modifiers.contains(KeyModifiers::ALT))
 }
 
 /// ctrl+f (⌘f with the kitty protocol): the only key that focuses a filter, in every list; in the
@@ -323,7 +320,7 @@ pub(crate) fn esc_drops(at: &mut Option<std::time::Instant>, dirty: bool) -> boo
     if !dirty
         || at
             .take()
-            .is_some_and(|thread| now.saturating_duration_since(thread) < std::time::Duration::from_secs(2))
+            .is_some_and(|last| now.saturating_duration_since(last) < std::time::Duration::from_secs(2))
     {
         return true;
     }
@@ -346,21 +343,21 @@ pub(crate) fn delete_key(text: &mut String, key: &KeyEvent) -> bool {
         text.clear();
     } else if word {
         let line: Vec<char> = text.chars().collect();
-        let mut character = line.len();
+        let mut end = line.len();
 
-        while character > 0 && line[character - 1].is_whitespace() {
-            character -= 1;
+        while end > 0 && line[end - 1].is_whitespace() {
+            end -= 1;
         }
 
-        while character > 0 && line[character - 1] == '/' {
-            character -= 1;
+        while end > 0 && line[end - 1] == '/' {
+            end -= 1;
         }
 
-        while character > 0 && !line[character - 1].is_whitespace() && line[character - 1] != '/' {
-            character -= 1;
+        while end > 0 && !line[end - 1].is_whitespace() && line[end - 1] != '/' {
+            end -= 1;
         }
 
-        *text = line[..character].iter().collect();
+        *text = line[..end].iter().collect();
     } else if key.code == KeyCode::Backspace {
         text.pop();
     } else {
@@ -374,21 +371,21 @@ pub(crate) fn delete_key(text: &mut String, key: &KeyEvent) -> bool {
 pub(crate) fn wrap(line: &[char], width: usize) -> Vec<(usize, usize)> {
     let width = width.max(1);
     let mut segs = Vec::new();
-    let (mut start, mut i, mut width_value, mut space) = (0, 0, 0, None::<usize>);
+    let (mut start, mut i, mut used, mut space) = (0, 0, 0, None::<usize>);
 
     while i < line.len() {
-        let character = cw(line[i]);
+        let char_width = cw(line[i]);
 
-        if width_value + character > width && i > start {
+        if used + char_width > width && i > start {
             let brk = match space {
-                Some(text) if text + 1 > start => text + 1,
+                Some(space_at) if space_at + 1 > start => space_at + 1,
                 _ => i,
             };
 
             segs.push((start, brk));
             start = brk;
             i = brk;
-            width_value = 0;
+            used = 0;
             space = None;
             continue;
         }
@@ -397,7 +394,7 @@ pub(crate) fn wrap(line: &[char], width: usize) -> Vec<(usize, usize)> {
             space = Some(i);
         }
 
-        width_value += character;
+        used += char_width;
         i += 1;
     }
 
@@ -488,12 +485,12 @@ impl TextArea {
 
     /// Cursor at the very end of the text.
     pub(crate) fn move_end(&mut self) {
-        let result = self.lines.len() - 1;
+        let last = self.lines.len() - 1;
 
         self.move_to(
             Pos {
-                row: result,
-                col: self.lines[result].len(),
+                row: last,
+                col: self.lines[last].len(),
             },
             false,
         );
@@ -514,11 +511,11 @@ impl TextArea {
 
     /// Display rows needed for WIDTH (input height for the title).
     pub(crate) fn rows_for(&self, width: u16) -> usize {
-        let width_value = width.saturating_sub(1) as usize;
+        let cols = width.saturating_sub(1) as usize;
 
         self.lines
             .iter()
-            .map(|line| wrap(line, width_value).len())
+            .map(|line| wrap(line, cols).len())
             .sum::<usize>()
             .max(1)
     }

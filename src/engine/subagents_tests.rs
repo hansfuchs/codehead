@@ -12,11 +12,11 @@ fn tool(id: &str, input: Value) -> Kind {
 
 #[test]
 fn foreground_start_and_end_by_the_tool_result() {
-    let (mut thread, lost) = Tracker::from_log(&[]);
+    let (mut tracker, lost) = Tracker::from_log(&[]);
 
     assert_eq!(lost, [] as [(std::string::String, crate::engine::store::Kind); 0]);
 
-    let logs = thread.event(
+    let logs = tracker.event(
         "ada",
         &tool(
             "t1",
@@ -27,11 +27,11 @@ fn foreground_start_and_end_by_the_tool_result() {
     assert!(
         matches!(&logs[0].1, Kind::SubStart { id, description, agent_type, background: false, prompt, .. } if id == "t1" && description == "find the bug" && agent_type == "Explore" && prompt == "look at x")
     );
-    assert_eq!(thread.masters(), HashSet::from(["ada".to_string()]));
+    assert_eq!(tracker.masters(), HashSet::from(["ada".to_string()]));
 
     // another agent's result with the same id: 0 end
     assert_eq!(
-        thread.event(
+        tracker.event(
             "bob",
             &Kind::ToolResult {
                 id: "t1".into(),
@@ -42,7 +42,7 @@ fn foreground_start_and_end_by_the_tool_result() {
         [] as [(std::string::String, crate::engine::store::Kind); 0]
     );
 
-    let logs = thread.event(
+    let logs = tracker.event(
         "ada",
         &Kind::ToolResult {
             id: "t1".into(),
@@ -52,11 +52,11 @@ fn foreground_start_and_end_by_the_tool_result() {
     );
 
     assert!(matches!(&logs[0].1, Kind::SubEnd { state, result, .. } if state == "done" && result == "found it"));
-    assert!(!thread.any());
+    assert!(!tracker.any());
 
     // the same call again (a replay): 0 start
     assert_eq!(
-        thread.event("ada", &tool("t1", json!({}))),
+        tracker.event("ada", &tool("t1", json!({}))),
         [] as [(std::string::String, crate::engine::store::Kind); 0]
     );
 }
@@ -69,14 +69,14 @@ fn background_launch_gives_the_task_id_then_the_meta_file_ends_it() {
 
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(root.join("proj/s1.jsonl"), "").unwrap();
-    let (mut thread, _) = Tracker::from_log(&[]);
+    let (mut tracker, _) = Tracker::from_log(&[]);
 
-    thread.since = 0;
-    thread.event(
+    tracker.since = 0;
+    tracker.event(
         "ada",
         &tool("t2", json!({"description": "long job", "run_in_background": true})),
     );
-    let logs = thread.event(
+    let logs = tracker.event(
         "ada",
         &Kind::ToolResult {
             id: "t2".into(),
@@ -86,7 +86,7 @@ fn background_launch_gives_the_task_id_then_the_meta_file_ends_it() {
     );
 
     assert!(matches!(&logs[0].1, Kind::SubInfo { task, .. } if task == "abc123"));
-    assert!(thread.any(), "a background launch: still running");
+    assert!(tracker.any(), "a background launch: still running");
 
     // its files: running, with a nested subagent of its own
     let line = |value: Value| value.to_string() + "\n";
@@ -104,22 +104,22 @@ fn background_launch_gives_the_task_id_then_the_meta_file_ends_it() {
     .unwrap();
     std::fs::write(dir.join("agent-def456.jsonl"), line(json!({"type": "user", "message": {"content": "help"}})) + &line(json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "x", "name": "Bash", "input": {"command": "cargo test"}}]}}))).unwrap();
     let sessions = [("ada".to_string(), "s1".to_string())];
-    let logs = thread.scan(&root, &sessions);
+    let logs = tracker.scan(&root, &sessions);
 
     assert!(
         logs.iter()
-            .any(|(_, key)| matches!(key, Kind::SubInfo { id, task, .. } if id == "t2" && task == "abc123")),
+            .any(|(_, kind)| matches!(kind, Kind::SubInfo { id, task, .. } if id == "t2" && task == "abc123")),
         "{logs:?}"
     );
-    assert!(logs.iter().any(|(_, key_value)| matches!(key_value, Kind::SubStart { id, parent: Some(parent), prompt, .. } if id == "t3" && parent == "t2" && prompt == "help")), "{logs:?}");
+    assert!(logs.iter().any(|(_, kind)| matches!(kind, Kind::SubStart { id, parent: Some(parent), prompt, .. } if id == "t3" && parent == "t2" && prompt == "help")), "{logs:?}");
 
-    verify_background_launch_gives_the_task_id_then_the_meta_file_ends_it(&root, &dir, thread, line, &sessions);
+    verify_background_launch_gives_the_task_id_then_the_meta_file_ends_it(&root, &dir, tracker, line, &sessions);
 }
 
 fn verify_background_launch_gives_the_task_id_then_the_meta_file_ends_it(
     root: &PathBuf,
     dir: &Path,
-    mut thread: Tracker,
+    mut tracker: Tracker,
     line: impl Fn(Value) -> String,
     sessions: &[(String, String); 1],
 ) {
@@ -127,7 +127,7 @@ fn verify_background_launch_gives_the_task_id_then_the_meta_file_ends_it(
         activity_of(&dir.join("agent-def456.jsonl")).as_deref(),
         Some("Bash cargo test")
     );
-    assert!(thread.scan(root, sessions).is_empty(), "0 news: 0 events");
+    assert!(tracker.scan(root, sessions).is_empty(), "0 news: 0 events");
 
     // both finish: the report of each
     std::fs::write(
@@ -146,19 +146,19 @@ fn verify_background_launch_gives_the_task_id_then_the_meta_file_ends_it(
         .unwrap();
 
     write!(file, "{}", line(json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "SubagentHandback", "input": {"message": "all done"}}]}}))).unwrap();
-    let logs = thread.scan(root, sessions);
+    let logs = tracker.scan(root, sessions);
 
     assert!(
         logs.iter()
-            .any(|(_, key_2)| matches!(key_2, Kind::SubEnd { id, result, .. } if id == "t2" && result == "all done")),
+            .any(|(_, kind)| matches!(kind, Kind::SubEnd { id, result, .. } if id == "t2" && result == "all done")),
         "{logs:?}"
     );
     assert!(
         logs.iter()
-            .any(|(_, key_3)| matches!(key_3, Kind::SubEnd { id, .. } if id == "t3")),
+            .any(|(_, kind)| matches!(kind, Kind::SubEnd { id, .. } if id == "t3")),
         "{logs:?}"
     );
-    assert!(!thread.any());
+    assert!(!tracker.any());
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -167,11 +167,11 @@ fn verify_background_launch_gives_the_task_id_then_the_meta_file_ends_it(
 /// Its launch result keeps it running (its master stays busy); its meta file ends it.
 #[test]
 fn a_launch_result_without_run_in_background_keeps_it_running() {
-    let (mut thread, _) = Tracker::from_log(&[]);
+    let (mut tracker, _) = Tracker::from_log(&[]);
 
-    thread.event("ada", &tool("t1", json!({"description": "map keys", "prompt": "read"})));
+    tracker.event("ada", &tool("t1", json!({"description": "map keys", "prompt": "read"})));
     let out = "Async agent launched successfully. (This tool result is internal metadata.)\nagentId: abb626af5fcd5a2af (internal ID)\nThe agent is working in the background.";
-    let logs = thread.event(
+    let logs = tracker.event(
         "ada",
         &Kind::ToolResult {
             id: "t1".into(),
@@ -185,14 +185,14 @@ fn a_launch_result_without_run_in_background_keeps_it_running() {
         "{logs:?}"
     );
     assert!(
-        thread.any() && thread.masters().contains("ada"),
+        tracker.any() && tracker.masters().contains("ada"),
         "still running: the master is busy"
     );
-    assert!(thread.running["t1"].background);
+    assert!(tracker.running["t1"].background);
 
     // a report that names an agent id (0 launch): the end
-    thread.event("ada", &tool("t2", json!({"description": "x"})));
-    let logs = thread.event(
+    tracker.event("ada", &tool("t2", json!({"description": "x"})));
+    let logs = tracker.event(
         "ada",
         &Kind::ToolResult {
             id: "t2".into(),
@@ -206,15 +206,15 @@ fn a_launch_result_without_run_in_background_keeps_it_running() {
 
 #[test]
 fn a_dead_process_or_a_restarted_host_loses_its_subagents() {
-    let (mut thread, _) = Tracker::from_log(&[]);
+    let (mut tracker, _) = Tracker::from_log(&[]);
 
-    thread.event("ada", &tool("t1", json!({"description": "a"})));
-    thread.event("bob", &tool("t2", json!({"description": "b"})));
-    let logs = thread.exit("ada", "the harness process ended");
+    tracker.event("ada", &tool("t1", json!({"description": "a"})));
+    tracker.event("bob", &tool("t2", json!({"description": "b"})));
+    let logs = tracker.exit("ada", "the harness process ended");
 
     assert_eq!(logs.len(), 1);
     assert!(matches!(&logs[0].1, Kind::SubEnd { id, state, .. } if id == "t1" && state == "lost"));
-    assert_eq!(thread.masters(), HashSet::from(["bob".to_string()]));
+    assert_eq!(tracker.masters(), HashSet::from(["bob".to_string()]));
 
     // a new host: the log's open subagents are lost
     let ev = |agent: &str, kind: Kind| Event {
@@ -254,11 +254,11 @@ fn a_dead_process_or_a_restarted_host_loses_its_subagents() {
             },
         ),
     ];
-    let (thread_value, logs) = Tracker::from_log(&log);
+    let (restarted, logs) = Tracker::from_log(&log);
 
     assert_eq!(logs.len(), 1);
     assert!(matches!(&logs[0].1, Kind::SubEnd { id, state, .. } if id == "a" && state == "lost"));
-    assert!(!thread_value.any());
+    assert!(!restarted.any());
 }
 
 /// A background subagent ended; its master's `SendMessage` to its agent id resumes it. A
@@ -272,11 +272,11 @@ fn a_message_to_an_ended_subagent_resumes_it_until_its_meta_file_ends_it_again()
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(root.join("proj/s1.jsonl"), "").unwrap();
     let sessions = [("ada".to_string(), "s1".to_string())];
-    let (mut thread_value, _) = Tracker::from_log(&[]);
+    let (mut tracker, _) = Tracker::from_log(&[]);
 
-    thread_value.since = 0;
-    thread_value.event("ada", &tool("t1", json!({"description": "stream C"})));
-    thread_value.event(
+    tracker.since = 0;
+    tracker.event("ada", &tool("t1", json!({"description": "stream C"})));
+    tracker.event(
         "ada",
         &Kind::ToolResult {
             id: "t1".into(),
@@ -292,12 +292,12 @@ fn a_message_to_an_ended_subagent_resumes_it_until_its_meta_file_ends_it_again()
     std::fs::write(dir.join("agent-c1.jsonl"), "").unwrap();
 
     assert!(
-        thread_value
+        tracker
             .scan(&root, &sessions)
             .iter()
-            .any(|(_, key)| matches!(key, Kind::SubEnd { id, .. } if id == "t1"))
+            .any(|(_, kind)| matches!(kind, Kind::SubEnd { id, .. } if id == "t1"))
     );
-    assert!(!thread_value.any() && thread_value.resumable());
+    assert!(!tracker.any() && tracker.resumable());
 
     // a message to another id or of another agent: 0 resume
     let send = |to: &str| Kind::Tool {
@@ -307,16 +307,12 @@ fn a_message_to_an_ended_subagent_resumes_it_until_its_meta_file_ends_it_again()
     };
 
     assert_eq!(
-        thread_value.event("ada", &send("x9")),
+        tracker.event("ada", &send("x9")),
         [] as [(std::string::String, crate::engine::store::Kind); 0]
     );
 
     verify_a_message_to_an_ended_subagent_resumes_it_until_its_meta_file_ends_it_again(
-        &root,
-        &dir,
-        &sessions,
-        thread_value,
-        send,
+        &root, &dir, &sessions, tracker, send,
     );
 }
 
@@ -324,32 +320,32 @@ fn verify_a_message_to_an_ended_subagent_resumes_it_until_its_meta_file_ends_it_
     root: &PathBuf,
     dir: &Path,
     sessions: &[(String, String); 1],
-    mut thread_value: Tracker,
+    mut tracker: Tracker,
     send: impl Fn(&str) -> Kind,
 ) {
     assert_eq!(
-        thread_value.event("bob", &send("c1")),
+        tracker.event("bob", &send("c1")),
         [] as [(std::string::String, crate::engine::store::Kind); 0]
     );
 
-    let logs = thread_value.event("ada", &send("c1"));
+    let logs = tracker.event("ada", &send("c1"));
 
     assert!(
         matches!(&logs[..], [(agent, Kind::SubResume { id })] if agent == "ada" && id == "t1"),
         "{logs:?}"
     );
-    assert_eq!(thread_value.masters(), HashSet::from(["ada".to_string()]));
+    assert_eq!(tracker.masters(), HashSet::from(["ada".to_string()]));
 
     // the old `finished` meta file (from before the resume): still running
     assert_eq!(
-        thread_value.scan(root, sessions),
+        tracker.scan(root, sessions),
         [] as [(std::string::String, crate::engine::store::Kind); 0]
     );
-    assert!(thread_value.any());
+    assert!(tracker.any());
 
     // a 2nd message while it runs: 0 2nd resume
     assert_eq!(
-        thread_value.event("ada", &send("c1")),
+        tracker.event("ada", &send("c1")),
         [] as [(std::string::String, crate::engine::store::Kind); 0]
     );
 
@@ -360,14 +356,14 @@ fn verify_a_message_to_an_ended_subagent_resumes_it_until_its_meta_file_ends_it_
         json!({"toolUseId": "t1", "finished": true}).to_string(),
     )
     .unwrap();
-    let logs = thread_value.scan(root, sessions);
+    let logs = tracker.scan(root, sessions);
 
     assert!(
         logs.iter()
-            .any(|(_, key_value)| matches!(key_value, Kind::SubEnd { id, state, .. } if id == "t1" && state == "done")),
+            .any(|(_, kind)| matches!(kind, Kind::SubEnd { id, state, .. } if id == "t1" && state == "done")),
         "{logs:?}"
     );
-    assert!(!thread_value.any());
+    assert!(!tracker.any());
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -396,41 +392,41 @@ fn a_scan_resumes_an_ended_subagent_whose_files_changed_after_its_end() {
     // the log: it ended a minute ago (its files: changed since, 0 `finished`)
     let log = ended_subagent_events(now, transcript, ev);
 
-    let (mut thread, lost) = Tracker::from_log(&log);
+    let (mut tracker, lost) = Tracker::from_log(&log);
 
-    assert!(lost.is_empty() && thread.resumable());
+    assert!(lost.is_empty() && tracker.resumable());
 
-    let logs = thread.scan(&root, &sessions);
+    let logs = tracker.scan(&root, &sessions);
 
     assert!(
         matches!(&logs[..], [(_, Kind::SubResume { id })] if id == "t1"),
         "{logs:?}"
     );
-    assert!(thread.any());
+    assert!(tracker.any());
 
     // a log with the resume, the host restarts: lost, resumable again
     let mut log = log.to_vec();
 
     log.push(ev(now - 30_000, Kind::SubResume { id: "t1".into() }));
-    let (thread_value, lost) = Tracker::from_log(&log);
+    let (restarted, lost) = Tracker::from_log(&log);
 
     assert!(
         matches!(&lost[..], [(_, Kind::SubEnd { id, state, .. })] if id == "t1" && state == "lost"),
         "{lost:?}"
     );
-    assert!(!thread_value.any() && thread_value.resumable());
+    assert!(!restarted.any() && restarted.resumable());
 
     let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
 fn task_tools_of_the_harnesses() {
-    for count in ["Agent", "Task", "task", "spawn_agent"] {
-        assert!(is_sub_tool(count), "{count}");
+    for name in ["Agent", "Task", "task", "spawn_agent"] {
+        assert!(is_sub_tool(name), "{name}");
     }
 
-    for count_value in ["Bash", "TaskStop", "TodoWrite", "agents"] {
-        assert!(!is_sub_tool(count_value), "{count_value}");
+    for name in ["Bash", "TaskStop", "TodoWrite", "agents"] {
+        assert!(!is_sub_tool(name), "{name}");
     }
 }
 
