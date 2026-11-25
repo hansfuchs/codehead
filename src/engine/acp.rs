@@ -1,4 +1,4 @@
-//! Agent Client Protocol client: codehead drives any ACP agent (OpenCode, Goose, Cursor, Pi, …)
+//! Agent Client Protocol client: codehead drives any ACP agent (`OpenCode`, Goose, Cursor, Pi, …)
 //! over JSON-RPC 2.0 on the agent's stdio, 1 JSON message per line.
 //!
 //! Flow: `initialize` → `session/new` (or `session/load` to resume) → optional
@@ -8,7 +8,6 @@
 //! mode) picks an option. `session/cancel` stops the running prompt.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Write;
 use std::process::ChildStdin;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -28,7 +27,7 @@ enum Pending {
     Prompt,
 }
 
-pub struct Setup {
+pub(crate) struct Setup {
     pub cwd: String,
     pub resume: Option<String>,
     pub model: Option<String>,
@@ -50,9 +49,8 @@ struct State {
     session: Option<String>,
     /// Loads replay the history as updates: 0 events from them.
     loading: bool,
-    can_load: bool,
     /// `mcpServers` of `session/new` / `session/load`, set on the `initialize` reply.
-    mcp: Value,
+    capabilities: Capabilities,
     busy: bool,
     queue: VecDeque<String>,
     /// The preamble goes before the 1st prompt (a new session only).
@@ -71,290 +69,69 @@ struct State {
 }
 
 #[derive(Clone)]
-pub struct Conn(Arc<Mutex<State>>);
+pub(crate) struct Conn(Arc<Mutex<State>>);
 
 /// A JSON-RPC error E as text: its message, the server's own message (`data.message`, e.g. the
 /// model API's 400) after it.
-fn error_text(e: &Value) -> String {
-    let msg = e["message"].as_str().unwrap_or("error").to_string();
-    let data = e["data"]["message"].as_str().or_else(|| e["data"].as_str()).unwrap_or_default();
+fn error_text(error: &Value) -> String {
+    let msg = error["message"].as_str().unwrap_or("error").to_string();
+    let data = error["data"]["message"]
+        .as_str()
+        .or_else(|| error["data"].as_str())
+        .unwrap_or_default();
+
     // `data.message` may hold the API's error JSON: its `error.message`
-    let inner = serde_json::from_str::<Value>(data).ok().and_then(|v| v["error"]["message"].as_str().map(String::from)).unwrap_or_else(|| data.to_string());
-    if inner.is_empty() || inner == msg { msg } else { format!("{msg}: {inner}") }
+    let inner = serde_json::from_str::<Value>(data)
+        .ok()
+        .and_then(|value| value["error"]["message"].as_str().map(String::from))
+        .unwrap_or_else(|| data.to_string());
+
+    if inner.is_empty() || inner == msg {
+        msg
+    } else {
+        format!("{msg}: {inner}")
+    }
 }
 
 /// The model of a new session R and whether it sets models as config options: `configOptions`
 /// (id `model`, ACP config options) or the older `models.currentModelId`.
-fn session_model(r: &Value) -> (String, bool) {
-    let opt = r["configOptions"].as_array().and_then(|o| o.iter().find(|c| c["id"] == "model" || c["category"] == "model"));
+fn session_model(result: &Value) -> (String, bool) {
+    let opt = result["configOptions"].as_array().and_then(|output| {
+        output
+            .iter()
+            .find(|character| character["id"] == "model" || character["category"] == "model")
+    });
+
     match opt {
-        Some(o) => (o["currentValue"].as_str().unwrap_or_default().to_string(), true),
-        None => (r["models"]["currentModelId"].as_str().unwrap_or_default().to_string(), false),
+        Some(output_value) => (
+            output_value["currentValue"].as_str().unwrap_or_default().to_string(),
+            true,
+        ),
+        None => (
+            result["models"]["currentModelId"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            false,
+        ),
     }
 }
 
 /// `mcpServers`: codehead's own, then the agent's servers the harness can run (HTTP, SSE: its
 /// `mcpCapabilities`); the rest: (server, why).
-fn mcp_servers(s: &Setup, http: bool, sse: bool) -> (Value, Vec<(String, String)>) {
-    let (cmd, args, env) = &s.mcp;
-    let own = json!({"name": "codehead", "command": cmd, "args": args, "env": env.iter().map(|(k, v)| json!({"name": k, "value": v})).collect::<Vec<_>>()});
-    let (more, errors) = super::servers::acp_config(&s.servers, http, sse);
+fn mcp_servers(text: &Setup, http: bool, sse: bool) -> (Value, Vec<(String, String)>) {
+    let (cmd, args, env) = &text.mcp;
+    let own = json!({"name": "codehead", "command": cmd, "args": args, "env": env.iter().map(|(key, value)| json!({"name": key, "value": value})).collect::<Vec<_>>()});
+    let (more, errors) = super::servers::acp_config(&text.servers, http, sse);
+
     (Value::Array(std::iter::once(own).chain(more).collect()), errors)
-}
-
-impl State {
-    fn send(&mut self, v: &Value) -> Result<(), String> {
-        self.stdin.send(v.to_string()).map_err(|_| "agent stdin closed".to_string())
-    }
-
-    fn request(&mut self, method: &str, params: Value, why: Pending) -> Result<(), String> {
-        self.next += 1;
-        let id = self.next;
-        self.pending.insert(id, why);
-        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
-    }
-
-    fn out(&self, o: Out) {
-        let _ = self.tx.send((self.name.clone(), o));
-    }
-
-    /// The buffered thought, then the buffered text, as events (empty ones: 0 events).
-    fn flush_text(&mut self) {
-        self.flush_thought();
-        let t = std::mem::take(&mut self.text);
-        if !t.trim().is_empty() {
-            self.out(Out::Event(Kind::Text { text: t }));
-        }
-    }
-
-    fn flush_thought(&mut self) {
-        let t = std::mem::take(&mut self.thought);
-        if !t.trim().is_empty() {
-            self.out(Out::Event(Kind::Thought { text: t.trim().to_string() }));
-        }
-    }
-
-    /// The next queued prompt, when the session is up and idle.
-    fn pump(&mut self) -> Result<(), String> {
-        if self.busy || self.session.is_none() {
-            return Ok(());
-        }
-        let Some(text) = self.queue.pop_front() else { return Ok(()) };
-        let text = match self.preamble.take() {
-            Some(p) if !p.is_empty() => format!("{p}\n\n---\n\n{text}"),
-            _ => text,
-        };
-        self.busy = true;
-        let sid = self.session.clone().unwrap_or_default();
-        self.request("session/prompt", json!({"sessionId": sid, "prompt": [{"type": "text", "text": text}]}), Pending::Prompt)
-    }
-
-    fn reply(&mut self, why: Pending, v: &Value) -> Result<(), String> {
-        let err = v.get("error").map(error_text);
-        let r = &v["result"];
-        match why {
-            Pending::Init => {
-                if let Some(e) = err {
-                    return Err(format!("initialize: {e}"));
-                }
-                self.can_load = r["agentCapabilities"]["loadSession"].as_bool().unwrap_or(false);
-                let caps = &r["agentCapabilities"]["mcpCapabilities"];
-                let (mcp, errors) = mcp_servers(&self.setup, caps["http"].as_bool().unwrap_or(false), caps["sse"].as_bool().unwrap_or(false));
-                super::harness::report_mcp_errors(&self.setup.harness, &errors, &self.tx, &self.name);
-                self.mcp = mcp.clone();
-                let cwd = self.setup.cwd.clone();
-                match self.setup.resume.clone().filter(|_| self.can_load) {
-                    Some(sid) => {
-                        self.loading = true;
-                        self.session = None;
-                        self.request("session/load", json!({"sessionId": sid, "cwd": cwd, "mcpServers": mcp}), Pending::Load)?;
-                        // the id stays the same: kept for the reply
-                        self.setup.resume = Some(sid);
-                    }
-                    None => self.request("session/new", json!({"cwd": cwd, "mcpServers": mcp}), Pending::New)?,
-                }
-            }
-            Pending::New | Pending::Load => {
-                self.loading = false;
-                let sid = if why == Pending::Load && err.is_none() {
-                    self.setup.resume.clone()
-                } else if why == Pending::Load {
-                    // the old session is gone: a new one
-                    let cwd = self.setup.cwd.clone();
-                    let mcp = self.mcp.clone();
-                    return self.request("session/new", json!({"cwd": cwd, "mcpServers": mcp}), Pending::New);
-                } else {
-                    if let Some(e) = err {
-                        return Err(format!("session/new: {e}"));
-                    }
-                    r["sessionId"].as_str().map(String::from)
-                };
-                let Some(sid) = sid else { return Err("session/new: 0 session id".into()) };
-                if why == Pending::Load {
-                    self.preamble = None;
-                }
-                let (model, options) = session_model(r);
-                self.out(Out::Event(Kind::Session { session: sid.clone(), model }));
-                self.session = Some(sid.clone());
-                if let Some(m) = self.setup.model.clone() {
-                    // ACP config options (codex-acp ≥ 0.16: 0 `session/set_model`), else the older call
-                    if options {
-                        self.request("session/set_config_option", json!({"sessionId": sid, "configId": "model", "value": m}), Pending::Model)?;
-                    } else {
-                        self.request("session/set_model", json!({"sessionId": sid, "modelId": m}), Pending::Model)?;
-                    }
-                }
-                self.pump()?;
-            }
-            // the model the agent's profile names: unknown to the harness → a note in the stream
-            Pending::Model => {
-                if let Some(e) = err {
-                    let m = self.setup.model.clone().unwrap_or_default();
-                    self.out(Out::Event(Kind::Error { message: format!("model {m}: {e}") }));
-                }
-            }
-            Pending::Prompt => {
-                self.flush_text();
-                self.busy = false;
-                let u = &r["usage"];
-                let n = |k: &str| u[k].as_u64().unwrap_or(0);
-                let error = err.or_else(|| match r["stopReason"].as_str() {
-                    Some("refusal") => Some("the agent refused".into()),
-                    Some("max_tokens") => Some("hit the token limit".into()),
-                    _ => None,
-                });
-                self.out(Out::Event(Kind::TurnEnd {
-                    cost: 0.0,
-                    input: n("inputTokens"),
-                    output: n("outputTokens"),
-                    cache_read: n("cachedReadTokens"),
-                    cache_write: n("cachedWriteTokens"),
-                    ctx: n("totalTokens"),
-                    window: 0,
-                    ms: 0,
-                    error,
-                }));
-                self.pump()?;
-            }
-        }
-        Ok(())
-    }
-
-    fn update(&mut self, u: &Value) {
-        if self.loading {
-            return;
-        }
-        match u["sessionUpdate"].as_str().unwrap_or_default() {
-            "agent_message_chunk" => {
-                if let Some(t) = u["content"]["text"].as_str() {
-                    // a thought before it: its own event, before the text
-                    self.flush_thought();
-                    self.text.push_str(t);
-                    // live in the view now; the log gets the whole text at the next tool call or turn end
-                    if !t.is_empty() {
-                        self.out(Out::Delta(t.into()));
-                    }
-                }
-            }
-            "agent_thought_chunk" => {
-                if let Some(t) = u["content"]["text"].as_str().filter(|t| !t.is_empty()) {
-                    if !self.text.trim().is_empty() {
-                        let text = std::mem::take(&mut self.text);
-                        self.out(Out::Event(Kind::Text { text }));
-                    }
-                    self.thought.push_str(t);
-                }
-            }
-            "tool_call" => {
-                self.flush_text();
-                let (name, input) = tool_of(u);
-                self.out(Out::Event(Kind::Tool { id: u["toolCallId"].as_str().unwrap_or_default().into(), name, input }));
-                self.result_of(u);
-            }
-            "tool_call_update" => self.result_of(u),
-            // the context so far (ACP `usage_update`: used / size)
-            "usage_update" => {
-                if let Some(used) = u["used"].as_u64().filter(|n| *n > 0) {
-                    self.out(Out::Usage(super::harness::TurnUse { ctx: used, ..Default::default() }));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// A finished tool call: its result event.
-    fn result_of(&mut self, u: &Value) {
-        let status = u["status"].as_str().unwrap_or_default();
-        if status != "completed" && status != "failed" {
-            return;
-        }
-        let mut out: Vec<String> = Vec::new();
-        for c in u["content"].as_array().into_iter().flatten() {
-            match c["type"].as_str() {
-                Some("content") => out.extend(c["content"]["text"].as_str().map(String::from)),
-                Some("diff") => out.push(format!("diff {}", c["path"].as_str().unwrap_or_default())),
-                _ => {}
-            }
-        }
-        if out.is_empty()
-            && let Some(r) = u.get("rawOutput").filter(|r| !r.is_null())
-        {
-            out.push(r.as_str().map(String::from).unwrap_or_else(|| r.to_string()));
-        }
-        let mut text = out.join("\n");
-        if text.len() > 4096 {
-            let mut end = 4096;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            text.truncate(end);
-            text.push_str("\n…");
-        }
-        self.out(Out::Event(Kind::ToolResult { id: u["toolCallId"].as_str().unwrap_or_default().into(), ok: status == "completed", output: text }));
-    }
-
-    fn incoming(&mut self, v: &Value) -> Result<(), String> {
-        // a reply to 1 of our requests
-        if v.get("method").is_none() {
-            if let Some(id) = v["id"].as_u64()
-                && let Some(why) = self.pending.remove(&id)
-            {
-                return self.reply(why, v);
-            }
-            return Ok(());
-        }
-        let method = v["method"].as_str().unwrap_or_default();
-        let p = &v["params"];
-        match method {
-            "session/update" => self.update(&p["update"]),
-            "session/request_permission" => {
-                self.flush_text();
-                let id = super::new_id();
-                let options = p["options"].as_array().cloned().unwrap_or_default();
-                let tc = &p["toolCall"];
-                let (name, mut input) = tool_of(tc);
-                if let Some(o) = input.as_object_mut() {
-                    o.insert("_options".into(), Value::Array(options.iter().map(|o| json!({"id": o["optionId"], "name": o["name"], "kind": o["kind"]})).collect()));
-                    o.insert("_kind".into(), tc["kind"].clone());
-                }
-                self.asks.insert(id.clone(), (v["id"].clone(), options));
-                self.out(Out::Control(id, json!({"subtype": "can_use_tool", "tool_name": name, "input": input})));
-            }
-            // 0 client capabilities advertised: anything else is an error reply
-            _ if v.get("id").is_some() => {
-                let id = v["id"].clone();
-                self.send(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("{method}: not supported by codehead")}}))?;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
 }
 
 /// ACP tool call → (codehead tool name, input): its kind as a familiar name, the raw input
 /// with the title as description.
-pub fn tool_of(tc: &Value) -> (String, Value) {
+pub(crate) fn tool_of(tc: &Value) -> (String, Value) {
     let title = tc["title"].as_str().unwrap_or_default().to_string();
+
     let name = match tc["kind"].as_str().unwrap_or_default() {
         "execute" => "Bash",
         "read" => "Read",
@@ -366,41 +143,128 @@ pub fn tool_of(tc: &Value) -> (String, Value) {
         "think" => "Think",
         _ => "",
     };
+
     let mut input = tc["rawInput"].clone();
+
     if !input.is_object() {
         input = json!({});
     }
-    if let Some(o) = input.as_object_mut()
-        && !o.contains_key("description")
+
+    if let Some(output) = input.as_object_mut()
+        && !output.contains_key("description")
         && !title.is_empty()
     {
-        o.insert("description".into(), Value::String(title.clone()));
+        output.insert("description".into(), Value::String(title.clone()));
     }
-    let name = if name.is_empty() { if title.is_empty() { "tool".to_string() } else { title } } else { name.to_string() };
+
+    let name = if name.is_empty() {
+        if title.is_empty() { "tool".to_string() } else { title }
+    } else {
+        name.to_string()
+    };
+
     (name, input)
 }
 
 /// Start the protocol on a spawned agent: stdout is read here, events go to TX.
-pub fn start(stdin: ChildStdin, stdout: std::process::ChildStdout, stderr: Arc<Mutex<Vec<String>>>, setup: Setup, name: String, tx: Sender<(String, Out)>) -> Conn {
-    let (wtx, wrx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let mut stdin = stdin;
-        for mut line in wrx {
-            line.push('\n');
-            if stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush()).is_err() {
-                return;
-            }
+pub(crate) fn start(
+    stdin: ChildStdin,
+    stdout: std::process::ChildStdout,
+    stderr: Arc<Mutex<Vec<String>>>,
+    setup: Setup,
+    name: String,
+    tx: Sender<(String, Out)>,
+) -> Conn {
+    let writer = crate::engine::harness::json_writer(stdin);
+    let conn = Conn(Arc::new(Mutex::new(state(writer, setup, name, tx))));
+
+    {
+        let mut text_value = conn.0.lock().expect("fresh lock");
+        let init = json!({"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false},
+            "clientInfo": {"name": "codehead", "version": crate::infra::update::VERSION}});
+
+        if let Err(error) = text_value.request("initialize", &init, Pending::Init) {
+            text_value.out(Out::Event(Kind::Error {
+                message: format!("acp: {error}"),
+            }));
         }
-    });
+    }
+
+    conn.read_protocol(stdout, stderr.clone());
+    conn.watch_setup(stderr);
+
+    conn
+}
+
+/// Time for `initialize` + `session/new` (or `session/load`) to give a session.
+const SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+impl Conn {
+    pub(crate) fn prompt(&self, text: &str) -> Result<(), String> {
+        let mut text_value = self.0.lock().map_err(|error| error.to_string())?;
+
+        text_value.queue.push_back(text.to_string());
+        text_value.pump()
+    }
+
+    /// Answer ask ID with the option OPTION (an option id), else the 1st option of KINDS.
+    pub(crate) fn answer(&self, id: &str, option: Option<&str>, kinds: &[&str]) -> Result<(), String> {
+        let mut text = self.0.lock().map_err(|error| error.to_string())?;
+        let (rpc, options) = text.asks.remove(id).ok_or_else(|| format!("no open ask {id}"))?;
+
+        let pick = option.map(String::from).or_else(|| permission_option(&options, kinds));
+
+        let outcome = match pick {
+            Some(output_2) => json!({"outcome": "selected", "optionId": output_2}),
+            None => json!({"outcome": "cancelled"}),
+        };
+
+        text.send(&json!({"jsonrpc": "2.0", "id": rpc, "result": {"outcome": outcome}}))
+    }
+
+    pub(crate) fn cancel(&self) -> Result<(), String> {
+        let mut text = self.0.lock().map_err(|error| error.to_string())?;
+
+        // open asks first: a cancelled prompt answers them with `cancelled`
+        let asks: Vec<(Value, Vec<Value>)> = text.asks.drain().map(|(_, agent)| agent).collect();
+
+        for (rpc, _) in asks {
+            text.send(&json!({"jsonrpc": "2.0", "id": rpc, "result": {"outcome": {"outcome": "cancelled"}}}))?;
+        }
+
+        text.queue.clear();
+        let sid = text.session.clone().unwrap_or_default();
+
+        text.send(&json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}}))
+    }
+}
+
+#[cfg(test)]
+#[path = "acp_tests.rs"]
+mod tests;
+
+#[path = "acp_protocol.rs"]
+mod acp_protocol;
+
+#[path = "acp_events.rs"]
+mod acp_events;
+
+#[derive(Default)]
+struct Capabilities {
+    load_session: bool,
+    mcp: Value,
+}
+
+fn state(wtx: Sender<String>, setup: Setup, name: String, tx: Sender<(String, Out)>) -> State {
     let preamble = Some(setup.preamble.clone());
-    let st = State {
+
+    State {
         stdin: wtx,
         next: 0,
         pending: HashMap::new(),
         session: None,
         loading: false,
-        can_load: false,
-        mcp: Value::Null,
+        capabilities: Capabilities::default(),
         busy: false,
         queue: VecDeque::new(),
         preamble,
@@ -411,177 +275,17 @@ pub fn start(stdin: ChildStdin, stdout: std::process::ChildStdout, stderr: Arc<M
         tx,
         name,
         dead: false,
-    };
-    let conn = Conn(Arc::new(Mutex::new(st)));
-    {
-        let mut s = conn.0.lock().expect("fresh lock");
-        let init = json!({"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false},
-            "clientInfo": {"name": "codehead", "version": crate::update::VERSION}});
-        if let Err(e) = s.request("initialize", init, Pending::Init) {
-            s.out(Out::Event(Kind::Error { message: format!("acp: {e}") }));
-        }
-    }
-    let c = conn.clone();
-    let tail = stderr.clone();
-    std::thread::spawn(move || {
-        super::harness::json_lines(stdout, |v| {
-            let Ok(mut s) = c.0.lock() else { return false };
-            if let Err(e) = s.incoming(&v) {
-                // 0 session: the setup failed, the queue never runs → end the session
-                if s.session.is_none() {
-                    s.exit(&tail, &format!("acp: {e}"));
-                    return false;
-                }
-                s.out(Out::Event(Kind::Error { message: format!("acp: {e}") }));
-            }
-            true
-        });
-        // stdout closed: the process ended (`exit` sends once: 0 2nd one after a setup error)
-        if let Ok(mut s) = c.0.lock() {
-            s.exit(&tail, "");
-        }
-    });
-    // an agent that never answers the setup: the session ends after SETUP_TIMEOUT
-    let c = conn.clone();
-    std::thread::spawn(move || {
-        let at = std::time::Instant::now();
-        while at.elapsed() < SETUP_TIMEOUT {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            match c.0.lock() {
-                Ok(s) if s.session.is_some() || s.dead => return,
-                Ok(_) => {}
-                Err(_) => return,
-            }
-        }
-        if let Ok(mut s) = c.0.lock()
-            && s.session.is_none()
-        {
-            s.exit(&stderr, &format!("acp: 0 session after {}s", SETUP_TIMEOUT.as_secs()));
-        }
-    });
-    conn
-}
-
-/// Time for `initialize` + `session/new` (or `session/load`) to give a session.
-const SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
-impl State {
-    /// End the session once: the stderr tail, then WHY. The host kills the process.
-    fn exit(&mut self, stderr: &Mutex<Vec<String>>, why: &str) {
-        if std::mem::replace(&mut self.dead, true) {
-            return;
-        }
-        let mut err = stderr.lock().map(|t| t.join("\n")).unwrap_or_default();
-        if !why.is_empty() {
-            if !err.is_empty() {
-                err.push('\n');
-            }
-            err.push_str(why);
-        }
-        self.out(Out::Exit(err));
     }
 }
 
-impl Conn {
-    pub fn prompt(&self, text: &str) -> Result<(), String> {
-        let mut s = self.0.lock().map_err(|e| e.to_string())?;
-        s.queue.push_back(text.to_string());
-        s.pump()
-    }
+#[path = "acp_transport.rs"]
+mod transport;
 
-    /// Answer ask ID with the option OPTION (an option id), else the 1st option of KINDS.
-    pub fn answer(&self, id: &str, option: Option<&str>, kinds: &[&str]) -> Result<(), String> {
-        let mut s = self.0.lock().map_err(|e| e.to_string())?;
-        let (rpc, options) = s.asks.remove(id).ok_or_else(|| format!("no open ask {id}"))?;
-        let pick = option.map(String::from).or_else(|| {
-            kinds.iter().find_map(|k| options.iter().find(|o| o["kind"] == *k).and_then(|o| o["optionId"].as_str().map(String::from)))
-        });
-        let outcome = match pick {
-            Some(o) => json!({"outcome": "selected", "optionId": o}),
-            None => json!({"outcome": "cancelled"}),
-        };
-        s.send(&json!({"jsonrpc": "2.0", "id": rpc, "result": {"outcome": outcome}}))
-    }
-
-    pub fn cancel(&self) -> Result<(), String> {
-        let mut s = self.0.lock().map_err(|e| e.to_string())?;
-        // open asks first: a cancelled prompt answers them with `cancelled`
-        let asks: Vec<(Value, Vec<Value>)> = s.asks.drain().map(|(_, a)| a).collect();
-        for (rpc, _) in asks {
-            s.send(&json!({"jsonrpc": "2.0", "id": rpc, "result": {"outcome": {"outcome": "cancelled"}}}))?;
-        }
-        s.queue.clear();
-        let sid = s.session.clone().unwrap_or_default();
-        s.send(&json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}}))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-
-    #[test]
-    fn codex_acp_016_config_options_and_api_errors() {
-        // codex-acp 0.16: the model as a config option
-        let r = json!({"sessionId": "s", "configOptions": [{"id": "model", "category": "model", "type": "select", "currentValue": "gpt-5.6-sol", "options": []}]});
-        assert_eq!(session_model(&r), ("gpt-5.6-sol".to_string(), true));
-        // older: models.currentModelId
-        assert_eq!(session_model(&json!({"models": {"currentModelId": "gpt-5.5"}})), ("gpt-5.5".to_string(), false));
-        // the API's 400 behind "Internal error"
-        let e = json!({"code": -32603, "message": "Internal error", "data": {"message": "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\"}}"}});
-        assert_eq!(error_text(&e), "Internal error: The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.");
-        assert_eq!(error_text(&json!({"code": -32601, "message": "Method not found", "data": "session/set_model"})), "Method not found: session/set_model");
-    }
-    #[test]
-    fn tool_calls_map_to_familiar_names() {
-        let (n, i) = tool_of(&json!({"kind": "execute", "title": "Run tests", "rawInput": {"command": "cargo test"}}));
-        assert_eq!(n, "Bash");
-        assert_eq!(i["command"], "cargo test");
-        assert_eq!(i["description"], "Run tests");
-        let (n, _) = tool_of(&json!({"kind": "other", "title": "codehead_send"}));
-        assert_eq!(n, "codehead_send");
-    }
-
-    #[test]
-    fn thought_chunks_become_1_thought_before_the_next_text_or_tool() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (stdin, _lines) = std::sync::mpsc::channel::<String>();
-        let setup = Setup { cwd: "/".into(), resume: None, model: None, mcp: (String::new(), Vec::new(), Vec::new()), preamble: String::new(), harness: "x".into(), servers: Vec::new() };
-        let mut s = State {
-            stdin,
-            next: 0,
-            pending: HashMap::new(),
-            session: None,
-            loading: false,
-            can_load: false,
-            mcp: Value::Null,
-            busy: true,
-            queue: VecDeque::new(),
-            preamble: None,
-            text: String::new(),
-            thought: String::new(),
-            asks: HashMap::new(),
-            setup,
-            tx,
-            name: "ada".into(),
-            dead: false,
-        };
-        let chunk = |kind: &str, t: &str| json!({"sessionUpdate": kind, "content": {"type": "text", "text": t}});
-        // empty chunks: 0 events
-        s.update(&chunk("agent_thought_chunk", ""));
-        for t in ["Cause", " found,", " fixing."] {
-            s.update(&chunk("agent_thought_chunk", t));
-        }
-        s.update(&json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "kind": "execute", "title": "Run", "rawInput": {"command": "ls"}}));
-        s.update(&chunk("agent_thought_chunk", "Then the text."));
-        s.update(&chunk("agent_message_chunk", "Done."));
-        s.flush_text();
-        let kinds: Vec<Kind> = rx.try_iter().filter_map(|(_, o)| if let Out::Event(k) = o { Some(k) } else { None }).collect();
-        assert_eq!(kinds[0], Kind::Thought { text: "Cause found, fixing.".into() });
-        assert!(matches!(kinds[1], Kind::Tool { .. }));
-        assert_eq!(kinds[2], Kind::Thought { text: "Then the text.".into() });
-        assert_eq!(kinds[3], Kind::Text { text: "Done.".into() });
-        assert_eq!(kinds.len(), 4);
-    }
+fn permission_option(options: &[Value], kinds: &[&str]) -> Option<String> {
+    kinds.iter().find_map(|key| {
+        options
+            .iter()
+            .find(|output| output["kind"] == *key)
+            .and_then(|output_value| output_value["optionId"].as_str().map(String::from))
+    })
 }

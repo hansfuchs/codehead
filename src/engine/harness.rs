@@ -5,6 +5,7 @@
 //! other harness: ACP (`engine::acp`).
 
 use std::io::{BufRead, BufReader, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
@@ -17,7 +18,7 @@ use super::store::Kind;
 
 /// What a session reports to the host.
 #[derive(Debug)]
-pub enum Out {
+pub(crate) enum Out {
     Event(Kind),
     /// A control request (permission, question): its id, the request.
     Control(String, Value),
@@ -37,7 +38,7 @@ pub enum Out {
 
 /// Tokens of a running turn so far. CTX: the context of the last model call (0: unknown).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TurnUse {
+pub(crate) struct TurnUse {
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
@@ -50,12 +51,29 @@ pub(super) fn report_mcp_errors(harness: &str, errors: &[(String, String)], tx: 
     if errors.is_empty() {
         return;
     }
+
     let at = super::now_ms();
-    let rows = errors.iter().map(|(n, e)| (n.clone(), super::servers::Status { state: "failed".into(), error: e.clone(), source: "codehead".into(), at, ..Default::default() })).collect();
+
+    let rows = errors
+        .iter()
+        .map(|(count, error_value)| {
+            (
+                count.clone(),
+                super::servers::Status {
+                    state: "failed".into(),
+                    error: error_value.clone(),
+                    source: "codehead".into(),
+                    at,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+
     let _ = tx.send((agent.to_string(), Out::Mcp(harness.to_string(), rows)));
 }
 
-pub struct Spec<'a> {
+pub(crate) struct Spec<'a> {
     pub agent: &'a Agent,
     pub thread: &'a str,
     pub dir: &'a Path,
@@ -70,13 +88,13 @@ pub struct Spec<'a> {
     pub extra: &'a [PathBuf],
 }
 
-pub struct Session {
+pub(crate) struct Session {
     pub child: Child,
     driver: Box<dyn Driver>,
 }
 
 /// The protocol of a session on the harness's stdin: Claude Code's stream-json or ACP.
-pub trait Driver {
+pub(crate) trait Driver {
     fn prompt(&mut self, text: &str) -> Result<(), String>;
     /// Allow request ID, with INPUT as the tool's input (a question's input carries the answers;
     /// ACP: `_option`, the picked option id).
@@ -94,10 +112,14 @@ pub trait Driver {
 struct ClaudeStream(ChildStdin);
 
 impl ClaudeStream {
-    fn write(&mut self, v: &Value) -> Result<(), String> {
-        let mut line = v.to_string();
+    fn write(&mut self, value: &Value) -> Result<(), String> {
+        let mut line = value.to_string();
+
         line.push('\n');
-        self.0.write_all(line.as_bytes()).and_then(|_| self.0.flush()).map_err(|e| e.to_string())
+        self.0
+            .write_all(line.as_bytes())
+            .and_then(|()| self.0.flush())
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -115,7 +137,9 @@ impl Driver for ClaudeStream {
     }
 
     fn interrupt(&mut self) -> Result<(), String> {
-        self.write(&json!({"type": "control_request", "request_id": super::new_id(), "request": {"subtype": "interrupt"}}))
+        self.write(
+            &json!({"type": "control_request", "request_id": super::new_id(), "request": {"subtype": "interrupt"}}),
+        )
     }
 }
 
@@ -141,277 +165,41 @@ impl Driver for super::acp::Conn {
     }
 }
 
-/// JSON lines of R → F until R ends or F says stop (false). Bytes, not text: a line with
-/// invalid UTF-8 is skipped, the reader goes on.
-pub(super) fn json_lines(r: impl std::io::Read, mut f: impl FnMut(Value) -> bool) {
-    let mut r = BufReader::new(r);
-    let mut buf = Vec::new();
-    loop {
-        buf.clear();
-        match r.read_until(b'\n', &mut buf) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
-        }
-        let Ok(v) = serde_json::from_slice::<Value>(&buf) else { continue };
-        if !f(v) {
-            return;
-        }
-    }
-}
-
-/// Spawn options of a harness process: its own process group (a kill reaches its children).
-fn harness_command(bin: &str, s: &Spec) -> Command {
-    use std::os::unix::process::CommandExt;
-    let mut c = Command::new(bin);
-    c.current_dir(s.dir)
-        .env("CODEHEAD_THREAD", s.thread)
-        .env("CODEHEAD_AGENT", &s.agent.name)
-        // `git` through codehead's shim: 1 push per checkout at a time (crate::pushlock)
-        .env("PATH", crate::pushlock::path_with_shim())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
-    if let Some(h) = crate::config::home_repo() {
-        c.env("CODEHEAD_HOME_REPO", h);
-    }
-    if let Some(t) = super::store::load(s.thread) {
-        if let Some(p) = t.port {
-            c.env("CODEHEAD_PORT", p.to_string());
-        }
-        // portless: the worktree's label, so its URLs stay fixed
-        if crate::portless::active()
-            && t.worktree.is_some()
-            && let Some(b) = &t.branch
-        {
-            c.env("PORTLESS_PREFIX", crate::portless::prefix(b));
-        }
-    }
-    c
-}
-
 /// Output of a tool result kept in the log.
 const OUTPUT_CAP: usize = 4096;
 
-/// Claude Code's arguments. SERVERS: the agent's codehead MCP servers (`servers::claude_config`),
-/// ALLOW: their tool prefixes that run without an ask.
-pub fn args(s: &Spec, servers: serde_json::Map<String, Value>, allow: &[String]) -> Vec<String> {
-    let mut all = serde_json::Map::new();
-    all.insert(
-        "codehead".into(),
-        json!({
-            "type": "stdio",
-            "command": s.exe.display().to_string(),
-            "args": ["mcp"],
-            "env": {"CODEHEAD_THREAD": s.thread, "CODEHEAD_AGENT": s.agent.name},
-        }),
-    );
-    all.extend(servers.into_iter().filter(|(k, _)| k != "codehead"));
-    let mcp = json!({ "mcpServers": all });
-    let mut a: Vec<String> = [
-        "-p",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        // token chunks (`stream_event`): live text before each full message
-        "--include-partial-messages",
-        "--permission-prompt-tool",
-        "stdio",
-        "--permission-mode",
-        super::roster::permission_mode(&s.agent.mode),
-        "--name",
-        &s.agent.name,
-        "--append-system-prompt",
-        s.system,
-        "--mcp-config",
-        &mcp.to_string(),
-        // codehead's own tools never wait on the owner
-        "--allowedTools",
-        "mcp__codehead",
-    ]
-    .map(String::from)
-    .to_vec();
-    a.extend(allow.iter().cloned());
-    // the agent's own model / effort, else the harness tab's
-    let own = |v: &Option<String>| v.clone().filter(|v| !v.is_empty() && v != "default");
-    if let Some(m) = own(&s.agent.model).or_else(|| crate::config::harness_opt("claude", "model")) {
-        a.extend(["--model".into(), m]);
-    }
-    if let Some(e) = own(&s.agent.effort).or_else(|| crate::config::harness_opt("claude", "effort")) {
-        a.extend(["--effort".into(), e]);
-    }
-    if let Some(extra) = crate::config::harness_opt("claude", "args") {
-        a.extend(super::harnesses::split(&extra));
-    }
-    for d in s.extra {
-        a.extend(["--add-dir".into(), d.display().to_string()]);
-    }
-    if let Some(r) = s.resume {
-        a.extend(["--resume".into(), r.into()]);
-        if s.fork {
-            a.push("--fork-session".into());
-        }
-    }
-    a
-}
-
-pub(super) fn stderr_tail(stderr: std::process::ChildStderr) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
-    let tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let t = tail.clone();
-    std::thread::spawn(move || {
-        // bytes: a non-UTF-8 line must not end the reader (a full pipe blocks the harness)
-        let mut r = BufReader::new(stderr);
-        let mut buf = Vec::new();
-        while matches!(r.read_until(b'\n', &mut buf), Ok(n) if n > 0) {
-            let l = String::from_utf8_lossy(&buf).trim_end_matches(['\n', '\r']).to_string();
-            buf.clear();
-            if let Ok(mut t) = t.lock() {
-                t.push(l);
-                let n = t.len();
-                if n > 20 {
-                    t.drain(..n - 20);
-                }
-            }
-        }
-    });
-    tail
-}
-
-/// Start the session; its events go to TX, tagged with the agent's name.
-pub fn spawn(s: &Spec, tx: Sender<(String, Out)>) -> Result<Session, String> {
-    let h = super::harnesses::get(&s.agent.harness).ok_or_else(|| format!("unknown harness {:?}", s.agent.harness))?;
-    match (super::harnesses::acp_command(h, s.agent.command.as_deref()), &h.drive) {
-        (Some(cmd), _) => spawn_acp(s, h, &cmd, tx),
-        (None, super::harnesses::Drive::Codex) => spawn_codex(s, h, tx),
-        (None, _) => spawn_claude(s, tx),
-    }
-}
-
-/// The agent's own value of KEY (model, effort), else the harness tab's.
-fn own_or_harness(own: &Option<String>, harness: &str, key: &str) -> Option<String> {
-    own.clone().filter(|v| !v.is_empty() && v != "default").or_else(|| crate::config::harness_opt(harness, key))
-}
-
-fn spawn_codex(s: &Spec, h: &super::harnesses::Harness, tx: Sender<(String, Out)>) -> Result<Session, String> {
-    let mut child = harness_command("codex", s)
-        .arg("app-server")
-        .spawn()
-        .map_err(|e| format!("{} (codex app-server): {e}. install: {}", h.label, h.install))?;
-
-    let stdin = child.stdin.take().ok_or("0 stdin")?;
-    let stdout = child.stdout.take().ok_or("0 stdout")?;
-    let tail = stderr_tail(child.stderr.take().ok_or("0 stderr")?);
-
-    // the app server runs every MCP transport
-    let (servers, errors) = super::servers::acp_config(&super::servers::for_agent(s.agent), true, true);
-    report_mcp_errors(h.name, &errors, &tx, &s.agent.name);
-
-    let env = [("CODEHEAD_THREAD".to_string(), s.thread.to_string()), ("CODEHEAD_AGENT".to_string(), s.agent.name.clone())];
-    let setup = super::codex::Setup {
-        cwd: s.dir.display().to_string(),
-        resume: s.resume.map(String::from),
-        fork: s.fork,
-        model: own_or_harness(&s.agent.model, h.name, "model"),
-        effort: own_or_harness(&s.agent.effort, h.name, "effort"),
-        instructions: s.system.to_string(),
-        config: json!({"mcp_servers": super::codex::mcp_config(&s.exe.display().to_string(), &env, &servers)}),
-        sandbox: if s.agent.mode == "plan" { "read-only" } else { "danger-full-access" },
-    };
-
-    let conn = super::codex::start(stdin, stdout, tail, setup, s.agent.name.clone(), tx);
-    Ok(Session { child, driver: Box::new(conn) })
-}
-
-fn spawn_acp(s: &Spec, h: &super::harnesses::Harness, cmd: &[String], tx: Sender<(String, Out)>) -> Result<Session, String> {
-    let bin = cmd.first().ok_or("empty ACP command")?;
-    let mut child = harness_command(bin, s)
-        .args(&cmd[1..])
-        .spawn()
-        .map_err(|e| format!("{} ({}): {e}. install: {}", h.label, cmd.join(" "), h.install))?;
-    let stdin = child.stdin.take().ok_or("0 stdin")?;
-    let stdout = child.stdout.take().ok_or("0 stdout")?;
-    let tail = stderr_tail(child.stderr.take().ok_or("0 stderr")?);
-    let setup = super::acp::Setup {
-        cwd: s.dir.display().to_string(),
-        resume: s.resume.filter(|_| !s.fork).map(String::from),
-        model: s.agent.model.clone().filter(|m| !m.is_empty() && m != "default").or_else(|| crate::config::harness_opt(h.name, "model")),
-        mcp: (s.exe.display().to_string(), vec!["mcp".into()], vec![("CODEHEAD_THREAD".into(), s.thread.into()), ("CODEHEAD_AGENT".into(), s.agent.name.clone())]),
-        preamble: s.system.to_string(),
-        harness: h.name.to_string(),
-        servers: super::servers::for_agent(s.agent),
-    };
-    let conn = super::acp::start(stdin, stdout, tail, setup, s.agent.name.clone(), tx);
-    Ok(Session { child, driver: Box::new(conn) })
-}
-
-fn spawn_claude(s: &Spec, tx: Sender<(String, Out)>) -> Result<Session, String> {
-    let servers = super::servers::for_agent(s.agent);
-    let allow: Vec<String> = servers.iter().filter(|v| v.auto_allow).map(|v| format!("mcp__{}", v.name)).collect();
-    let (entries, env, errors) = super::servers::claude_config(&servers);
-    report_mcp_errors("claude", &errors, &tx, &s.agent.name);
-    let mut child = harness_command("claude", s)
-        .args(args(s, entries, &allow))
-        // secrets of the MCP servers: `${CODEHEAD_MCP_<n>}` in the config, the values here
-        .envs(env)
-        // Claude Code leaves the Artifact tools out of SDK sessions without this
-        .env("CLAUDE_CODE_ARTIFACT", std::env::var("CLAUDE_CODE_ARTIFACT").unwrap_or_else(|_| "1".into()))
-        .spawn()
-        .map_err(|e| format!("claude: {e}"))?;
-    let stdin = child.stdin.take().ok_or("claude: 0 stdin")?;
-    let stdout = child.stdout.take().ok_or("claude: 0 stdout")?;
-    let err_tail = stderr_tail(child.stderr.take().ok_or("claude: 0 stderr")?);
-    let name = s.agent.name.clone();
-    std::thread::spawn(move || {
-        let mut p = Parser::default();
-        let mut open = true;
-        json_lines(stdout, |v| {
-            open = p.line(&v).into_iter().all(|o| tx.send((name.clone(), o)).is_ok());
-            open
-        });
-        if open {
-            let err = err_tail.lock().map(|t| t.join("\n")).unwrap_or_default();
-            let _ = tx.send((name, Out::Exit(err)));
-        }
-    });
-    Ok(Session { child, driver: Box::new(ClaudeStream(stdin)) })
-}
-
 impl Session {
     /// The host answers this session's permission requests per the agent's mode (ACP).
-    pub fn host_allows(&self) -> bool {
+    pub(crate) fn host_allows(&self) -> bool {
         self.driver.host_allows()
     }
 
-    pub fn prompt(&mut self, text: &str) -> Result<(), String> {
+    pub(crate) fn prompt(&mut self, text: &str) -> Result<(), String> {
         self.driver.prompt(text)
     }
 
-    pub fn allow(&mut self, id: &str, input: &Value) -> Result<(), String> {
+    pub(crate) fn allow(&mut self, id: &str, input: &Value) -> Result<(), String> {
         self.driver.allow(id, input)
     }
 
-    pub fn deny(&mut self, id: &str, why: &str) -> Result<(), String> {
+    pub(crate) fn deny(&mut self, id: &str, why: &str) -> Result<(), String> {
         self.driver.deny(id, why)
     }
 
-    pub fn interrupt(&mut self) -> Result<(), String> {
+    pub(crate) fn interrupt(&mut self) -> Result<(), String> {
         self.driver.interrupt()
     }
 
     /// End the harness and its children (its process group): SIGTERM, 2 s grace, SIGKILL.
-    pub fn kill(&mut self) {
+    pub(crate) fn kill(&mut self) {
         let group = -(self.child.id() as i32);
+
         // SAFETY: kill(2) on the process group this session's spawn created (process_group(0)).
         unsafe { libc::kill(group, libc::SIGTERM) };
         let at = std::time::Instant::now();
-        while at.elapsed() < std::time::Duration::from_secs(2) {
-            if !matches!(self.child.try_wait(), Ok(None)) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+
+        kill_while_at_elapsed_std_time_duration(at, self);
+
         // SAFETY: as above; children left after the leader's exit go too.
         unsafe { libc::kill(group, libc::SIGKILL) };
         let _ = self.child.wait();
@@ -420,7 +208,7 @@ impl Session {
 
 /// stream-json lines → events. Keeps what spans lines: the last cost total, the context size.
 #[derive(Default)]
-pub struct Parser {
+pub(crate) struct Parser {
     /// `total_cost_usd` of the last result: the process reports a running total.
     cost_total: f64,
     /// Context tokens of the last assistant message.
@@ -431,350 +219,35 @@ pub struct Parser {
     turn: Vec<(String, TurnUse)>,
 }
 
-/// Context window of the result's `modelUsage`: the session model's entry, else the largest
-/// (subagents on other models add entries). 0: unknown.
-fn window_of(usage: &Value, model: &str) -> u64 {
-    let size = |m: &Value| m["contextWindow"].as_u64().unwrap_or(0);
-    match usage.get(model) {
-        Some(m) if size(m) > 0 => size(m),
-        _ => usage.as_object().into_iter().flatten().map(|(_, m)| size(m)).max().unwrap_or(0),
-    }
-}
-
-fn text_of(content: &Value) -> String {
-    match content {
-        Value::String(s) => s.clone(),
-        Value::Array(a) => a.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n"),
-        _ => String::new(),
-    }
-}
-
-fn cap(mut s: String) -> String {
-    if s.len() > OUTPUT_CAP {
-        let mut end = OUTPUT_CAP;
-        while !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        s.truncate(end);
-        s.push_str("\n…");
-    }
-    s
-}
-
-impl Parser {
-    /// The running turn's tokens: the sum of its model calls, the last call's context.
-    fn turn_use(&self) -> TurnUse {
-        let mut t = self.turn.iter().fold(TurnUse::default(), |a, (_, c)| TurnUse {
-            input: a.input + c.input,
-            output: a.output + c.output,
-            cache_read: a.cache_read + c.cache_read,
-            cache_write: a.cache_write + c.cache_write,
-            ctx: 0,
-        });
-        t.ctx = self.ctx;
-        t
-    }
-
-    pub fn line(&mut self, v: &Value) -> Vec<Out> {
-        let mut out = Vec::new();
-        match v["type"].as_str().unwrap_or_default() {
-            "system" if v["subtype"] == "init" => {
-                self.model = v["model"].as_str().unwrap_or_default().into();
-                out.push(Out::Event(Kind::Session {
-                    session: v["session_id"].as_str().unwrap_or_default().into(),
-                    model: self.model.clone(),
-                }));
-                let mcp = super::servers::from_init(v);
-                if !mcp.is_empty() {
-                    out.push(Out::Mcp("claude".into(), mcp));
-                }
-            }
-            "assistant" if v["parent_tool_use_id"].is_null() => {
-                let u = &v["message"]["usage"];
-                let ctx = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].iter().map(|k| u[k].as_u64().unwrap_or(0)).sum::<u64>();
-                if ctx > 0 {
-                    self.ctx = ctx;
-                }
-                if let Some(id) = v["message"]["id"].as_str().filter(|_| u.is_object()) {
-                    let n = |k: &str| u[k].as_u64().unwrap_or(0);
-                    let call = TurnUse { input: n("input_tokens"), output: n("output_tokens"), cache_read: n("cache_read_input_tokens"), cache_write: n("cache_creation_input_tokens"), ctx };
-                    match self.turn.iter_mut().find(|(i, _)| i == id) {
-                        Some((_, c)) => *c = call,
-                        None => self.turn.push((id.into(), call)),
-                    }
-                    out.push(Out::Usage(self.turn_use()));
-                }
-                for b in v["message"]["content"].as_array().into_iter().flatten() {
-                    match b["type"].as_str() {
-                        Some("text") => {
-                            let t = b["text"].as_str().unwrap_or_default();
-                            if !t.trim().is_empty() {
-                                out.push(Out::Event(Kind::Text { text: t.into() }));
-                            }
-                        }
-                        // a thought with a summary (most thinking blocks: empty + a signature)
-                        Some("thinking") => {
-                            let t = b["thinking"].as_str().unwrap_or_default().trim();
-                            if !t.is_empty() {
-                                out.push(Out::Event(Kind::Thought { text: t.into() }));
-                            }
-                        }
-                        Some("tool_use") => out.push(Out::Event(Kind::Tool {
-                            id: b["id"].as_str().unwrap_or_default().into(),
-                            name: b["name"].as_str().unwrap_or_default().into(),
-                            input: b["input"].clone(),
-                        })),
-                        _ => {}
-                    }
-                }
-            }
-            "user" if v["parent_tool_use_id"].is_null() => {
-                for b in v["message"]["content"].as_array().into_iter().flatten() {
-                    if b["type"] == "tool_result" {
-                        out.push(Out::Event(Kind::ToolResult {
-                            id: b["tool_use_id"].as_str().unwrap_or_default().into(),
-                            ok: !b["is_error"].as_bool().unwrap_or(false),
-                            output: cap(text_of(&b["content"])),
-                        }));
-                    }
-                }
-            }
-            "result" => {
-                self.turn.clear();
-                let total = v["total_cost_usd"].as_f64().unwrap_or(0.0);
-                // a running total; a new process (or a smaller total) starts over
-                let cost = if total >= self.cost_total { total - self.cost_total } else { total };
-                self.cost_total = total;
-                let u = &v["usage"];
-                let n = |k: &str| u[k].as_u64().unwrap_or(0);
-                let error = if v["is_error"].as_bool().unwrap_or(false) || v["subtype"].as_str().is_some_and(|s| s.starts_with("error")) {
-                    Some(v["result"].as_str().or(v["subtype"].as_str()).unwrap_or("error").to_string())
-                } else {
-                    None
-                };
-                out.push(Out::Event(Kind::TurnEnd {
-                    cost,
-                    input: n("input_tokens"),
-                    output: n("output_tokens"),
-                    cache_read: n("cache_read_input_tokens"),
-                    cache_write: n("cache_creation_input_tokens"),
-                    ctx: self.ctx,
-                    window: window_of(&v["modelUsage"], &self.model),
-                    ms: v["duration_ms"].as_u64().unwrap_or(0),
-                    error,
-                }));
-            }
-            // a token chunk of the main agent (subagents: 0)
-            "stream_event" if v["parent_tool_use_id"].is_null() => {
-                let e = &v["event"];
-                if e["type"] == "content_block_delta"
-                    && e["delta"]["type"] == "text_delta"
-                    && let Some(t) = e["delta"]["text"].as_str().filter(|t| !t.is_empty())
-                {
-                    out.push(Out::Delta(t.into()));
-                }
-            }
-            "rate_limit_event" => {
-                let w = &v["rate_limit_info"]["unifiedWindows"];
-                let l: Vec<(String, f64, Option<u64>)> = w
-                    .as_object()
-                    .into_iter()
-                    .flatten()
-                    .map(|(k, x)| (k.clone(), x["utilization"].as_f64().unwrap_or(0.0) * 100.0, x["resetsAt"].as_u64()))
-                    .collect();
-                if !l.is_empty() {
-                    out.push(Out::Limits(l));
-                }
-            }
-            "control_request" => {
-                if let Some(id) = v["request_id"].as_str() {
-                    out.push(Out::Control(id.into(), v["request"].clone()));
-                }
-            }
-            _ => {}
-        }
-        out
-    }
-}
-
-/// What the agent is told about codehead, appended to its system prompt.
-pub fn system_prompt(agent: &Agent, thread: &super::store::Thread, roster: &[Agent]) -> String {
-    let others: Vec<String> = thread
-        .agents
-        .iter()
-        .filter(|n| **n != agent.name)
-        .map(|n| match roster.iter().find(|a| &a.name == n) {
-            Some(a) => format!("{n} ({})", harness_label(a)),
-            None => n.clone(),
-        })
-        .collect();
-    let mut s = format!(
-        "You are {name}, an agent in codehead. codehead runs named agents on threads: 1 thread = 1 task, \
-shared with its owner (the person). The owner reads every line of the thread.\n\
-- Answer the owner in your reply text: the owner reads it there. Write `@owner` when the owner must act or read something now: codehead notifies them. \
-Use the `send` tool of the `codehead` MCP server (`to`: agent names) only to hand work to another agent or to ask it something: \
-other agents see only what you send them. Sending to an agent not on the thread brings it in.\n\
-- `list_agents` shows every agent, its harness and model. `set_status` reports blocked / review / done to the owner (never working: codehead shows each turn as working): \
-review when a step is finished (a plan, a draft) and the next step waits for the owner; done only when the whole task is finished.\n\
-- `comment` writes review comments on lines of the changes (the owner's changes view). Only when the owner asks for comments (e.g. a review): 1 comment per finding, never unasked. \
-`comments` lists them (id, author, open / resolved, replies). Addressed a comment (fixed, or answered why not): `comment_status` resolved, with a 1-line note. \
-A question or a point on a comment: answer with `comment_reply` (id, text).\n\
-- Messages from other agents reach you as prompts that start with `[from @name]`.\n\
-- A message that starts with `[codehead flow: ...]` is a step of the thread's flow: do that step only, then call `flow_step`. \
-The task changed kind: propose another flow with `flow_suggest`.\n\
-- Ask the owner, not other agents, for anything only the owner knows.\n\
-- Code blocks: a command to run, a file's content, a config or code snippet, any text the owner may copy: \
-a fenced code block with a language tag (```sh), on its own lines, never inline code. Inline code only \
-for names inside a sentence (a file, a function, a flag, a branch). codehead draws fenced blocks as boxes \
-with a copy button.\n\
-Thread: {title}\nAgents on the thread: {list}",
-        name = agent.name,
-        title = thread.title,
-        list = if others.is_empty() { "only you".to_string() } else { others.join(", ") },
-    );
-    if let Some(h) = crate::config::home_repo() {
-        s.push_str(&home_block(&h));
-    }
-    // a sub-thread runs for another thread: 0 own name, 0 own projects
-    if thread.of.is_none() {
-        s.push_str(&crate::projects::prompt(thread));
-    }
-    if crate::portless::active() {
-        s.push_str(&crate::portless::prompt(thread.worktree.as_ref().and(thread.branch.as_deref())));
-    }
-    if let Some(p) = thread.port {
-        let what = if crate::portless::active() { "databases, queues and other non-HTTP listeners" } else { "dev servers and other listeners" };
-        s.push_str(&format!(
-            "\nPorts of this thread: {p}-{} ($CODEHEAD_PORT = {p}). Start {what} on these, never on the defaults: other threads run next to you.",
-            p + crate::setup::PORTS - 1
-        ));
-    }
-    let profile = crate::agents::session_prompt(agent);
-    if !profile.is_empty() {
-        s.push_str("\n\n");
-        s.push_str(&profile);
-    }
-    s
-}
-
-/// The home repo block of the system prompt: every harness gets the same steering.
-fn home_block(home: &std::path::Path) -> String {
-    let h = home.display();
-    format!(
-        "\n\n# Home repo\n\
-Home repo: `{h}` ($CODEHEAD_HOME_REPO). Read `{h}/AGENTS.md` before work: its rules apply to you \
-wherever you work (notes, plans, reports, other repos)."
-    )
-}
-
-/// `claude/opus`, `claude`.
-pub fn harness_label(a: &Agent) -> String {
-    match a.model.as_deref().filter(|m| !m.is_empty() && *m != "default") {
-        Some(m) => format!("{}/{m}", a.harness),
-        None => a.harness.clone(),
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "harness_tests.rs"]
+mod tests;
 
-    #[test]
-    fn system_prompt_asks_for_fenced_blocks_for_commands() {
-        let a = crate::engine::roster::Agent { name: "ada".into(), ..Default::default() };
-        let t = crate::engine::store::Thread::new("t", "task", std::path::Path::new("/tmp"), vec!["ada".into()]);
-        let s = system_prompt(&a, &t, &[]);
-        assert!(s.contains("a fenced code block with a language tag (```sh)") && s.contains("never inline code"), "{s}");
+#[path = "harness_spawn.rs"]
+mod harness_spawn;
+pub(crate) use harness_spawn::*;
+
+#[path = "harness_parser.rs"]
+mod harness_parser;
+
+#[path = "harness_prompt.rs"]
+mod harness_prompt;
+pub(crate) use harness_prompt::*;
+
+fn finish_process_exit(model_state: &mut Session) -> ControlFlow<()> {
+    if !matches!(model_state.child.try_wait(), Ok(None)) {
+        return ControlFlow::Break(());
     }
 
-    #[test]
-    fn home_block_points_every_harness_to_agents_md() {
-        let b = home_block(std::path::Path::new("/h/bonfire"));
-        assert!(b.contains("# Home repo") && b.contains("`/h/bonfire/AGENTS.md`") && b.contains("$CODEHEAD_HOME_REPO"), "{b}");
-    }
+    ControlFlow::Continue(())
+}
 
-    #[test]
-    fn json_lines_skip_a_non_utf8_line_and_go_on() {
-        let mut bytes = b"{\"a\":1}\n".to_vec();
-        bytes.extend_from_slice(b"{\"b\":\"\xff\xfe\"}\n");
-        bytes.extend_from_slice(b"{\"c\":3}\n");
-        let mut seen = Vec::new();
-        json_lines(&bytes[..], |v| {
-            seen.push(v);
-            true
-        });
-        assert_eq!(seen, vec![json!({"a": 1}), json!({"c": 3})]);
-    }
-
-    #[test]
-    fn kill_ends_the_harness_children_too() {
-        use std::os::unix::process::CommandExt;
-        // a harness with a background child (a dev server, a sleep)
-        let mut child = Command::new("sh").args(["-c", "sleep 60 & echo $!; wait"]).stdin(Stdio::piped()).stdout(Stdio::piped()).process_group(0).spawn().unwrap();
-        let mut line = String::new();
-        BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
-        let grandchild: i32 = line.trim().parse().unwrap();
-        let stdin = child.stdin.take().unwrap();
-        let mut s = Session { child, driver: Box::new(ClaudeStream(stdin)) };
-        s.kill();
-        // SAFETY: signal 0 only checks that the pid exists.
-        let alive = || unsafe { libc::kill(grandchild, 0) } == 0;
-        let at = std::time::Instant::now();
-        while alive() && at.elapsed() < std::time::Duration::from_secs(3) {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+fn kill_while_at_elapsed_std_time_duration(at: std::time::Instant, model_state: &mut Session) {
+    while at.elapsed() < std::time::Duration::from_secs(2) {
+        if let ControlFlow::Break(()) = finish_process_exit(model_state) {
+            break;
         }
-        assert!(!alive(), "grandchild {grandchild} still runs");
-    }
 
-    #[test]
-    fn a_running_turn_reports_its_tokens_per_model_call() {
-        let mut p = Parser::default();
-        let use_of = |o: Vec<Out>| o.into_iter().find_map(|o| if let Out::Usage(u) = o { Some(u) } else { None });
-        let msg = |id: &str, out: u64| json!({"type": "assistant", "parent_tool_use_id": null, "message": {"id": id, "usage": {"input_tokens": 2, "output_tokens": out, "cache_read_input_tokens": 100}, "content": []}});
-        assert_eq!(use_of(p.line(&msg("m1", 5))), Some(TurnUse { input: 2, output: 5, cache_read: 100, cache_write: 0, ctx: 102 }));
-        // the next block of the same message: its usage again, 0 double count
-        assert_eq!(use_of(p.line(&msg("m1", 9))).map(|u| u.output), Some(9));
-        assert_eq!(use_of(p.line(&msg("m2", 1))).map(|u| (u.input, u.output, u.cache_read)), Some((4, 10, 200)));
-        // the turn end: a new turn starts at 0
-        p.line(&json!({"type": "result", "subtype": "success", "usage": {}}));
-        assert_eq!(use_of(p.line(&msg("m3", 1))).map(|u| u.output), Some(1));
-    }
-
-    #[test]
-    fn parser_maps_stream_json() {
-        let mut p = Parser::default();
-        let ev = |o: Vec<Out>| -> Vec<Kind> { o.into_iter().filter_map(|o| if let Out::Event(k) = o { Some(k) } else { None }).collect() };
-        let init = json!({"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-opus-5-5"});
-        assert_eq!(ev(p.line(&init)), vec![Kind::Session { session: "s1".into(), model: "claude-opus-5-5".into() }]);
-        let a = json!({"type": "assistant", "parent_tool_use_id": null, "message": {"usage": {"input_tokens": 3, "cache_read_input_tokens": 100}, "content": [
-            {"type": "thinking", "thinking": ""}, {"type": "text", "text": "hi"}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}});
-        let k = ev(p.line(&a));
-        assert_eq!(k.len(), 2);
-        assert_eq!(k[0], Kind::Text { text: "hi".into() });
-        // a thinking block with a summary: 1 thought, trimmed
-        let a = json!({"type": "assistant", "parent_tool_use_id": null, "message": {"content": [
-            {"type": "thinking", "thinking": "  ", "signature": "x"}, {"type": "thinking", "thinking": "CI=true missing, fixing it.\n\n", "signature": "y"}]}});
-        assert_eq!(ev(p.line(&a)), vec![Kind::Thought { text: "CI=true missing, fixing it.".into() }]);
-        // token chunks: text deltas of the main agent only
-        let chunk = |parent: Value, kind: &str| json!({"type": "stream_event", "parent_tool_use_id": parent, "event": {"type": "content_block_delta", "index": 1, "delta": {"type": kind, "text": "Hel", "thinking": "x"}}});
-        assert!(matches!(p.line(&chunk(Value::Null, "text_delta")).as_slice(), [Out::Delta(t)] if t == "Hel"));
-        assert!(p.line(&chunk(json!("t9"), "text_delta")).is_empty());
-        assert!(p.line(&chunk(Value::Null, "thinking_delta")).is_empty());
-        let sub = json!({"type": "assistant", "parent_tool_use_id": "t9", "message": {"content": [{"type": "text", "text": "sub agent"}]}});
-        assert!(ev(p.line(&sub)).is_empty());
-        let r = json!({"type": "user", "parent_tool_use_id": null, "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "a\nb"}]}]}});
-        assert_eq!(ev(p.line(&r)), vec![Kind::ToolResult { id: "t1".into(), ok: true, output: "a\nb".into() }]);
-        let end = |c: f64| json!({"type": "result", "subtype": "success", "total_cost_usd": c, "duration_ms": 5, "usage": {"input_tokens": 1, "output_tokens": 2}});
-        let Kind::TurnEnd { cost, ctx, window, .. } = ev(p.line(&end(0.5))).remove(0) else { panic!() };
-        assert_eq!((cost, ctx, window), (0.5, 103, 0));
-        // the window: the session model's `modelUsage` entry, not a subagent's
-        let mut e = end(0.5);
-        e["modelUsage"] = json!({"claude-haiku-5-5": {"contextWindow": 200000}, "claude-opus-5-5": {"contextWindow": 1000000}});
-        let Kind::TurnEnd { window, .. } = ev(p.line(&e)).remove(0) else { panic!() };
-        assert_eq!(window, 1_000_000);
-        let Kind::TurnEnd { cost, .. } = ev(p.line(&end(0.75))).remove(0) else { panic!() };
-        assert_eq!(cost, 0.25);
-        let c = json!({"type": "control_request", "request_id": "r1", "request": {"subtype": "can_use_tool"}});
-        assert!(matches!(&p.line(&c)[0], Out::Control(id, _) if id == "r1"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }

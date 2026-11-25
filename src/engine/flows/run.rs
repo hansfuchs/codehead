@@ -2,6 +2,7 @@
 //! moves. Pure: the host does the I/O (log, delivery, interrupts).
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +11,7 @@ use super::{Flow, Library, Resolved, resolve};
 /// Why the flow waits on the owner.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Wait {
+pub(crate) enum Wait {
     /// A gate node: approve, or another outcome.
     Gate,
     /// A loop reached its max: 1 more round, or move on.
@@ -18,14 +19,15 @@ pub enum Wait {
 }
 
 /// A wait of `thread.json`; an old kind (`role`: roles are gone) reads as 0 wait.
-fn lenient_wait<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Wait>, D::Error> {
-    let v = Option::<serde_json::Value>::deserialize(d)?;
-    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
+fn lenient_wait<'de, D: serde::Deserializer<'de>>(directory: D) -> Result<Option<Wait>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(directory)?;
+
+    Ok(value.and_then(|value_value| serde_json::from_value(value_value).ok()))
 }
 
 /// A switch to flow FLOW at node START.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Switch {
+pub(crate) struct Switch {
     pub flow: String,
     #[serde(default)]
     pub start: usize,
@@ -33,7 +35,7 @@ pub struct Switch {
 
 /// A node that ended: how, when.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Past {
+pub(crate) struct Past {
     pub node: usize,
     pub title: String,
     /// `done`, `skipped`, `approved`, `passed by agent`, `loop`, outcome label, `left`.
@@ -42,7 +44,7 @@ pub struct Past {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FlowState {
+pub(crate) struct FlowState {
     /// Flow slug.
     pub flow: String,
     /// Its name when set (the flow file can go).
@@ -74,7 +76,7 @@ pub struct FlowState {
 
 /// What a step-done report did.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Moved {
+pub(crate) enum Moved {
     /// To node N.
     To(usize),
     Wait(Wait),
@@ -83,22 +85,33 @@ pub enum Moved {
 
 impl FlowState {
     /// A new state for flow F at node START.
-    pub fn new(f: &Flow, lib: &Library, start: usize, now: u64) -> FlowState {
-        let nodes = resolve(f, lib);
-        FlowState { flow: f.slug.clone(), title: f.name.clone(), node: start.min(nodes.len().saturating_sub(1)), node_started: now, ..Default::default() }
+    pub(crate) fn new(file: &Flow, lib: &Library, start: usize, now: u64) -> FlowState {
+        let nodes = resolve(file, lib);
+
+        FlowState {
+            flow: file.slug.clone(),
+            title: file.name.clone(),
+            node: start.min(nodes.len().saturating_sub(1)),
+            node_started: now,
+            ..Default::default()
+        }
     }
 
-    pub fn round(&self, id: &str) -> u32 {
+    pub(crate) fn round(&self, id: &str) -> u32 {
         self.rounds.get(id).copied().unwrap_or(0)
     }
 
     fn leave(&mut self, nodes: &[Resolved], how: &str, now: u64) {
-        if let Some(n) = nodes.get(self.node) {
-            self.history.push(Past { node: self.node, title: n.title.clone(), how: how.into(), ms: now.saturating_sub(self.node_started) });
+        if let Some(count) = nodes.get(self.node) {
+            self.history.push(Past {
+                node: self.node,
+                title: count.title.clone(),
+                how: how.into(),
+                ms: now.saturating_sub(self.node_started),
+            });
+
             // keep the file small: the last 200 nodes
-            if self.history.len() > 200 {
-                self.history.remove(0);
-            }
+            trim_history(self);
         }
     }
 
@@ -116,79 +129,58 @@ impl FlowState {
             self.wait = None;
             return Moved::Finished;
         }
+
         self.enter(self.node + 1, now)
     }
 
     /// The agent reports the current node done. LOOP: the loop's exit criteria are not met (go
     /// back). PASS: an autopilot agent passes the gate itself.
-    pub fn step_done(&mut self, nodes: &[Resolved], again: bool, pass: bool, now: u64) -> Moved {
-        let Some(n) = nodes.get(self.node).cloned() else {
+    pub(crate) fn step_done(&mut self, nodes: &[Resolved], again: bool, pass: bool, now: u64) -> Moved {
+        let Some(count) = nodes.get(self.node).cloned() else {
             self.finished = true;
             return Moved::Finished;
         };
-        if let Some(w) = &self.wait {
-            return Moved::Wait(w.clone());
+
+        if let Some(width) = &self.wait {
+            return Moved::Wait(width.clone());
         }
-        if let (true, Some((to, _, max))) = (again, &n.loops) {
-            let r = self.round(&n.id);
-            if r + 1 >= *max {
-                self.wait = Some(Wait::LoopMax);
-                return Moved::Wait(Wait::LoopMax);
-            }
-            self.rounds.insert(n.id.clone(), r + 1);
-            self.leave(nodes, "loop", now);
-            return self.enter(*to, now);
+
+        if let (true, Some((to, _, max))) = (again, &count.loops) {
+            return repeat_node(nodes, &count, *to, *max, now, self);
         }
-        if n.gate && !pass {
+
+        if count.gate && !pass {
             self.wait = Some(Wait::Gate);
             return Moved::Wait(Wait::Gate);
         }
-        self.leave(nodes, if n.gate { "passed by agent" } else { "done" }, now);
+
+        self.leave(nodes, if count.gate { "passed by agent" } else { "done" }, now);
+
         self.next(nodes, now)
     }
 
     /// The owner's answer to the wait: gate `approve` or an outcome label; loop max `again` or
     /// `next`. Err: 0 such choice.
-    pub fn answer(&mut self, nodes: &[Resolved], choice: &str, now: u64) -> Result<Moved, String> {
-        let n = nodes.get(self.node).cloned().ok_or("0 current step")?;
+    pub(crate) fn answer(&mut self, nodes: &[Resolved], choice: &str, now: u64) -> Result<Moved, String> {
+        let count = nodes.get(self.node).cloned().ok_or("0 current step")?;
+
         match self.wait.clone() {
-            Some(Wait::Gate) => {
-                if choice == "approve" {
-                    self.leave(nodes, "approved", now);
-                    return Ok(self.next(nodes, now));
-                }
-                let (label, to) = n.edges.iter().find(|(k, _)| k == choice).cloned().ok_or_else(|| format!("gate: 0 outcome {choice}"))?;
-                self.leave(nodes, &label, now);
-                Ok(self.enter(to, now))
-            }
-            Some(Wait::LoopMax) => {
-                let (to, _, _) = n.loops.clone().ok_or("0 loop")?;
-                match choice {
-                    "again" => {
-                        *self.rounds.entry(n.id.clone()).or_default() += 1;
-                        self.leave(nodes, "loop", now);
-                        Ok(self.enter(to, now))
-                    }
-                    "next" => {
-                        self.leave(nodes, "done", now);
-                        Ok(self.next(nodes, now))
-                    }
-                    c => Err(format!("loop: 0 choice {c} (again, next)")),
-                }
-            }
+            Some(Wait::Gate) => answer_gate(nodes, choice, now, &count, self),
+            Some(Wait::LoopMax) => answer_loop_limit(nodes, choice, now, &count, self),
             None => Err("the flow waits on 0 answer".into()),
         }
     }
 
-    pub fn skip(&mut self, nodes: &[Resolved], now: u64) -> Moved {
+    pub(crate) fn skip(&mut self, nodes: &[Resolved], now: u64) -> Moved {
         self.leave(nodes, "skipped", now);
         self.next(nodes, now)
     }
 
-    pub fn jump(&mut self, nodes: &[Resolved], to: usize, now: u64) -> Result<Moved, String> {
+    pub(crate) fn jump(&mut self, nodes: &[Resolved], to: usize, now: u64) -> Result<Moved, String> {
         if to >= nodes.len() {
             return Err(format!("0 step {}", to + 1));
         }
+
         self.finished = false;
         self.leave(nodes, "left", now);
         Ok(self.enter(to, now))
@@ -196,50 +188,79 @@ impl FlowState {
 }
 
 /// The message an agent gets at the start of node I.
-pub fn step_message(title: &str, nodes: &[Resolved], i: usize, st: &FlowState, task: Option<&str>) -> String {
-    let n = &nodes[i];
-    let mut s = format!("[codehead flow: {title} · step {}/{}: {}]\n\n", i + 1, nodes.len(), n.title);
-    s.push_str(&crate::shortcuts::expand(&n.text));
-    if !n.done.is_empty() {
-        s.push_str(&format!("\n\nDone when: {}", n.done));
+pub(crate) fn step_message(title: &str, nodes: &[Resolved], i: usize, st: &FlowState, task: Option<&str>) -> String {
+    let count = &nodes[i];
+    let mut text_value = format!(
+        "[codehead flow: {title} · step {}/{}: {}]\n\n",
+        i + 1,
+        nodes.len(),
+        count.title
+    );
+
+    text_value.push_str(&crate::domain::shortcuts::expand(&count.text));
+
+    if !count.done.is_empty() {
+        let _ = write!(text_value, "\n\nDone when: {}", count.done);
     }
-    if let Some((to, until, max)) = &n.loops {
-        let r = st.round(&n.id) + 1;
-        s.push_str(&format!(
-            "\n\nLoop (round {r}/{max}): when this step is done, check: {until}. Not met: `flow_step` with `again: true` (back to step {}: {}). Met: `flow_step` without it.",
+
+    if let Some((to, until, max)) = &count.loops {
+        let result = st.round(&count.id) + 1;
+
+        let _ = write!(
+            text_value,
+            "\n\nLoop (round {result}/{max}): when this step is done, check: {until}. Not met: `flow_step` with `again: true` (back to step {}: {}). Met: `flow_step` without it.",
             to + 1,
             nodes[*to].title
-        ));
+        );
     }
-    if n.gate {
-        s.push_str("\n\nGate: after this step, the owner approves before the flow goes on. Call `flow_step` when the step is done; then wait for the owner.");
+
+    if count.gate {
+        text_value.push_str("\n\nGate: after this step, the owner approves before the flow goes on. Call `flow_step` when the step is done; then wait for the owner.");
     }
-    s.push_str("\n\nWhen the step is done: call `flow_step` (codehead MCP). Do not start the next step before it: codehead gives you the next step.");
+
+    text_value.push_str("\n\nWhen the step is done: call `flow_step` (codehead MCP). Do not start the next step before it: codehead gives you the next step.");
+
     // the 1st step of a flow: the whole flow, so the agent knows what comes later
     if st.history.is_empty() && i == st.node {
-        s.push_str(&format!("\n\nThe flow (▶ = this step; later steps come one at a time):\n{}", outline(nodes, st)));
+        let _ = write!(
+            text_value,
+            "\n\nThe flow (▶ = this step; later steps come one at a time):\n{}",
+            outline(nodes, st)
+        );
     }
-    if let Some(t) = task.filter(|t| !t.trim().is_empty()) {
-        s.push_str(&format!("\n\n---\n\n{t}"));
+
+    if let Some(thread_value) = task.filter(|thread| !thread.trim().is_empty()) {
+        let _ = write!(text_value, "\n\n---\n\n{thread_value}");
     }
-    s
+
+    text_value
 }
 
 /// The flow outline: 1 line per node, the current one marked.
-pub fn outline(nodes: &[Resolved], st: &FlowState) -> String {
+pub(crate) fn outline(nodes: &[Resolved], st: &FlowState) -> String {
     nodes
         .iter()
         .enumerate()
-        .map(|(i, n)| {
-            let mark = if i == st.node && !st.finished { "▶" } else if st.history.iter().any(|p| p.node == i) { "✓" } else { " " };
-            let mut l = format!("{mark} {}. {}", i + 1, n.title);
-            if n.gate {
-                l.push_str(" [gate]");
+        .map(|(i, count)| {
+            let mark = if i == st.node && !st.finished {
+                "▶"
+            } else if st.history.iter().any(|path| path.node == i) {
+                "✓"
+            } else {
+                " "
+            };
+
+            let mut line = format!("{mark} {}. {}", i + 1, count.title);
+
+            if count.gate {
+                line.push_str(" [gate]");
             }
-            if let Some((to, _, max)) = &n.loops {
-                l.push_str(&format!(" [loop → {}, max {max}]", to + 1));
+
+            if let Some((to, _, max)) = &count.loops {
+                let _ = write!(line, " [loop → {}, max {max}]", to + 1);
             }
-            l
+
+            line
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -247,122 +268,158 @@ pub fn outline(nodes: &[Resolved], st: &FlowState) -> String {
 
 /// Problems of the nodes for AGENT (the flow's agent): needs it lacks, node errors. (node index,
 /// text). DIR: the work dir (skills of the project).
-pub fn warnings(nodes: &[Resolved], agent: &str, roster: &[crate::engine::roster::Agent], dir: &std::path::Path) -> Vec<(usize, String)> {
+pub(crate) fn warnings(
+    nodes: &[Resolved],
+    agent: &str,
+    roster: &[crate::engine::roster::Agent],
+    dir: &std::path::Path,
+) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut skills: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let a = roster.iter().find(|a| a.name == agent);
-    for (i, n) in nodes.iter().enumerate() {
-        for e in &n.errors {
-            out.push((i, e.clone()));
+    let agent_2 = roster.iter().find(|agent_value| agent_value.name == agent);
+
+    for (i, count) in nodes.iter().enumerate() {
+        for error in &count.errors {
+            out.push((i, error.clone()));
         }
-        let Some(a) = a else { continue };
-        for need in &n.needs {
-            let (k, v) = need.split_once(':').unwrap_or(("skill", need));
-            let ok = match k {
-                "skill" => {
-                    if !a.skills.is_empty() {
-                        a.skills.iter().any(|s| s == v || s.ends_with(&format!(":{v}")))
-                    } else {
-                        let h = a.harness.split('/').next().unwrap_or_default().to_string();
-                        let list = skills.entry(h.clone()).or_insert_with(|| crate::skills::load(std::slice::from_ref(&h), dir).into_iter().map(|s| s.name).collect());
-                        list.iter().any(|s| s == v || s.ends_with(&format!(":{v}")))
-                    }
-                }
-                "mcp" => a.mcp.iter().any(|m| m == v),
-                "harness" => a.harness.split('/').next() == Some(v),
+
+        let Some(agent_3) = agent_2 else { continue };
+
+        for need in &count.needs {
+            let (key, value) = need.split_once(':').unwrap_or(("skill", need));
+
+            let ok = match key {
+                "skill" => handle_skill(dir, &mut skills, agent_3, value),
+                "mcp" => agent_3.mcp.iter().any(|message| message == value),
+                "harness" => agent_3.harness.split('/').next() == Some(value),
                 _ => true,
             };
-            if !ok {
-                out.push((i, format!("@{agent} ({}): 0 {k} {v}", a.harness)));
-            }
+
+            append_warning(agent, &mut out, i, agent_3, key, value, ok);
         }
     }
+
     out
 }
 
+fn append_warning(
+    agent: &str,
+    out: &mut Vec<(usize, String)>,
+    i: usize,
+    agent_3: &crate::engine::roster::Agent,
+    key: &str,
+    value: &str,
+    ok: bool,
+) {
+    if !ok {
+        out.push((i, format!("@{agent} ({}): 0 {key} {value}", agent_3.harness)));
+    }
+}
+
+fn handle_skill(
+    dir: &std::path::Path,
+    skills: &mut BTreeMap<String, Vec<String>>,
+    agent_3: &crate::engine::roster::Agent,
+    value: &str,
+) -> bool {
+    if agent_3.skills.is_empty() {
+        let height = agent_3.harness.split('/').next().unwrap_or_default().to_string();
+
+        let list = skills.entry(height.clone()).or_insert_with(|| {
+            crate::infra::skills::load(std::slice::from_ref(&height), dir)
+                .into_iter()
+                .map(|text| text.name)
+                .collect()
+        });
+
+        list.iter()
+            .any(|text_value| text_value == value || text_value.ends_with(&format!(":{value}")))
+    } else {
+        agent_3
+            .skills
+            .iter()
+            .any(|text_2| text_2 == value || text_2.ends_with(&format!(":{value}")))
+    }
+}
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::engine::flows::{Library, parse_flow, resolve};
+#[path = "run_tests.rs"]
+mod tests;
 
-    fn flow() -> (Flow, Vec<Resolved>) {
-        let f = parse_flow(
-            "t",
-            r#"name = "t"
-[[step]]
-id = "plan"
-text = "plan it"
-[[step]]
-text = "approve"
-gate = { changes = "plan" }
-[[step]]
-id = "review"
-text = "review"
-[[step]]
-text = "address"
-loop = { to = "review", until = "0 findings", max = 2 }
-[[step]]
-text = "report"
-"#,
-        )
-        .unwrap();
-        let n = resolve(&f, &Library::default());
-        (f, n)
+/// The tool name of a flow wait shown as an ask (the question picker answers it).
+pub(crate) const WAIT_TOOL: &str = "FlowWait";
+
+/// The choice of a flow wait that sends the prompt's text as a message: the wait stays.
+pub(crate) const REPLY: &str = "__reply";
+
+fn trim_history(model_state: &mut FlowState) {
+    if model_state.history.len() > 200 {
+        model_state.history.remove(0);
+    }
+}
+
+fn answer_loop_limit(
+    nodes: &[Resolved],
+    choice: &str,
+    now: u64,
+    count: &Resolved,
+    model_state: &mut FlowState,
+) -> Result<Moved, String> {
+    let (to, _, _) = count.loops.clone().ok_or("0 loop")?;
+
+    match choice {
+        "again" => {
+            *model_state.rounds.entry(count.id.clone()).or_default() += 1;
+            model_state.leave(nodes, "loop", now);
+            Ok(model_state.enter(to, now))
+        }
+        "next" => {
+            model_state.leave(nodes, "done", now);
+            Ok(model_state.next(nodes, now))
+        }
+        character => Err(format!("loop: 0 choice {character} (again, next)")),
+    }
+}
+
+fn answer_gate(
+    nodes: &[Resolved],
+    choice: &str,
+    now: u64,
+    count: &Resolved,
+    model_state: &mut FlowState,
+) -> Result<Moved, String> {
+    if choice == "approve" {
+        model_state.leave(nodes, "approved", now);
+        return Ok(model_state.next(nodes, now));
     }
 
-    #[test]
-    fn gates_wait_and_outcomes_pick_the_edge() {
-        let (f, n) = flow();
-        let mut st = FlowState::new(&f, &Library::default(), 0, 0);
-        assert_eq!(st.step_done(&n, false, false, 1), Moved::To(1));
-        assert_eq!(st.step_done(&n, false, false, 2), Moved::Wait(Wait::Gate));
-        // a 2nd report while waiting: still waiting
-        assert_eq!(st.step_done(&n, false, false, 3), Moved::Wait(Wait::Gate));
-        assert_eq!(st.answer(&n, "changes", 4).unwrap(), Moved::To(0));
-        assert!(st.answer(&n, "approve", 5).is_err(), "0 wait: 0 answer");
-        st.step_done(&n, false, false, 6);
-        st.step_done(&n, false, false, 7);
-        assert_eq!(st.answer(&n, "approve", 8).unwrap(), Moved::To(2));
-        // an autopilot agent passes a gate itself
-        let mut s2 = st.clone();
-        s2.node = 1;
-        assert_eq!(s2.step_done(&n, false, true, 9), Moved::To(2));
-        assert_eq!(s2.history.last().unwrap().how, "passed by agent");
+    let (label, to) = count
+        .edges
+        .iter()
+        .find(|(key, _)| key == choice)
+        .cloned()
+        .ok_or_else(|| format!("gate: 0 outcome {choice}"))?;
+
+    model_state.leave(nodes, &label, now);
+    Ok(model_state.enter(to, now))
+}
+
+fn repeat_node(
+    nodes: &[Resolved],
+    node: &Resolved,
+    target: usize,
+    maximum: u32,
+    now: u64,
+    state: &mut FlowState,
+) -> Moved {
+    let round = state.round(&node.id);
+
+    if round + 1 >= maximum {
+        state.wait = Some(Wait::LoopMax);
+        return Moved::Wait(Wait::LoopMax);
     }
 
-    #[test]
-    fn loops_go_back_until_max_then_wait() {
-        let (f, n) = flow();
-        let mut st = FlowState::new(&f, &Library::default(), 3, 0);
-        // round 1 → back to review
-        assert_eq!(st.step_done(&n, true, false, 1), Moved::To(2));
-        st.step_done(&n, false, false, 2);
-        // round 2 = max: the owner decides
-        assert_eq!(st.step_done(&n, true, false, 3), Moved::Wait(Wait::LoopMax));
-        assert_eq!(st.answer(&n, "again", 4).unwrap(), Moved::To(2));
-        st.step_done(&n, false, false, 5);
-        assert_eq!(st.step_done(&n, false, false, 6), Moved::To(4));
-        assert_eq!(st.step_done(&n, false, false, 7), Moved::Finished);
-        assert!(st.finished);
-        assert!(outline(&n, &st).contains("[loop → 3, max 2]"));
-    }
-
-    #[test]
-    fn step_messages_say_how_to_report() {
-        let (f, n) = flow();
-        let st = FlowState::new(&f, &Library::default(), 3, 0);
-        let m = step_message("t", &n, 3, &st, Some("the task"));
-        assert!(m.starts_with("[codehead flow: t · step 4/5: address]"));
-        assert!(m.contains("round 1/2") && m.contains("`again: true`") && m.ends_with("the task"));
-        assert!(warnings(&n, "ada", &[], std::path::Path::new("/tmp")).is_empty());
-    }
-
-    /// An old `thread.json` flow: its role map is ignored, a `role` wait reads as 0 wait.
-    #[test]
-    fn an_old_state_with_roles_and_a_role_wait_loads() {
-        let st: FlowState = serde_json::from_str(r#"{"flow":"chore","title":"chore","node":1,"roles":{"lead":"ada","reviewer":"zed"},"wait":{"kind":"role","role":"reviewer"}}"#).unwrap();
-        assert_eq!((st.node, st.wait), (1, None));
-        let st: FlowState = serde_json::from_str(r#"{"flow":"chore","title":"chore","node":1,"wait":{"kind":"gate"}}"#).unwrap();
-        assert_eq!(st.wait, Some(Wait::Gate));
-    }
+    state.rounds.insert(node.id.clone(), round + 1);
+    state.leave(nodes, "loop", now);
+    state.enter(target, now)
 }

@@ -2,8 +2,9 @@
 default:
     @just --list
 
-# Clippy (warnings fail) and tests, like CI.
+# rustfmt, clippy (warnings fail), tests + tidy (tests/tidy), like CI.
 check:
+    cargo fmt --check
     cargo clippy --all-targets --locked -- -D warnings
     cargo test --locked
 
@@ -30,16 +31,12 @@ site:
 site-build:
     cd site && bun install --frozen-lockfile && bun run build
 
-# Agent sprite pools (examples/sprites.rs): --force regenerates pcb + chip, --sheet prints them.
-sprites *args:
-    cargo run --quiet --example sprites -- {{args}}
-
 # Demo videos of the real TUI (scripts/demo): fake harnesses, scripted keys → site/public/demo/.
 demo *flows:
     cargo build --release --locked
     ~/.cache/codehead-demo/venv/bin/python scripts/demo/demo.py {{flows}}
 
-# Perf suite (src/perf.rs): every case under 20 ms, cold call included. Release build, 1 thread.
+# Perf suite (src/perf/mod.rs): every case under 20 ms, cold call included. Release build, 1 thread.
 # The release binary first: the thread start case starts real hosts with it.
 perf *filter:
     cargo build --release --locked

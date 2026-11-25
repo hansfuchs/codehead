@@ -1,0 +1,200 @@
+//! Screens: new (compose, the start) | threads | agents; notes = sub-screen of task. Modals: F2 menu, y/n confirm, info.
+
+pub(crate) mod start;
+
+pub(crate) mod repo_pick;
+
+pub(crate) mod drafts;
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use ratatui::Frame;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use unicode_width::UnicodeWidthStr;
+
+use crate::domain::agents::{self, Agent, Use};
+use crate::domain::notes::{Notes, Row, slug};
+use crate::domain::threads::{self, Worktree};
+use crate::features::prompt_input::attach::{Pasted, Paster};
+use crate::features::prompt_input::command::Command;
+use crate::infra::background::{self, Reads};
+use crate::infra::claude::{self, Session};
+use crate::infra::styles::{self, Style as OutStyle};
+use crate::screens::start_screen::drafts::Draft;
+use crate::ui::dropdown;
+use crate::ui::mention::Mention;
+use crate::ui::preview::Previews;
+use crate::ui::sprites::{self, Sprite};
+use crate::ui::textarea::{Outcome as Input, TextArea};
+use crate::ui::theme;
+
+/// Agent card rows: the sprite + 2 border rows.
+use crate::ui::cards::CARD_H;
+
+/// Below this width the preview goes under the list (1/3 list, 2/3 preview).
+const THIN: u16 = 110;
+
+pub(crate) struct Config {
+    pub notes: PathBuf,
+    pub repo: Option<PathBuf>,
+    pub cwd: PathBuf,
+    /// Default agent: takes over threads of deleted agents, preselected for new threads.
+    pub agent: String,
+    /// Agents preselected for a new thread (-a, comma-separated).
+    pub picks: Vec<String>,
+    pub branch: Option<String>,
+    pub prefix: String,
+    pub copy_mode: bool,
+    pub logs: PathBuf,
+    /// Dir of the task drafts.
+    pub drafts: PathBuf,
+}
+
+/// Where the new thread works.
+#[derive(Clone, Debug)]
+pub(crate) enum Target {
+    /// New worktree on this branch.
+    Branch(String),
+    /// Existing branch: the checkout that has it. Else the main checkout: SWITCH → `git switch`
+    /// to it first (STASH: a switch that local changes block → `git stash`, then again), else as is.
+    Checkout { branch: String, switch: bool, stash: bool },
+    /// New branch in the main checkout (git switch -c), 0 worktrees.
+    NewBranch(String),
+    /// Existing worktree without a thread.
+    Worktree { path: String, branch: String },
+    /// No git repo: the current directory itself.
+    InPlace,
+    /// Dir of a Claude Code session, in place.
+    Dir(String),
+}
+
+pub(crate) enum Outcome {
+    Quit,
+    Copy(Vec<PathBuf>),
+    /// AGENTS: first starts the thread, the others join it.
+    /// CLONE: a home repo to clone first (url, path).
+    /// FLOW: the slug of the flow the thread follows, the step it starts at.
+    /// FLOWS: (agent, flow slug, start step) per agent with a flow.
+    /// PROJECTS: the owner's projects (None: auto, the agents pick). `TITLE_SET`: the owner wrote
+    /// the title.
+    New {
+        message: String,
+        target: Target,
+        agents: Vec<String>,
+        clone: Option<(String, PathBuf)>,
+        flows: Vec<(String, String, usize)>,
+        projects: Option<Vec<String>>,
+        title_set: bool,
+    },
+    Resume(Box<Worktree>),
+}
+
+/// $EDITOR on: a note, the compose prompt, the sprite of the open agent form.
+pub(crate) enum Suspend {
+    Note(PathBuf),
+    Prompt,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tab {
+    /// The compose screen (`Screen::Compose`).
+    New,
+    /// Sub-screen of task: enter on the notes field.
+    Notes,
+    Threads,
+    /// Projects of a repo: their briefs (projtab.rs).
+    Projects,
+    /// The owner's pull requests (mergetab.rs).
+    Merge,
+    Agents,
+    /// Flows and their steps (flows.rs).
+    Flows,
+    Settings,
+}
+
+impl Tab {
+    fn next(self) -> Tab {
+        match self {
+            Tab::New | Tab::Notes => Tab::Threads,
+            Tab::Threads => Tab::Projects,
+            Tab::Projects => Tab::Merge,
+            Tab::Merge => Tab::Agents,
+            Tab::Agents => Tab::Flows,
+            Tab::Flows => Tab::Settings,
+            Tab::Settings => Tab::New,
+        }
+    }
+    fn prev(self) -> Tab {
+        match self {
+            Tab::New | Tab::Notes => Tab::Settings,
+            Tab::Threads => Tab::New,
+            Tab::Projects => Tab::Threads,
+            Tab::Merge => Tab::Projects,
+            Tab::Agents => Tab::Merge,
+            Tab::Flows => Tab::Agents,
+            Tab::Settings => Tab::Flows,
+        }
+    }
+}
+
+/// The main tabs in order (F1-F7, alt+1-7).
+const MAIN_TABS: [Tab; 7] = [
+    Tab::New,
+    Tab::Threads,
+    Tab::Projects,
+    Tab::Merge,
+    Tab::Agents,
+    Tab::Flows,
+    Tab::Settings,
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    Pick,
+    Compose,
+}
+
+/// Where a new task works (git repo only), the "where" row of the task screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Where {
+    /// The branch of the current directory's checkout: works there, 0 checkout.
+    Current,
+    Branch(String),
+    NewBranch,
+    NewWorktree,
+}
+
+/// The open where dropdown: cursor (a row of [`App::where_rows`]), 1st row in view, typed filter.
+#[derive(Default)]
+struct WhereMenu {
+    cursor: usize,
+    offset: usize,
+    query: String,
+}
+
+/// The open flow dropdown of AGENT's card: the flows (0: 0 flow, I: the I-th flow), the 2nd
+/// dropdown of the flow under the cursor: its steps (the step the agent starts at).
+#[derive(Default)]
+struct FlowMenu {
+    agent: String,
+    cursor: usize,
+    offset: usize,
+    /// The steps dropdown: cursor, 1st row in view.
+    sub: Option<(usize, usize)>,
+}
+
+/// The where row's choices for a repo: the choices, branches checked out elsewhere, the repo's
+/// branch, the branch and top dir of the current directory.
+#[derive(Default)]
+struct Choices {
+    wheres: Vec<Where>,
+    checkouts: HashMap<String, String>,
+    repo_branch: String,
+    here_branch: String,
+    here_dir: String,

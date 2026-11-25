@@ -23,6 +23,7 @@ while read -r _ local_sha _ _; do
         unset $(git rev-parse --local-env-vars)
         cd "$dir"
         export CARGO_TARGET_DIR="$root/target/pre-push"
+        cargo fmt --check
         cargo clippy --all-targets --locked -- -D warnings
         cargo test --locked
     ) || { echo "pre-push: checks failed on ${local_sha:0:9}; push blocked (skip: --no-verify)" >&2; exit 1; }

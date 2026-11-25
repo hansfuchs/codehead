@@ -1,0 +1,305 @@
+[
+  {
+    "name": "send",
+    "description": "Message other agents on this thread. They see only what you send. An agent not on the thread joins it. The owner sees every message.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "to": {
+          "description": "Agent name, or names",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "message": {
+          "type": "string",
+          "description": "The message: what you need, with file paths and exact actions"
+        }
+      },
+      "required": [
+        "to",
+        "message"
+      ]
+    }
+  },
+  {
+    "name": "set_status",
+    "description": "Report to the owner at the end of a turn: blocked, review or done. Never for working: codehead shows each turn as working. done ends the task: a thread whose agents all report done counts as shipped.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "blocked",
+            "review",
+            "done"
+          ],
+          "description": "blocked: you cannot go on (say on what in note). review: a step is finished (a plan, a draft, a part of the work) and the next step waits for the owner's OK or input. done: the whole task is finished, 0 steps left."
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "state"
+      ]
+    }
+  },
+  {
+    "name": "stash_name",
+    "description": "Name an entry of the owner's stash (lines the owner took out of the worktree in the changes view): 2-6 words on what the lines do. Call it when codehead asks you to.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The stash entry id"
+        },
+        "name": {
+          "type": "string",
+          "description": "2-6 words"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "stash_restored",
+    "description": "Report that a stash entry the owner asked you to restore is back in the worktree: the entry leaves the stash. Only after the patch applied (or the owner settled each conflict).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The stash entry id"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "comment",
+    "description": "Write review comments on lines of the changed files, in the owner's changes view (as the owner's own comments). Only when the owner asks for it (e.g. a review of the changes: 1 comment per finding). Never on your own: 0 unasked comments.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "comments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "file": {
+                "type": "string",
+                "description": "Path relative to the repo root of the worktree (an absolute path in it: fine)"
+              },
+              "line": {
+                "type": "integer",
+                "description": "Line number in the new version of the file"
+              },
+              "lines": {
+                "type": "string",
+                "description": "Optional: the lines it is on, e.g. `11-13, 15`"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "text": {
+                "type": "string",
+                "description": "The comment: what is wrong, how to fix it"
+              }
+            },
+            "required": [
+              "file",
+              "line",
+              "severity",
+              "text"
+            ]
+          }
+        }
+      },
+      "required": [
+        "comments"
+      ]
+    }
+  },
+  {
+    "name": "comments",
+    "description": "List the review comments of the changes view (the owner's and the agents'): id, file, line, severity, author, state (open / resolved), text, replies, last_by (who wrote last). Read them when you address review comments, or when the owner asks you to.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "open",
+            "resolved",
+            "all"
+          ],
+          "description": "Default: open"
+        }
+      }
+    }
+  },
+  {
+    "name": "comment_status",
+    "description": "Resolve review comments once addressed (fixed, or answered with a reason not to fix), as on GitHub: they leave the owner's file view. A reviewer re-opens a comment whose fix does not hold. 1 note per call: what fixed it, or why not.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Comment ids, e.g. [\"c3\", \"c4\"]"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "resolved",
+            "open"
+          ]
+        },
+        "note": {
+          "type": "string",
+          "description": "1 line: the fix (file:line), or why not"
+        }
+      },
+      "required": [
+        "ids",
+        "state",
+        "note"
+      ]
+    }
+  },
+  {
+    "name": "comment_reply",
+    "description": "Reply on a review comment of the changes view (its thread): answer a question on it, argue a finding, say what you did. The owner gets a notification. `@name` in the text: that agent gets the comment's thread at once.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The comment id, e.g. \"c3\""
+        },
+        "text": {
+          "type": "string",
+          "description": "The reply"
+        }
+      },
+      "required": [
+        "id",
+        "text"
+      ]
+    }
+  },
+  {
+    "name": "flow_step",
+    "description": "Report the current step of your flow done (a step comes as a message that starts with `[codehead flow: ...]`). codehead returns your next step, or holds the flow at a gate for the owner. Call it once per step, only when the step's `Done when` holds.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "again": {
+          "type": "boolean",
+          "description": "Loop step: its loop condition is not met yet, go back to the loop's start"
+        },
+        "pass_gate": {
+          "type": "boolean",
+          "description": "Gate step, agents on autopilot only: go on without the owner's approval (the situation makes the wait pointless). Say why in note"
+        },
+        "note": {
+          "type": "string",
+          "description": "1 line: the result of the step"
+        }
+      }
+    }
+  },
+  {
+    "name": "flow_suggest",
+    "description": "Propose another flow to the owner when the task changed kind (e.g. a bug investigation turns into a refactor). The owner decides; go on with the current step until then.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "flow": {
+          "type": "string",
+          "description": "Flow name or slug, e.g. `refactor`, `bug-fix`"
+        },
+        "reason": {
+          "type": "string",
+          "description": "1 line: why"
+        }
+      },
+      "required": [
+        "flow",
+        "reason"
+      ]
+    }
+  },
+  {
+    "name": "set_title",
+    "description": "Name the thread after its work: title `area: outcome` (e.g. `menu: live quick commands`), and for a thread in its own codehead worktree its branch `<kind>/<area>-<slug>` (codehead renames it, also on the remote; GitHub PRs follow). Call it after your 1st turn's work and when the work changes direction, not every turn. An owner-written title stays.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "`area: outcome`, imperative, max. 72 chars, 0 `#n`"
+        },
+        "branch": {
+          "type": "string",
+          "description": "Optional: `<kind>/<area>-<slug>`, kind: feat fix refactor perf docs test chore style ci build"
+        }
+      },
+      "required": [
+        "title"
+      ]
+    }
+  },
+  {
+    "name": "set_projects",
+    "description": "Assign the thread to 0..n existing projects of its repo (slugs from the system prompt's Projects list). Never invent a project: only the owner makes them. Owner-picked projects stay.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Project slugs; [] for 0 projects"
+        }
+      },
+      "required": [
+        "projects"
+      ]
+    }
+  },
+  {
+    "name": "list_agents",
+    "description": "Every agent: name, harness/model, mode, whether it is on this thread.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  }
+]

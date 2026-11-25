@@ -1,110 +1,18 @@
 #![recursion_limit = "256"]
 //! codehead: pick notes, write the task, then work the thread with its agents in this terminal.
 
-mod avatar;
-mod agents;
-mod ansi;
-mod app;
-mod ask;
-mod attach;
-mod cards;
-mod changes;
-mod chatsearch;
-mod background;
-mod branchpin;
-mod bus;
-mod claude;
-mod clip;
-mod code;
-mod command;
-mod ctxmenu;
-mod config;
-mod cost;
-mod drafts;
-mod handoff;
-mod harnesstab;
-mod gh;
-mod histsearch;
-mod home;
-mod homeinit;
-mod tutor;
-mod wizard;
-mod editor;
-mod files;
-mod graphics;
-mod flowbar;
-mod flowrail;
-mod frames;
-mod flows;
-mod fuzzy;
+mod domain;
 mod engine;
-mod dropdown;
-mod mention;
-mod merge;
-mod mergetab;
-mod landed;
-mod models;
-mod monitors;
-mod nav;
-mod mcplist;
-mod mcptab;
-mod menu;
-mod notes;
-mod notify;
-mod paths;
+mod features;
+mod infra;
 #[cfg(test)]
 mod perf;
-mod picker;
-mod prlist;
-mod projects;
-mod projtab;
-mod portless;
-mod preview;
-mod pushlock;
-mod rank;
-mod screensel;
-mod search;
-mod review;
-mod render;
-mod repopick;
-mod settings;
-mod shellcomp;
-mod shortcuts;
-mod setup;
-mod skills;
-mod sprites;
-mod start;
-mod stream;
-mod subagents;
-mod subthreads;
-mod dissolve;
-mod styles;
-mod tabgroup;
-mod textarea;
-mod theme;
-mod threads;
-mod threadlist;
-mod workspot;
-mod update;
-mod urls;
-mod view;
-mod watch;
+mod screens;
+mod ui;
 
-use std::io::{self, Stdout, Write};
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, Instant};
+use std::path::Path;
 
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyEventKind, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-};
-use ratatui::crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
-use ratatui::crossterm::{cursor, execute};
-
-use app::{App, Config, Outcome, Suspend, Target};
+use crate::infra::terminal::fail;
 
 const HELP: &str = "codehead: write the task (+ notes, + Claude Code context), then work the thread with its agents.
 
@@ -273,367 +181,61 @@ menu:    ctrl+p on every screen (setting keys.menu: 1 key codehead binds to noth
          agents: the agents of the thread in view (enter, enter: remove = it leaves the thread), add,
          edit → the agents tab of the start screen.";
 
-type Term = Terminal<CrosstermBackend<frames::Frames>>;
-
 #[derive(Default)]
-struct Args {
-    agent: Option<String>,
-    branch: Option<String>,
-    copy: bool,
-    dry: bool,
-    title: String,
-    view: Option<String>,
-}
-
-fn fail(msg: &str, code: i32) -> ! {
-    // not eprintln: on a closed terminal it panics, exit 101 instead of CODE
-    let _ = writeln!(io::stderr(), "codehead: {msg}");
-    std::process::exit(code)
+pub(crate) struct Args {
+    pub(crate) agent: Option<String>,
+    pub(crate) branch: Option<String>,
+    pub(crate) copy: bool,
+    pub(crate) dry: bool,
+    pub(crate) title: String,
+    pub(crate) view: Option<String>,
 }
 
 fn parse() -> Args {
-    let mut a = Args::default();
+    let mut agent_value = Args::default();
     let mut it = std::env::args().skip(1);
     let mut rest = Vec::new();
-    while let Some(s) = it.next() {
-        match s.as_str() {
-            "-h" | "--help" => {
-                println!("{HELP}");
-                std::process::exit(0)
-            }
-            "-V" | "--version" => {
-                println!("codehead {}", update::VERSION);
-                std::process::exit(0)
-            }
-            "--update" => update::run(),
-            "--kill-hosts" => kill_hosts(),
-            "-a" => a.agent = Some(it.next().unwrap_or_else(|| fail("-a: value required", 2))),
-            "-b" => a.branch = Some(it.next().unwrap_or_else(|| fail("-b: value required", 2))),
-            "-c" => a.copy = true,
-            "--cost" => cost::run(&it.next().unwrap_or_else(|| fail("--cost: thread id required", 2))),
-            "--view" => a.view = Some(it.next().unwrap_or_else(|| fail("--view: thread id required", 2))),
-            "-n" => a.dry = true,
-            "--" => {
-                rest.extend(it.by_ref());
-            }
-            s if s.starts_with('-') && s.len() > 1 => fail(&format!("unknown option {s}\n\n{HELP}"), 2),
-            _ => rest.push(s),
-        }
+
+    while let Some(text) = it.next() {
+        parse_option(&mut agent_value, &mut it, &mut rest, text);
     }
-    a.title = rest.join(" ");
-    a
+
+    agent_value.title = rest.join(" ");
+
+    agent_value
 }
 
 /// `--kill-hosts`: stop every thread host, 1 line per host. Exit 1: a host did not end.
 fn kill_hosts() -> ! {
     let out = engine::client::stop_all(std::time::Duration::from_secs(10));
+
     if out.is_empty() {
         println!("0 hosts run");
         std::process::exit(0)
     }
-    for (id, e) in &out {
-        let title = engine::store::load(id).map(|t| t.title).unwrap_or_default();
-        match e {
+
+    for (id, error) in &out {
+        let title = engine::store::load(id).map(|thread| thread.title).unwrap_or_default();
+
+        match error {
             None => println!("stopped  {id}  {title}"),
-            Some(e) => println!("failed   {id}  {title}: {e}"),
+            Some(error_value) => println!("failed   {id}  {title}: {error_value}"),
         }
     }
-    let failed = out.iter().filter(|(_, e)| e.is_some()).count();
+
+    let failed = out.iter().filter(|(_, error_2)| error_2.is_some()).count();
+
     println!("{} of {} hosts stopped", out.len() - failed, out.len());
-    std::process::exit(if failed == 0 { 0 } else { 1 })
-}
 
-fn which(bin: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
-}
-
-/// Config agent ($CODEHEAD_AGENT, codehead.toml), else amon, else the first active agent.
-fn default_agent(all: &[agents::Agent]) -> Option<String> {
-    if let Some(a) = config::agent() {
-        return Some(a);
-    }
-    all.iter().find(|a| a.name == "amon").or(all.first()).map(|a| a.name.clone())
+    std::process::exit(i32::from(failed != 0))
 }
 
 // ---------- terminal ----------
-struct Tty {
-    enhanced: bool,
-}
-
-impl Tty {
-    fn enter(&mut self, out: &mut Stdout) -> io::Result<()> {
-        terminal::enable_raw_mode()?;
-        // the terminal's palette (agent border colors), before crossterm reads the tty
-        theme::query_palette();
-        execute!(out, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
-        // always on, also when the support query got 0 answer in time: without it shift+enter
-        // comes as `ESC[27;2;13~`, which crossterm drops. Terminals without it ignore the request.
-        execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
-        self.enhanced = true;
-        Ok(())
-    }
-
-    /// Input modes off, alternate screen kept (the next screen takes it over: no flash).
-    fn release(&mut self, out: &mut Stdout) {
-        if self.enhanced {
-            let _ = execute!(out, PopKeyboardEnhancementFlags);
-            self.enhanced = false;
-        }
-        let _ = execute!(out, DisableMouseCapture, DisableBracketedPaste, cursor::Show);
-        let _ = terminal::disable_raw_mode();
-    }
-
-    fn leave(&mut self, out: &mut Stdout) {
-        self.release(out);
-        let _ = execute!(out, LeaveAlternateScreen);
-        if let Some(hint) = update::hint() {
-            // not eprintln: on a closed terminal it panics
-            let _ = writeln!(io::stderr(), "{hint}");
-        }
-    }
-}
-
-fn restore_on_panic() {
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let mut out = io::stdout();
-        let _ = execute!(out, PopKeyboardEnhancementFlags, DisableMouseCapture, DisableBracketedPaste, cursor::Show, LeaveAlternateScreen);
-        let _ = terminal::disable_raw_mode();
-        hook(info);
-    }));
-}
-
-fn editor(path: &Path) {
-    let ed = std::env::var("VISUAL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| if which("nvim") { "nvim".into() } else { "vi".into() });
-    let mut parts = ed.split_whitespace();
-    let bin = parts.next().unwrap_or("vi");
-    let _ = Command::new(bin).args(parts).arg(path).status();
-}
-
-/// SIGTERM / SIGHUP came: the next `read_ready` fails, the screen loops end and restore the tty.
-static SIGNALED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// The signal that came (its exit code: 128 + it).
-static SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
-/// Write end of the exit guard's pipe; -1: no guard.
-static GUARD_W: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
-
-/// Time for the screen loop to end by itself after a signal, before the exit guard ends the process.
-const EXIT_GRACE: Duration = Duration::from_secs(2);
-
-extern "C" fn on_signal(s: libc::c_int) {
-    SIGNAL.store(s, std::sync::atomic::Ordering::Relaxed);
-    SIGNALED.store(true, std::sync::atomic::Ordering::Relaxed);
-    let w = GUARD_W.load(std::sync::atomic::Ordering::Relaxed);
-    if w >= 0 {
-        // SAFETY: write is async-signal-safe; 1 byte from a static literal.
-        let _ = unsafe { libc::write(w, b"x".as_ptr().cast(), 1) };
-    }
-}
-
-/// SIGTERM / SIGHUP: the screen loops end and restore the tty. A closed terminal sends SIGHUP; its
-/// default action ended the process, this handler does not. So an exit guard: a thread asleep on a
-/// pipe the handler writes, which ends the process when the screen loop did not end within
-/// EXIT_GRACE. crossterm 0.29 spins on a hung-up tty, where no flag check reaches it, and the UI
-/// thread can enter it before the hang-up shows: a write to the closing tty wakes it before the
-/// kernel marks the tty hung up and before the handler runs.
-fn catch_signals() {
-    let mut fds = [-1; 2];
-    // SAFETY: FDS has room for the 2 fds pipe writes.
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } == 0 {
-        for fd in fds {
-            // SAFETY: FD is open (pipe above); flags change only.
-            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
-        }
-        let r = fds[0];
-        let guard = std::thread::Builder::new().name("exit-guard".into()).spawn(move || {
-            let mut b = [0u8; 1];
-            // SAFETY: R is the open read end; B is live. Blocks until the handler writes.
-            while unsafe { libc::read(r, b.as_mut_ptr().cast(), 1) } < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {}
-            std::thread::sleep(EXIT_GRACE);
-            let s = SIGNAL.load(std::sync::atomic::Ordering::Relaxed);
-            let _ = writeln!(io::stderr(), "codehead: signal {s}, the screen did not end within {}s: exit", EXIT_GRACE.as_secs());
-            std::process::exit(128 + s)
-        });
-        if guard.is_ok() {
-            GUARD_W.store(fds[1], std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-    for s in [libc::SIGTERM, libc::SIGHUP] {
-        // SAFETY: the handler stores to atomics and writes 1 byte (async-signal-safe).
-        unsafe { libc::signal(s, on_signal as *const () as libc::sighandler_t) };
-    }
-}
-
-
-/// The fd crossterm reads keys from: stdin when a tty, else /dev/tty (crossterm's own pick).
-/// -1: no terminal.
-fn input_fd() -> std::os::fd::RawFd {
-    static FD: std::sync::OnceLock<std::os::fd::RawFd> = std::sync::OnceLock::new();
-    *FD.get_or_init(|| {
-        // SAFETY: isatty on fd 0 reads no memory.
-        if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
-            return libc::STDIN_FILENO;
-        }
-        // SAFETY: a NUL-terminated path literal; the fd stays open for the process.
-        unsafe { libc::open(c"/dev/tty".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) }
-    })
-}
-
-/// Why FD can give no more keys: no tty (any more), or hung up (window closed, other pty end
-/// gone). None: live. crossterm 0.29 reads a hung-up tty in an endless loop (EOF reads as "more
-/// to come"): 100% CPU, a SIGTERM never reaches `read_ready`. So no crossterm call after a hang-up.
-fn tty_gone(fd: std::os::fd::RawFd) -> Option<String> {
-    if fd < 0 {
-        return Some("no terminal".into());
-    }
-
-    // the hang-up first: Linux reports a hung-up pty as 0 tty (isatty fails), macOS does not
-    let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-    // SAFETY: P is 1 live pollfd; 0 ms: no wait.
-    let n = unsafe { libc::poll(&mut p, 1, 0) };
-    if n > 0 && p.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
-        return Some("terminal closed".into());
-    }
-
-    // SAFETY: isatty reads no memory; a bad fd gives 0.
-    if unsafe { libc::isatty(fd) } != 1 {
-        return Some("no terminal".into());
-    }
-
-    None
-}
-
-/// Every event ready within WAIT (the 1st one) and right after it, each with its read time.
-/// Read first, handled after: the handling time of 1 key never splits a burst of the OS.
-/// Err: a signal came or the terminal is gone; every caller ends its screen loop.
-pub fn read_ready(wait: Duration) -> Result<Vec<(Event, Instant)>, String> {
-    if SIGNALED.load(std::sync::atomic::Ordering::Relaxed) {
-        return Err("terminated by a signal".into());
-    }
-    let fd = input_fd();
-    if let Some(why) = tty_gone(fd) {
-        return Err(why);
-    }
-    let mut out = Vec::new();
-    let mut wait = wait;
-    // sleep on the tty and on the bus's wake pipe: new data wakes the loop at once. Events
-    // crossterm buffered already: read first.
-    if !wait.is_zero() && !event::poll(Duration::ZERO).map_err(|e| e.to_string())? {
-        bus::wait(fd, wait);
-        wait = Duration::ZERO;
-    }
-    while out.len() < 512 {
-        // a hang-up or a signal while asleep or within a burst: before crossterm reads again. A
-        // closed terminal's SIGHUP wakes the sleep before the tty reads as hung up.
-        if SIGNALED.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err("terminated by a signal".into());
-        }
-        if let Some(why) = tty_gone(fd) {
-            return Err(why);
-        }
-        if !event::poll(wait).map_err(|e| e.to_string())? {
-            break;
-        }
-        let ev = event::read().map_err(|e| e.to_string())?;
-        key_log(&ev);
-        out.push((ev, Instant::now()));
-        wait = Duration::ZERO;
-    }
-    Ok(out)
-}
-
-/// $CODEHEAD_KEYLOG=1: each key event as 1 line in ~/.cache/codehead/keys.log (what the terminal
-/// sends for a key).
-fn key_log(ev: &Event) {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ON.get_or_init(|| std::env::var_os("CODEHEAD_KEYLOG").is_some_and(|v| !v.is_empty() && v != "0")) {
-        return;
-    }
-    let Event::Key(k) = ev else { return };
-    let path = config::home().join(".cache/codehead/keys.log");
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{} {:?} {:?} {:?}", engine::now_ms(), k.code, k.modifiers, k.kind);
-    }
-}
 
 // ---------- threads ----------
-fn quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@+,".contains(c)) {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    }
-}
-
-/// Append 1 line to the view log (why the thread view did not open).
-fn view_log(msg: &str) {
-    let dir = engine::logs_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("view.log")) {
-        let _ = writeln!(f, "{} {msg}", engine::now_ms() / 1000);
-    }
-}
-
-/// Thread ID before its view: a done thread opens again. Its host starts with the next message.
-fn wake(id: &str) {
-    if engine::store::load(id).is_some_and(|t| t.state != "open") {
-        let _ = engine::store::update(id, |t| t.state = "open".into());
-    }
-}
-
-/// Thread view.
-/// Esc esc: the retained start screen in HOME, without another process. Some(tab): the menu asked
-/// for that tab of the start screen.
-#[allow(clippy::too_many_arguments)]
-fn open_view(term: &mut Term, tty: &mut Tty, out: &mut Stdout, id: &str, cwd: &Path, title: &str, home: &Path, note: Option<String>) -> Option<menu::Home> {
-    let (mut id, mut cwd, mut title) = (id.to_string(), cwd.to_path_buf(), title.to_string());
-    // the thread header keeps the thread opened first at index 0
-    let first = id.clone();
-    let mut note = note;
-    let _ = terminal::enable_raw_mode();
-    let _ = execute!(out, EnableMouseCapture, EnableBracketedPaste);
-    loop {
-    let _ = std::env::set_current_dir(&cwd);
-    match view::run(term, &id, &cwd, &title, note.as_deref(), &first) {
-        Ok(view::Exit::Quit) => {
-            tty.leave(out);
-            std::process::exit(0)
-        }
-        Ok(view::Exit::Open { id: new, dir, title: new_title, note: new_note }) => {
-            note = Some(new_note);
-            wake(&new);
-            // the thread's own work dir (a menu row without a dir: the dir of the thread before)
-            cwd = engine::store::load(&new).map(|t| t.work_dir()).filter(|p| p.is_dir()).unwrap_or(dir);
-            id = new;
-            title = new_title;
-        }
-        Ok(view::Exit::Back) => {
-            // Keep App, terminal modes, lists, previews and form state in memory.
-            let _ = std::env::set_current_dir(home);
-            return None;
-        }
-        Ok(view::Exit::Home(tab)) => {
-            let _ = std::env::set_current_dir(home);
-            return Some(tab);
-        }
-        Err(e) => {
-            view_log(&format!("thread {id}: view failed: {e}"));
-            tty.leave(out);
-            fail(&format!("thread view: {e}"), 1)
-        }
-    }
-    }
-}
 
 /// Claude Code leaves the Artifact tools (web artifacts on claude.ai) out of SDK sessions, and
-/// codehead runs its agents as SDK sessions: $CLAUDE_CODE_ARTIFACT=1 puts them back. Set here, for
+/// codehead runs its agents as SDK sessions: $`CLAUDE_CODE_ARTIFACT=1` puts them back. Set here, for
 /// every session codehead starts (hosts and agents inherit it). A value set by the person stays.
 fn enable_artifacts() {
     if std::env::var_os("CLAUDE_CODE_ARTIFACT").is_none() {
@@ -644,351 +246,83 @@ fn enable_artifacts() {
 
 fn main() {
     // called as `git` (the shim on the agents' PATH): the push lock, then the real git
-    if std::env::args_os().next().is_some_and(|a| Path::new(&a).file_name().is_some_and(|n| n == "git")) {
-        pushlock::shim_main();
+    if std::env::args_os()
+        .next()
+        .is_some_and(|agent| Path::new(&agent).file_name().is_some_and(|count| count == "git"))
+    {
+        crate::infra::pushlock::shim_main();
     }
+
     engine::trace("main");
-    pushlock::install();
+    crate::infra::pushlock::install();
     enable_artifacts();
     sub();
+
     // the palette before any screen (`--cost` draws in parse); a broken file fails in start
-    let _ = config::load();
+    let _ = crate::infra::config::load();
     let args = parse();
-    update::spawn_check();
-    start(args);
+
+    crate::infra::update::spawn_check();
+    crate::screens::application::start(args);
 }
 
 /// Subcommands without a screen: the thread host, the agents' MCP server, scripting.
 fn sub() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let arg = |i: usize| argv.get(i).cloned().unwrap_or_else(|| fail(&format!("{}: argument {i} missing", argv[0]), 2));
+
+    let arg = |i: usize| {
+        argv.get(i)
+            .cloned()
+            .unwrap_or_else(|| fail(&format!("{}: argument {i} missing", argv[0]), 2))
+    };
+
     match argv.first().map(String::as_str) {
         Some("host") => engine::host::run(&arg(1)),
         Some("mcp") => engine::mcp::run(),
-        Some("home") => homeinit::run(argv.get(1).map(String::as_str)),
-        Some("setup") => wizard::run(argv.iter().any(|a| a == "--dry")),
-        Some("tutorial") => tutor::run(&argv[1..]),
-        Some("tutor-agent") => tutor::agent(&argv[1..]),
+        Some("home") => crate::infra::home_init::run(argv.get(1).map(String::as_str)),
+        Some("setup") => crate::screens::tutorial::wizard::run(argv.iter().any(|agent_value| agent_value == "--dry")),
+        Some("tutorial") => crate::screens::tutorial::run(&argv[1..]),
+        Some("tutor-agent") => crate::screens::tutorial::agent(&argv[1..]),
         Some("ctl") => {
             // codehead ctl <thread> '<json command>': 1 command to the thread's host
-            let c: serde_json::Value = serde_json::from_str(&arg(2)).unwrap_or_else(|e| fail(&format!("ctl: {e}"), 2));
-            match engine::client::call(&arg(1), &c) {
-                Ok(v) => println!("{v}"),
-                Err(e) => fail(&e, 1),
+            let character: serde_json::Value =
+                serde_json::from_str(&arg(2)).unwrap_or_else(|error| fail(&format!("ctl: {error}"), 2));
+
+            match engine::client::call(&arg(1), &character) {
+                Ok(value) => println!("{value}"),
+                Err(error_value) => fail(&error_value, 1),
             }
+
             std::process::exit(0)
         }
         _ => {}
     }
 }
 
-fn start(args: Args) {
-    if let Err(e) = config::load() {
-        fail(&e, 2);
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let repo = threads::repo_root(&cwd);
-    if engine::harnesses::installed().is_empty() {
-        let list: Vec<String> = engine::harnesses::ALL.iter().map(|h| format!("  {} ({}): {}", h.label, h.bin, h.install)).collect();
-        fail(&format!("0 harnesses on PATH: codehead's agents run on one of these:\n{}", list.join("\n")), 1);
-    }
-    engine::trace("harnesses");
-    let mut all = agents::cached();
-    let picks: Vec<String> = args.agent.iter().flat_map(|a| a.split(',')).map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
-    if picks.iter().any(|p| !all.iter().any(|a| &a.name == p)) {
-        all = agents::roster_only();
-    }
-    let agent = default_agent(&all).unwrap_or_default();
-    if let Some(bad) = picks.iter().find(|p| !all.iter().any(|a| &a.name == *p)) {
-        fail(&format!("no agent named {bad}. agents: {}", all.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")), 2);
-    }
-    if args.branch.is_some() && repo.is_none() {
-        fail("-b needs a git repo. cd into one first", 2);
-    }
-    let notes = config::notes();
-    let _ = std::fs::create_dir_all(&notes);
-    let cfg = Config {
-        notes,
-        repo,
-        cwd: cwd.clone(),
-        agent,
-        picks,
-        branch: args.branch.clone(),
-        prefix: config::prefix(),
-        copy_mode: args.copy,
-        logs: engine::logs_dir(),
-        drafts: drafts::dir(),
-    };
-    restore_on_panic();
-    catch_signals();
-    // a plan window ends: its next one starts 1 min after (1 trigger message per harness)
-    if !args.dry {
-        engine::warm::watch();
-    }
-    // agents stopped on a usage limit whose host is gone (a reboot, a kill): their host again,
-    // it resumes them at the reset
-    if !args.dry {
-        std::thread::spawn(|| {
-            for t in engine::store::all().into_iter().filter(|t| !t.resume.is_empty()) {
-                let _ = engine::client::ensure(&t.id);
-            }
-        });
-    }
-    let mut out = io::stdout();
-    let mut tty = Tty { enhanced: false };
-    if let Err(e) = tty.enter(&mut out) {
-        tty.leave(&mut out);
-        fail(&format!("terminal: {e}"), 1);
-    }
-    let mut term = match Terminal::new(frames::backend()) {
-        Ok(t) => t,
-        Err(e) => {
-            tty.leave(&mut out);
-            fail(&format!("terminal: {e}"), 1)
+fn parse_option(agent_value: &mut Args, it: &mut impl Iterator<Item = String>, rest: &mut Vec<String>, text: String) {
+    match text.as_str() {
+        "-h" | "--help" => {
+            println!("{HELP}");
+            std::process::exit(0)
         }
-    };
-
-    // plain `codehead` (0 options, 0 title): the thread updated last; esc esc: the start screen
-    let plain = args.view.is_none() && args.title.is_empty() && args.agent.is_none() && args.branch.is_none() && !args.copy && !args.dry;
-    let latest = plain.then(engine::store::latest).flatten().map(|t| t.id);
-    // the thread view first: the start screen (App) is built when it ends
-    notify::start();
-    watch::start();
-    landed::start();
-    let mut back: Option<Option<menu::Home>> = None;
-    if let Some(id) = args.view.as_ref().or(latest.as_ref()) {
-        // 1 thread.json (an id prefix: the newest match), 0 scan of every thread's host and log
-        let t = engine::store::load(id).or_else(|| engine::store::all().into_iter().find(|t| t.id.starts_with(id.as_str())));
-        let Some(t) = t else { tty.leave(&mut out); fail(&format!("no thread {id}"), 2) };
-        let dir = [t.worktree.clone(), Some(t.dir.clone())].into_iter().flatten().map(PathBuf::from).find(|p| p.is_dir()).unwrap_or_else(|| cwd.clone());
-        // --view opens a done thread again; the auto-open leaves its state as it is
-        if args.view.is_some() {
-            wake(&t.id);
+        "-V" | "--version" => {
+            println!("codehead {}", crate::infra::update::VERSION);
+            std::process::exit(0)
         }
-        back = Some(open_view(&mut term, &mut tty, &mut out, &t.id, &dir, &t.title, &cwd, None));
-    }
-    // a thread view ended: until the start screen's next frame
-    let mut transition: Option<Instant> = back.is_some().then(Instant::now);
-    engine::trace("app new …");
-    let mut app = App::new(cfg, &args.title);
-    // -b names a branch of the start dir's repo: the setting `repo` stays off then
-    if args.branch.is_none()
-        && let Some(r) = config::default_repo()
-    {
-        app.use_default_repo(&r);
-    }
-    engine::trace("app new");
-    if let Some(tab) = back {
-        app.return_from_thread();
-        if let Some(tab) = tab { app.go_home(tab); }
-    }
-    // draws only after an event, a background read or once per second (relative times):
-    // an idle start screen builds 1 frame per second, not 12
-    let mut dirty = true;
-    let mut notes_v = crate::notify::version() + bus::version();
-    let mut drawn = Instant::now();
-    'screens: loop {
-    loop {
-        // new notifications / seen marks: the header redraws
-        let nv = crate::notify::version() + bus::version();
-        if nv != notes_v {
-            notes_v = nv;
-            dirty = true;
+        "--update" => crate::infra::update::run(),
+        "--kill-hosts" => kill_hosts(),
+        "-a" => agent_value.agent = Some(it.next().unwrap_or_else(|| fail("-a: value required", 2))),
+        "-b" => agent_value.branch = Some(it.next().unwrap_or_else(|| fail("-b: value required", 2))),
+        "-c" => agent_value.copy = true,
+        "--cost" => crate::features::cost::run(&it.next().unwrap_or_else(|| fail("--cost: thread id required", 2))),
+        "--view" => agent_value.view = Some(it.next().unwrap_or_else(|| fail("--view: thread id required", 2))),
+        "-n" => agent_value.dry = true,
+        "--" => {
+            rest.extend(it.by_ref());
         }
-        // a dissolve under way: 30 frames per second
-        if dirty || drawn.elapsed() >= Duration::from_secs(1) || (dissolve::active() && drawn.elapsed() >= Duration::from_millis(33)) {
-            let _w = engine::watch(|| "start: draw".to_string());
-            let _ = term.draw(|f| app.draw(f));
-            dirty = false;
-            drawn = Instant::now();
-            engine::first_frame();
-            if let Some(at) = transition.take() {
-                let took = at.elapsed();
-                if took > engine::BUDGET {
-                    engine::trace(&format!("SLOW {} back to the start screen", took.as_millis()));
-                }
-            }
+        text_value if text_value.starts_with('-') && text_value.len() > 1 => {
+            fail(&format!("unknown option {text_value}\n\n{HELP}"), 2)
         }
-        if app.outcome.is_some() {
-            break;
-        }
-        if let Some(s) = app.suspend.take() {
-            tty.leave(&mut out);
-            match s {
-                Suspend::Note(p) => {
-                    editor(&p);
-                    app.reload_notes();
-                }
-                Suspend::Prompt => {
-                    let f = std::env::temp_dir().join(format!("codehead-prompt-{}.md", std::process::id()));
-                    if std::fs::write(&f, app.prompt_text()).is_ok() {
-                        editor(&f);
-                        if let Ok(t) = std::fs::read_to_string(&f) {
-                            app.set_prompt(t.trim_end_matches('\n'));
-                        }
-                        let _ = std::fs::remove_file(&f);
-                    }
-                }
-            }
-            let _ = tty.enter(&mut out);
-            let _ = term.clear();
-            dirty = true;
-            continue;
-        }
-        // every waiting event before the next draw: a burst (OS text substitution) stays 1 burst
-        // sleep until the next frame is due (1 per second: relative times); keys, background
-        // results and bus changes wake the loop sooner
-        let mut wait = if dissolve::active() { Duration::from_millis(33) } else { Duration::from_secs(1).saturating_sub(drawn.elapsed()).max(Duration::from_millis(1)) };
-        let mut failed = false;
-        'events: loop {
-            let batch = match read_ready(wait) {
-                Ok(b) if b.is_empty() => break,
-                Ok(b) => b,
-                Err(_) => {
-                    failed = true;
-                    break;
-                }
-            };
-            dirty = true;
-            for (ev, at) in batch {
-                textarea::stamp(Some(at));
-                let tag = if engine::trace_on() { format!("start: {ev:?}") } else { String::new() };
-                let _w = engine::watch(move || tag);
-                match ev {
-                    Event::Key(k) if k.kind != KeyEventKind::Release => app.key(k),
-                    Event::Mouse(m) => app.mouse(m),
-                    Event::Paste(s) => app.paste(&s),
-                    _ => {}
-                }
-                if app.outcome.is_some() || app.suspend.is_some() {
-                    textarea::stamp(None);
-                    break 'events;
-                }
-            }
-            textarea::stamp(None);
-            wait = Duration::ZERO;
-        }
-        if failed {
-            break;
-        }
-        let _w = engine::watch(|| "start: tick".to_string());
-        dirty |= app.tick();
-    }
-
-    let outcome = app.outcome.take().unwrap_or(Outcome::Quit);
-    let home_tab: Option<menu::Home> = match outcome {
-        Outcome::Quit => { tty.leave(&mut out); break 'screens; }
-        Outcome::Copy(paths) => {
-            tty.leave(&mut out);
-            if paths.is_empty() {
-                return;
-            }
-            let text: String = paths.iter().map(|p| format!("{}\n", p.display())).collect();
-            if clip::copy_wait(&text) {
-                println!("copied {} path(s)", paths.len());
-            } else {
-                print!("{text}");
-                eprintln!("0 clipboard tools found (wl-copy, xclip, xsel). paths printed");
-            }
-            break 'screens;
-        }
-        Outcome::New { message, target, agents: picked, clone, flows, projects, title_set } => {
-            engine::trace("start: submit");
-            engine::transition_begin("start: submit → thread view");
-            // a home repo not on disk yet: clone it first
-            if let Some((url, path)) = &clone {
-                let _ = term.draw(|f| app::draw_status(f, &format!("cloning {url}…"), 0));
-                if let Err(e) = home::clone(url, path) {
-                    tty.leave(&mut out);
-                    fail(&e, 1)
-                }
-            }
-            let repo = app.cfg.repo.clone().unwrap_or(cwd.clone());
-            let plan = start::plan(&repo, &cwd, &target);
-            if args.dry {
-                tty.leave(&mut out);
-                if let Some(g) = &plan.prep {
-                    let line = g.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ");
-                    if plan.stash {
-                        println!("{line} || {{ git -C {} stash push --include-untracked -m 'codehead: before switch' && {line}; }}", quote(&repo.display().to_string()));
-                    } else {
-                        println!("{line}");
-                    }
-                }
-                if let Some(b) = &plan.worktree {
-                    println!("git -C {} worktree add <codehead data>/worktrees/{} {}", quote(&repo.display().to_string()), quote(b), quote(b));
-                }
-                if plan.worktree.is_none() && matches!(target, Target::Checkout { .. } | Target::Worktree { .. }) {
-                    println!("git -C {} pull --ff-only    # on main / master with an upstream", quote(&plan.dir.display().to_string()));
-                }
-                println!("thread in {} · agents {} · task:\n{message}", plan.dir.display(), picked.join(", "));
-                return;
-            }
-            // a status frame only for a `git switch` (ms to s): else the start takes ~1 ms and a
-            // blank frame between the form and the view only flashes
-            if plan.prep.is_some() {
-                let _ = term.draw(|f| app::draw_status(f, &format!("starting {} · {}…", plan.label, picked.join(", ")), 0));
-            }
-            let s = start::Start { repo: &repo, target: &target, message: &message, agents: &picked, flows: &flows, projects: projects.as_deref(), title_set };
-            let (t, note) = match start::launch(&s, &plan, engine::client::start) {
-                Ok(r) => r,
-                Err(e) => {
-                    tty.leave(&mut out);
-                    fail(&e, 1)
-                }
-            };
-            let title = t.title.clone();
-            // the thread has the message (or its draft): the form starts empty again
-            app.clear_task();
-            open_view(&mut term, &mut tty, &mut out, &t.id, &t.work_dir(), &title, &cwd, note)
-        }
-        Outcome::Resume(w) => {
-            let Some(t) = w.thread.clone() else { return tty.leave(&mut out) };
-            let dir = PathBuf::from(&w.path);
-            if args.dry {
-                tty.leave(&mut out);
-                println!("codehead --view {}", t.id);
-                return;
-            }
-            wake(&t.id);
-            open_view(&mut term, &mut tty, &mut out, &t.id, &dir, &t.title, &cwd, None)
-        }
-    };
-    transition = Some(Instant::now());
-    app.return_from_thread();
-    if let Some(tab) = home_tab { app.go_home(tab); }
-    dirty = true;
-    }
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::tty_gone;
-
-    /// A live pty: keys can come. Its other end closed (the window gone): gone, so no crossterm
-    /// read spins on it. A pipe: no tty.
-    #[test]
-    fn tty_gone_on_hang_up_and_on_no_tty() {
-        let (mut master, mut slave) = (-1, -1);
-        // SAFETY: 2 live out fds; null name, termios and window size are allowed.
-        let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
-        assert_eq!(rc, 0, "openpty");
-        assert_eq!(tty_gone(slave), None, "live pty");
-        // SAFETY: MASTER is open (openpty above).
-        unsafe { libc::close(master) };
-        assert_eq!(tty_gone(slave).as_deref(), Some("terminal closed"));
-
-        let mut fds = [0; 2];
-        // SAFETY: FDS has room for the 2 fds pipe writes.
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        assert_eq!(tty_gone(fds[0]).as_deref(), Some("no terminal"));
-        assert_eq!(tty_gone(-1).as_deref(), Some("no terminal"));
-        // SAFETY: each fd is open.
-        unsafe {
-            libc::close(slave);
-            libc::close(fds[0]);
-            libc::close(fds[1]);
-        }
+        _ => rest.push(text),
     }
 }

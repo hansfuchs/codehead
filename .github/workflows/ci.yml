@@ -23,6 +23,9 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       # lints: the same on every OS, Linux only
+      - name: rustfmt
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
       - name: clippy, warnings fail
         if: runner.os == 'Linux'
         run: cargo clippy --all-targets --locked -- -D warnings

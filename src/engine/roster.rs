@@ -1,4 +1,4 @@
-//! Agents: 1 TOML file per agent in `<shared>/agents/<name>.toml` (engine::shared_dir). A file a person edits by
+//! Agents: 1 TOML file per agent in `<shared>/agents/<name>.toml` (`engine::shared_dir`). A file a person edits by
 //! hand is the same file codehead writes.
 //!
 //! ```toml
@@ -17,9 +17,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Agent {
+pub(crate) struct Agent {
     /// The file name, not stored in the file.
     #[serde(skip)]
     pub name: String,
@@ -60,7 +59,7 @@ pub struct Agent {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct SpriteRec {
+pub(crate) struct SpriteRec {
     pub id: String,
     pub rows: Vec<String>,
 }
@@ -73,77 +72,105 @@ fn autopilot() -> String {
     "autopilot".into()
 }
 
-pub fn agents_dir() -> PathBuf {
+pub(crate) fn agents_dir() -> PathBuf {
     super::shared_dir().join("agents")
 }
 
 /// Agent names: a letter, then letters, digits, `-` or `_`; max. 32 chars.
-pub fn valid_name(name: &str) -> bool {
-    let mut c = name.chars();
-    c.next().is_some_and(|f| f.is_ascii_alphabetic()) && name.len() <= 32 && c.all(|x| x.is_ascii_alphanumeric() || x == '-' || x == '_')
+pub(crate) fn valid_name(name: &str) -> bool {
+    let mut character = name.chars();
+
+    character.next().is_some_and(|file| file.is_ascii_alphabetic())
+        && name.len() <= 32
+        && character.all(|x| x.is_ascii_alphanumeric() || x == '-' || x == '_')
 }
 
 /// Agent NAME (archived too).
-pub fn get(name: &str) -> Option<Agent> {
+pub(crate) fn get(name: &str) -> Option<Agent> {
     if !valid_name(name) {
         return None;
     }
+
     let text = std::fs::read_to_string(agents_dir().join(format!("{name}.toml"))).ok()?;
-    let mut a: Agent = toml::from_str(&text).ok()?;
-    a.name = name.to_string();
-    Some(a)
+    let mut agent: Agent = toml::from_str(&text).ok()?;
+
+    agent.name = name.to_string();
+    Some(agent)
 }
 
 /// Every agent, archived too, by name.
-pub fn all() -> Vec<Agent> {
-    let Ok(rd) = std::fs::read_dir(agents_dir()) else { return Vec::new() };
-    let mut v: Vec<Agent> = rd
+pub(crate) fn all() -> Vec<Agent> {
+    let Ok(rd) = std::fs::read_dir(agents_dir()) else {
+        return Vec::new();
+    };
+
+    let mut value: Vec<Agent> = rd
         .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            if p.extension()? != "toml" {
+        .filter_map(|error| {
+            let path_value = error.path();
+
+            if path_value.extension()? != "toml" {
                 return None;
             }
-            get(&p.file_stem()?.to_string_lossy())
+
+            get(&path_value.file_stem()?.to_string_lossy())
         })
         .collect();
-    v.sort_by(|a, b| a.name.cmp(&b.name));
-    v
+
+    value.sort_by(|agent, bytes| agent.name.cmp(&bytes.name));
+    value
 }
 
 /// Active agents, by name.
-pub fn active() -> Vec<Agent> {
-    all().into_iter().filter(|a| !a.archived).collect()
+pub(crate) fn active() -> Vec<Agent> {
+    all().into_iter().filter(|agent| !agent.archived).collect()
 }
 
 /// Write agent A (create or replace).
-pub fn save(a: &Agent) -> Result<(), String> {
-    if !valid_name(&a.name) {
-        return Err(format!("agent name {:?}: a letter, then letters, digits, - or _ (max. 32)", a.name));
+pub(crate) fn save(agent: &Agent) -> Result<(), String> {
+    if !valid_name(&agent.name) {
+        return Err(format!(
+            "agent name {:?}: a letter, then letters, digits, - or _ (max. 32)",
+            agent.name
+        ));
     }
-    let text = toml::to_string_pretty(a).map_err(|e| e.to_string())?;
-    let path = agents_dir().join(format!("{}.toml", a.name));
-    super::write_atomic(&path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))
+
+    let text = toml::to_string_pretty(agent).map_err(|error| error.to_string())?;
+    let path = agents_dir().join(format!("{}.toml", agent.name));
+
+    super::write_atomic(&path, text.as_bytes()).map_err(|error_value| format!("{}: {error_value}", path.display()))
 }
 
 /// Rename agent OLD to NEW: the file, and the agent's place on every thread.
-pub fn rename(old: &str, new: &str) -> Result<(), String> {
+pub(crate) fn rename(old: &str, new: &str) -> Result<(), String> {
     if !valid_name(new) {
-        return Err(format!("agent name {new:?}: a letter, then letters, digits, - or _ (max. 32)"));
+        return Err(format!(
+            "agent name {new:?}: a letter, then letters, digits, - or _ (max. 32)"
+        ));
     }
+
     let dir = agents_dir();
+
     if dir.join(format!("{new}.toml")).exists() {
         return Err(format!("agent {new} exists"));
     }
-    std::fs::rename(dir.join(format!("{old}.toml")), dir.join(format!("{new}.toml"))).map_err(|e| e.to_string())?;
-    for t in super::store::all().into_iter().filter(|t| t.agents.iter().any(|a| a == old) || t.sessions.contains_key(old) || t.flows.contains_key(old)) {
-        let _ = super::store::update(&t.id, |t| t.rename_agent(old, new));
+
+    std::fs::rename(dir.join(format!("{old}.toml")), dir.join(format!("{new}.toml")))
+        .map_err(|error| error.to_string())?;
+
+    for thread_value in super::store::all().into_iter().filter(|thread| {
+        thread.agents.iter().any(|agent| agent == old)
+            || thread.sessions.contains_key(old)
+            || thread.flows.contains_key(old)
+    }) {
+        let _ = super::store::update(&thread_value.id, |thread_2| thread_2.rename_agent(old, new));
     }
+
     Ok(())
 }
 
 /// Claude Code `--permission-mode` of codehead mode MODE.
-pub fn permission_mode(mode: &str) -> &'static str {
+pub(crate) fn permission_mode(mode: &str) -> &'static str {
     match mode {
         "edits" => "acceptEdits",
         "supervised" => "default",
@@ -154,28 +181,5 @@ pub fn permission_mode(mode: &str) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_and_modes() {
-        assert!(valid_name("ada"));
-        assert!(valid_name("r2-d2_x"));
-        assert!(!valid_name("2pac"));
-        assert!(!valid_name("a/b"));
-        assert!(!valid_name(""));
-        assert_eq!(permission_mode("autopilot"), "auto");
-        assert_eq!(permission_mode("supervised"), "default");
-    }
-
-    #[test]
-    fn toml_keeps_unset_keys_out() {
-        let a = Agent { name: "ada".into(), harness: "claude".into(), mode: "autopilot".into(), model: Some("opus".into()), ..Default::default() };
-        let text = toml::to_string_pretty(&a).unwrap();
-        assert!(text.contains("model = \"opus\""));
-        assert!(!text.contains("effort"));
-        assert!(!text.contains("archived"));
-        let back: Agent = toml::from_str(&text).unwrap();
-        assert_eq!(back.model.as_deref(), Some("opus"));
-    }
-}
+#[path = "roster_tests.rs"]
+mod tests;

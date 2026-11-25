@@ -1,0 +1,395 @@
+//! Model lists of the harnesses, for the model dropdown of the agent form.
+//! - Claude Code: the aliases (`models` setting) with their exact ids, then the exact ids.
+//! - Codex: `~/.codex/models_cache.json` (the codex CLI's server list: models of the picker,
+//!   by priority). The CLI refreshes it; codehead runs the same CLI (`codex app-server`).
+//! - `OpenCode`: `opencode models`, else an ACP probe.
+//! - Other ACP harnesses: a probe: the ACP command, `initialize`, `session/new` in a temp dir,
+//!   the models of the session (config option `model`, else `models.availableModels`), kill.
+//!
+//! Probes run in a background thread (app.rs) and land in `<data dir>/models.json` with their
+//! time: older than [`MAX_AGE`] → read again.
+
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use crate::engine::harnesses::{self, Drive};
+
+/// A model of a harness: ID goes into the agent (`codex/<id>`), NAME is the detail of its row.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Model {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// The models of 1 harness at a time (unix seconds).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct Entry {
+    pub at: u64,
+    pub models: Vec<Model>,
+}
+
+/// A cached list older than this: read again.
+pub(crate) const MAX_AGE: Duration = Duration::from_hours(24);
+/// Most time a probe gets; its process goes in every case.
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Exact ids of the Claude Code aliases (current family).
+pub(crate) const CLAUDE_IDS: [(&str, &str); 4] = [
+    ("fable", "claude-fable-5-2"),
+    ("opus", "claude-opus-5-5"),
+    ("sonnet", "claude-sonnet-5-5"),
+    ("haiku", "claude-haiku-5-5"),
+];
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |directory| directory.as_secs())
+}
+
+fn path() -> std::path::PathBuf {
+    crate::engine::data_dir().join("models.json")
+}
+
+/// Every cached list, by harness.
+pub(crate) fn load() -> HashMap<String, Entry> {
+    std::fs::read(path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// MODELS of HARNESS into the cache (now).
+pub(crate) fn store(harness: &str, models: &[Model]) -> Entry {
+    let mut all = load();
+    let error = Entry {
+        at: now(),
+        models: models.to_vec(),
+    };
+
+    all.insert(harness.to_string(), error.clone());
+    let path_value = path();
+
+    if let Some(directory) = path_value.parent() {
+        let _ = std::fs::create_dir_all(directory);
+    }
+
+    if let Ok(bytes) = serde_json::to_vec_pretty(&all) {
+        let tmp = path_value.with_extension(format!("{}.tmp", std::process::id()));
+
+        if std::fs::write(&tmp, bytes).is_ok() {
+            let _ = std::fs::rename(tmp, path_value);
+        }
+    }
+
+    error
+}
+
+/// E is younger than [`MAX_AGE`].
+pub(crate) fn fresh(error: &Entry) -> bool {
+    now().saturating_sub(error.at) < MAX_AGE.as_secs()
+}
+
+/// Claude Code: `default`, the ALIASES (exact id as name), then the exact ids.
+pub(crate) fn claude(aliases: &[String]) -> Vec<Model> {
+    let exact = |agent: &str| CLAUDE_IDS.iter().find(|(x, _)| *x == agent).map(|(_, id)| *id);
+    let mut value = vec![Model {
+        id: "default".into(),
+        name: "settings.json model".into(),
+    }];
+
+    for agent_value in aliases {
+        value.push(Model {
+            id: agent_value.clone(),
+            name: exact(agent_value).map_or_else(|| crate::domain::agents::model_name(agent_value), String::from),
+        });
+    }
+
+    for (_, id) in CLAUDE_IDS {
+        if !value.iter().any(|message| message.id == id) {
+            value.push(Model {
+                id: id.into(),
+                name: format!("{} · pinned", crate::domain::agents::model_name(id)),
+            });
+        }
+    }
+
+    value
+}
+
+/// The models of HARNESS, read now (slow: a CLI or a probe). Claude Code: the fixed list.
+pub(crate) fn read(harness: &str) -> Result<Vec<Model>, String> {
+    let height = harnesses::get(harness).ok_or_else(|| format!("unknown harness {harness}"))?;
+
+    let probe = || {
+        harnesses::acp_command(height, None)
+            .ok_or_else(|| "0 ACP command".to_string())
+            .and_then(|character| acp(&character, TIMEOUT))
+    };
+
+    match (height.name, &height.drive) {
+        ("claude", _) | (_, Drive::Claude) => Ok(claude(&crate::infra::config::models())),
+        ("codex", _) => {
+            let home = crate::infra::config::home();
+            let cached = std::fs::read_to_string(home.join(".codex/models_cache.json"))
+                .map(|thread| codex_cache(&thread))
+                .unwrap_or_default();
+
+            if cached.is_empty() {
+                Err("0 models in ~/.codex/models_cache.json: run `codex` once".into())
+            } else {
+                Ok(cached)
+            }
+        }
+        ("opencode", _) => {
+            match run(&["opencode".into(), "models".into()], TIMEOUT).map(|thread_value| lines(&thread_value)) {
+                Ok(message) if !message.is_empty() => Ok(message),
+                _ => probe(),
+            }
+        }
+        _ => probe(),
+    }
+}
+
+/// `~/.codex/models_cache.json`: the models the codex picker lists (`visibility: list`), by priority.
+pub(crate) fn codex_cache(text: &str) -> Vec<Model> {
+    let value: Value = serde_json::from_str(text).unwrap_or_default();
+
+    let mut message_2: Vec<(i64, Model)> = value["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|message| {
+            message["visibility"]
+                .as_str()
+                .is_none_or(|value_value| value_value == "list")
+                && message["supported_in_api"].as_bool() != Some(false)
+        })
+        .filter_map(|message_value| {
+            let id = message_value["slug"].as_str()?.to_string();
+
+            Some((
+                message_value["priority"].as_i64().unwrap_or(i64::MAX),
+                Model {
+                    id,
+                    name: message_value["display_name"].as_str().unwrap_or_default().to_string(),
+                },
+            ))
+        })
+        .collect();
+
+    message_2.sort_by_key(|(path, _)| *path);
+    message_2.into_iter().map(|(_, message_3)| message_3).collect()
+}
+
+/// 1 model id per line (`opencode models`).
+pub(crate) fn lines(text: &str) -> Vec<Model> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.contains(' '))
+        .map(|line_value| Model {
+            id: line_value.into(),
+            name: String::new(),
+        })
+        .collect()
+}
+
+/// The models of a `session/new` result R: config option `model` (`options[]`: value + name,
+/// grouped or flat), else the older `models.availableModels[]` (modelId + name).
+pub(crate) fn session_models(result: &Value) -> Vec<Model> {
+    let opt = result["configOptions"].as_array().and_then(|output| {
+        output
+            .iter()
+            .find(|character| character["id"] == "model" || character["category"] == "model")
+    });
+
+    if let Some(output_value) = opt {
+        return option_models(output_value);
+    }
+
+    result["models"]["availableModels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|message| {
+            Some(Model {
+                id: message["modelId"].as_str()?.into(),
+                name: message["name"].as_str().unwrap_or_default().into(),
+            })
+        })
+        .collect()
+}
+
+/// SIGTERM to the process group of CHILD, a short grace, SIGKILL, reaped.
+fn end(mut child: Child) {
+    let group = -(child.id() as i32);
+
+    // SAFETY: kill(2) on the process group the spawn created (process_group(0)).
+    unsafe { libc::kill(group, libc::SIGTERM) };
+    let at = Instant::now();
+
+    while at.elapsed() < Duration::from_millis(500) {
+        if !matches!(child.try_wait(), Ok(None)) {
+            break;
+        }
+
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // SAFETY: as above; children left after the leader's exit go too.
+    unsafe { libc::kill(group, libc::SIGKILL) };
+    let _ = child.wait();
+}
+
+/// Spawn CMD in its own process group in DIR, stdout as lines over a channel.
+fn spawn(cmd: &[String], dir: &std::path::Path, stdin: bool) -> Result<(Child, mpsc::Receiver<String>), String> {
+    let (bin, args) = cmd.split_first().ok_or("empty command")?;
+    let mut child = Command::new(bin)
+        .args(args)
+        .current_dir(dir)
+        .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(|error| format!("{bin}: {error}"))?;
+    let out = child.stdout.take().ok_or("0 stdout")?;
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        read_model_lines(out, &(tx));
+    });
+
+    Ok((child, rx))
+}
+
+fn read_model_lines(out: std::process::ChildStdout, tx: &mpsc::Sender<String>) {
+    for line in BufReader::new(out).lines() {
+        let Ok(line_value) = line else { break };
+
+        if tx.send(line_value).is_err() {
+            break;
+        }
+    }
+}
+
+/// Stdout of CMD (max. TIMEOUT); the process goes in every case.
+fn run(cmd: &[String], timeout: Duration) -> Result<String, String> {
+    let (child, rx) = spawn(cmd, &std::env::temp_dir(), false)?;
+    let deadline = Instant::now() + timeout;
+    let mut out = String::new();
+
+    let res = loop {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line) => {
+                out.push_str(&line);
+                out.push('\n');
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(out),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                break Err(format!("{}: 0 answer in {} s", cmd[0], timeout.as_secs()));
+            }
+        }
+    };
+
+    end(child);
+
+    res
+}
+
+/// The result of request ID from the lines of RX (other messages: skipped), until DEADLINE.
+fn answer(rx: &mpsc::Receiver<String>, id: u64, deadline: Instant) -> Result<Value, String> {
+    loop {
+        let line = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line_value) => line_value,
+            Err(mpsc::RecvTimeoutError::Timeout) => return Err(format!("0 answer in {} s", TIMEOUT.as_secs())),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("the agent quit".into()),
+        };
+
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+
+        if value["id"].as_u64() != Some(id) || value.get("method").is_some() {
+            continue;
+        }
+
+        if let Some(error) = value.get("error") {
+            return Err(error["message"].as_str().unwrap_or("error").to_string());
+        }
+
+        return Ok(value["result"].clone());
+    }
+}
+
+/// ACP probe: CMD, `initialize`, `session/new` (temp dir, 0 MCP servers), the session's models.
+pub(crate) fn acp(cmd: &[String], timeout: Duration) -> Result<Vec<Model>, String> {
+    let dir = std::env::temp_dir().join(format!("codehead-models-{}", std::process::id()));
+
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let (mut child, rx) = spawn(cmd, &dir, true)?;
+    let mut stdin = child.stdin.take();
+    let deadline = Instant::now() + timeout;
+
+    let mut send = |value: Value| -> Result<(), String> {
+        let width = stdin.as_mut().ok_or("0 stdin")?;
+
+        writeln!(width, "{value}")
+            .and_then(|()| width.flush())
+            .map_err(|error_value| format!("stdin: {error_value}"))
+    };
+
+    let res = (|| {
+        let init = json!({"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false},
+            "clientInfo": {"name": "codehead", "version": crate::infra::update::VERSION}});
+
+        send(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": init}))?;
+        answer(&rx, 1, deadline).map_err(|error_2| format!("initialize: {error_2}"))?;
+        send(json!({"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": dir, "mcpServers": []}}))?;
+        let result = answer(&rx, 2, deadline).map_err(|error_3| format!("session/new: {error_3}"))?;
+        let message = session_models(&result);
+
+        if message.is_empty() {
+            Err("the session lists 0 models".to_string())
+        } else {
+            Ok(message)
+        }
+    })();
+
+    drop(stdin);
+    end(child);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    res
+}
+
+#[cfg(test)]
+#[path = "models_tests.rs"]
+mod tests;
+
+fn option_models(option: &Value) -> Vec<Model> {
+    option["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|item| {
+            item["options"]
+                .as_array()
+                .map_or_else(|| vec![item], |group| group.iter().collect())
+        })
+        .filter_map(|model| {
+            Some(Model {
+                id: model["value"].as_str()?.into(),
+                name: model["name"].as_str().unwrap_or_default().into(),
+            })
+        })
+        .collect()
+}

@@ -6,6 +6,8 @@
 //! the next message's share of a window. Use outside codehead (claude.ai, other sessions) adds %
 //! without $: the share comes out high, never low.
 
+use std::ops::ControlFlow;
+
 use serde_json::{Value, json};
 
 /// Samples kept (the last ones).
@@ -18,63 +20,79 @@ fn path() -> std::path::PathBuf {
 }
 
 /// F on the file's JSON, under its lock, written back.
-fn edit(f: impl FnOnce(&mut Value)) {
-    let p = path();
+fn edit(file: impl FnOnce(&mut Value)) {
+    let path_value = path();
+
     let _ = super::locked(&super::data_dir().join("limits.lock"), || {
-        let mut v: Value = std::fs::read(&p).ok().and_then(|t| serde_json::from_slice(&t).ok()).unwrap_or_else(|| json!({}));
-        if !v.is_object() {
-            v = json!({});
+        let mut value: Value = std::fs::read(&path_value)
+            .ok()
+            .and_then(|thread| serde_json::from_slice(&thread).ok())
+            .unwrap_or_else(|| json!({}));
+
+        if !value.is_object() {
+            value = json!({});
         }
-        f(&mut v);
-        super::write_atomic(&p, v.to_string().as_bytes())
+
+        file(&mut value);
+        super::write_atomic(&path_value, value.to_string().as_bytes())
     });
 }
 
-/// The warm-up of HARNESS (engine::warm) at NOW: DUE on the file → marked (`_warm`), true. 1
+/// The warm-up of HARNESS (`engine::warm`) at NOW: DUE on the file → marked (`_warm`), true. 1
 /// process wins per try (the lock).
-pub fn claim_warm(harness: &str, now: u64, due: impl FnOnce(&Value) -> bool) -> bool {
+pub(crate) fn claim_warm(harness: &str, now: u64, due: impl FnOnce(&Value) -> bool) -> bool {
     let mut won = false;
-    edit(|v| {
-        if due(v) {
-            v["_warm"][harness] = json!(now);
+
+    edit(|value| {
+        if due(value) {
+            value["_warm"][harness] = json!(now);
             won = true;
         }
     });
+
     won
 }
 
 /// A turn of a Claude agent ended: its $ into the sum.
-pub fn add_cost(usd: f64) {
+pub(crate) fn add_cost(usd: f64) {
     if usd <= 0.0 {
         return;
     }
-    edit(|v| {
-        let sum = v["_cal"]["usd"].as_f64().unwrap_or(0.0) + usd;
-        v["_cal"]["usd"] = json!(sum);
+
+    edit(|value| {
+        let sum = value["_cal"]["usd"].as_f64().unwrap_or(0.0) + usd;
+
+        value["_cal"]["usd"] = json!(sum);
     });
 }
 
 /// HARNESS reported windows L (window, used %, resets at): the new values, a calibration sample.
-pub fn record(harness: &str, l: &[(String, f64, Option<u64>)]) {
-    edit(|v| {
-        for (w, pct, resets) in l {
-            v[harness][w] = json!({"pct": pct, "resets": resets});
+pub(crate) fn record(harness: &str, line: &[(String, f64, Option<u64>)]) {
+    edit(|value| {
+        for (width, pct, resets) in line {
+            value[harness][width] = json!({"pct": pct, "resets": resets});
         }
-        let usd = v["_cal"]["usd"].as_f64().unwrap_or(0.0);
-        let windows: serde_json::Map<String, Value> = l.iter().map(|(w, pct, resets)| (format!("{harness}/{w}"), json!([pct, resets]))).collect();
-        let mut samples = v["_cal"]["samples"].as_array().cloned().unwrap_or_default();
+
+        let usd = value["_cal"]["usd"].as_f64().unwrap_or(0.0);
+        let windows: serde_json::Map<String, Value> = line
+            .iter()
+            .map(|(width_value, pct, resets)| (format!("{harness}/{width_value}"), json!([pct, resets])))
+            .collect();
+        let mut samples = value["_cal"]["samples"].as_array().cloned().unwrap_or_default();
+
         samples.push(json!({"ts": super::now_ms() / 1000, "usd": usd, "w": windows}));
         let drop = samples.len().saturating_sub(SAMPLES);
+
         samples.drain(..drop);
-        v["_cal"]["samples"] = Value::Array(samples);
+        value["_cal"]["samples"] = Value::Array(samples);
     });
 }
 
 /// A window of a plan.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Window {
+pub(crate) struct Window {
     pub harness: String,
-    pub window: String,
+    pub label: String,
     pub pct: f64,
     pub resets: Option<u64>,
     /// $ of codehead turns per 1 % of the window (None: too few samples yet).
@@ -82,76 +100,104 @@ pub struct Window {
 }
 
 /// The windows the hosts saw last, with their rates.
-pub fn read() -> Vec<Window> {
-    let Ok(text) = std::fs::read(path()) else { return Vec::new() };
-    let Ok(v) = serde_json::from_slice::<Value>(&text) else { return Vec::new() };
-    parse(&v)
+pub(crate) fn read() -> Vec<Window> {
+    let Ok(text) = std::fs::read(path()) else {
+        return Vec::new();
+    };
+
+    let Ok(value) = serde_json::from_slice::<Value>(&text) else {
+        return Vec::new();
+    };
+
+    parse(&value)
 }
 
-fn parse(v: &Value) -> Vec<Window> {
-    let samples = v["_cal"]["samples"].as_array().cloned().unwrap_or_default();
+fn parse(value: &Value) -> Vec<Window> {
+    let samples = value["_cal"]["samples"].as_array().cloned().unwrap_or_default();
     let mut out = Vec::new();
-    for (h, ws) in v.as_object().into_iter().flatten() {
-        if h.starts_with('_') {
+
+    for (height, ws) in value.as_object().into_iter().flatten() {
+        if height.starts_with('_') {
             continue;
         }
-        for (w, l) in ws.as_object().into_iter().flatten() {
-            // `seven_day_overage_included`: the 7d window again, with overage: 0 own row
-            if w.ends_with("_overage_included") {
-                continue;
-            }
-            out.push(Window { harness: h.clone(), window: w.clone(), pct: l["pct"].as_f64().unwrap_or(0.0), resets: l["resets"].as_u64(), usd_per_pct: rate(&samples, &format!("{h}/{w}")) });
-        }
+
+        parse_windows(&samples, &mut out, height, ws);
     }
+
     out
 }
 
-/// $ per 1 % of window KEY: the latest period (1 reset time) whose % rose by MIN_RISE+, from its
+fn parse_windows(samples: &[Value], out: &mut Vec<Window>, height: &String, ws: &Value) {
+    for (width, line) in ws.as_object().into_iter().flatten() {
+        // `seven_day_overage_included`: the 7d window again, with overage: 0 own row
+        if let ControlFlow::Break(()) = skip_overage_window(width) {
+            continue;
+        }
+
+        out.push(Window {
+            harness: height.clone(),
+            label: width.clone(),
+            pct: line["pct"].as_f64().unwrap_or(0.0),
+            resets: line["resets"].as_u64(),
+            usd_per_pct: rate(samples, &format!("{height}/{width}")),
+        });
+    }
+}
+
+fn skip_overage_window(width: &str) -> ControlFlow<()> {
+    if width.ends_with("_overage_included") {
+        return ControlFlow::Break(());
+    }
+
+    ControlFlow::Continue(())
+}
+
+/// $ per 1 % of window KEY: the latest period (1 reset time) whose % rose by `MIN_RISE`+, from its
 /// 1st sample to its last.
 fn rate(samples: &[Value], key: &str) -> Option<f64> {
     // per period, in order: (resets, (usd, pct) first, (usd, pct) last)
-    let mut periods: Vec<(Option<u64>, (f64, f64), (f64, f64))> = Vec::new();
-    for s in samples {
-        let Some(w) = s["w"].get(key) else { continue };
-        let (pct, resets, usd) = (w[0].as_f64().unwrap_or(0.0), w[1].as_u64(), s["usd"].as_f64().unwrap_or(0.0));
+    let mut periods: Vec<WindowPeriod> = Vec::new();
+
+    for text in samples {
+        let Some(width) = text["w"].get(key) else { continue };
+        let (pct, resets, usd) = (
+            width[0].as_f64().unwrap_or(0.0),
+            width[1].as_u64(),
+            text["usd"].as_f64().unwrap_or(0.0),
+        );
+
         match periods.last_mut() {
-            Some(p) if p.0 == resets && pct >= p.2.1 => p.2 = (usd, pct),
-            _ => periods.push((resets, (usd, pct), (usd, pct))),
+            Some(period) if period.reset == resets && pct >= period.last.percent => {
+                period.last = UsageSample { usd, percent: pct }
+            }
+            _ => periods.push(WindowPeriod {
+                reset: resets,
+                first: UsageSample { usd, percent: pct },
+                last: UsageSample { usd, percent: pct },
+            }),
         }
     }
-    periods.iter().rev().find_map(|(_, a, b)| {
-        let (du, dp) = (b.0 - a.0, b.1 - a.1);
+
+    periods.iter().rev().find_map(|period| {
+        let (du, dp) = (
+            period.last.usd - period.first.usd,
+            period.last.percent - period.first.percent,
+        );
+
         (dp >= MIN_RISE && du > 0.0).then(|| du / dp)
     })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "limits_tests.rs"]
+mod tests;
 
-    fn sample(usd: f64, pct: f64, resets: u64) -> Value {
-        json!({"ts": 0, "usd": usd, "w": {"claude/five_hour": [pct, resets]}})
-    }
-
-    #[test]
-    fn the_rate_comes_from_the_latest_period_that_rose_enough() {
-        let v = json!({
-            "claude": {"five_hour": {"pct": 30.0, "resets": 200}, "seven_day_overage_included": {"pct": 1.0}},
-            "_cal": {"usd": 9.0, "samples": [
-                sample(0.0, 10.0, 100), sample(4.0, 20.0, 100),
-                // a new period: 1 % rise only → the period before counts
-                sample(5.0, 29.0, 200), sample(6.0, 30.0, 200),
-            ]},
-        });
-        let w = parse(&v);
-        assert_eq!(w.len(), 1, "{w:?}");
-        assert_eq!((w[0].window.as_str(), w[0].pct, w[0].resets), ("five_hour", 30.0, Some(200)));
-        assert_eq!(w[0].usd_per_pct, Some(0.4));
-        // the new period rises 3 %: its own rate
-        let mut v = v;
-        v["_cal"]["samples"].as_array_mut().unwrap().push(sample(8.0, 32.0, 200));
-        assert_eq!(parse(&v)[0].usd_per_pct, Some(1.0));
-        // 0 samples: 0 rate
-        assert_eq!(parse(&json!({"claude": {"five_hour": {"pct": 5.0}}}))[0].usd_per_pct, None);
-    }
+struct UsageSample {
+    usd: f64,
+    percent: f64,
+}
+struct WindowPeriod {
+    reset: Option<u64>,
+    first: UsageSample,
+    last: UsageSample,
 }
