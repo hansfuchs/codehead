@@ -1,33 +1,37 @@
 //! codehead lab: ASCII experiments for the mascot, agent avatars and loaders.
 //!
 //! ```sh
-//! cargo run --release --example lab                      # the TUI: 7 pages
+//! cargo run --release --example lab                      # the TUI: 9 pages
 //! cargo run --release --example lab -- print shape 72 34  # 1 frame as ANSI text (mode w h [yaw])
 //! cargo run --release --example lab -- page 6 1.2 200 42  # 1 page as plain text (page t w h [pick] [status])
 //! ```
 //!
-//! Keys: 1-7 / tab: page · m: render mode · t: tint · e: eye pattern (regi, monolith) · f: float speed · space: pause · ←→↑↓: turn / pick · s: status · q: quit
+//! Keys: 1-9 / tab: page · m: render mode · t: tint · e: eye pattern (regi, monolith) · f: float speed · space: pause · ←→↑↓: turn / pick · s: status · r: new avatars (float, big) · l: line mode (big) · q: quit
 
+mod big;
 mod fx;
 // codehead's avatar module as a whole (avatar-frames: `Avatar`, spawns); the lab's own copies of
 // its files below stay for the lab's pages
 #[allow(clippy::duplicate_mod)]
-#[path = "../../src/avatar/mod.rs"]
+#[path = "avatar/mod.rs"]
 mod avatar;
-#[path = "../../src/avatar/geo.rs"]
+#[path = "avatar/geo.rs"]
 mod geo;
-#[path = "../../src/avatar/glyph.rs"]
+#[path = "avatar/glyph.rs"]
 mod glyph;
-#[path = "../../src/avatar/glyphs.rs"]
+#[path = "avatar/glyphs.rs"]
 mod glyphs;
-#[path = "../../src/avatar/mono.rs"]
+#[path = "avatar/mono.rs"]
 mod mono;
-#[path = "../../src/avatar/regi.rs"]
+// the app path (draw3d_in, clean, shade at 7x4) unused here: the lab draws through render_sized
+#[allow(dead_code)]
+#[path = "avatar/regi.rs"]
 mod regi;
-#[path = "../../src/avatar/sdf.rs"]
+#[path = "avatar/sdf.rs"]
 mod sdf;
-#[path = "../../src/avatar/spawn.rs"]
+#[path = "avatar/spawn.rs"]
 mod spawn;
+mod tokens;
 
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -243,10 +247,46 @@ struct App {
     per_row: std::cell::Cell<usize>,
     loaders: fx::Loaders,
     frame: usize,
+    /// Float page: the seed of the 4 random avatars (r: next).
+    fseed: u64,
+    /// Float page: the 1st line mode in view (←→ when they do not all fit).
+    fcol: usize,
+    /// Big page: the size (big::SIZES), the layout of that size, the line mode (regi::LINES).
+    bsize: usize,
+    blayout: usize,
+    bline: usize,
+    /// Tokens page: the ctx tail (tokens::TAILS), the colors (tokens::COLORS).
+    ttail: usize,
+    tcolor: usize,
+    /// Float page: per (row, line mode) the last cells and the changes (t, dots) of the last
+    /// FWINDOW seconds; its key (seed, status, speed) clears it when one of them changes.
+    fhist: std::collections::HashMap<(usize, usize), (Vec<glyph::Cell>, std::collections::VecDeque<(f32, u32)>)>,
+    fkey: (u64, Option<usize>, usize),
 }
 
-const PAGES: [&str; 7] = [
-    "moai", "logos", "avatars", "loaders", "regi", "spawn", "monolith",
+/// REGI's avatar (`regi:36 eyes=11`), the 1st row of the float page.
+const REGI_AVATAR: (usize, usize) = (36, 11);
+
+/// The float page counts the changes of the last 4 s.
+const FWINDOW: f32 = 4.0;
+
+/// REGI's avatar, then 4 distinct random ones of SEED.
+fn float_picks(seed: u64) -> Vec<usize> {
+    let n = regi::all().len();
+    let mut out = vec![REGI_AVATAR.0];
+    let mut k = 0;
+    while out.len() < 5 {
+        let i = ((regi::hash(seed.wrapping_mul(97).wrapping_add(k)) * n as f32) as usize).min(n - 1);
+        if !out.contains(&i) {
+            out.push(i);
+        }
+        k += 1;
+    }
+    out
+}
+
+const PAGES: [&str; 10] = [
+    "moai", "logos", "avatars", "loaders", "regi", "spawn", "monolith", "float", "big", "tokens",
 ];
 
 /// The float speeds of the regi page.
@@ -298,7 +338,10 @@ impl App {
             3 => self.loader_page(buf, body),
             4 => self.regis(buf, body),
             5 => self.spawns(buf, body),
-            _ => self.monolith(buf, body),
+            6 => self.monolith(buf, body),
+            7 => self.floats(buf, body),
+            8 => big::Big { t: self.t, size: self.bsize, layout: self.blayout, lines: regi::LINES[self.bline], crew: &float_picks(self.fseed), status: self.status, regi_eyes: REGI_AVATAR.1 }.draw(buf, body),
+            _ => tokens::Tokens { t: self.t, tail: self.ttail, color: self.tcolor }.draw(buf, body),
         }
         let keys = match self.page {
             0 => "m mode · t tint · ←→↑↓ turn · space pause · q quit",
@@ -306,7 +349,10 @@ impl App {
             4 => "←→↑↓ pick · e eyes for all · f float speed · s status · space pause · q quit",
             5 => "←→↑↓ pick · s status · space pause · q quit",
             6 => "←→ design · e eyes · ↑↓ tilt · m mode · t tint · s status · space pause · q quit",
-            _ => "1-7 page · space pause · q quit",
+            7 => "←→ modes · r new avatars · f float speed · s status · space pause · q quit",
+            8 => "←→ size · ↑↓ layout · l line mode · r new crew · s status · space pause · q quit",
+            9 => "v ctx tail · c colors · space pause · q quit",
+            _ => "1-9, 0 page · space pause · q quit",
         };
         write(buf, 2, area.height.saturating_sub(1), keys, MUTED);
     }
@@ -487,6 +533,72 @@ impl App {
                     glyph::mix(BG, MUTED, 0.6)
                 },
             );
+        }
+    }
+
+    /// Line modes for the regi float, side by side: 1 column per mode, 1 row per avatar (REGI's,
+    /// then 4 random). Under each: the changes of the last FWINDOW s, the dots per change (a
+    /// whole-outline jump: many dots at once, then a long hold).
+    fn floats(&mut self, buf: &mut Buffer, r: Rect) {
+        let s = self.status.unwrap_or(2);
+        let key = (self.fseed, self.status, self.speed);
+        if key != self.fkey {
+            self.fkey = key;
+            self.fhist.clear();
+        }
+        let picks = float_picks(self.fseed);
+        let speed = SPEEDS[self.speed];
+        let head = format!("float · line modes  ·  {}  ·  float {}x  ·  REGI + 4 random", STATUSES[s].name(), speed);
+        write(buf, r.x, r.y, &head, CORAL);
+        write(buf, r.x, r.y + 1, "under each: changes in the last 4 s · steps per change (dots flipped + cells retoned; many steps, few changes: jumps)", MUTED);
+        let (lw, cw) = (24u16, 20u16);
+        // the modes in view: as many as fit, from fcol (←→)
+        let fit = ((r.width.saturating_sub(lw) / cw) as usize).clamp(1, regi::LINES.len());
+        let first = self.fcol.min(regi::LINES.len() - fit);
+        let shown = first..first + fit;
+        if fit < regi::LINES.len() {
+            let more = format!("modes {}-{} of {} (←→)", first + 1, first + fit, regi::LINES.len());
+            write(buf, r.x, r.y + 2, &more, MUTED);
+        }
+        for (c, lines) in regi::LINES.iter().enumerate().filter(|(c, _)| shown.contains(c)) {
+            let x = r.x + lw + (c - first) as u16 * cw;
+            write(buf, x, r.y + 2, lines.name(), INK);
+            write(buf, x, r.y + 3, lines.about(), MUTED);
+        }
+        let dim = glyph::mix(BG, MUTED, 0.6);
+        for (row, &i) in picks.iter().enumerate() {
+            let a = &regi::all()[i];
+            let y = r.y + 5 + row as u16 * 6;
+            if y + 5 > r.bottom() {
+                break;
+            }
+            let eyes = (row == 0).then_some(REGI_AVATAR.1);
+            let look = regi::Look { pattern: eyes.map(|k| regi::PATTERNS[k]), speed };
+            let regi::Kind::Solid(solid, motion) = a.kind;
+            let title = if row == 0 { format!("REGI · regi:{i}") } else { format!("regi:{i}") };
+            write(buf, r.x, y, &title, if row == 0 { CORAL } else { INK });
+            write(buf, r.x, y + 1, solid.name(), MUTED);
+            write(buf, r.x, y + 2, &format!("{motion:?}").to_lowercase(), MUTED);
+            write(buf, r.x, y + 3, look.pattern.unwrap_or(a.pattern).name(), dim);
+            for (c, &lines) in regi::LINES.iter().enumerate().filter(|(c, _)| shown.contains(c)) {
+                let x = r.x + lw + (c - first) as u16 * cw;
+                let cells = regi::render_lines(a, s, self.t, &look, lines);
+                blit(buf, x, y, 7, &cells);
+                let (prev, log) = self.fhist.entry((row, c)).or_default();
+                if !prev.is_empty() {
+                    let n: u32 = cells.iter().zip(prev.iter()).map(|(a, b)| ((a.ch as u32) ^ (b.ch as u32)).count_ones() + u32::from(a.ch == b.ch && a.fg != b.fg)).sum();
+                    if n > 0 {
+                        log.push_back((self.t, n));
+                    }
+                }
+                *prev = cells;
+                while log.front().is_some_and(|&(t, _)| t < self.t - FWINDOW) {
+                    log.pop_front();
+                }
+                let dots: u32 = log.iter().map(|&(_, n)| n).sum();
+                let per = if log.is_empty() { 0.0 } else { dots as f32 / log.len() as f32 };
+                write(buf, x, y + 4, &format!("{:>2} ch · {per:.1} steps", log.len()), dim);
+            }
         }
     }
 
@@ -935,9 +1047,18 @@ fn main() -> std::io::Result<()> {
         per_row: std::cell::Cell::new(1),
         loaders: fx::Loaders::new(),
         frame: 0,
+        fseed: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        fhist: Default::default(),
+        fkey: (0, None, 0),
+        fcol: 0,
+        bsize: 0,
+        blayout: 0,
+        bline: 0,
+        ttail: 0,
+        tcolor: 0,
     };
     if args.first().map(|s| s.as_str()) == Some("page") {
-        // 1 page as plain text: page <1-7> <t> [w h] [pick] [status 1-5] [eyes: monolith 0-10, regi 1-11]
+        // 1 page as plain text: page <1-9> <t> [w h] [pick] [status 1-5] [eyes: monolith 0-10, regi 1-11]
         let num = |i: usize, d: f32| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
         app.page = (num(1, 1.0) as usize)
             .saturating_sub(1)
@@ -946,6 +1067,10 @@ fn main() -> std::io::Result<()> {
         let (w, h) = (num(3, 160.0) as u16, num(4, 40.0) as u16);
         let pick = num(5, 0.0) as usize;
         (app.pick, app.rpick, app.spick, app.mpick) = (pick, pick, pick, pick % mono::BODIES.len());
+        // big page: pick = size * 2 + layout
+        (app.bsize, app.blayout) = ((pick / 2) % big::SIZES.len(), pick % 2);
+        // tokens page: pick = color * 3 + tail
+        (app.ttail, app.tcolor) = (pick % tokens::TAILS.len(), (pick / tokens::TAILS.len()) % tokens::COLORS.len());
         app.epat = num(7, 0.0) as usize % regi::PATTERNS.len();
         app.rpat = (num(7, 0.0) as usize)
             .checked_sub(1)
@@ -982,7 +1107,10 @@ fn main() -> std::io::Result<()> {
         {
             match k.code {
                 KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
-                KeyCode::Char(c @ '1'..='7') => app.page = c as usize - '1' as usize,
+                KeyCode::Char(c @ '1'..='9') => app.page = c as usize - '1' as usize,
+                KeyCode::Char('0') => app.page = 9,
+                KeyCode::Char('v') if app.page == 9 => app.ttail = (app.ttail + 1) % tokens::TAILS.len(),
+                KeyCode::Char('c') if app.page == 9 => app.tcolor = (app.tcolor + 1) % tokens::COLORS.len(),
                 KeyCode::Tab => app.page = (app.page + 1) % PAGES.len(),
                 KeyCode::BackTab => app.page = (app.page + PAGES.len() - 1) % PAGES.len(),
                 KeyCode::Char('m') => app.mode = (app.mode + 1) % MODES.len(),
@@ -1020,6 +1148,14 @@ fn main() -> std::io::Result<()> {
                 KeyCode::Down if app.page == 5 => {
                     app.spick = (app.spick + app.per_row.get()).min(spawn::count() - 1)
                 }
+                KeyCode::Left if app.page == 8 => app.bsize = app.bsize.saturating_sub(1),
+                KeyCode::Right if app.page == 8 => app.bsize = (app.bsize + 1).min(big::SIZES.len() - 1),
+                KeyCode::Up if app.page == 8 => app.blayout = app.blayout.saturating_sub(1),
+                KeyCode::Down if app.page == 8 => app.blayout = (app.blayout + 1).min(big::LAYOUTS[0].len() - 1),
+                KeyCode::Char('l') if app.page == 8 => app.bline = (app.bline + 1) % regi::LINES.len(),
+                KeyCode::Char('r') if app.page == 8 => app.fseed = app.fseed.wrapping_add(1),
+                KeyCode::Left if app.page == 7 => app.fcol = app.fcol.saturating_sub(1),
+                KeyCode::Right if app.page == 7 => app.fcol = (app.fcol + 1).min(regi::LINES.len() - 1),
                 KeyCode::Left if app.page == 6 => {
                     app.mpick = (app.mpick + mono::BODIES.len() - 1) % mono::BODIES.len()
                 }
@@ -1032,6 +1168,7 @@ fn main() -> std::io::Result<()> {
                     }
                 }
                 KeyCode::Char('e') => app.epat = (app.epat + 1) % regi::PATTERNS.len(),
+                KeyCode::Char('r') if app.page == 7 => app.fseed = app.fseed.wrapping_add(1),
                 KeyCode::Char('f') => app.speed = (app.speed + 1) % SPEEDS.len(),
                 KeyCode::Left if app.page == 2 => app.pick = app.pick.saturating_sub(1),
                 KeyCode::Right if app.page == 2 => {
