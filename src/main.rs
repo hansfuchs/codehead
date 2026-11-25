@@ -116,6 +116,8 @@ usage: codehead                    the thread updated last (0 threads: the start
        codehead home [init]       what codehead keeps in the home repo; init: move agents, flows, servers, settings there
        codehead setup [--dry]     the setup wizard; --dry: every screen, 0 writes, then the list of what a real run does
        codehead --update          install the latest release (curl -fsSL https://codehead.sh/install | sh)
+       codehead --kill-hosts      stop every thread host: its agents and their subagents end; the next
+                                  message to a thread starts a new host (with the installed binary)
   -a  agents preselected for the new thread (default: the default agent)
   -b  branch for the new worktree (default: <prefix>/<title slug>, prefix \"task\")
   -c  copy the picked note paths to the clipboard, start nothing
@@ -304,6 +306,7 @@ fn parse() -> Args {
                 std::process::exit(0)
             }
             "--update" => update::run(),
+            "--kill-hosts" => kill_hosts(),
             "-a" => a.agent = Some(it.next().unwrap_or_else(|| fail("-a: value required", 2))),
             "-b" => a.branch = Some(it.next().unwrap_or_else(|| fail("-b: value required", 2))),
             "-c" => a.copy = true,
@@ -319,6 +322,25 @@ fn parse() -> Args {
     }
     a.title = rest.join(" ");
     a
+}
+
+/// `--kill-hosts`: stop every thread host, 1 line per host. Exit 1: a host did not end.
+fn kill_hosts() -> ! {
+    let out = engine::client::stop_all(std::time::Duration::from_secs(10));
+    if out.is_empty() {
+        println!("0 hosts run");
+        std::process::exit(0)
+    }
+    for (id, e) in &out {
+        let title = engine::store::load(id).map(|t| t.title).unwrap_or_default();
+        match e {
+            None => println!("stopped  {id}  {title}"),
+            Some(e) => println!("failed   {id}  {title}: {e}"),
+        }
+    }
+    let failed = out.iter().filter(|(_, e)| e.is_some()).count();
+    println!("{} of {} hosts stopped", out.len() - failed, out.len());
+    std::process::exit(if failed == 0 { 0 } else { 1 })
 }
 
 fn which(bin: &str) -> bool {
