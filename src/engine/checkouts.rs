@@ -174,8 +174,8 @@ fn scan_shell_segments(out: &mut Vec<PathBuf>, mut cwd: Option<PathBuf>, segment
         let words: Vec<&str> = seg.split_whitespace().collect();
 
         // leading `VAR=x` assignments, `sudo`, `command`: not the command
-        let Some(at) = words.iter().position(|width| {
-            !width.contains('=') || width.starts_with('-') && !matches!(*width, "sudo" | "command" | "time" | "env")
+        let Some(at) = words.iter().position(|word| {
+            !(word.contains('=') && !word.starts_with('-')) && !matches!(*word, "sudo" | "command" | "time" | "env")
         }) else {
             continue;
         };

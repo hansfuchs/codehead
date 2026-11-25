@@ -124,7 +124,7 @@ fn handle_events(first: Msg, mut paths: Vec<PathBuf>, settings: WatchEvents<'_>)
 }
 
 struct WatchLoop<'context> {
-    watcher: &'context mut notify::FsEventWatcher,
+    watcher: &'context mut notify::RecommendedWatcher,
     rx: &'context Receiver<Msg>,
     threads: &'context PathBuf,
     width: &'context mut Watch,
@@ -145,7 +145,7 @@ struct WatchEvents<'context> {
 }
 
 fn update_watch_roots(
-    watcher: &mut notify::FsEventWatcher,
+    watcher: &mut notify::RecommendedWatcher,
     threads: &Path,
     width: &mut Watch,
     roots_watched: &mut HashSet<PathBuf>,

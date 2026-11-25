@@ -81,6 +81,14 @@ fn shell_writes_add_their_dirs() {
 }
 
 #[test]
+fn command_prefixes_are_not_the_command() {
+    assert_eq!(bash("sudo cp /src/a.rs /dst/a.rs"), paths(&["/dst/a.rs"]));
+    assert_eq!(bash("env FOO=1 git -C /repo commit -m x"), paths(&["/repo"]));
+    assert_eq!(bash("time git -C /x push"), paths(&["/x"]));
+    assert_eq!(bash("command git -C /y commit -m x"), paths(&["/y"]));
+}
+
+#[test]
 fn checkouts_without_an_edit_go() {
     let co = |directory: &str| store::Checkout {
         dir: directory.into(),
