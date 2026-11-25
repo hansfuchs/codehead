@@ -48,7 +48,12 @@ fn mouse_drag(view: &mut View, at: Position) {
 fn mouse_release(view: &mut View) {
     view.selection.dragging = false;
 
-    if view.selection.sel.is_some_and(|(start, end)| start != end)
+    let Some((start, end)) = view.selection.sel else {
+        view.mouse_body();
+        return;
+    };
+
+    if start != end
         && let Some(text) = view.selected()
     {
         view.copy(&text);

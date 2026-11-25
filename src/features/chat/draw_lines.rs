@@ -245,15 +245,7 @@ fn draw_run_item(
     let color = begin_run(layout, &blank, &divider, agent, start);
     let shown = layout.fold.run(key);
     let running = calls.iter().any(|call| call.output.is_none()) && layout.thread.busy.contains(agent);
-
-    let mark = if shown {
-        "▾ "
-    } else if running {
-        "◦ "
-    } else {
-        "▸ "
-    };
-
+    let mark = layout.fold.run_mark(key, running);
     let summary = summary_with_thoughts(calls, start, end, thoughts, layout.fold);
 
     let fold: &Fold<'_> = layout.fold;
@@ -286,6 +278,8 @@ fn draw_run_item(
         drawn.rows.push(row);
     }
 
+    let body_at = drawn.rows.len();
+
     if think && !shown {
         for calls_before in 0..=calls.len() {
             run_thought_rows(drawn, thoughts, calls_before, width, &tbar);
@@ -295,6 +289,8 @@ fn draw_run_item(
     if shown {
         draw_run_calls(width, drawn, calls, thoughts, color, think, &tbar);
     }
+
+    drawn.body(body_at, Hit::Run(key));
 }
 
 fn draw_run_calls(

@@ -71,9 +71,12 @@ fn report_rows(drawn: &mut Drawn, subagent: &Sub, key: usize, fold: &Fold<'_>, w
         subagent.result.trim_end().to_string()
     };
 
+    let text_at = drawn.rows.len();
+
     drawn.rows.extend(memo::markdown(&text, width, bar));
 
     if long {
+        drawn.body(text_at, Hit::Run(key));
         let at = drawn.rows.len();
 
         let label = if open {

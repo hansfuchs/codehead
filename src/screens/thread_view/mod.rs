@@ -394,6 +394,10 @@ mod split_tests;
 mod select_tests;
 
 #[cfg(test)]
+#[path = "thread_view_section_tests.rs"]
+mod section_tests;
+
+#[cfg(test)]
 #[path = "thread_view_subagent_tests.rs"]
 mod subagent_tests;
 

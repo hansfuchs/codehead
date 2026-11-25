@@ -1,5 +1,5 @@
 use super::stream::StreamFrame;
-use super::{Frame, Line, Paragraph, Position, Rect, Span, Style, View, WAVE, chat, theme};
+use super::{Frame, Line, Paragraph, Rect, Span, Style, View, WAVE, chat, theme};
 impl View {
     pub(super) fn draw_stream_waves(&self, frame: &mut Frame, window: &StreamFrame) {
         draw_waves(self, frame, window);
@@ -18,7 +18,7 @@ impl View {
 
         let col = at.x - area.x;
         let row = &self.stream.drawn.rows[row_index];
-        let hit = self.stream.drawn.hits.contains_key(&row_index);
+        let section = self.stream.drawn.section(row_index);
         let span = row
             .links
             .iter()
@@ -36,8 +36,8 @@ impl View {
                     height: 1,
                 },
             );
-        } else if hit {
-            hover_message(self, buf, area, at);
+        } else if let Some(rows) = section {
+            hover_section(self, buf, window, rows);
         }
     }
 
@@ -79,7 +79,22 @@ impl View {
     }
 }
 
-fn hover_message(view: &View, buf: &mut ratatui::buffer::Buffer, area: Rect, at: Position) {
+/// The hover on every row of the section (first, last) on screen: the rows of the window, minus
+/// the rows cut on top.
+fn hover_section(view: &View, buf: &mut ratatui::buffer::Buffer, window: &StreamFrame, (first, last): (usize, usize)) {
+    let top = window.start + window.cut;
+    let last = last.min(window.end.saturating_sub(1));
+
+    for drawn_row in first.max(top)..=last {
+        let y = window.shown.y + (drawn_row - top) as u16;
+
+        if y < window.shown.bottom() {
+            hover_message(view, buf, window.area, y);
+        }
+    }
+}
+
+fn hover_message(view: &View, buf: &mut ratatui::buffer::Buffer, area: Rect, y: u16) {
     // bubbles: the hover stays inside the box's borders
     let (x0, x1) = if view.stream.look == chat::Look::Bubbles {
         (area.x + 2, area.right().saturating_sub(2))
@@ -91,7 +106,7 @@ fn hover_message(view: &View, buf: &mut ratatui::buffer::Buffer, area: Rect, at:
         buf,
         Rect {
             x: x0,
-            y: at.y,
+            y,
             width: x1.saturating_sub(x0),
             height: 1,
         },

@@ -167,15 +167,7 @@ pub(super) fn draw_run(
 
     let shown = fold.run(key);
     let running = calls.iter().any(|call| call.output.is_none()) && thread.busy.contains(agent);
-
-    let mark = if shown {
-        "▾ "
-    } else if running {
-        "◦ "
-    } else {
-        "▸ "
-    };
-
+    let mark = fold.run_mark(key, running);
     let failed = calls
         .iter()
         .filter(|call| matches!(call.output, Some((false, _))))
@@ -209,6 +201,7 @@ pub(super) fn draw_run(
     }
 
     drawn.rows.extend(rows);
+    let body_at = drawn.rows.len();
 
     if think && !shown {
         for calls_before in 0..=calls.len() {
@@ -219,6 +212,8 @@ pub(super) fn draw_run(
     if shown {
         draw_run_calls(inner, drawn, bar, calls, thoughts, think, &tbar);
     }
+
+    drawn.body(body_at, Hit::Run(key));
 }
 pub(super) fn draw_run_calls(
     inner: usize,

@@ -14,6 +14,18 @@ impl View {
 
         mouse_select(self, row, col);
     }
+
+    /// A click (0 drag) on the body of a section (an open run, a long report): it toggles the
+    /// section, as a click on its head.
+    pub(super) fn mouse_body(&mut self) {
+        let Some(((row, _), (_, _, 1))) = self.selection.drag_from.zip(self.selection.clicks) else {
+            return;
+        };
+
+        if let Some(hit) = self.stream.drawn.bodies.get(&row).copied() {
+            toggle_hit(self, hit);
+        }
+    }
 }
 fn toggle_fold(folds: &mut HashSet<usize>, key: usize) {
     if !folds.remove(&key) {
@@ -64,31 +76,27 @@ fn mouse_copy(view: &mut View, row: usize, col: u16) -> bool {
 }
 
 fn mouse_hit(view: &mut View, row: usize) -> bool {
-    match view.stream.drawn.hits.get(&row).cloned() {
-        Some(Hit::Thought(key)) => {
+    let Some(hit) = view.stream.drawn.hits.get(&row).copied() else {
+        return false;
+    };
+
+    toggle_hit(view, hit);
+    true
+}
+
+fn toggle_hit(view: &mut View, hit: Hit) {
+    match hit {
+        Hit::Thought(key) => {
             toggle_fold(&mut view.stream.open_thoughts, key);
-
             view.stream.dirty = true;
-            return true;
         }
-        Some(Hit::Run(key)) => {
+        Hit::Run(key) => {
             toggle_fold(&mut view.stream.open, key);
-
             view.stream.dirty = true;
-            return true;
         }
-        Some(Hit::PickUp(i)) => {
-            view.pick_up(i);
-            return true;
-        }
-        Some(Hit::Choice(i)) => {
-            mouse_choice(view, i);
-            return true;
-        }
-        None => {}
+        Hit::PickUp(i) => view.pick_up(i),
+        Hit::Choice(i) => mouse_choice(view, i),
     }
-
-    false
 }
 
 fn mouse_choice(view: &mut View, i: usize) {

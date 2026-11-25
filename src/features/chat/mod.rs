@@ -127,7 +127,7 @@ pub(crate) struct Thread {
 }
 
 /// What a row of the stream does on a click.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Hit {
     Run(usize),
     /// Pick up of lost subagent I (index in `Thread::subs`).
@@ -153,6 +153,17 @@ impl Fold<'_> {
         self.all_runs || self.runs.contains(&key)
     }
 
+    /// The mark before run KEY: `▾` open, `◦` RUNNING, else `▸`.
+    fn run_mark(&self, key: usize, running: bool) -> &'static str {
+        if self.run(key) {
+            "▾ "
+        } else if running {
+            "◦ "
+        } else {
+            "▸ "
+        }
+    }
+
     /// The thoughts above message KEY: open.
     fn thought(&self, key: usize) -> bool {
         self.thoughts == Thoughts::Open || self.all_thoughts || self.open_thoughts.contains(&key)
@@ -164,11 +175,46 @@ impl Fold<'_> {
 pub(crate) struct Drawn {
     pub rows: Vec<Row>,
     pub hits: HashMap<usize, Hit>,
+    /// The body rows of a section (an open run, a long report): a click on them toggles the
+    /// section on release, so a drag over them still selects text.
+    pub bodies: HashMap<usize, Hit>,
     /// Where the view draws the working wave (3 cols): row, col, color (bubbles: the box of an
     /// agent at work).
     pub waves: Vec<(usize, u16, Color)>,
     /// Per item: its 1st row (the scroll anchor of a view scrolled back).
     pub starts: Vec<usize>,
+}
+
+impl Drawn {
+    /// The rows from FROM to the end: the body of the section HIT.
+    pub(crate) fn body(&mut self, from: usize, hit: Hit) {
+        for i in from..self.rows.len() {
+            self.bodies.insert(i, hit);
+        }
+    }
+
+    /// What a click on ROW toggles: its own hit, else the section of its body.
+    pub(crate) fn section_hit(&self, row: usize) -> Option<&Hit> {
+        self.hits.get(&row).or_else(|| self.bodies.get(&row))
+    }
+
+    /// The rows (first, last) of the section around ROW: its rows in a row with the same hit.
+    pub(crate) fn section(&self, row: usize) -> Option<(usize, usize)> {
+        let hit = self.section_hit(row)?;
+        let same = |i: usize| self.section_hit(i) == Some(hit);
+        let mut first = row;
+        let mut last = row;
+
+        while first > 0 && same(first - 1) {
+            first -= 1;
+        }
+
+        while same(last + 1) {
+            last += 1;
+        }
+
+        Some((first, last))
+    }
 }
 
 /// Colors of the agents (name → color).
