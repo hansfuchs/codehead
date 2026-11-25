@@ -5847,6 +5847,37 @@ mod subagent_tests {
         assert_eq!(last["to"], serde_json::json!(["ada"]));
         assert!(text.contains("“fix the build”") && text.contains("/x/agent-2.jsonl") && text.contains("> do fix the build"), "{text}");
     }
+
+    /// A message of the master resumes an ended subagent: the card shows `subagents…`, the
+    /// running row lists it; the old block keeps the 1st report; the rerun's end: a 2nd block
+    /// at the bottom.
+    #[test]
+    fn a_resumed_subagent_reports_in_a_2nd_block_at_the_bottom() {
+        let (tx, _rx) = crate::bus::channel();
+        let mut v = View::new("subtest-0002", Path::new("/tmp"), "t", tx);
+        v.members = vec!["ada".into()];
+        v.thread.push(&ev("ada", 1_000, start("t1", None, "fix the flakes", true)));
+        v.thread.push(&ev("ada", 61_000, store::Kind::SubEnd { id: "t1".into(), state: "done".into(), result: "fixed 12 of 13".into() }));
+        assert!(!v.thread.working("ada"));
+        v.thread.push(&ev("ada", 100_000, store::Kind::SubResume { id: "t1".into() }));
+        assert!(v.thread.working("ada") && !v.thread.busy.contains("ada"), "resumed: ada works");
+        v.dirty = true;
+        let s = screen(&mut v);
+        let count = |s: &[String], x: &str| s.iter().filter(|r| r.contains(x)).count();
+        assert!(s.iter().any(|r| r.contains("subagents…")), "the agent card: {s:#?}");
+        assert!(s.iter().any(|r| r.contains("subagents (1)")), "the running row: {s:#?}");
+        assert_eq!(count(&s, "↳ subagent “fix the flakes” · done · 1m00s"), 1, "the old block, as it was: {s:#?}");
+        assert_eq!(count(&s, "↳ subagent “fix the flakes”"), 1, "0 2nd block while it runs: {s:#?}");
+        v.thread.push(&ev("ada", 130_000, store::Kind::SubEnd { id: "t1".into(), state: "done".into(), result: "fixed the 13th".into() }));
+        assert!(!v.thread.working("ada"));
+        v.dirty = true;
+        let s = screen(&mut v);
+        let at = |x: &str| s.iter().position(|r| r.contains(x)).unwrap_or_else(|| panic!("{x}: {s:#?}"));
+        let (old, first, new, second) = (at("“fix the flakes” · done · 1m00s"), at("fixed 12 of 13"), at("“fix the flakes” · resumed · done · 30s"), at("fixed the 13th"));
+        assert!(old < first && first < new && new < second, "old block, then the rerun's block below: {s:#?}");
+        assert_eq!(count(&s, "fixed 12 of 13"), 1, "{s:#?}");
+        assert!(!s.iter().any(|r| r.contains("subagents (")), "0 running: 0 row");
+    }
 }
 
 #[cfg(test)]

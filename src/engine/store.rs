@@ -423,6 +423,9 @@ pub enum Kind {
     SubInfo { id: String, transcript: String, task: String },
     /// Subagent ID ended: STATE `done`, `failed`, `stopped` or `lost`; RESULT its report (or why).
     SubEnd { id: String, state: String, result: String },
+    /// Subagent ID, ended, runs again (its master sent it a message: Claude Code `SendMessage`).
+    /// A later `SubEnd` ends it again.
+    SubResume { id: String },
     /// A sub-thread of this thread (`>sub`): STATE `running` (started, TEXT: its task), `done` /
     /// `failed` (TEXT: its result), `held` (a message waits for the sub-threads to end).
     SubThread { id: String, title: String, state: String, text: String },

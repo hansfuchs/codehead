@@ -31,7 +31,19 @@ pub struct Run {
     /// Claude Code: its transcript, its agent id (the task id of TaskStop).
     pub transcript: Option<PathBuf>,
     pub task: String,
+    /// Resumed at (unix ms; 0: never): a `finished` meta file older than this is its last end.
+    pub resumed: u64,
 }
+
+/// An ended subagent whose files changed this long (ms) after its end: resumed.
+const RESUME_GAP: u64 = 2_000;
+
+/// A resumed subagent: its meta file stays `finished` and its transcript unchanged this long
+/// (ms): the resume never ran (it ends again).
+const RESUME_WAIT: u64 = 30_000;
+
+/// Ended subagents this old (ms) count as done for good: 0 scans for a resume.
+const RESUMABLE: u64 = 24 * 60 * 60 * 1000;
 
 /// Events to log: (master, kind).
 pub type Logs = Vec<(String, Kind)>;
@@ -42,6 +54,8 @@ pub struct Tracker {
     pub running: HashMap<String, Run>,
     /// Ended ids: a later scan never starts them again.
     ended: HashSet<String>,
+    /// Ended ones, by id: (the run, its end in unix ms). A message of the master resumes them.
+    done: HashMap<String, (Run, u64)>,
     /// Claude Code session id → its `subagents` dir, when found (found again after `REDIR`).
     dirs: HashMap<String, (PathBuf, std::time::Instant)>,
     /// Meta files older than this (ms) belong to earlier processes.
@@ -159,12 +173,37 @@ impl Tracker {
     pub fn from_log(events: &[Event]) -> (Tracker, Logs) {
         let mut t = Tracker { since: super::now_ms(), ..Default::default() };
         let mut open: Vec<(String, String)> = Vec::new();
+        let mut runs: HashMap<String, Run> = HashMap::new();
         for e in events {
+            let agent = e.agent.clone().unwrap_or_default();
             match &e.kind {
-                Kind::SubStart { id, .. } => open.push((e.agent.clone().unwrap_or_default(), id.clone())),
+                Kind::SubStart { id, parent, description, background, .. } => {
+                    open.push((agent.clone(), id.clone()));
+                    runs.insert(id.clone(), Run { agent, description: description.clone(), background: *background, nested: parent.is_some(), ..Default::default() });
+                }
+                Kind::SubInfo { id, transcript, task } => {
+                    if let Some(r) = runs.get_mut(id) {
+                        if !transcript.is_empty() {
+                            r.transcript = Some(PathBuf::from(transcript));
+                        }
+                        if !task.is_empty() {
+                            r.task = task.clone();
+                        }
+                    }
+                }
                 Kind::SubEnd { id, .. } => {
                     t.ended.insert(id.clone());
                     open.retain(|(_, x)| x != id);
+                    if let Some(r) = runs.get(id) {
+                        t.done.insert(id.clone(), (r.clone(), e.ts));
+                    }
+                }
+                Kind::SubResume { id } => {
+                    t.ended.remove(id);
+                    t.done.remove(id);
+                    if !open.iter().any(|(_, x)| x == id) {
+                        open.push((agent, id.clone()));
+                    }
                 }
                 _ => {}
             }
@@ -173,6 +212,9 @@ impl Tracker {
             .into_iter()
             .map(|(a, id)| {
                 t.ended.insert(id.clone());
+                if let Some(r) = runs.remove(&id) {
+                    t.done.insert(id.clone(), (r, t.since));
+                }
                 (a, Kind::SubEnd { id, state: "lost".into(), result: "codehead's thread host restarted: the harness process that ran it is gone".into() })
             })
             .collect();
@@ -187,6 +229,32 @@ impl Tracker {
     /// Masters with running subagents.
     pub fn masters(&self) -> HashSet<String> {
         self.running.values().map(|r| r.agent.clone()).collect()
+    }
+
+    /// Ended subagents with files (Claude Code), ended in the last RESUMABLE: a message of their
+    /// master can resume them.
+    pub fn resumable(&self) -> bool {
+        let since = super::now_ms().saturating_sub(RESUMABLE);
+        self.done.values().any(|(r, end)| r.transcript.is_some() && *end >= since)
+    }
+
+    /// ID ends: out of the running ones, kept with its end time for a resume.
+    fn end(&mut self, id: &str) -> Option<Run> {
+        let r = self.running.remove(id)?;
+        self.ended.insert(id.to_string());
+        self.done.insert(id.to_string(), (r.clone(), super::now_ms()));
+        Some(r)
+    }
+
+    /// Ended subagent ID runs again. It ends with its meta file (0 tool result of its master).
+    fn resume(&mut self, id: &str) -> Logs {
+        let Some((mut r, _)) = self.done.remove(id) else { return Vec::new() };
+        self.ended.remove(id);
+        r.resumed = super::now_ms();
+        r.background = true;
+        let agent = r.agent.clone();
+        self.running.insert(id.to_string(), r);
+        vec![(agent, Kind::SubResume { id: id.to_string() })]
     }
 
     /// An event of AGENT: a task tool call starts a subagent; its result ends it (a background
@@ -217,10 +285,15 @@ impl Tracker {
                     }
                     return Vec::new();
                 }
-                let r = self.running.remove(id).expect("checked");
-                self.ended.insert(id.clone());
+                let r = self.end(id).expect("checked");
                 let result = r.transcript.as_deref().and_then(result_of).filter(|_| *ok).unwrap_or_else(|| output.clone());
                 vec![(agent.into(), Kind::SubEnd { id: id.clone(), state: if *ok { "done" } else { "failed" }.into(), result })]
+            }
+            // a message to an ended subagent (Claude Code `SendMessage`, `to`: its agent id) resumes it
+            Kind::Tool { name, input, .. } if name == "SendMessage" => {
+                let to = input["to"].as_str().unwrap_or_default();
+                let id = self.done.iter().find(|(_, (r, _))| r.agent == agent && !to.is_empty() && r.task == to).map(|(id, _)| id.clone());
+                id.map(|id| self.resume(&id)).unwrap_or_default()
             }
             _ => Vec::new(),
         }
@@ -231,8 +304,7 @@ impl Tracker {
         let ids: Vec<String> = self.running.iter().filter(|(_, r)| r.agent == agent).map(|(id, _)| id.clone()).collect();
         ids.into_iter()
             .map(|id| {
-                self.running.remove(&id);
-                self.ended.insert(id.clone());
+                self.end(&id);
                 (agent.to_string(), Kind::SubEnd { id, state: "lost".into(), result: why.to_string() })
             })
             .collect()
@@ -240,9 +312,7 @@ impl Tracker {
 
     /// The owner stops ID: it leaves the tracker (its end is logged by the caller).
     pub fn stop(&mut self, id: &str) -> Option<Run> {
-        let r = self.running.remove(id)?;
-        self.ended.insert(id.to_string());
-        Some(r)
+        self.end(id)
     }
 
     /// The `subagents` dir of Claude Code session SID under ROOT (`~/.claude/projects`).
@@ -280,13 +350,23 @@ impl Tracker {
                         r.task = task.clone();
                         logs.push((agent.clone(), Kind::SubInfo { id: tool.clone(), transcript: transcript.display().to_string(), task: task.clone() }));
                     }
+                    // resumed: a `finished` from before the resume is its last end, unless the
+                    // resume never ran (0 change of its files in RESUME_WAIT)
+                    let now = super::now_ms();
+                    let fresh = r.resumed == 0 || mtime_ms(&meta_path) > r.resumed || (now.saturating_sub(r.resumed) > RESUME_WAIT && mtime_ms(&transcript) <= r.resumed);
                     // a background or nested one ends here; a foreground one with its tool result
-                    if finished && (r.background || r.nested) {
-                        self.running.remove(&tool);
-                        self.ended.insert(tool.clone());
+                    if finished && fresh && (r.background || r.nested) {
+                        self.end(&tool);
                         let result = result_of(&transcript).unwrap_or_else(|| "(0 report)".into());
                         logs.push((agent.clone(), Kind::SubEnd { id: tool, state: "done".into(), result }));
                     }
+                    continue;
+                }
+                // an ended one whose files changed after its end, 0 `finished`: resumed (a
+                // message the events missed: of a subagent, before a host restart)
+                let changed = |end: u64| mtime_ms(&meta_path) > end + RESUME_GAP && mtime_ms(&transcript) > end + RESUME_GAP;
+                if !finished && self.done.get(&tool).is_some_and(|(r, end)| r.agent == *agent && changed(*end)) {
+                    logs.extend(self.resume(&tool));
                     continue;
                 }
                 if finished || self.ended.contains(&tool) || mtime_ms(&transcript).max(mtime_ms(&meta_path)) < self.since {
@@ -301,7 +381,7 @@ impl Tracker {
                     .map(|(id, _)| id.clone());
                 let description = meta["description"].as_str().map(String::from).unwrap_or_else(|| "subagent".into());
                 let background = meta["requestShape"] == "background";
-                self.running.insert(tool.clone(), Run { agent: agent.clone(), description: description.clone(), background, nested: true, transcript: Some(transcript.clone()), task: task.clone() });
+                self.running.insert(tool.clone(), Run { agent: agent.clone(), description: description.clone(), background, nested: true, transcript: Some(transcript.clone()), task: task.clone(), resumed: 0 });
                 let agent_type = meta["agentType"].as_str().unwrap_or_default().to_string();
                 logs.push((agent.clone(), Kind::SubStart { id: tool.clone(), parent, description, agent_type, background, prompt: prompt_of(&transcript) }));
                 logs.push((agent.clone(), Kind::SubInfo { id: tool, transcript: transcript.display().to_string(), task }));
@@ -416,6 +496,80 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert!(matches!(&logs[0].1, Kind::SubEnd { id, state, .. } if id == "a" && state == "lost"));
         assert!(!t.any());
+    }
+
+    /// A background subagent ended; its master's `SendMessage` to its agent id resumes it. A
+    /// `finished` meta file from before the resume does not end it; a new one does.
+    #[test]
+    fn a_message_to_an_ended_subagent_resumes_it_until_its_meta_file_ends_it_again() {
+        let root = std::env::temp_dir().join(format!("codehead-subs-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("proj/s1/subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.join("proj/s1.jsonl"), "").unwrap();
+        let sessions = [("ada".to_string(), "s1".to_string())];
+        let (mut t, _) = Tracker::from_log(&[]);
+        t.since = 0;
+        t.event("ada", &tool("t1", json!({"description": "stream C"})));
+        t.event("ada", &Kind::ToolResult { id: "t1".into(), ok: true, output: "Async agent launched successfully.\nagentId: c1 (internal)".into() });
+        std::fs::write(dir.join("agent-c1.meta.json"), json!({"toolUseId": "t1", "finished": true}).to_string()).unwrap();
+        std::fs::write(dir.join("agent-c1.jsonl"), "").unwrap();
+        assert!(t.scan(&root, &sessions).iter().any(|(_, k)| matches!(k, Kind::SubEnd { id, .. } if id == "t1")));
+        assert!(!t.any() && t.resumable());
+        // a message to another id or of another agent: 0 resume
+        let send = |to: &str| Kind::Tool { id: format!("m-{to}"), name: "SendMessage".into(), input: json!({"to": to, "message": "go on"}) };
+        assert!(t.event("ada", &send("x9")).is_empty());
+        assert!(t.event("bob", &send("c1")).is_empty());
+        let logs = t.event("ada", &send("c1"));
+        assert!(matches!(&logs[..], [(a, Kind::SubResume { id })] if a == "ada" && id == "t1"), "{logs:?}");
+        assert_eq!(t.masters(), HashSet::from(["ada".to_string()]));
+        // the old `finished` meta file (from before the resume): still running
+        assert!(t.scan(&root, &sessions).is_empty());
+        assert!(t.any());
+        // a 2nd message while it runs: 0 2nd resume
+        assert!(t.event("ada", &send("c1")).is_empty());
+        // its new end
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("agent-c1.meta.json"), json!({"toolUseId": "t1", "finished": true}).to_string()).unwrap();
+        let logs = t.scan(&root, &sessions);
+        assert!(logs.iter().any(|(_, k)| matches!(k, Kind::SubEnd { id, state, .. } if id == "t1" && state == "done")), "{logs:?}");
+        assert!(!t.any());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A resume the events missed: the meta file of an ended subagent changed after its end, 0
+    /// `finished`, its transcript grew: the scan resumes it.
+    #[test]
+    fn a_scan_resumes_an_ended_subagent_whose_files_changed_after_its_end() {
+        let root = std::env::temp_dir().join(format!("codehead-subs-rescan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("proj/s1/subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.join("proj/s1.jsonl"), "").unwrap();
+        std::fs::write(dir.join("agent-d1.meta.json"), json!({"toolUseId": "t1"}).to_string()).unwrap();
+        std::fs::write(dir.join("agent-d1.jsonl"), "").unwrap();
+        let sessions = [("ada".to_string(), "s1".to_string())];
+        let ev = |ts: u64, kind: Kind| Event { ts, agent: Some("ada".into()), kind };
+        let now = crate::engine::now_ms();
+        let transcript = dir.join("agent-d1.jsonl").display().to_string();
+        // the log: it ended a minute ago (its files: changed since, 0 `finished`)
+        let log = [
+            ev(now - 120_000, Kind::SubStart { id: "t1".into(), parent: None, description: "stream D".into(), agent_type: String::new(), background: true, prompt: String::new() }),
+            ev(now - 120_000, Kind::SubInfo { id: "t1".into(), transcript, task: "d1".into() }),
+            ev(now - 60_000, Kind::SubEnd { id: "t1".into(), state: "done".into(), result: "r".into() }),
+        ];
+        let (mut t, lost) = Tracker::from_log(&log);
+        assert!(lost.is_empty() && t.resumable());
+        let logs = t.scan(&root, &sessions);
+        assert!(matches!(&logs[..], [(_, Kind::SubResume { id })] if id == "t1"), "{logs:?}");
+        assert!(t.any());
+        // a log with the resume, the host restarts: lost, resumable again
+        let mut log = log.to_vec();
+        log.push(ev(now - 30_000, Kind::SubResume { id: "t1".into() }));
+        let (t, lost) = Tracker::from_log(&log);
+        assert!(matches!(&lost[..], [(_, Kind::SubEnd { id, state, .. })] if id == "t1" && state == "lost"), "{lost:?}");
+        assert!(!t.any() && t.resumable());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

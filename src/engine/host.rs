@@ -1414,6 +1414,10 @@ pub fn run(id: &str) -> ! {
     for (a, k) in lost {
         h.log(Some(&a), k);
     }
+    // ended subagents resumed while 0 host ran (or an older one missed it)
+    if h.subagents.resumable() {
+        h.scan_subs();
+    }
     // the hooks of the repo change: each host start pins the worktree again
     if let (Some(wt), Some(b), None) = (t.worktree.clone(), t.branch.clone(), &t.worktree_pending) {
         std::thread::spawn(move || pin_branch(Path::new(&wt), &b));
@@ -1451,7 +1455,9 @@ pub fn run(id: &str) -> ! {
         if h.stopping || SIGNALED.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
-        if h.subagents.any() && h.sub_scan.elapsed() >= Duration::from_secs(2) {
+        // running ones: every 2 s; ended ones a message can resume: every 10 s
+        let every = Duration::from_secs(if h.subagents.any() { 2 } else { 10 });
+        if (h.subagents.any() || h.subagents.resumable()) && h.sub_scan.elapsed() >= every {
             h.scan_subs();
         }
         h.run_resumes();

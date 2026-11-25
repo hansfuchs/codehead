@@ -69,6 +69,8 @@ pub struct Sub {
     pub state: Option<String>,
     pub result: String,
     pub end: u64,
+    /// A rerun: its master resumed it after an earlier end (that run: an earlier `Sub`, same id).
+    pub resumed: bool,
 }
 
 impl Sub {
@@ -292,7 +294,8 @@ impl Thread {
                 }
             }
             Kind::SubInfo { id, transcript, task } => {
-                if let Some(s) = self.subs.iter_mut().find(|s| &s.id == id) {
+                // a rerun: its newest run
+                if let Some(s) = self.subs.iter_mut().rev().find(|s| &s.id == id) {
                     if !transcript.is_empty() {
                         s.transcript = transcript.clone();
                     }
@@ -311,6 +314,15 @@ impl Thread {
                     self.open_run.remove(&agent);
                     self.runs += 1;
                     self.items.push(Item::Sub { agent, sub: i, ts: e.ts, key: self.runs });
+                }
+            }
+            // an ended subagent runs again: a new `Sub` (same id); the old one keeps its report
+            // and row, the rerun's end gets its own row
+            Kind::SubResume { id } => {
+                let last = self.subs.iter().rposition(|s| &s.id == id);
+                if let Some(old) = last.map(|i| &self.subs[i]).filter(|s| !s.running()) {
+                    let rerun = Sub { start: e.ts, state: None, result: String::new(), end: 0, resumed: true, ..old.clone() };
+                    self.subs.push(rerun);
                 }
             }
         }
@@ -442,7 +454,7 @@ fn sub_rows(d: &mut Drawn, s: &Sub, sub: usize, key: usize, fold: &Fold, w: usiz
     let head = [bar.to_vec(), vec![
         Span::styled("↳ subagent ", theme::accent()),
         Span::styled(format!("“{}”", s.description), theme::bold()),
-        Span::styled(" · ", theme::muted()),
+        Span::styled(if s.resumed { " · resumed · " } else { " · " }, theme::muted()),
         Span::styled(state.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
         Span::styled(format!(" · {took}"), theme::muted()),
     ]]
