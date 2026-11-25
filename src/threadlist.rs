@@ -1,8 +1,8 @@
 //! The thread list of both threads tabs: the menu's (ctrl+p: a quick switch, type to filter) and
-//! the start screen's (manage: preview, multi-select, letter keys). 1 look: thread cards in
-//! sections (open · stale · shipped), the repo tabs, the view tabs (active ·
-//! archived; the start screen also: worktrees without thread, claude sessions: their rows are the
-//! host's), a name filter.
+//! the start screen's (manage: preview, multi-select, letter keys). 1 look: thread cards, the repo
+//! tabs, the project tabs, the view tabs (active · archived; the start screen also: worktrees
+//! without thread, claude sessions: their rows are the host's), the status tabs (open · stale ·
+//! shipped · all: a fixed row above the list, out of its scroll), a name filter.
 //!
 //! Actions on the card under the cursor (the start screen: or the selection): open, archive /
 //! unarchive, edit, delete. ctrl+.: their dropdown (both tabs); the start screen also: a u e d.
@@ -60,12 +60,13 @@ impl View {
     }
 }
 
-/// Where the keys go: the repo tabs, the view tabs, the list.
+/// Where the keys go: the repo tabs, the project tabs, the view tabs, the status tabs, the list.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Repos,
     Projects,
     Views,
+    Status,
     List,
 }
 
@@ -167,6 +168,50 @@ impl ProjTab {
     }
 }
 
+/// A status tab of the active view: the cards of 1 section, or all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusTab {
+    Open,
+    Stale,
+    Shipped,
+    All,
+}
+
+impl StatusTab {
+    const ALL: [StatusTab; 4] = [StatusTab::Open, StatusTab::Stale, StatusTab::Shipped, StatusTab::All];
+
+    /// The tab of section S (`ThreadList::section`).
+    fn of(s: u8) -> StatusTab {
+        match s {
+            0 => StatusTab::Open,
+            1 => StatusTab::Stale,
+            _ => StatusTab::Shipped,
+        }
+    }
+
+    pub fn keeps(self, section: u8) -> bool {
+        self == StatusTab::All || self == StatusTab::of(section)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            StatusTab::Open => "open",
+            StatusTab::Stale => "stale",
+            StatusTab::Shipped => "shipped",
+            StatusTab::All => "all",
+        }
+    }
+
+    /// Muted text right of the tabs, while the tab is picked.
+    fn hint(self) -> &'static str {
+        match self {
+            StatusTab::Stale => "0 code or on main, idle 3+ days: go on or archive",
+            StatusTab::Shipped => "archive?",
+            _ => "",
+        }
+    }
+}
+
 fn repo_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
 }
@@ -175,23 +220,6 @@ fn repo_name(p: &Path) -> String {
 struct Pending {
     act: Act,
     ids: Vec<String>,
-}
-
-/// A list row: a section label or a card (its position in `visible`).
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Row {
-    Label(u8, usize),
-    Card(usize),
-}
-
-impl Row {
-    /// Rows of the row; H: rows of the card at a position.
-    fn height(self, h: impl Fn(usize) -> u16) -> u16 {
-        match self {
-            Row::Label(..) => 1,
-            Row::Card(pos) => h(pos),
-        }
-    }
 }
 
 /// A job's result shows this long.
@@ -240,6 +268,9 @@ pub struct ThreadList {
     proj_pick: ProjTab,
     views: TabGroup,
     pub view: View,
+    stats: TabGroup,
+    /// The picked status tab (None: the section of the thread in view, else open).
+    pub stat_pick: Option<StatusTab>,
     pub focus: Focus,
     /// Manage: rows of the host's views (worktrees, claude): the counts on the view tabs, their
     /// repos in the repo tabs.
@@ -297,6 +328,8 @@ impl ThreadList {
             proj_pick: ProjTab::All,
             views: TabGroup::default(),
             view: View::Active,
+            stats: TabGroup::default(),
+            stat_pick: None,
             focus: Focus::List,
             extra: Default::default(),
             actions: None,
@@ -558,6 +591,37 @@ impl ThreadList {
         }
     }
 
+    /// The status tabs show (the active view only).
+    pub fn has_stats(&self) -> bool {
+        self.view == View::Active
+    }
+
+    /// The status tab in use: the pick, else the section of the thread in view, else open.
+    pub fn stat_tab(&self) -> StatusTab {
+        if let Some(p) = self.stat_pick {
+            return p;
+        }
+        self.here.as_deref().and_then(|id| self.cards.iter().find(|c| c.id == id && !c.archived())).map_or(StatusTab::Open, |c| StatusTab::of(Self::section(c)))
+    }
+
+    pub fn step_stat(&mut self, d: isize) {
+        self.stats.i = StatusTab::ALL.iter().position(|t| *t == self.stat_tab()).unwrap_or(0);
+        self.stats.step(d, StatusTab::ALL.len());
+        self.stat_pick = Some(StatusTab::ALL[self.stats.i]);
+        self.cursor = 0;
+        self.offset = 0;
+    }
+
+    /// Cards per status tab (filter, repo, project tabs applied).
+    fn stat_counts(&self) -> [usize; 4] {
+        let mut n = [0; 4];
+        for i in self.base() {
+            n[Self::section(&self.cards[i]) as usize] += 1;
+            n[3] += 1;
+        }
+        n
+    }
+
     // ---------- rows ----------
 
     /// Section of card C: 0 open (working, a question, work not in the base yet, 0 code yet, 0
@@ -577,46 +641,29 @@ impl ThreadList {
         }
     }
 
-    /// The cards of the view (filter, repo tab applied), by section, then match / activity.
-    pub fn visible(&self) -> Vec<usize> {
+    /// The cards of the view (filter, repo and project tabs applied), match / activity order.
+    fn base(&self) -> Vec<usize> {
         if !self.view.cards() {
             return Vec::new();
         }
         let tab = self.repo_tab();
         let proj = self.proj_tab();
         let archived = self.view == View::Archived;
-        let mut v: Vec<usize> = nav::filter(&self.cards, &self.filter.text())
+        nav::filter(&self.cards, &self.filter.text())
             .into_iter()
             .filter(|&i| self.cards[i].archived() == archived && tab.keeps(self.cards[i].repo.as_deref()) && proj.keeps(&self.cards[i].projects))
-            .collect();
-        if !archived {
+            .collect()
+    }
+
+    /// The cards of the view, status tab applied (active: by section, then match / activity).
+    pub fn visible(&self) -> Vec<usize> {
+        let mut v = self.base();
+        if self.has_stats() {
+            let st = self.stat_tab();
+            v.retain(|&i| st.keeps(Self::section(&self.cards[i])));
             v.sort_by_key(|&i| Self::section(&self.cards[i]));
         }
         v
-    }
-
-    fn layout(&self, vis: &[usize]) -> Vec<Row> {
-        let mut rows = Vec::new();
-        let mut last = None;
-        for (pos, &i) in vis.iter().enumerate() {
-            let s = if self.view == View::Archived { 9 } else { Self::section(&self.cards[i]) };
-            if last != Some(s) {
-                let n = vis.iter().filter(|&&j| if self.view == View::Archived { true } else { Self::section(&self.cards[j]) == s }).count();
-                rows.push(Row::Label(s, n));
-                last = Some(s);
-            }
-            rows.push(Row::Card(pos));
-        }
-        rows
-    }
-
-    fn label_text(s: u8, n: usize) -> String {
-        match s {
-            0 => format!("open · {n}"),
-            1 => format!("stale · {n} · 0 code or on main, idle 3+ days: go on or archive"),
-            2 => format!("shipped: archive? · {n}"),
-            _ => format!("archived · {n} · branches kept, worktrees gone"),
-        }
     }
 
     pub fn current(&self) -> Option<&Card> {
@@ -838,8 +885,22 @@ impl ThreadList {
             Focus::Views => {
                 match k.code {
                     KeyCode::Up => self.focus = Focus::Projects,
+                    KeyCode::Down if self.has_stats() => self.focus = Focus::Status,
                     KeyCode::Down | KeyCode::Enter => self.focus = Focus::List,
                     KeyCode::Left | KeyCode::Right => self.step_view(if k.code == KeyCode::Right { 1 } else { -1 }),
+                    KeyCode::Char(_) if self.mode == Mode::Switch && !ctrl => {
+                        self.focus = Focus::List;
+                        self.type_filter(k);
+                    }
+                    _ => return Out::Pass,
+                }
+                Out::None
+            }
+            Focus::Status => {
+                match k.code {
+                    KeyCode::Up => self.focus = Focus::Views,
+                    KeyCode::Down | KeyCode::Enter => self.focus = Focus::List,
+                    KeyCode::Left | KeyCode::Right => self.step_stat(if k.code == KeyCode::Right { 1 } else { -1 }),
                     KeyCode::Char(_) if self.mode == Mode::Switch && !ctrl => {
                         self.focus = Focus::List;
                         self.type_filter(k);
@@ -898,7 +959,7 @@ impl ThreadList {
         match k.code {
             KeyCode::Up | KeyCode::Char('k') if k.code == KeyCode::Up || self.mode == Mode::Manage => {
                 if self.cursor == 0 {
-                    self.focus = Focus::Views;
+                    self.focus = if self.has_stats() { Focus::Status } else { Focus::Views };
                 } else {
                     self.cursor -= 1;
                 }
@@ -1003,6 +1064,13 @@ impl ThreadList {
                     self.set_view(all[self.views.i.min(all.len() - 1)]);
                     return Out::None;
                 }
+                if self.has_stats() && self.stats.click(at) {
+                    self.focus = Focus::Status;
+                    self.stat_pick = StatusTab::ALL.get(self.stats.i).copied();
+                    self.cursor = 0;
+                    self.offset = 0;
+                    return Out::None;
+                }
                 let Some(&(_, pos)) = self.rows.iter().find(|(r, _)| r.contains(at)) else { return Out::Pass };
                 self.focus = Focus::List;
                 // the menu: a click opens; the start screen: a click picks, a 2nd opens
@@ -1082,6 +1150,22 @@ impl ThreadList {
         self.views.i = all.iter().position(|v| *v == self.view).unwrap_or(0);
         let labels: Vec<String> = all.iter().map(|v| self.view_label(*v)).collect();
         self.views.draw(f, row(3), "show   ", &labels, self.focus == Focus::Views);
+        // status tabs (active) / the archived note: a fixed row, out of the list's scroll
+        let sr = row(4);
+        if self.has_stats() {
+            let st = self.stat_tab();
+            self.stats.i = StatusTab::ALL.iter().position(|t| *t == st).unwrap_or(0);
+            let n = self.stat_counts();
+            let labels: Vec<String> = StatusTab::ALL.iter().zip(n).map(|(t, n)| format!("{} {n}", t.label())).collect();
+            self.stats.draw(f, sr, "status ", &labels, self.focus == Focus::Status);
+            if let Some(x) = self.stats.end().filter(|_| !st.hint().is_empty()) {
+                let r = Rect { x: x + 1, width: sr.right().saturating_sub(x + 1), ..sr };
+                f.render_widget(Paragraph::new(Span::styled(st.hint(), theme::muted())), r);
+            }
+        } else if self.view == View::Archived {
+            let n = self.visible().len();
+            f.render_widget(Paragraph::new(Span::styled(format!("archived · {n} · branches kept, worktrees gone"), theme::muted().add_modifier(Modifier::BOLD))), sr);
+        }
         let mut list = Rect { y: area.y + 5, height: area.height.saturating_sub(5), ..area };
         // the question / the status: the last row
         let foot = Rect { y: list.bottom().saturating_sub(1), height: 1, ..list };
@@ -1128,6 +1212,8 @@ impl ThreadList {
                 "0 matches".into()
             } else if self.view == View::Archived {
                 "0 archived threads".into()
+            } else if self.stat_tab() != StatusTab::All {
+                format!("0 {} threads", self.stat_tab().label())
             } else if self.repo_tab() != RepoTab::All {
                 "0 threads in this repo".into()
             } else {
@@ -1137,20 +1223,17 @@ impl ThreadList {
             return;
         }
         self.cursor = self.cursor.min(vis.len() - 1);
-        let rows = self.layout(&vis);
         let h = |pos: usize| nav::card_h(&self.cards[vis[pos]]);
-        // virtual y of each row
-        let mut ys = Vec::with_capacity(rows.len());
+        // virtual y of each card
+        let mut ys = Vec::with_capacity(vis.len());
         let mut y = 0u16;
-        for r in &rows {
+        for pos in 0..vis.len() {
             ys.push(y);
-            y += r.height(h);
+            y += h(pos);
         }
         let total = y;
-        let ci = rows.iter().position(|r| *r == Row::Card(self.cursor)).unwrap_or(0);
-        // the label above the cursor's card stays in view with it
-        let top = if ci > 0 && matches!(rows[ci - 1], Row::Label(..)) { ys[ci - 1] } else { ys[ci] };
-        let bottom = ys[ci] + rows.get(ci).map_or(nav::CARD_H, |r| r.height(h));
+        let top = ys[self.cursor];
+        let bottom = top + h(self.cursor);
         if top < self.offset {
             self.offset = top;
         } else if bottom > self.offset + list.height {
@@ -1159,33 +1242,22 @@ impl ThreadList {
         self.offset = self.offset.min(total.saturating_sub(list.height));
         let notes = crate::notify::unseen(self.here.as_deref());
         let focused = self.focus == Focus::List && !self.filtering;
-        for (r, &vy) in rows.iter().zip(&ys) {
-            if vy < self.offset || vy + r.height(h) > self.offset + list.height {
-                continue;
+        let fits = |pos: usize| ys[pos] >= self.offset && ys[pos] + h(pos) <= self.offset + list.height;
+        for pos in (0..vis.len()).filter(|&p| fits(p)) {
+            let rect = Rect { y: list.y + ys[pos] - self.offset, height: h(pos), ..list };
+            let c = &self.cards[vis[pos]];
+            nav::draw_card(f.buffer_mut(), rect, c, pos == self.cursor && focused, self.here.as_deref() == Some(c.id.as_str()), true, tick);
+            crate::notify::card_badge(f.buffer_mut(), rect, &notes, &c.id);
+            if self.mode == Mode::Manage {
+                let on = self.sel.contains(&c.id);
+                let mark = if on { Span::styled(" ◼ ", theme::accent_bold()) } else { Span::styled(" ◻ ", theme::line()) };
+                f.render_widget(Paragraph::new(mark), Rect { x: rect.x + 1, y: rect.y, width: 3, height: 1 });
             }
-            let y = list.y + vy - self.offset;
-            match *r {
-                Row::Label(s, n) => {
-                    let st = if s == 2 { theme::fg(theme::pal().success()).add_modifier(Modifier::BOLD) } else { theme::muted().add_modifier(Modifier::BOLD) };
-                    f.render_widget(Paragraph::new(Span::styled(Self::label_text(s, n), st)), Rect { y, height: 1, ..list });
-                }
-                Row::Card(pos) => {
-                    let rect = Rect { y, height: h(pos), ..list };
-                    let c = &self.cards[vis[pos]];
-                    nav::draw_card(f.buffer_mut(), rect, c, pos == self.cursor && focused, self.here.as_deref() == Some(c.id.as_str()), true, tick);
-                    crate::notify::card_badge(f.buffer_mut(), rect, &notes, &c.id);
-                    if self.mode == Mode::Manage {
-                        let on = self.sel.contains(&c.id);
-                        let mark = if on { Span::styled(" ◼ ", theme::accent_bold()) } else { Span::styled(" ◻ ", theme::line()) };
-                        f.render_widget(Paragraph::new(mark), Rect { x: rect.x + 1, y: rect.y, width: 3, height: 1 });
-                    }
-                    self.rows.push((rect, pos));
-                }
-            }
+            self.rows.push((rect, pos));
         }
         self.fx.apply(f, list, self.version);
-        let above = rows.iter().zip(&ys).filter(|(r, y)| matches!(r, Row::Card(_)) && **y < self.offset).count();
-        let below = rows.iter().zip(&ys).filter(|(r, y)| matches!(r, Row::Card(_)) && **y + r.height(h) > self.offset + list.height).count();
+        let above = (0..vis.len()).filter(|&p| ys[p] < self.offset).count();
+        let below = (0..vis.len()).filter(|&p| ys[p] + h(p) > self.offset + list.height).count();
         if above + below > 0 {
             let r = Rect { y: list.y.saturating_sub(1), height: 1, ..list };
             f.render_widget(Paragraph::new(Span::styled(format!("{above}↑ · {below}↓"), theme::muted())).right_aligned(), r);
@@ -1238,7 +1310,8 @@ impl ThreadList {
         match (self.mode, self.focus) {
             (_, Focus::Repos) => vec![("←→", "repo"), ("↓", "projects"), ("↑", "tabs")],
             (_, Focus::Projects) => vec![("←→", "project"), ("↑", "repos"), ("↓", "views")],
-            (_, Focus::Views) => vec![("←→", "view"), ("↑", "projects"), ("↓", "list")],
+            (_, Focus::Views) => vec![("←→", "view"), ("↑", "projects"), ("↓", if self.has_stats() { "status" } else { "list" })],
+            (_, Focus::Status) => vec![("←→", "status"), ("↑", "views"), ("↓", "list")],
             (Mode::Switch, Focus::List) => vec![("type", "filter"), ("←→", "repo"), ("↑↓", "move"), ("enter", "open"), ("ctrl+.", "actions")],
             (Mode::Manage, Focus::List) => vec![("space", "select"), ("a", "archive"), ("u", "unarchive"), ("e", "edit"), ("d", "delete"), ("ctrl+.", "actions")],
         }
@@ -1549,28 +1622,65 @@ mod tests {
             card("old", |c| c.state = "archived".into()),
         ];
         let mut l = ThreadList::new(Mode::Switch, None, None, cards);
-        let ids: Vec<String> = l.visible().iter().map(|&i| l.cards[i].id.clone()).collect();
+        let ids = |l: &ThreadList| -> Vec<String> { l.visible().iter().map(|&i| l.cards[i].id.clone()).collect() };
+        // status tab open first: the open cards only
+        assert_eq!(l.stat_tab(), StatusTab::Open);
+        assert_eq!(ids(&l), ["idle", "asks", "busy", "plan", "onmain", "new", "loose"]);
         // 0 code: shipped only when the agents reported done; idle 3 days: stale (code: never);
         // a step to review: open; on main: never shipped (done or not), stale after 3 days
-        assert_eq!(ids, ["idle", "asks", "busy", "plan", "onmain", "new", "loose", "mainidle", "dusty", "waits", "shipped", "talk"]);
+        l.stat_pick = Some(StatusTab::All);
+        assert_eq!(ids(&l), ["idle", "asks", "busy", "plan", "onmain", "new", "loose", "mainidle", "dusty", "waits", "shipped", "talk"]);
         let s = screen(&mut l, 80, 120);
-        for x in ["open · 7", "stale · 3", "shipped: archive? · 2", "◇ 3 unpushed", "⇲ shipped", "⇲ nothing to ship", "auto-archive in 25d", "▷ step to review", "◌ on main · auto-archive in 26d"] {
+        for x in ["status     open 7   stale 3   shipped 2   all 12", "◇ 3 unpushed", "⇲ shipped", "⇲ nothing to ship", "auto-archive in 25d", "▷ step to review", "◌ on main · auto-archive in 26d"] {
             assert!(s.contains(x), "{x}: {s}");
         }
-        for x in ["needs you ·", "recent ·", "working ·", "threads ·"] {
+        // 0 section labels in the list (the status row holds them)
+        for x in ["open ·", "stale ·", "shipped: archive?", "needs you ·", "recent ·", "working ·", "threads ·"] {
             assert!(!s.contains(x), "{x}: {s}");
         }
         assert_eq!(s.matches("nothing to ship").count(), 1, "{s}");
         assert!(s.contains("active 12") && s.contains("archived 1") && !s.contains("old"), "{s}");
 
-        // ↑ from the 1st card: the view tabs; → archived
+        // ↑ from the 1st card: the status tabs; ← stale (its hint on the row); ↑ the view tabs
+        l.key(k(KeyCode::Up));
+        assert_eq!(l.focus, Focus::Status);
+        l.key(k(KeyCode::Left));
+        l.key(k(KeyCode::Left));
+        assert_eq!(l.stat_tab(), StatusTab::Stale);
+        assert_eq!(ids(&l), ["mainidle", "dusty", "waits"]);
+        let s = screen(&mut l, 100, 40);
+        assert!(s.contains("stale 3   shipped 2   all 12  0 code or on main, idle 3+ days"), "{s}");
+        // the filter narrows the counts too
+        l.filter.set_text("dusty");
+        let s = screen(&mut l, 100, 40);
+        assert!(s.contains("open 0   stale 1   shipped 0   all 1"), "{s}");
+        l.filter.set_text("");
         l.key(k(KeyCode::Up));
         assert_eq!(l.focus, Focus::Views);
         l.key(k(KeyCode::Right));
         l.key(k(KeyCode::Down));
-        assert_eq!((l.view, l.focus), (View::Archived, Focus::List));
+        assert_eq!((l.view, l.focus), (View::Archived, Focus::List), "archived: 0 status tabs, ↓ to the list");
         let s = screen(&mut l, 70, 40);
-        assert!(s.contains("old") && s.contains("archived · 1") && s.contains("▣ archived"), "{s}");
+        assert!(s.contains("old") && s.contains("archived · 1") && s.contains("▣ archived") && !s.contains("status "), "{s}");
+    }
+
+    /// The status row stays while the list scrolls; the thread in view picks its status tab.
+    #[test]
+    fn the_status_row_stays_out_of_the_scroll() {
+        use crate::landed::Land;
+        let mut cards: Vec<Card> = (0..30).map(|i| card(&format!("t{i:02}"), |_| {})).collect();
+        cards.push(card("done", |c| c.land = Some(Land::Landed)));
+        let mut l = ThreadList::new(Mode::Switch, Some("done".into()), None, cards);
+        assert_eq!(l.stat_tab(), StatusTab::Shipped, "the thread in view's section");
+        assert_eq!(l.visible().len(), 1);
+        l.stat_pick = Some(StatusTab::Open);
+        for _ in 0..20 {
+            l.key(k(KeyCode::Down));
+        }
+        let s = screen(&mut l, 80, 30);
+        let lines: Vec<&str> = s.lines().collect();
+        assert!(lines[4].contains("status") && lines[4].contains("open 30") && lines[4].contains('↓'), "{s}");
+        assert!(!s.contains("t00"), "{s}");
     }
 
     /// The menu: letters filter; ctrl+o → the actions; a → the question; enter → archived.
@@ -1618,6 +1728,7 @@ mod tests {
         use crate::landed::Land;
         let cards = vec![card("loose", |c| c.land = Some(Land::Unpushed(3))), card("done", |c| c.land = Some(Land::Landed))];
         let mut l = ThreadList::new(Mode::Manage, None, None, cards);
+        l.stat_pick = Some(StatusTab::All);
         l.key(k(KeyCode::Char('a')));
         let s = screen(&mut l, 120, 30);
         assert!(s.contains("3 unpushed: archive anyway?"), "{s}");

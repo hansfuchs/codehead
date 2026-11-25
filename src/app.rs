@@ -7214,10 +7214,12 @@ mod render_tests {
         a.switch_tab(Tab::Threads);
         a.tabs_focus = false;
         let s = dump(&mut a, 130, 40);
-        for l in ["open · 3", "shipped: archive? · 1", "show", "active 4", "archived 0", "worktrees 0"] {
+        for l in ["status ", "open 3", "shipped 1", "all 4", "show", "active 4", "archived 0", "worktrees 0"] {
             assert!(s.contains(l), "{l}: {s}");
         }
-        // the shipped card: 4th (3 open, shipped)
+        assert!(!s.contains("archive me"), "status tab open: 0 shipped cards: {s}");
+        // status tab all: the shipped card 4th (3 open, shipped)
+        a.tlist.stat_pick = Some(crate::threadlist::StatusTab::All);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
@@ -7282,7 +7284,9 @@ mod render_tests {
         assert_eq!(a.tlist.visible().len(), 2);
         key(&mut a, KeyCode::Right, KeyModifiers::NONE);
         assert_eq!(a.tlist.visible().len(), 1);
-        // ↑: the view tabs; →→→: claude; ↓: its rows (alpha's session only)
+        // ↑: the status tabs, ↑: the view tabs; →→→: claude; ↓: its rows (alpha's session only)
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(a.tlist.focus, crate::threadlist::Focus::Status);
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
         for _ in 0..3 {
             key(&mut a, KeyCode::Right, KeyModifiers::NONE);

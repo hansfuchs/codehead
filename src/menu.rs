@@ -300,7 +300,7 @@ impl Menu {
     }
 
     /// Tab (BACK: shift+tab): the next / previous region of the tab: the bar, its groups
-    /// (threads: repos, projects, views; merge: states), its list.
+    /// (threads: repos, projects, views, status; merge: states), its list.
     fn cycle(&mut self, back: bool) {
         #[derive(Clone, Copy, PartialEq)]
         enum R {
@@ -309,9 +309,11 @@ impl Menu {
             Repos,
             Projects,
             Views,
+            Status,
             Body,
         }
         let rs: &[R] = match self.tab {
+            Tab::Threads if self.list.has_stats() => &[R::Bar, R::Repos, R::Projects, R::Views, R::Status, R::Body],
             Tab::Threads => &[R::Bar, R::Repos, R::Projects, R::Views, R::Body],
             Tab::Merge => &[R::Bar, R::Group, R::Body],
             _ => &[R::Bar, R::Body],
@@ -323,6 +325,7 @@ impl Menu {
                 threadlist::Focus::Repos => R::Repos,
                 threadlist::Focus::Projects => R::Projects,
                 threadlist::Focus::Views => R::Views,
+                threadlist::Focus::Status => R::Status,
                 threadlist::Focus::List => R::Body,
             },
             (Level::Body, _) => R::Body,
@@ -338,6 +341,7 @@ impl Menu {
             R::Repos => self.list.focus = threadlist::Focus::Repos,
             R::Projects => self.list.focus = threadlist::Focus::Projects,
             R::Views => self.list.focus = threadlist::Focus::Views,
+            R::Status => self.list.focus = threadlist::Focus::Status,
             R::Body if self.tab == Tab::Threads => self.list.focus = threadlist::Focus::List,
             _ => {}
         }
@@ -839,8 +843,8 @@ mod tests {
         assert_eq!(m.tab, Tab::Merge);
         m.key(k(KeyCode::Left));
         assert_eq!(m.tab, Tab::Threads);
-        // ↓: the repo tabs (←→ there), ↓: the project tabs, ↓: the view tabs, ↓: the list; ↑ at
-        // its top: the view tabs, the project tabs, the repo tabs, the tab bar
+        // ↓: the repo tabs (←→ there), ↓: the project tabs, ↓: the view tabs, ↓: the status
+        // tabs, ↓: the list; ↑ at its top: status, views, projects, repos, the tab bar
         m.key(k(KeyCode::Down));
         assert_eq!((m.level, m.list.focus), (Level::Body, threadlist::Focus::Repos));
         m.key(k(KeyCode::Down));
@@ -848,9 +852,12 @@ mod tests {
         m.key(k(KeyCode::Down));
         assert_eq!(m.list.focus, threadlist::Focus::Views);
         m.key(k(KeyCode::Down));
+        assert_eq!(m.list.focus, threadlist::Focus::Status);
+        m.key(k(KeyCode::Down));
         assert_eq!(m.list.focus, threadlist::Focus::List);
         m.key(k(KeyCode::Right));
         assert_eq!(m.tab, Tab::Threads, "the list: ←→ walk the repos");
+        m.key(k(KeyCode::Up));
         m.key(k(KeyCode::Up));
         m.key(k(KeyCode::Up));
         m.key(k(KeyCode::Up));
@@ -1005,8 +1012,8 @@ mod tests {
     fn threads_filter_and_open() {
         let mut m = menu();
         m.key(k(KeyCode::Right));
-        // repo tabs, project tabs, view tabs, the list, its 2nd card
-        for _ in 0..5 {
+        // repo tabs, project tabs, view tabs, status tabs, the list, its 2nd card
+        for _ in 0..6 {
             m.key(k(KeyCode::Down));
         }
         assert!(matches!(m.key(k(KeyCode::Enter)), Action::Open(c) if c.id == "t2"));
@@ -1026,12 +1033,15 @@ mod tests {
         // a letter on the tab bar: the filter takes it
         m.key(k(KeyCode::Char('e')));
         let ids = |m: &Menu| m.list.visible().iter().map(|&i| m.list.cards[i].id.clone()).collect::<Vec<_>>();
+        // the status tab of the thread in view (open): 0 shipped cards; all: shipped last
+        assert_eq!(ids(&m), ["t1", "t3"]);
+        m.list.stat_pick = Some(threadlist::StatusTab::All);
         assert_eq!(ids(&m), ["t1", "t3", "t2"], "shipped last");
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 34)).unwrap();
         t.draw(|f| m.render(f, f.area())).unwrap();
         let b = t.backend().buffer().clone();
         let s: String = (0..34).map(|y| (0..90).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
-        assert!(s.contains(" here ") && s.contains("open · 2") && s.contains("ctrl+."), "{s}");
+        assert!(s.contains(" here ") && s.contains("open 2") && s.contains("shipped 1") && s.contains("ctrl+."), "{s}");
         m.key(k(KeyCode::Backspace));
         for c in "older".chars() {
             m.key(k(KeyCode::Char(c)));

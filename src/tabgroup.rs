@@ -43,6 +43,11 @@ impl TabGroup {
         self.rects.iter().any(|(r, _)| r.contains(at))
     }
 
+    /// The x right of the last tab in view (last draw).
+    pub fn end(&self) -> Option<u16> {
+        self.rects.last().map(|(r, _)| r.right())
+    }
+
     /// A click at AT on a tab: it is picked. True: a tab was hit.
     pub fn click(&mut self, at: Position) -> bool {
         match self.rects.iter().find(|(r, _)| r.contains(at)) {
