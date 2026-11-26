@@ -1,26 +1,15 @@
 use super::{ActivityLayout, Frame, Rect, View};
 
 impl View {
+    /// Every row renders, also at 0 height: a render resets the row's click rects, so a row
+    /// that just closed never keeps a stale rect over the rows that move into its place.
     pub(super) fn draw_activity(&mut self, frame: &mut Frame, layout: &ActivityLayout) {
-        if layout.monitors.height > 0 {
-            self.monitors.render(frame, layout.monitors, self.tick());
-        }
+        let tick = self.tick();
 
-        if layout.flow.height > 0 {
-            draw_flowbars(self, frame, layout);
-        }
-
-        if layout.subagents.height > 0 {
-            let tick = self.tick();
-
-            self.subagents.render(frame, layout.subagents, tick, &self.thread.subs);
-        }
-
-        if layout.subthreads.height > 0 {
-            let tick = self.tick();
-
-            self.subthreads.render(frame, layout.subthreads, tick);
-        }
+        self.monitors.render(frame, layout.monitors, tick);
+        draw_flowbars(self, frame, layout);
+        self.subagents.render(frame, layout.subagents, tick, &self.thread.subs);
+        self.subthreads.render(frame, layout.subthreads, tick);
     }
 }
 

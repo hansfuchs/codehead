@@ -334,3 +334,23 @@ fn ctrl_m_gives_the_prompt_back_from_the_search_bar_and_another_view() {
 
     assert!(view.panes.prompt_focus);
 }
+
+#[test]
+fn a_click_on_the_row_of_a_closed_flow_box_keeps_it_closed() {
+    let mut view = view("agentsbox-0005");
+
+    view.open_flow("ada", false);
+    let open = screen(&mut view);
+    let row = open.lines().position(|line| line.contains("◆ @ada")).unwrap();
+
+    view.flowbars[0].close();
+    screen(&mut view);
+    view.mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 4,
+        row: row as u16,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert!(view.flowbars.iter().all(|flow| !flow.is_open()), "0 flow box opens");
+}
