@@ -34,6 +34,12 @@ accent = "#B8A6FF"                    # overrides 1 color of the scheme
 
 [aliases]
 "project:platform" = "~/projects/exampleorg/project/notes/platform/"
+
+[prices."gpt-6.1-sol"]                # $ per 1M tokens of a model
+input  = 1.25
+cached = 0.125                        # cache reads (default: input)
+output = 10.0
+# cache_write = 1.25                  # cache writes (default: input)
 ```
 
 | Key | Default | Meaning |
@@ -59,5 +65,6 @@ accent = "#B8A6FF"                    # overrides 1 color of the scheme
 | `[colors] scheme` | `lavender` | color preset: `lavender` (violet grays, pastel lavender accent), `coral` (cool grays, coral accent) or `amber` (warm paper, amber accent) |
 | `[colors] <name>` | the scheme's | `#RRGGBB` for 1 slot (base16 / catppuccin model): `base`, `surface0`-`surface2`, `overlay0`, `subtext0`, `text`, `accent`, `on_accent`, `red`, `peach`, `yellow`, `green`, `teal`, `sky`, `mauve`. Old names still work: `panel` → `surface0`, `hover` → `surface1`, `muted` → `subtext0`, `line` → `overlay0`, `ok` → `green`, `danger` → `red`, `warn` → `yellow` |
 | `[aliases]` | none | short names for directories, see [aliases](/docs/concepts/notes/#path-aliases) |
+| `[prices."<model>"]` | none | $ per 1M tokens of a model: `input`, `output` (required), `cached`, `cache_write` (default: `input`). Prices the turns of harnesses that report 0 $: Codex always, ACP agents unless their `usage_update` carries a USD cost. The model name as the harness reports it; `provider/model` also finds `model`. 0 entry: the turn costs 0 $. codehead ships 0 prices. Read when an agent's session starts; the settings tab leaves the table as it is |
 
 Agents have their own files: see [agents](/docs/concepts/agents/).

@@ -12,8 +12,13 @@ impl Host {
                 self.push(&json!({"op": "delta", "agent": agent, "text": text}));
                 self.live.entry(agent).or_default().push_str(&text);
             }
-            // the plan's windows are the account's: 1 file for every host
-            Out::Limits(limits) => crate::engine::limits::record("claude", &limits),
+            // the plan's windows are the account's: 1 file for every host, under the harness
+            Out::Limits(limits) => {
+                // an agent gone from the roster: Claude Code, the 1st harness to report windows
+                let harness = harness_of(&agent).unwrap_or_else(|| "claude".into());
+
+                crate::engine::limits::record(&harness, &limits);
+            }
             Out::Mcp(harness, rows) => crate::engine::servers::record(&harness, rows),
             Out::Usage(usage) => {
                 self.turn_use.insert(agent, usage);
@@ -52,6 +57,12 @@ impl Host {
             self.log(Some(&agent), session_ended());
         }
     }
+}
+
+/// The harness of AGENT (`claude`, `codex`, …): its plan windows and $ sums go under it. None:
+/// the agent is gone from the roster.
+fn harness_of(agent: &str) -> Option<String> {
+    roster::get(agent).and_then(|profile| profile.harness.split('/').next().map(String::from))
 }
 
 fn kill_unresponsive_session(killed: bool, live: &mut super::Live) {
@@ -227,9 +238,9 @@ fn record_turn_end(agent: &str, host: &mut Host, pending_resume: &mut Option<Str
         *pending_resume = Some(limit_error.to_string());
     }
 
-    // Claude's $: the base of the $ per % of its plan windows
-    if roster::get(agent).is_some_and(|profile| profile.harness.split('/').next() == Some("claude")) {
-        crate::engine::limits::add_cost(cost);
+    // the harness's $: the base of the $ per % of its plan windows
+    if let Some(harness) = harness_of(agent) {
+        crate::engine::limits::add_cost(&harness, cost);
     }
 
     // a turn ends: its open asks are moot (the view drops them too)

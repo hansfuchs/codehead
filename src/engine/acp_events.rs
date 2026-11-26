@@ -1,4 +1,4 @@
-use super::{Kind, Out, State, Value, tool_of};
+use super::{Kind, Out, State, TurnUse, Usage, Value, tool_of};
 
 impl State {
     pub(crate) fn update(&mut self, update: &Value) {
@@ -25,7 +25,7 @@ impl State {
                 result_of(update, self);
             }
             "tool_call_update" => result_of(update, self),
-            // the context so far (ACP `usage_update`: used / size)
+            // the context so far, its window, the session's $ (ACP `usage_update`)
             "usage_update" => {
                 handle_usage_update(update, self);
             }
@@ -41,11 +41,64 @@ fn floor_char_boundary(text: &str, end: &mut usize) {
 }
 
 fn handle_usage_update(update: &Value, state: &mut State) {
-    if let Some(used) = update["used"].as_u64().filter(|count| *count > 0) {
-        state.out(Out::Usage(crate::engine::harness::TurnUse {
+    if let Some(used) = state.usage.update(update) {
+        state.out(Out::Usage(TurnUse {
             ctx: used,
             ..Default::default()
         }));
+    }
+}
+
+impl Usage {
+    /// A `usage_update` (`used`, `size`: tokens; `cost`: the session's {amount, currency}): the
+    /// new values. Some(used): the context changed.
+    fn update(&mut self, update: &Value) -> Option<u64> {
+        if let Some(size) = update["size"].as_u64().filter(|size| *size > 0) {
+            self.size = size;
+        }
+
+        let cost = &update["cost"];
+
+        if let Some(amount) = cost["amount"].as_f64()
+            && cost["currency"]
+                .as_str()
+                .is_some_and(|currency| currency.eq_ignore_ascii_case("USD"))
+        {
+            self.cost = Some(amount);
+        }
+
+        let used = update["used"].as_u64().filter(|count| *count > 0)?;
+
+        self.used = used;
+
+        Some(used)
+    }
+
+    /// A session is up: NEW (its $ start at 0) or loaded (its $ so far unknown), on MODEL (the
+    /// agent's profile model first).
+    pub(crate) fn session_started(&mut self, new: bool, model: &str) {
+        self.cost = None;
+        self.base = new.then_some(0.0);
+
+        if self.model.is_empty() {
+            self.model = model.to_string();
+        }
+    }
+
+    /// A prompt goes out: the session's $ so far is the turn's base.
+    pub(crate) fn turn_started(&mut self) {
+        if self.cost.is_some() {
+            self.base = self.cost;
+        }
+    }
+
+    /// The $ of the turn that ended with TOKENS: the rise of the session's $ the agent reported,
+    /// else the config's price of the model.
+    pub(crate) fn turn_usd(&self, tokens: TurnUse) -> f64 {
+        match (self.cost, self.base) {
+            (Some(cost), Some(base)) if cost > base => cost - base,
+            _ => crate::engine::harness::priced_usd(&self.prices, &self.model, tokens),
+        }
     }
 }
 

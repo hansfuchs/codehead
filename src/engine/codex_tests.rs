@@ -43,13 +43,13 @@ fn setup_starts_a_thread_with_model_instructions_and_mcp_then_runs_the_queue() {
     let setup_requests = sent(&lines);
 
     assert_eq!(setup_requests[1]["method"], "initialized");
-    assert_eq!(setup_requests[2]["method"], "thread/start");
-    assert_eq!(setup_requests[2]["params"]["model"], "gpt-6.1-sol");
-    assert_eq!(setup_requests[2]["params"]["developerInstructions"], "You are ada.");
-    assert_eq!(setup_requests[2]["params"]["approvalPolicy"], "untrusted");
+    assert_eq!(setup_requests[3]["method"], "thread/start");
+    assert_eq!(setup_requests[3]["params"]["model"], "gpt-6.1-sol");
+    assert_eq!(setup_requests[3]["params"]["developerInstructions"], "You are ada.");
+    assert_eq!(setup_requests[3]["params"]["approvalPolicy"], "untrusted");
 
     state
-        .incoming(&json!({"id": 2, "result": {"model": "gpt-6.1-sol", "thread": {"id": "t1"}}}))
+        .incoming(&json!({"id": 3, "result": {"model": "gpt-6.1-sol", "thread": {"id": "t1"}}}))
         .unwrap();
 
     assert!(
@@ -82,14 +82,14 @@ fn a_lost_thread_on_resume_starts_a_new_one() {
 
     assert_eq!(
         (
-            requests[2]["method"].as_str(),
-            requests[2]["params"]["threadId"].as_str()
+            requests[3]["method"].as_str(),
+            requests[3]["params"]["threadId"].as_str()
         ),
         (Some("thread/resume"), Some("old"))
     );
 
     state
-        .incoming(&json!({"id": 2, "error": {"code": -32600, "message": "thread not found"}}))
+        .incoming(&json!({"id": 3, "error": {"code": -32600, "message": "thread not found"}}))
         .unwrap();
 
     assert_eq!(sent(&lines)[0]["method"], "thread/start");
@@ -294,6 +294,121 @@ fn mcp_config_holds_codehead_and_the_agent_servers() {
         config["docs"],
         json!({"url": "https://d", "http_headers": {"Authorization": "b"}})
     );
+}
+
+fn limit_reports(rx: &std::sync::mpsc::Receiver<(String, Out)>) -> Vec<Vec<(String, f64, Option<u64>)>> {
+    events(rx)
+        .into_iter()
+        .filter_map(|out| {
+            if let Out::Limits(windows) = out {
+                Some(windows)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn rate_limits_are_read_after_initialize_and_their_windows_go_to_the_host() {
+    let (mut state, lines, rx) = test_state();
+
+    state.request("initialize", &json!({}), Pending::Init).unwrap();
+    state.incoming(&json!({"id": 1, "result": {}})).unwrap();
+    let requests = sent(&lines);
+
+    assert_eq!(
+        (&requests[2]["method"], &requests[2]["id"]),
+        (&json!("account/rateLimits/read"), &json!(2))
+    );
+
+    // codex-cli 0.170's reply on a business plan: the weekly window only
+    let snapshot = json!({"limitId": "codex", "limitName": null, "primary": {"usedPercent": 19, "windowDurationMins": 10080, "resetsAt": 1_796_039_040_u64}, "secondary": null, "credits": {"hasCredits": true, "unlimited": false, "balance": null}, "planType": "self_serve_business_prolite"});
+    let update = |snapshot: Value| json!({"method": "account/rateLimits/updated", "params": {"rateLimits": snapshot}});
+
+    state
+        .incoming(&json!({"id": 2, "result": {"rateLimits": snapshot, "rateLimitsByLimitId": {"codex": snapshot}}}))
+        .unwrap();
+    state.incoming(&update(json!({"limitId": "codex", "primary": {"usedPercent": 42.5, "windowDurationMins": 300, "resetsAt": 1_796_000_000_u64}, "secondary": {"usedPercent": 20, "windowDurationMins": 10080, "resetsAt": null}}))).unwrap();
+
+    // another bucket, a sparse update with 0 windows: 0 reports
+    state
+        .incoming(&update(
+            json!({"limitId": "other", "primary": {"usedPercent": 99, "windowDurationMins": 300}}),
+        ))
+        .unwrap();
+    state
+        .incoming(&update(json!({"limitId": null, "primary": null, "secondary": null})))
+        .unwrap();
+
+    assert_eq!(
+        limit_reports(&rx),
+        [
+            vec![("seven_day".to_string(), 19.0, Some(1_796_039_040))],
+            vec![
+                ("five_hour".to_string(), 42.5, Some(1_796_000_000)),
+                ("seven_day".to_string(), 20.0, None)
+            ],
+        ]
+    );
+
+    // an API key login: the read fails, 0 reports, the thread starts all the same
+    let (mut keyed, keyed_lines, keyed_rx) = test_state();
+
+    keyed.request("initialize", &json!({}), Pending::Init).unwrap();
+    keyed.incoming(&json!({"id": 1, "result": {}})).unwrap();
+    keyed
+        .incoming(&json!({"id": 2, "error": {"code": -32600, "message": "not signed in with ChatGPT"}}))
+        .unwrap();
+
+    assert_eq!(limit_reports(&keyed_rx), [] as [Vec<(String, f64, Option<u64>)>; 0]);
+    assert_eq!(sent(&keyed_lines)[3]["method"], "thread/start");
+}
+
+#[test]
+fn a_turn_costs_the_configured_price_of_its_model() {
+    let (mut state, lines, rx) = test_state();
+    let price = crate::infra::config::Price {
+        input: 1.25,
+        cached: 0.125,
+        output: 10.0,
+        cache_write: 1.25,
+    };
+    let notification = |method: &str, params: Value| json!({"method": method, "params": params});
+    let tokens = json!({"tokenUsage": {"total": {"inputTokens": 1_000_000, "cachedInputTokens": 600_000, "outputTokens": 100_000, "totalTokens": 1_100_000}, "last": {"inputTokens": 1_000_000, "cachedInputTokens": 600_000, "outputTokens": 100_000, "totalTokens": 1_100_000}}});
+
+    let turn = |state: &mut State, id: &str| {
+        state.queue.push_back("go".into());
+        state.pump().unwrap();
+        state
+            .incoming(&notification("thread/tokenUsage/updated", tokens.clone()))
+            .unwrap();
+        state
+            .incoming(&notification(
+                "turn/completed",
+                json!({"turn": {"id": id, "status": "completed"}}),
+            ))
+            .unwrap();
+        events(&rx).into_iter().find_map(|out| match out {
+            Out::Event(Kind::TurnEnd { cost, .. }) => Some(cost),
+            _ => None,
+        })
+    };
+
+    state.prices.insert("gpt-6.1-sol".into(), price);
+    state.thread = Some("t1".into());
+    let priced = turn(&mut state, "u1").unwrap();
+
+    // 400k input × 1.25 + 600k cached × 0.125 + 100k output × 10 (per 1M)
+    assert!((priced - 1.575).abs() < 1e-9, "{priced}");
+
+    // the thread runs another model (`thread/start` named it): 0 price, 0 $
+    state.model = "gpt-6.1-mini".into();
+    state.total = TurnUse::default();
+
+    assert_eq!(turn(&mut state, "u2"), Some(0.0));
+
+    drop(lines);
 }
 
 /// Live: `codex app-server` runs the agent's model. `cargo test codex_live -- --ignored`

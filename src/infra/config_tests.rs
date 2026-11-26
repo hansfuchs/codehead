@@ -315,3 +315,45 @@ fn saves_preserve_comments_and_reject_external_changes() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn prices_parse_per_model_and_saves_keep_them() {
+    let text = "agent = 'ada'\n[prices.\"gpt-6.1-sol\"]\ninput = 1.25\ncached = 0.125\noutput = 10\n[prices.local]\ninput = 0\noutput = 0\n";
+    let file = parse(text).unwrap();
+    let sol = file.prices["gpt-6.1-sol"];
+
+    assert_eq!(
+        (sol.input, sol.cached, sol.output, sol.cache_write),
+        (1.25, 0.125, 10.0, 1.25)
+    );
+    assert_eq!(price_of(&file.prices, "openai/gpt-6.1-sol"), Some(sol));
+    assert_eq!(price_of(&file.prices, "gpt-6.1"), None);
+
+    let tokens = Tokens {
+        input: 400_000,
+        cached: 600_000,
+        cache_write: 0,
+        output: 100_000,
+    };
+
+    assert!((sol.usd(tokens) - 1.575).abs() < 1e-9);
+
+    // a settings save leaves the table as it is
+    let mut edited = file.clone();
+
+    edited.agent = Some("bob".into());
+    let saved = document(text, &edited).unwrap();
+
+    assert!(saved.contains("[prices.\"gpt-6.1-sol\"]"), "{saved}");
+    assert_eq!(parse(&saved).unwrap().prices, file.prices);
+
+    for broken in [
+        "[prices.x]\ninput = 1\n",
+        "[prices.x]\ninput = 1\noutput = -2\n",
+        "[prices.x]\ninput = 1\noutput = '2'\n",
+        "[prices.x]\ninput = 1\noutput = 2\nreasoning = 3\n",
+        "prices = 1\n",
+    ] {
+        assert!(parse(broken).is_err(), "{broken}");
+    }
+}

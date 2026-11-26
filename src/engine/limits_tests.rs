@@ -39,3 +39,50 @@ fn the_rate_comes_from_the_latest_period_that_rose_enough() {
         None
     );
 }
+
+#[test]
+fn window_labels_follow_the_duration() {
+    let labels: Vec<String> = [300, 10_080, 1440, 43_200, 60, 120, 90].map(window_label).to_vec();
+
+    assert_eq!(
+        labels,
+        [
+            "five_hour",
+            "seven_day",
+            "1_day",
+            "30_day",
+            "1_hour",
+            "2_hour",
+            "90_min"
+        ]
+    );
+}
+
+#[test]
+fn each_harness_rates_its_windows_by_its_own_dollars() {
+    // an older file: 1 number, Claude's sum
+    let mut value = json!({"_cal": {"usd": 4.0, "samples": [sample(0.0, 10.0, 100)]}});
+
+    add_usd(&mut value, "codex", 1.0);
+
+    assert_eq!(value["_cal"]["usd"], json!({"claude": 4.0, "codex": 1.0}));
+
+    record_windows(&mut value, "codex", &[("seven_day".into(), 10.0, Some(500))]);
+    add_usd(&mut value, "codex", 2.0);
+    add_usd(&mut value, "claude", 100.0);
+    record_windows(&mut value, "codex", &[("seven_day".into(), 14.0, Some(500))]);
+    record_windows(&mut value, "claude", &[("five_hour".into(), 20.0, Some(100))]);
+    let rates: Vec<(String, String, Option<f64>)> = parse(&value)
+        .into_iter()
+        .map(|window| (window.harness, window.label, window.usd_per_pct))
+        .collect();
+
+    // codex: 2 $ over 4 %; claude: 104 $ (the old sum went on) over 10 %
+    assert_eq!(
+        rates,
+        [
+            ("codex".to_string(), "seven_day".to_string(), Some(0.5)),
+            ("claude".to_string(), "five_hour".to_string(), Some(10.4)),
+        ]
+    );
+}

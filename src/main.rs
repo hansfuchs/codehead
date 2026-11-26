@@ -48,6 +48,8 @@ config:  ~/.config/codehead.toml ($CODEHEAD_CONFIG overrides). keys, each overri
            [colors] scheme = \"lavender\" | \"coral\" | \"amber\" ($CODEHEAD_SCHEME); accent, text, … = \"#RRGGBB\"
            [aliases]
            \"project:platform\" = \"~/projects/exampleorg/project/notes/platform/\"
+           [prices.\"<model>\"] input = 1.25, cached = 0.125, output = 10.0   $ per 1M tokens, for
+                                   harnesses that report 0 $ (codex, ACP); 0 entry: 0 $
 settings: 7th tab (F7). edit fields and path aliases; ctrl+s saves, ctrl+r discards edits / reloads.
           enter on + add (menu: add path alias) adds an alias; d d removes the current alias, on a
           field ctrl+d: back to its default (↺ too).

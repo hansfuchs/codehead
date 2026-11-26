@@ -22,7 +22,18 @@ impl State {
             "mcpServer/startupStatus/updated" => {
                 report_mcp_status(params, self);
             }
+            "account/rateLimits/updated" => self.rate_limits(&params["rateLimits"]),
             _ => {}
+        }
+    }
+
+    /// A rate limit snapshot of the account (`account/rateLimits/read`, `…/updated`): its windows
+    /// to the host, which keeps them in `limits.json`.
+    pub(crate) fn rate_limits(&self, snapshot: &Value) {
+        let windows = plan_windows(snapshot);
+
+        if !windows.is_empty() {
+            self.out(Out::Limits(windows));
         }
     }
 
@@ -74,6 +85,30 @@ impl State {
 
         Ok(())
     }
+}
+
+/// The windows of SNAPSHOT (`primary`, `secondary`: `usedPercent`, `windowDurationMins`,
+/// `resetsAt` in unix s) → (label, used %, resets at). Only the `codex` bucket: other limit ids
+/// meter other things. A sparse update leaves a window null: 0 entry, the last value stays.
+pub(crate) fn plan_windows(snapshot: &Value) -> Vec<(String, f64, Option<u64>)> {
+    if snapshot["limitId"].as_str().is_some_and(|limit| limit != "codex") {
+        return Vec::new();
+    }
+
+    ["primary", "secondary"]
+        .iter()
+        .filter_map(|slot| {
+            let window = &snapshot[slot];
+            let minutes = window["windowDurationMins"].as_u64()?;
+            let pct = window["usedPercent"].as_f64()?;
+
+            Some((
+                crate::engine::limits::window_label(minutes),
+                pct,
+                window["resetsAt"].as_u64(),
+            ))
+        })
+        .collect()
 }
 
 fn set_permission_reason(params: &Value, input: &mut Value) {
@@ -156,8 +191,9 @@ fn handle_turn_completed(params: &Value, state: &mut State) {
 
     let usage = state.turn_use();
 
+    // the app server reports 0 $: the config's price of the model
     state.out(Out::Event(Kind::TurnEnd {
-        cost: 0.0,
+        cost: crate::engine::harness::priced_usd(&state.prices, &state.model, usage),
         input: usage.input,
         output: usage.output,
         cache_read: usage.cache_read,

@@ -46,6 +46,30 @@ pub(crate) struct TurnUse {
     pub ctx: u64,
 }
 
+/// Model prices (`[prices]` of the config) for a new session: edits apply to the next one. Tests:
+/// 0 prices, never the machine's config.
+pub(super) fn price_table() -> Prices {
+    if cfg!(test) {
+        Prices::new()
+    } else {
+        crate::infra::config::prices()
+    }
+}
+
+pub(super) type Prices = std::collections::BTreeMap<String, crate::infra::config::Price>;
+
+/// $ of USAGE (input without cache reads) on MODEL by PRICES: 0 without a price.
+pub(super) fn priced_usd(prices: &Prices, model: &str, usage: TurnUse) -> f64 {
+    crate::infra::config::price_of(prices, model).map_or(0.0, |price| {
+        price.usd(crate::infra::config::Tokens {
+            input: usage.input,
+            cached: usage.cache_read,
+            cache_write: usage.cache_write,
+            output: usage.output,
+        })
+    })
+}
+
 /// codehead servers the harness did not get (ERRORS: server, why) → status rows, via TX.
 pub(super) fn report_mcp_errors(harness: &str, errors: &[(String, String)], tx: &Sender<(String, Out)>, agent: &str) {
     if errors.is_empty() {

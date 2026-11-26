@@ -32,8 +32,8 @@ struct Warm {
     cmd: fn() -> Vec<String>,
 }
 
-/// The harnesses that report a short window to codehead. Codex: its window goes over ACP
-/// without limit reports (0 entry until it reports one).
+/// The harnesses that report a short window to codehead. Codex reports its windows (app server
+/// `account/rateLimits/*`) only while a codex agent runs: 0 entry, 0 warm-up message.
 const ALL: [Warm; 1] = [Warm {
     harness: "claude",
     // 0 tools, 0 MCP servers, 0 settings (0 hooks), 0 saved session

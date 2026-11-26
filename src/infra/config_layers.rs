@@ -72,6 +72,7 @@ pub(super) fn overlay(base: &mut File, top: &File) {
 
     base.colors.extend(top.colors.clone());
     base.aliases.extend(top.aliases.clone());
+    base.prices.extend(top.prices.clone());
 
     for (harness, fields) in &top.harness {
         base.harness.entry(harness.clone()).or_default().extend(fields.clone());

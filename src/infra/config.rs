@@ -52,6 +52,9 @@ pub(crate) struct File {
     pub aliases: BTreeMap<String, String>,
     /// `[harness.<name>]`: defaults of a harness's agents (`HARNESS_FIELDS`) → value.
     pub harness: BTreeMap<String, BTreeMap<String, String>>,
+    /// `[prices."<model>"]`: $ per 1M tokens of a model (`config_prices`). Saves leave the
+    /// table's text as it is.
+    pub prices: BTreeMap<String, Price>,
 }
 
 /// Fields of a `[harness.<name>]` table: the model, effort (Claude Code), the ACP command,
@@ -324,6 +327,9 @@ pub(crate) use layers::{Layer, Layers, device_of, layout, layout_of, read_layers
 #[path = "config_document.rs"]
 mod document;
 pub(crate) use document::{read_file, save_file};
+#[path = "config_prices.rs"]
+mod prices;
+pub(crate) use prices::{Price, Tokens, price_of, prices};
 #[path = "config_values.rs"]
 mod values;
 use values::env;

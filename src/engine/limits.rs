@@ -1,10 +1,11 @@
 //! Plan limits (`<data>/limits.json`): the windows the harnesses report (used %, reset time),
 //! 1 file for every host (the windows are the account's, not the thread's), under its lock.
 //!
-//! The calibration (`_cal`): the $ of every Claude turn codehead ran, summed, and a sample of
-//! that sum per limits report. 2 samples of 1 window period: $ per 1 % of the window, the base of
-//! the next message's share of a window. Use outside codehead (claude.ai, other sessions) adds %
-//! without $: the share comes out high, never low.
+//! The calibration (`_cal`): the $ of every turn codehead ran, summed per harness (`_cal.usd`:
+//! harness → $; older files: 1 number, Claude's), and a sample of the reporting harness's sum per
+//! limits report. 2 samples of 1 window period: $ per 1 % of the window, the base of the next
+//! message's share of a window. Use outside codehead (claude.ai, other sessions) adds % without
+//! $: the share comes out high, never low.
 
 use std::ops::ControlFlow;
 
@@ -17,6 +18,18 @@ const MIN_RISE: f64 = 2.0;
 
 fn path() -> std::path::PathBuf {
     super::data_dir().join("limits.json")
+}
+
+/// The label of a window of MINUTES: the labels Claude reports (`five_hour`, `seven_day`), else
+/// `<n>_day`, `<n>_hour`, `<n>_min` (the cost box shows `_` as a space).
+pub(crate) fn window_label(minutes: u64) -> String {
+    match minutes {
+        300 => "five_hour".into(),
+        10_080 => "seven_day".into(),
+        days if days > 0 && days.is_multiple_of(1440) => format!("{}_day", days / 1440),
+        hours if hours > 0 && hours.is_multiple_of(60) => format!("{}_hour", hours / 60),
+        other => format!("{other}_min"),
+    }
 }
 
 /// CHANGE on the file's JSON, under its lock, written back.
@@ -53,39 +66,61 @@ pub(crate) fn claim_warm(harness: &str, now: u64, due: impl FnOnce(&Value) -> bo
     won
 }
 
-/// A turn of a Claude agent ended: its $ into the sum.
-pub(crate) fn add_cost(usd: f64) {
+/// A turn of an agent on HARNESS ended: its $ into the harness's sum.
+pub(crate) fn add_cost(harness: &str, usd: f64) {
     if usd <= 0.0 {
         return;
     }
 
-    edit(|value| {
-        let sum = value["_cal"]["usd"].as_f64().unwrap_or(0.0) + usd;
-
-        value["_cal"]["usd"] = json!(sum);
-    });
+    edit(|value| add_usd(value, harness, usd));
 }
 
-/// HARNESS reported WINDOWS (window, used %, resets at): the new values, a calibration sample.
+/// USD into HARNESS's sum of the limits file VALUE.
+fn add_usd(value: &mut Value, harness: &str, usd: f64) {
+    let sum = harness_usd(value, harness) + usd;
+
+    // an older file: its 1 number was Claude's sum
+    if let Some(claude) = value["_cal"]["usd"].as_f64() {
+        value["_cal"]["usd"] = json!({"claude": claude});
+    }
+
+    value["_cal"]["usd"][harness] = json!(sum);
+}
+
+/// HARNESS's sum of $ in the limits file VALUE.
+fn harness_usd(value: &Value, harness: &str) -> f64 {
+    let usd = &value["_cal"]["usd"];
+
+    match usd.as_f64() {
+        Some(claude) if harness == "claude" => claude,
+        Some(_) => 0.0,
+        None => usd[harness].as_f64().unwrap_or(0.0),
+    }
+}
+
+/// HARNESS reported WINDOWS (window, used %, resets at): the new values, a calibration sample
+/// (HARNESS's sum of $).
 pub(crate) fn record(harness: &str, windows: &[(String, f64, Option<u64>)]) {
-    edit(|value| {
-        for (window, pct, resets) in windows {
-            value[harness][window] = json!({"pct": pct, "resets": resets});
-        }
+    edit(|value| record_windows(value, harness, windows));
+}
 
-        let usd = value["_cal"]["usd"].as_f64().unwrap_or(0.0);
-        let reported: serde_json::Map<String, Value> = windows
-            .iter()
-            .map(|(window, pct, resets)| (format!("{harness}/{window}"), json!([pct, resets])))
-            .collect();
-        let mut samples = value["_cal"]["samples"].as_array().cloned().unwrap_or_default();
+fn record_windows(value: &mut Value, harness: &str, windows: &[(String, f64, Option<u64>)]) {
+    for (window, pct, resets) in windows {
+        value[harness][window] = json!({"pct": pct, "resets": resets});
+    }
 
-        samples.push(json!({"ts": super::now_ms() / 1000, "usd": usd, "w": reported}));
-        let drop = samples.len().saturating_sub(SAMPLES);
+    let usd = harness_usd(value, harness);
+    let reported: serde_json::Map<String, Value> = windows
+        .iter()
+        .map(|(window, pct, resets)| (format!("{harness}/{window}"), json!([pct, resets])))
+        .collect();
+    let mut samples = value["_cal"]["samples"].as_array().cloned().unwrap_or_default();
 
-        samples.drain(..drop);
-        value["_cal"]["samples"] = Value::Array(samples);
-    });
+    samples.push(json!({"ts": super::now_ms() / 1000, "usd": usd, "w": reported}));
+    let drop = samples.len().saturating_sub(SAMPLES);
+
+    samples.drain(..drop);
+    value["_cal"]["samples"] = Value::Array(samples);
 }
 
 /// A window of a plan.

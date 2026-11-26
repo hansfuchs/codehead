@@ -66,6 +66,9 @@ impl State {
             Pending::Interrupt => {
                 report_interrupt_error(err, self);
             }
+            // an API key login: 0 plan windows, 0 report
+            Pending::RateLimits if err.is_none() => self.rate_limits(&result["rateLimits"]),
+            Pending::RateLimits => {}
         }
 
         Ok(())
@@ -204,6 +207,13 @@ fn initialize_thread(err: Option<&str>, state: &mut State) -> Result<(), String>
     }
 
     state.send(&json!({"method": "initialized", "params": {}}))?;
+
+    // the plan's windows now; `account/rateLimits/updated` brings each change
+    state.request(
+        "account/rateLimits/read",
+        &json!({"excludeResetCreditDetails": true}),
+        Pending::RateLimits,
+    )?;
     let params = thread_params(state);
 
     match state.setup.resume.clone() {
@@ -238,6 +248,10 @@ fn establish_thread(why: Pending, err: Option<&str>, result: &Value, state: &mut
         .or(result["thread"]["model"].as_str())
         .unwrap_or_default()
         .to_string();
+
+    if !model.is_empty() {
+        state.model.clone_from(&model);
+    }
 
     state.out(Out::Event(Kind::Session {
         session: tid.clone(),

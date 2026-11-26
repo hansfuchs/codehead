@@ -9,6 +9,9 @@
 //! `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`,
 //! `mcpServer/elicitation/request` and `item/tool/requestUserInput`: codehead answers once the
 //! owner (or the agent's mode) picks. `turn/interrupt` stops the running turn.
+//! `account/rateLimits/read` (after `initialized`) and `account/rateLimits/updated` give the
+//! plan's windows (`limits.json`); the app server reports 0 $: `[prices]` of the config prices a
+//! turn.
 
 use std::collections::{HashMap, VecDeque};
 use std::process::ChildStdin;
@@ -28,6 +31,7 @@ enum Pending {
     Resume,
     Turn,
     Interrupt,
+    RateLimits,
 }
 
 pub(crate) struct Setup {
@@ -74,6 +78,9 @@ struct State {
     total: TurnUse,
     ctx: u64,
     window: u64,
+    /// The thread's model (`thread/start` names it) and the $ per token of models: a turn's $.
+    model: String,
+    prices: super::harness::Prices,
     setup: Setup,
     tx: Sender<(String, Out)>,
     name: String,
@@ -283,6 +290,8 @@ fn state(stdin: Sender<String>, setup: Setup, name: String, tx: Sender<(String, 
         total: TurnUse::default(),
         ctx: 0,
         window: 0,
+        model: setup.model.clone().unwrap_or_default(),
+        prices: super::harness::price_table(),
         setup,
         tx,
         name,

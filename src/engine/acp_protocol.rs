@@ -1,4 +1,4 @@
-use super::{Kind, Mutex, Out, Pending, State, Value, error_text, json, mcp_servers, session_model, tool_of};
+use super::{Kind, Mutex, Out, Pending, State, TurnUse, Value, error_text, json, mcp_servers, session_model, tool_of};
 
 impl State {
     pub(crate) fn send(&mut self, value: &Value) -> Result<(), String> {
@@ -50,6 +50,7 @@ impl State {
         };
 
         self.busy = true;
+        self.usage.turn_started();
         let sid = self.session.clone().unwrap_or_default();
 
         self.request(
@@ -207,14 +208,23 @@ fn reply_prompt(err: Option<String>, result: &Value, state: &mut State) -> Resul
         _ => None,
     });
 
-    state.out(Out::Event(Kind::TurnEnd {
-        cost: 0.0,
+    let tokens = TurnUse {
         input: count("inputTokens"),
         output: count("outputTokens"),
         cache_read: count("cachedReadTokens"),
         cache_write: count("cachedWriteTokens"),
-        ctx: count("totalTokens"),
-        window: 0,
+        ctx: state.usage.used,
+    };
+
+    // `totalTokens` is the turn's sum, not the context: the context is the last `usage_update`
+    state.out(Out::Event(Kind::TurnEnd {
+        cost: state.usage.turn_usd(tokens),
+        input: tokens.input,
+        output: tokens.output,
+        cache_read: tokens.cache_read,
+        cache_write: tokens.cache_write,
+        ctx: tokens.ctx,
+        window: state.usage.size,
         ms: 0,
         error,
     }));
@@ -286,6 +296,7 @@ fn establish_session(why: Pending, err: Option<&str>, result: &Value, state: &mu
 
     let (model, options) = session_model(result);
 
+    state.usage.session_started(why == Pending::New, &model);
     state.out(Out::Event(Kind::Session {
         session: sid.clone(),
         model,

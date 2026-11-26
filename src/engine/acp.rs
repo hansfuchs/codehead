@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use super::harness::Out;
+use super::harness::{Out, TurnUse};
 use super::store::Kind;
 
 /// Why a request went out: the reply goes to its handler.
@@ -61,11 +61,27 @@ struct State {
     thought: String,
     /// Open permission requests: our id → the agent's JSON-RPC id, the options.
     asks: HashMap<String, (Value, Vec<Value>)>,
+    usage: Usage,
     setup: Setup,
     tx: Sender<(String, Out)>,
     name: String,
     /// `Out::Exit` went out: 1 per session, a later one would end the next session of the agent.
     dead: bool,
+}
+
+/// The session's context and $ as `usage_update` reports them; the model and its price for an
+/// agent that reports 0 $.
+#[derive(Default)]
+struct Usage {
+    /// Tokens in the context, the context window (0: unknown).
+    used: u64,
+    size: u64,
+    /// The session's $ so far (`cost.amount`, USD), and at the running turn's start (None:
+    /// unknown, the 1st turn of a loaded session).
+    cost: Option<f64>,
+    base: Option<f64>,
+    model: String,
+    prices: super::harness::Prices,
 }
 
 #[derive(Clone)]
@@ -268,6 +284,11 @@ fn state(stdin: Sender<String>, setup: Setup, name: String, tx: Sender<(String, 
         text: String::new(),
         thought: String::new(),
         asks: HashMap::new(),
+        usage: Usage {
+            model: setup.model.clone().unwrap_or_default(),
+            prices: super::harness::price_table(),
+            ..Usage::default()
+        },
         setup,
         tx,
         name,

@@ -17,6 +17,7 @@ fn parse_entry(file: &mut File, key: &str, value: &toml::Value) -> Result<(), St
         "colors" => parse_colors(file, value),
         "harness" => parse_harness(file, value),
         "aliases" => parse_aliases(file, value),
+        "prices" => super::prices::parse_prices(file, value),
         _ => parse_scalar(file, key, value),
     }
 }
