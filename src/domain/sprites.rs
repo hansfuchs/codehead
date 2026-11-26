@@ -32,11 +32,6 @@ impl Sprite {
         self.avatar.speed *= 0.94 + 0.12 * key;
         self
     }
-
-    /// The live frame for status S.
-    pub(crate) fn frame(&self, status: Status) -> [String; HEIGHT] {
-        self.avatar.rows(status, crate::domain::avatar::now())
-    }
 }
 
 /// The saved id ID. None: not an avatar (an old text sprite: the agent gets its default).

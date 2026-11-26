@@ -3,13 +3,19 @@ use super::{KeyCode, KeyEvent, KeyModifiers, Pasted, View};
 impl View {
     pub(super) fn key_controls(&mut self, key: KeyEvent) -> Option<bool> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let command = key.modifiers.contains(KeyModifiers::SUPER);
 
         match key.code {
             KeyCode::Char('t') if ctrl => {
                 self.toggle_thoughts();
                 return Some(false);
             }
-            KeyCode::Char('o') if ctrl => {
+            KeyCode::Char('o') if ctrl || command => {
+                self.cost_box.toggle();
+                return Some(false);
+            }
+            // a prompt with text: ctrl+e = its line end (the text area)
+            KeyCode::Char('e') if ctrl && self.prompt.input.is_empty() => {
                 self.stream.all_runs = !self.stream.all_runs;
                 self.stream.open.clear();
                 self.stream.dirty = true;

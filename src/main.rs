@@ -156,7 +156,7 @@ thread view: the thread's agents on top (sprite, model, working / idle / waits o
          after the agents' ones; text in the prompt goes along as the note. > flow: the flow's steps.
          ctrl+f: the search bar above the prompt (the chat's messages, notes, shell, tool calls);
          enter / ↑ the next older match, ↓ the next newer one, esc closes.
-         tool runs (▸): click opens / closes the calls (input + output); ctrl+o: all.
+         tool runs (▸): click opens / closes the calls (input + output); ctrl+e (empty prompt): all.
          thoughts (setting thoughts = hidden | folded | open): ∴ rows, a click opens 1, ctrl+t: all.
          ctrl+v pastes a clipboard image as [Image #n], a dropped image path too. pasted text over
          1024 chars (code: never): [Pasted text #n +L lines]. both go in as attachments.

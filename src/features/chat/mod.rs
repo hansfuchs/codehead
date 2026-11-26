@@ -1,6 +1,6 @@
 //! The thread as the view shows it: the event log folded into items (messages, tool runs, asks),
 //! then drawn as rows of a width. Tool calls of an agent between 2 of its messages are 1 run:
-//! 1 row, opened by a click or ctrl+o.
+//! 1 row, opened by a click or ctrl+e (empty prompt).
 
 pub(crate) mod chat_search;
 

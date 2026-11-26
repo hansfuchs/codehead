@@ -36,12 +36,10 @@ pub(super) fn home_label(notes: &[crate::domain::notifications::Note]) -> (Strin
     }
 }
 
-/// Header rows (inside its frame + its top border) for N agents.
-pub(super) fn header_rows(count: usize) -> u16 {
-    let count = count.max(1) as u16;
-
-    // tokens box: column names, agents, all (2+), 2 plan windows, the next message
-    (5 + count + u16::from(count > 1)).clamp(HEADER_H, MAX_HEADER_H)
+/// Header rows (inside its frame + its top border) for COUNT agents on HARNESSES harnesses.
+pub(super) fn header_rows(harnesses: usize, count: usize) -> u16 {
+    // tokens box: 1 row per harness (its plan windows), 1 per agent (its context)
+    (crate::features::cost::box_rows(harnesses, count) + 1).clamp(HEADER_H, MAX_HEADER_H)
 }
 
 /// Width of the input in its bubble: `│ ` left, ` │` right.

@@ -1,5 +1,7 @@
-//! `codehead --cost <thread>`: the cost pane of the thread view (bottom right).
-//! Scoped to 1 thread: per agent tokens, $, a context line, then the plan limits (line bars).
+//! The tokens box of the thread view (bottom right of the header), and `codehead --cost <thread>`.
+//! Compact: per harness its plan windows, per agent its context (dithered bars, 1 column grid).
+//! Expanded (ctrl+o / ⌘o / a click): everything else above it: tokens, $, cache, turns, the next
+//! message, every thread's cost.
 //! Sources: the thread's event log (turn ends), the host's live agents, `limits.json`.
 
 use crate::engine::client::State;
@@ -24,39 +26,32 @@ const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'
 struct AgentRow {
     name: String,
     color: Option<String>,
-    tokens: u64,
-    usd: f64,
     /// Context fill of the agent's latest session, percent.
     ctx: Option<u64>,
     live: bool,
-    /// Saved in the agent prompt, else the stable pool pick (`agents::sprite`).
-    sprite: Option<crate::domain::sprites::Sprite>,
     /// Context tokens of the latest session: the least a next message sends.
     ctx_tokens: u64,
-    /// $ per token of the last turn (every kind, cache incl.).
-    usd_per_token: f64,
+    /// Every number of the agent in this thread.
+    usage: AgentUse,
 }
 
 type Limit = crate::engine::limits::Window;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct Snap {
     found: bool,
-    status: String,
+    id: String,
+    title: String,
     cost: f64,
-    input: u64,
-    output: u64,
-    cache_read: u64,
-    cache_write: u64,
-    turns: u64,
     agents: Vec<AgentRow>,
+    /// The plan windows of the thread's harnesses only.
     limits: Vec<Limit>,
 }
 
 /// Threads read at most for [`past_rate`] (newest first; the last 256 KB of each log).
 const RATE_THREADS: usize = 40;
 
-type Names = HashMap<String, (String, Option<String>, crate::domain::sprites::Sprite)>;
+type Names = HashMap<String, (String, Option<String>)>;
 
 /// The next message of the thread view: its recipients, its length (chars).
 #[derive(Clone, Debug, Default)]
@@ -111,32 +106,56 @@ pub(crate) struct AgentUse {
     pub usd_per_token: f64,
 }
 
-/// The tokens tab: the thread in view (None: start screen), every thread's cost, plan limits.
+/// 1 thread of the every-thread list: its id, title, $, tokens, turns.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Detail {
-    pub agents: Vec<AgentUse>,
-    /// Thread ids by cost: (id, $, tokens, turns). The top 8.
-    pub threads: Vec<(String, f64, u64, u64)>,
-    /// $ and tokens of every thread, and of the last 24h (sessions updated since).
-    pub all_usd: f64,
-    pub all_tokens: u64,
-    pub day_usd: f64,
-    pub limits: Vec<(String, String, f64, Option<u64>)>,
+pub(crate) struct ThreadCost {
+    pub id: String,
+    pub title: String,
+    pub usd: f64,
+    pub tokens: u64,
+    pub turns: u64,
 }
 
-#[cfg(test)]
-#[path = "cost_detail_tests.rs"]
-mod detail_tests;
+/// Every thread's cost (the expanded box's last section): the top 8, the sums, the last 24h.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AllThreads {
+    pub threads: Vec<ThreadCost>,
+    pub usd: f64,
+    pub tokens: u64,
+    pub day_usd: f64,
+}
+
+/// What the box shows besides the snapshot: the next message, every thread's cost (expanded).
+#[derive(Clone, Copy)]
+pub(crate) struct Show<'a> {
+    pub next: &'a Next,
+    pub expanded: Option<Expanded<'a>>,
+}
+
+/// The expanded box: every thread's cost (None: still on its way), rows scrolled off its top.
+#[derive(Clone, Copy)]
+pub(crate) struct Expanded<'a> {
+    pub all: Option<&'a AllThreads>,
+    pub scroll: u16,
+}
 
 #[path = "cost_data.rs"]
 mod data;
+pub(crate) use data::snapshot;
 use data::{fetch, names, now};
-pub(crate) use data::{limits, snapshot, uses};
 
 #[path = "cost_render.rs"]
 mod render;
-use render::{bar, draw, until, window};
-pub(crate) use render::{draw_in, draw_last, human, morphing};
+pub(crate) use render::{box_rows, draw_in, draw_last, expanded_rows, human, morphing};
+use render::{dither_bar, draw_at, until, window, window_bar};
+
+#[path = "cost_compact.rs"]
+mod compact;
+use compact::compact_lines;
+
+#[path = "cost_expanded.rs"]
+mod expanded;
+use expanded::expanded_lines;
 
 #[path = "cost_terminal.rs"]
 mod terminal;
@@ -144,9 +163,7 @@ pub(crate) use terminal::run;
 
 #[path = "cost_detail.rs"]
 mod detail;
-pub(crate) use detail::{detail, detail_lines};
+pub(crate) use detail::all_threads;
 
 #[cfg(test)]
-use data::{add_running, last_rate};
-#[cfg(test)]
-use render::draw_at;
+use data::{add_running, last_rate, last_window, of_harnesses};

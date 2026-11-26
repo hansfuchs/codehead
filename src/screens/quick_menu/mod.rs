@@ -1,6 +1,6 @@
 //! The menu (ctrl+p): 1 modal for the start screen and the thread view. Tabs: quick (commands; in
 //! a thread: per agent its flow, remove, replace), threads (the thread list: filter, repo + view
-//! tabs, cards, actions), merge, search (the messages of every thread), tokens. Focus levels: the
+//! tabs, cards, actions), merge, search (the messages of every thread). Focus levels: the
 //! tab bar, a tab's tab groups (threads: repos, views; merge: states), its list. ↑ at the top of a
 //! list: up 1 level; ↓: down 1 level. ←→ on the tab bar (a list without a tab group too): next /
 //! previous tab; on a tab group: its tabs. enter: run, a single esc or tab closes.
@@ -28,15 +28,13 @@ pub(crate) enum Tab {
     /// The owner's pull requests.
     Merge,
     Search,
-    Tokens,
 }
 
-const TABS: [(Tab, &str); 5] = [
+const TABS: [(Tab, &str); 4] = [
     (Tab::Quick, "quick"),
     (Tab::Threads, "threads"),
     (Tab::Merge, "merge"),
     (Tab::Search, "search"),
-    (Tab::Tokens, "tokens"),
 ];
 
 /// A tab of the start screen the menu opens.
@@ -103,7 +101,6 @@ pub(crate) struct Menu {
     /// Merge tab: the owner's PRs.
     prs: crate::screens::merge::pr_list::PrList,
 
-    tokens: TokenState,
     search_state: SearchState,
     layout: MenuLayout,
 }
@@ -172,12 +169,6 @@ impl Menu {
 
             prs: crate::screens::merge::pr_list::PrList::default(),
 
-            tokens: TokenState {
-                detail: None,
-                detail_rx: None,
-                detail_at: None,
-                dscroll: 0,
-            },
             search_state: SearchState {
                 search,
                 msgs: None,
@@ -198,10 +189,7 @@ impl Menu {
 
     /// A background read on its way (threads, messages, tokens, PRs): the host draws often.
     pub(crate) fn waiting(&self) -> bool {
-        self.list.waiting()
-            || self.search_state.msgs_rx.is_some()
-            || self.tokens.detail_rx.is_some()
-            || (self.tab == Tab::Merge && self.prs.reading())
+        self.list.waiting() || self.search_state.msgs_rx.is_some() || (self.tab == Tab::Merge && self.prs.reading())
     }
 
     /// New cards (a read): the cursor stays on its thread.
@@ -358,7 +346,6 @@ impl Menu {
             Tab::Threads => self.list.cursor == 0,
             Tab::Merge => self.prs.at_top(),
             Tab::Search => self.search_state.scursor == 0,
-            Tab::Tokens => self.tokens.dscroll == 0,
         }
     }
 
@@ -460,14 +447,6 @@ mod poll;
 mod render;
 #[path = "quick_menu_updates.rs"]
 mod updates;
-
-struct TokenState {
-    /// Tokens tab: the last read, the read running, its time, the first line in view.
-    detail: Option<crate::features::cost::Detail>,
-    detail_rx: Option<Receiver<crate::features::cost::Detail>>,
-    detail_at: Option<Instant>,
-    dscroll: u16,
-}
 
 struct SearchState {
     /// Search tab: the query, every thread's messages (read once, in the background), the hits of

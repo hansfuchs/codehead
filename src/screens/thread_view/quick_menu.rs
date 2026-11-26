@@ -94,8 +94,9 @@ fn menu_item(
 fn prompt_menu_items() -> Vec<crate::screens::quick_menu::Item> {
     vec![
         menu_item("search the chat", "ctrl+f", 16, "chat"),
-        menu_item("tool calls: open / close all", "ctrl+o", 1, "chat"),
+        menu_item("tool calls: open / close all", "ctrl+e", 1, "chat"),
         menu_item("thoughts: open / close all", "ctrl+t", 13, "chat"),
+        menu_item("tokens: details (or a click on the tokens box)", "ctrl+o", 18, "chat"),
         menu_item("scroll the stream", "wheel · pgup", 10, "chat"),
         menu_item(
             "select + copy · double click: word · click code: copy",
@@ -154,6 +155,7 @@ fn menu_command(view: &mut View, id: usize) -> bool {
             view.stream.dirty = true;
         }
         13 => view.toggle_thoughts(),
+        18 => view.cost_box.toggle(),
         2 => {
             view.ide_key();
             view.stream.dirty = true;

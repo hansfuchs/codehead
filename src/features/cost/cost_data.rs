@@ -13,14 +13,6 @@ pub(super) fn window_of(model: &str) -> u64 {
     if model.contains("[1m]") { 1_000_000 } else { 200_000 }
 }
 
-/// Plan limits the hosts saw last: (harness, window, used %, resets at).
-pub(crate) fn limits() -> Vec<(String, String, f64, Option<u64>)> {
-    crate::engine::limits::read()
-        .into_iter()
-        .map(|limit| (limit.harness, limit.label, limit.pct, limit.resets))
-        .collect()
-}
-
 /// Per agent of thread ID, from its turn ends; live agents from its host, their running
 /// turns' tokens so far (the $ of a running turn: at the agent's last $ per token).
 pub(crate) fn uses(id: &str) -> Vec<AgentUse> {
@@ -38,9 +30,9 @@ pub(crate) fn uses(id: &str) -> Vec<AgentUse> {
         account_event(&live, &mut usages, &mut models, event);
     }
 
-    // 0 turn end with a $ in this thread yet: the agent's $ per token from its other threads
+    // 0 turn end with a $ / a window in this thread yet: the agent's last ones of its other threads
     for usage in usages.iter_mut().filter(|candidate| candidate.usd_per_token == 0.0) {
-        usage.usd_per_token = past_rate(&usage.agent, id);
+        usage.usd_per_token = past_turn(&usage.agent, id).rate;
     }
 
     for (name, turn) in state.usage {
@@ -48,12 +40,16 @@ pub(crate) fn uses(id: &str) -> Vec<AgentUse> {
             continue;
         };
 
-        add_running(
-            running_agent,
-            &turn,
-            models.get(&name).map_or("", String::as_str),
-            now(),
-        );
+        // a 1st turn: the window of the agent's last turn elsewhere (Claude reports it at the turn's end only)
+        let past = past_turn(&name, id).window;
+
+        let window = if past > 0 {
+            past
+        } else {
+            window_of(models.get(&name).map_or("", String::as_str))
+        };
+
+        add_running(running_agent, &turn, window, now());
     }
 
     usages.retain(|candidate_usage| candidate_usage.turns > 0 || candidate_usage.live);
@@ -99,8 +95,9 @@ fn account_event(
     }
 }
 
-/// Running turn USAGE of AGENT (model MODEL) at NOW: its tokens, $ (at the last $ per token), ctx.
-pub(super) fn add_running(agent: &mut AgentUse, usage: &crate::engine::harness::TurnUse, model: &str, now: u64) {
+/// Running turn USAGE of AGENT at NOW: its tokens, $ (at the last $ per token), ctx (of WINDOW
+/// tokens, when the thread has no window of the agent yet).
+pub(super) fn add_running(agent: &mut AgentUse, usage: &crate::engine::harness::TurnUse, window: u64, now: u64) {
     agent.input += usage.input;
     agent.output += usage.output;
     agent.cache_read += usage.cache_read;
@@ -108,7 +105,7 @@ pub(super) fn add_running(agent: &mut AgentUse, usage: &crate::engine::harness::
     agent.usd += agent.usd_per_token * (usage.input + usage.output + usage.cache_read + usage.cache_write) as f64;
 
     if usage.ctx > 0 {
-        let size = agent.ctx.map_or_else(|| window_of(model), |ctx| ctx.1);
+        let size = agent.ctx.map_or(window, |ctx| ctx.1);
 
         agent.ctx = Some((usage.ctx, size));
     }
@@ -118,31 +115,65 @@ pub(super) fn add_running(agent: &mut AgentUse, usage: &crate::engine::harness::
     }
 }
 
-/// $ per token of AGENT's last turn with a $ in another thread than SKIP (newest threads first).
-/// 0: none. Kept per process (a miss: read again after 60 s).
-pub(super) fn past_rate(agent: &str, skip: &str) -> f64 {
+/// An agent's last turn elsewhere: its $ per token, its context window (0: none).
+#[derive(Clone, Copy, Default)]
+pub(super) struct PastTurn {
+    pub rate: f64,
+    pub window: u64,
+}
+
+/// AGENT's last turn with a $ and its last with a window, in other threads than SKIP (newest
+/// threads first). Kept per process (a miss: read again after 60 s).
+pub(super) fn past_turn(agent: &str, skip: &str) -> PastTurn {
     use std::sync::{Mutex, OnceLock};
-    static SEEN: OnceLock<Mutex<HashMap<String, (f64, Instant)>>> = OnceLock::new();
+    static SEEN: OnceLock<Mutex<HashMap<String, (PastTurn, Instant)>>> = OnceLock::new();
     let seen = SEEN.get_or_init(Default::default);
 
-    if let Some(&(cached, at)) = seen.lock().ok().as_ref().and_then(|rates| rates.get(agent))
-        && (cached > 0.0 || at.elapsed() < Duration::from_secs(60))
+    if let Some(&(cached, at)) = seen.lock().ok().as_ref().and_then(|past| past.get(agent))
+        && ((cached.rate > 0.0 && cached.window > 0) || at.elapsed() < Duration::from_secs(60))
     {
         return cached;
     }
 
-    let rate = crate::engine::store::all()
+    let mut past = PastTurn::default();
+
+    for thread in crate::engine::store::all()
         .into_iter()
         .filter(|thread| thread.id != skip)
         .take(RATE_THREADS)
-        .find_map(|thread| last_rate(&crate::engine::store::events_tail(&thread.id, 256 * 1024), agent))
-        .unwrap_or(0.0);
+    {
+        let events = crate::engine::store::events_tail(&thread.id, 256 * 1024);
 
-    if let Ok(mut rates) = seen.lock() {
-        rates.insert(agent.to_string(), (rate, Instant::now()));
+        if past.rate == 0.0 {
+            past.rate = last_rate(&events, agent).unwrap_or(0.0);
+        }
+
+        if past.window == 0 {
+            past.window = last_window(&events, agent).unwrap_or(0);
+        }
+
+        if past.rate > 0.0 && past.window > 0 {
+            break;
+        }
     }
 
-    rate
+    if let Ok(mut seen) = seen.lock() {
+        seen.insert(agent.to_string(), (past, Instant::now()));
+    }
+
+    past
+}
+
+/// The context window of AGENT's last turn end with one in EVENTS.
+pub(super) fn last_window(events: &[crate::engine::store::Event], agent: &str) -> Option<u64> {
+    events
+        .iter()
+        .rev()
+        .filter(|event| event.agent.as_deref() == Some(agent))
+        .find_map(|event| match event.kind {
+            crate::engine::store::Kind::TurnEnd { window, .. } if window > 0 => Some(window),
+            _ => None,
+        })
 }
 
 /// $ per token of AGENT's last turn end with a $ in EVENTS.
@@ -176,53 +207,34 @@ pub(super) fn fetch(id: &str, names: &Names) -> Snap {
         return Snap::default();
     };
 
-    let (_, busy) = if crate::engine::client::alive(&thread.id) {
-        crate::engine::client::state(&thread.id)
-    } else {
-        Default::default()
-    };
-
-    let status = if busy.is_empty() {
-        thread.state.clone()
-    } else {
-        format!("working: {}", busy.join(", "))
-    };
-
     let mut snap = Snap {
         found: true,
-        status,
+        id: thread.id.clone(),
+        title: thread.title.clone(),
         ..Default::default()
     };
 
     for usage in uses(&thread.id) {
         snap.cost += usage.usd;
-        snap.input += usage.input;
-        snap.output += usage.output;
-        snap.cache_read += usage.cache_read;
-        snap.cache_write += usage.cache_write;
-        snap.turns += usage.turns;
-        let (name, color, sprite) = names.get(&usage.agent).cloned().map_or_else(
-            || (usage.agent.clone(), None, None),
-            |(name, color, sprite)| (name, color, Some(sprite)),
-        );
+        let (name, color) = names
+            .get(&usage.agent)
+            .cloned()
+            .unwrap_or_else(|| (usage.agent.clone(), None));
 
         snap.agents.push(AgentRow {
             name,
             color,
-            sprite,
-            tokens: usage.input + usage.output,
-            usd: usage.usd,
             ctx: usage
                 .ctx
                 .filter(|(_, size)| *size > 0)
                 .map(|(used, size)| used * 100 / size),
             live: usage.live,
             ctx_tokens: usage.ctx.map_or(0, |(used, _)| used),
-            usd_per_token: usage.usd_per_token,
+            usage,
         });
     }
 
-    snap.limits = crate::engine::limits::read();
+    snap.limits = of_harnesses(crate::engine::limits::read(), &snap.agents);
 
     snap
 }
@@ -230,11 +242,7 @@ pub(super) fn fetch(id: &str, names: &Names) -> Snap {
 pub(super) fn names() -> Names {
     agents::roster_only()
         .into_iter()
-        .map(|agent| {
-            let sprite = agents::sprite(&agent).desynced(&agent.name);
-
-            (agent.name.clone(), (agent.name, agent.color, sprite))
-        })
+        .map(|agent| (agent.name.clone(), (agent.name, agent.color)))
         .collect()
 }
 
@@ -282,4 +290,12 @@ fn account_turn(
     }
 
     agent.samples.push((event.ts / 1000, input + output));
+}
+
+/// The account's windows of the AGENTS' harnesses only (a codex thread: 0 claude window).
+pub(super) fn of_harnesses(limits: Vec<super::Limit>, agents: &[AgentRow]) -> Vec<super::Limit> {
+    limits
+        .into_iter()
+        .filter(|limit| agents.iter().any(|agent| agent.usage.harness == limit.harness))
+        .collect()
 }

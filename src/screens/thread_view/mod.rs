@@ -11,6 +11,7 @@ mod agents_state;
 mod branch;
 mod checkout_state;
 mod context_menu;
+mod cost_box_state;
 mod draw;
 mod draw_activity;
 mod draw_bar;
@@ -42,6 +43,7 @@ mod stream_state;
 mod urls_state;
 use agents_state::AgentState;
 use checkout_state::CheckoutState;
+use cost_box_state::CostBox;
 use ide_state::IdeState;
 use layout_state::LayoutState;
 use merge_state::MergeState;
@@ -104,7 +106,7 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use serde_json::{Value, json};
 
 use crate::engine::{client, store};
@@ -190,6 +192,8 @@ const MIN_COST_WIDTH: u16 = 70;
 const MIN_COST_BOX: u16 = 48;
 const MAX_COST_BOX: u16 = 66;
 const SQUEEZED_COST_BOX: u16 = 30;
+/// The expanded tokens box (borders incl.) at least: room for the agents table.
+const EXPANDED_WIDTH: u16 = 66;
 /// Header: the sprite rows + its top border at least, max. this many rows.
 const HEADER_H: u16 = crate::ui::sprites::HEIGHT as u16 + 1;
 const MAX_HEADER_H: u16 = 12;
@@ -203,6 +207,8 @@ enum Msg {
     /// A command to the host ended: what it was, Err(why).
     Done(&'static str, Result<Value, String>),
     Cost(Box<crate::features::cost::Snap>),
+    /// Every thread's cost (the expanded tokens box).
+    AllThreads(Box<crate::features::cost::AllThreads>),
     /// The host logged events: read the tail.
     Wake,
     /// Live text of an agent (token chunk): (agent, text).
@@ -315,8 +321,7 @@ struct View {
     menu: Option<crate::screens::quick_menu::Menu>,
     /// The context menu (ctrl+.): the actions of the region in focus.
     ctx: Option<crate::ui::context_menu::Menu<Ctx>>,
-    cost: Option<crate::features::cost::Snap>,
-    cost_at: Instant,
+    cost_box: CostBox,
     toast: Option<(String, Instant)>,
     started: Instant,
     last_esc: Option<Instant>,

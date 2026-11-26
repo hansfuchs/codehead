@@ -3,6 +3,10 @@ use super::{DOUBLE_ESC, Exit, Instant, KeyCode, KeyEvent, Pane, View};
 impl View {
     pub(super) fn key_escape(&mut self, key: KeyEvent) -> Option<bool> {
         match key.code {
+            KeyCode::Esc if self.cost_box.expanded => {
+                self.cost_box.toggle();
+                return Some(false);
+            }
             KeyCode::Esc
                 if self.panes.pane != Pane::Chat
                     && self.panes.prompt_focus

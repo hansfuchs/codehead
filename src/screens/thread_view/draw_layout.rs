@@ -74,7 +74,7 @@ impl PromptLayout {
             && !view.agents.members.is_empty()
             && (view.panes.pane == Pane::Chat || view.layout.wide_split)
         {
-            header_rows(view.agents.members.len()) + 1
+            header_rows(view.member_harnesses(), view.agents.members.len()) + 1
         } else {
             0
         }
@@ -131,5 +131,22 @@ impl ActivityLayout {
             subthreads,
             stream,
         }
+    }
+}
+
+impl View {
+    /// Harnesses of the thread's agents (the roster's), each once: the tokens box's groups.
+    pub(super) fn member_harnesses(&self) -> usize {
+        let mut harnesses: Vec<&str> = self
+            .agents
+            .members
+            .iter()
+            .filter_map(|name| self.agents.roster.iter().find(|agent| agent.name == *name))
+            .map(|agent| agent.harness.as_str())
+            .collect();
+
+        harnesses.sort_unstable();
+        harnesses.dedup();
+        harnesses.len()
     }
 }

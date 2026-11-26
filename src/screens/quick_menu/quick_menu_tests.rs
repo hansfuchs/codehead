@@ -138,18 +138,14 @@ fn assert_tabs_close(mut menu: Menu) {
 
     assert_eq!(menu.tab, Tab::Search);
 
-    menu.key(key_event(KeyCode::Right));
-
-    assert_eq!(menu.tab, Tab::Tokens);
-
-    // 0 agents tab (the agents box of the thread view, tab, has their actions)
+    // 0 agents tab, 0 tokens tab (the tokens box of the thread view, ctrl+o, has them) (the agents box of the thread view, tab, has their actions)
     menu.key(key_event(KeyCode::Right));
 
     assert_eq!(menu.tab, Tab::Quick);
 
     menu.key(key_event(KeyCode::Left));
 
-    assert_eq!(menu.tab, Tab::Tokens);
+    assert_eq!(menu.tab, Tab::Search);
     assert_eq!(menu.key(key_event(KeyCode::Esc)), Action::Close);
 
     // the menu key closes it too; tab: the next region (0 close)
@@ -541,13 +537,4 @@ fn live_threads_tab() {
         .collect();
 
     println!("{}", text.join("\n"));
-    menu.key(key_event(KeyCode::Right));
-    menu.tokens.detail = Some(crate::features::cost::detail(menu.thread.as_deref()));
-    terminal.draw(|frame| menu.render(frame, frame.area())).unwrap();
-    let buffer = terminal.backend().buffer().clone();
-    let tokens: Vec<String> = (0..34)
-        .map(|y| (0..100).map(|x| buffer[(x, y)].symbol().to_string()).collect())
-        .collect();
-
-    println!("{}", tokens.join("\n"));
 }

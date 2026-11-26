@@ -1,7 +1,22 @@
 use super::{
-    CLOCK, DefaultTerminal, Duration, Event, Instant, KeyCode, KeyEventKind, KeyModifiers, MORPH_TIME, draw, fetch,
-    names, now,
+    AllThreads, CLOCK, DefaultTerminal, Duration, Event, Expanded, Frame, Instant, KeyCode, KeyEventKind, KeyModifiers,
+    MORPH_TIME, Next, Show, Snap, all_threads, draw_at, fetch, names, now,
 };
+
+/// The pane: the expanded box over the whole terminal (every thread incl.).
+fn draw(frame: &mut Frame, snap: &Snap, all: &AllThreads) {
+    let area = frame.area();
+    let next = Next::default();
+    let show = Show {
+        next: &next,
+        expanded: Some(Expanded {
+            all: Some(all),
+            scroll: 0,
+        }),
+    };
+
+    draw_at(frame.buffer_mut(), area, snap, now(), show);
+}
 
 pub(super) fn run_loop(term: &mut DefaultTerminal, id: &str) -> std::io::Result<()> {
     let names = names();
@@ -11,11 +26,12 @@ pub(super) fn run_loop(term: &mut DefaultTerminal, id: &str) -> std::io::Result<
     crate::infra::watch::start();
     let topics = crate::infra::bus::subscribe();
     let mut snap = fetch(id, &names);
+    let mut all = all_threads();
     let mut at = Instant::now();
     let mut morph = Instant::now();
 
     loop {
-        term.draw(|frame| draw(frame, &snap, morph.elapsed(), now()))?;
+        term.draw(|frame| draw(frame, &snap, &all))?;
 
         // the morph animation: frames until it ends; else sleep until a key, a change, the clock
         let wait = if morph.elapsed() < MORPH_TIME {
@@ -38,6 +54,7 @@ pub(super) fn run_loop(term: &mut DefaultTerminal, id: &str) -> std::io::Result<
 
         if read {
             snap = fetch(id, &names);
+            all = all_threads();
             at = Instant::now();
             morph = Instant::now();
         }

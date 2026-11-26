@@ -110,8 +110,9 @@ fn prompt_context(view: &View) -> (String, Vec<crate::ui::context_menu::Item<Ctx
 
     items.extend([
         Item::new("search the chat", "ctrl+f", Ctx::Menu(16)),
-        Item::new("tool calls: open / close all", "ctrl+o", Ctx::Menu(1)),
+        Item::new("tool calls: open / close all", "ctrl+e", Ctx::Menu(1)),
         Item::new("thoughts: open / close all", "ctrl+t", Ctx::Menu(13)),
+        Item::new("tokens: details", "ctrl+o", Ctx::Menu(18)),
         Item::new("interrupt the agents", "esc", Ctx::Menu(12)),
         Item::new("IDE on the worktree", "", Ctx::Menu(2)),
         Item::new("yazi on the worktree (its pick: into the prompt)", "", Ctx::Menu(14)),

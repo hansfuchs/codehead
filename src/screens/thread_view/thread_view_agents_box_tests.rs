@@ -354,3 +354,84 @@ fn a_click_on_the_row_of_a_closed_flow_box_keeps_it_closed() {
 
     assert!(view.flowbars.iter().all(|flow| !flow.is_open()), "0 flow box opens");
 }
+
+#[test]
+fn ctrl_o_and_a_click_expand_the_tokens_box_over_the_chat_and_esc_closes_it() {
+    let mut view = view("agentsbox-0006");
+
+    view.cost_box.snap = Some(crate::features::cost::Snap::default());
+    let compact = screen(&mut view);
+    let box_rect = view.cost_box.rect;
+
+    assert!(!compact.contains("ctrl+o · click: close"), "{compact}");
+
+    key(&mut view, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    let expanded = screen(&mut view);
+
+    assert!(
+        view.cost_box.expanded && expanded.contains("ctrl+o · click: close"),
+        "{expanded}"
+    );
+    assert!(view.cost_box.rect.height > box_rect.height, "it grows up over the chat");
+
+    key(&mut view, KeyCode::Esc, KeyModifiers::NONE);
+
+    assert!(
+        !view.cost_box.expanded && view.last_esc.is_none(),
+        "esc: closed, 0 back armed"
+    );
+
+    // a click on the box: expanded; ⌘o: closed again
+    screen(&mut view);
+    view.mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: box_rect.x + 1,
+        row: box_rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert!(view.cost_box.expanded);
+
+    key(&mut view, KeyCode::Char('o'), KeyModifiers::SUPER);
+
+    assert!(!view.cost_box.expanded);
+}
+
+#[test]
+fn ctrl_e_opens_every_tool_run_only_with_an_empty_prompt() {
+    let mut view = view("agentsbox-0007");
+
+    key(&mut view, KeyCode::Char('e'), KeyModifiers::CONTROL);
+
+    assert!(view.stream.all_runs);
+
+    view.prompt.input.set_text("draft");
+    key(&mut view, KeyCode::Char('e'), KeyModifiers::CONTROL);
+
+    // the prompt's line end, the runs stay open
+    assert!(view.stream.all_runs);
+}
+
+#[test]
+fn the_tokens_box_opens_on_the_last_thread_list_at_its_full_height() {
+    let mut view = view("agentsbox-0008");
+    let list = crate::features::cost::AllThreads {
+        threads: vec![crate::features::cost::ThreadCost::default(); 3],
+        ..Default::default()
+    };
+
+    view.cost_box.snap = Some(crate::features::cost::Snap::default());
+    view.cost_box.all = Some(list.clone());
+    view.cost_box.all_reading = true;
+    key(&mut view, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    screen(&mut view);
+    let opened = view.cost_box.rect;
+
+    // the new read comes: the same rows, the same box
+    view.cost_box.all = Some(list);
+    view.cost_box.all_reading = false;
+    screen(&mut view);
+
+    assert!(view.cost_box.all.is_some(), "the list stays while a new read runs");
+    assert_eq!(view.cost_box.rect, opened);
+}

@@ -1,5 +1,5 @@
 use super::{
-    AgentState, CheckoutState, Duration, Exit, IdeState, Instant, LayoutState, MergeState, MiniChatState, Msg,
+    AgentState, CheckoutState, CostBox, Exit, IdeState, Instant, LayoutState, MergeState, MiniChatState, Msg,
     PaneState, Path, PromptState, SelectionState, ShellState, StreamState, UrlState, View, chat, store,
 };
 impl View {
@@ -45,8 +45,7 @@ impl View {
             find: crate::features::chat::chat_search::ChatSearch::default(),
             find_to: None,
             menu: None,
-            cost: None,
-            cost_at: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
+            cost_box: CostBox::new(),
             toast: None,
             started: Instant::now(),
             last_esc: None,

@@ -12,8 +12,10 @@ impl View {
         self.draw_activity(frame, &activity);
         self.draw_bar(frame, top);
         self.draw_prompt_status(frame, prompt.title);
-        self.draw_header_cost(frame, prompt.header);
+        self.draw_header_cost(frame, prompt.header, activity.stream.y);
         let commands = self.draw_prompt(frame, prompt.input, prompt.bubble, prompt.search);
+
+        self.draw_cost_expanded(frame);
         let cwd = self.draw_hints(frame, prompt.hint);
 
         self.draw_footer(frame, prompt.footer);

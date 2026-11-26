@@ -51,12 +51,6 @@ fn dispatch_mouse(menu: &mut Menu, event: MouseEvent) -> Action {
         MouseEventKind::ScrollUp if menu.tab == Tab::Search => {
             menu.search_state.scursor = menu.search_state.scursor.saturating_sub(1);
         }
-        MouseEventKind::ScrollDown if menu.tab == Tab::Tokens => {
-            menu.tokens.dscroll = menu.tokens.dscroll.saturating_add(1);
-        }
-        MouseEventKind::ScrollUp if menu.tab == Tab::Tokens => {
-            menu.tokens.dscroll = menu.tokens.dscroll.saturating_sub(1);
-        }
         _ => {}
     }
 
@@ -98,7 +92,7 @@ fn dispatch_click(menu: &mut Menu, event: MouseEvent, at: Position) -> Option<Ac
             menu.search_state.scursor = i;
             return Some(menu.jump(i));
         }
-        Tab::Tokens | Tab::Merge | Tab::Threads => {}
+        Tab::Merge | Tab::Threads => {}
     }
 
     None

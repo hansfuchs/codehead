@@ -6,7 +6,11 @@ impl Runtime {
 
         match message {
             Msg::Done(command, result) => self.command_done(command, result),
-            Msg::Cost(snapshot) => self.view.cost = Some(*snapshot),
+            Msg::Cost(snapshot) => self.view.cost_box.snap = Some(*snapshot),
+            Msg::AllThreads(all) => {
+                self.view.cost_box.all = Some(*all);
+                self.view.cost_box.all_reading = false;
+            }
             Msg::Shell(command, output, code, dir) => {
                 self.view.shell_done(command, output, code, &dir);
                 self.wake = true;

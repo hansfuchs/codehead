@@ -13,7 +13,6 @@ impl Menu {
 
 fn draw_menu(menu: &mut Menu, frame: &mut Frame, area: Rect) {
     menu.poll();
-    menu.poll_detail();
 
     // wide screens: up to 100 columns (45% of the width), 76 at least
     let width = area.width.saturating_sub(4).min((area.width * 45 / 100).clamp(76, 100));
@@ -120,10 +119,6 @@ fn draw_menu_content(menu: &mut Menu, frame: &mut Frame<'_>, body: Rect, foot: R
                 ("←→", "tabs"),
                 ("esc", "close"),
             ]
-        }
-        Tab::Tokens => {
-            menu.draw_tokens(frame, body);
-            &[("↑↓", "scroll"), ("r", "reload"), ("←→", "tabs"), ("esc", "close")]
         }
     };
 

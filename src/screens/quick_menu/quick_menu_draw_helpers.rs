@@ -10,47 +10,6 @@ impl Menu {
     pub(super) fn draw_search(&mut self, frame: &mut Frame, body: Rect) {
         draw_message_search(self, frame, body);
     }
-
-    pub(super) fn draw_tokens(&mut self, frame: &mut Frame, body: Rect) {
-        let Some(detail) = &self.tokens.detail else {
-            frame.render_widget(
-                Paragraph::new(Span::styled("reading usage…", theme::muted())),
-                Rect { height: 1, ..body },
-            );
-            return;
-        };
-
-        let names = self
-            .roster
-            .iter()
-            .map(|agent| (agent.name.clone(), (agent.name.clone(), agent.color.clone())))
-            .collect();
-        let titles = self
-            .list
-            .cards
-            .iter()
-            .map(|card| (card.id.clone(), card.name()))
-            .collect();
-        let lines =
-            crate::features::cost::detail_lines(detail, self.thread.as_deref(), &names, &titles, body.width as usize);
-        let max = (lines.len() as u16).saturating_sub(body.height);
-
-        self.tokens.dscroll = self.tokens.dscroll.min(max);
-        frame.render_widget(Paragraph::new(lines).scroll((self.tokens.dscroll, 0)), body);
-
-        if max > 0 {
-            let text = format!("{}↑ · {}↓", self.tokens.dscroll, max - self.tokens.dscroll);
-
-            frame.render_widget(
-                Paragraph::new(Span::styled(text, theme::muted())).right_aligned(),
-                Rect {
-                    y: body.y.saturating_sub(2),
-                    height: 1,
-                    ..body
-                },
-            );
-        }
-    }
 }
 
 fn draw_quick_items(menu: &mut Menu, frame: &mut Frame, body: Rect) {

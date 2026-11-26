@@ -30,7 +30,8 @@ fn screen(menu: &mut Menu) -> String {
     text
 }
 
-/// 0 agents tab (the thread view's agents box, tab, has their actions); n starts a thread.
+/// 0 agents tab (the thread view's agents box, tab, has their actions), 0 tokens tab (the
+/// tokens box, ctrl+o, has them); n starts a thread.
 #[test]
 fn the_menu_has_0_agents_tab_and_n_starts_a_thread() {
     let roster = vec![agent("amon", "claude"), agent("nova", "codex")];
@@ -44,9 +45,12 @@ fn the_menu_has_0_agents_tab_and_n_starts_a_thread() {
         }],
     );
     let text = screen(&mut menu);
-    let bar = text.lines().find(|line| line.contains("tokens")).unwrap_or_default();
+    let bar = text.lines().find(|line| line.contains("search")).unwrap_or_default();
 
-    assert!(bar.contains("quick") && !bar.contains("agents"), "{text}");
+    assert!(
+        bar.contains("quick") && !bar.contains("agents") && !bar.contains("tokens"),
+        "{text}"
+    );
     assert_eq!(
         menu.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
         Action::Home(Home::New)

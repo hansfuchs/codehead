@@ -53,21 +53,5 @@ fn dispatch_key(menu: &mut Menu, key: KeyEvent) -> Action {
             crate::screens::merge::pr_list::Pick::Open(entry) => Action::Pr(entry),
             _ => Action::None,
         },
-        Tab::Tokens => {
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    menu.tokens.dscroll = menu.tokens.dscroll.saturating_sub(1);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    menu.tokens.dscroll = menu.tokens.dscroll.saturating_add(1);
-                }
-                KeyCode::PageUp => menu.tokens.dscroll = menu.tokens.dscroll.saturating_sub(10),
-                KeyCode::PageDown => menu.tokens.dscroll = menu.tokens.dscroll.saturating_add(10),
-                KeyCode::Char('r') => menu.tokens.detail_at = None,
-                _ => {}
-            }
-
-            Action::None
-        }
     }
 }

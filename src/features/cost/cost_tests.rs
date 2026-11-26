@@ -54,6 +54,41 @@ fn the_rate_comes_from_the_agents_last_paid_turn() {
 }
 
 #[test]
+fn a_1st_turn_takes_the_window_of_the_agents_last_turn_elsewhere() {
+    use crate::engine::store::{Event, Kind};
+
+    let end = |agent: &str, window: u64| {
+        Event::new(
+            Some(agent),
+            Kind::TurnEnd {
+                cost: 0.0,
+                input: 1,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                ctx: 10,
+                window,
+                ms: 0,
+                error: None,
+            },
+        )
+    };
+
+    let events = vec![end("regi", 1_000_000), end("regi", 0), end("gigas", 475_000)];
+    let mut agent = AgentUse::default();
+    let turn = crate::engine::harness::TurnUse {
+        ctx: 172_200,
+        ..Default::default()
+    };
+
+    add_running(&mut agent, &turn, last_window(&events, "regi").unwrap(), 1);
+
+    // 172.2k of 1M: 17 %, never 86 % of a 200k guess
+    assert_eq!(agent.ctx, Some((172_200, 1_000_000)));
+    assert_eq!(last_window(&events, "nova"), None);
+}
+
+#[test]
 fn a_running_turn_counts_at_once() {
     let mut agent = AgentUse {
         input: 100,
@@ -72,8 +107,9 @@ fn a_running_turn_counts_at_once() {
         ctx: 5000,
     };
 
-    add_running(&mut agent, &turn, "", 42);
+    add_running(&mut agent, &turn, 1_000_000, 42);
 
+    // the thread's own window wins over the fallback
     assert_eq!((agent.input, agent.output, agent.cache_read), (110, 70, 70));
     assert!((agent.usd - 2.0).abs() < 1e-9);
     assert_eq!(agent.ctx, Some((5000, 200_000)));
@@ -88,44 +124,41 @@ fn humanizes() {
     assert_eq!(human(12_812_803), "12.8M");
 }
 
+#[test]
+fn a_codex_thread_shows_0_claude_window() {
+    let codex_only = render_snapshot(100).agents.split_off(1);
+    let limits = render_snapshot(100).limits;
+
+    let kept = of_harnesses(limits, &codex_only);
+
+    assert!(kept.iter().all(|limit| limit.harness == "codex"), "{kept:?}");
+    assert_eq!(kept.len(), 1);
+}
+
 /// Live check: `CODEHEAD_THREAD`=<id> cargo test `live_fetch` -- --ignored --nocapture
 #[test]
 #[ignore = "live agent usage; explicit run required"]
 fn live_fetch() {
     let id = std::env::var("CODEHEAD_THREAD").unwrap();
     let snap = fetch(&id, &names());
-    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 14)).unwrap();
-
-    term.draw(|frame| draw(frame, &snap, Duration::from_secs(0), now()))
-        .unwrap();
-    let buffer = term.backend().buffer().clone();
-
-    let text: String = (0..14)
-        .map(|y| {
-            (0..60)
-                .map(|x| buffer[(x, y)].symbol().to_string())
-                .collect::<String>()
-                .trim_end()
-                .to_string()
-                + "\n"
-        })
-        .collect();
+    let next = Next::default();
+    let show = Show {
+        next: &next,
+        expanded: Some(Expanded { all: None, scroll: 0 }),
+    };
+    let (buffer, text) = render(&snap, show, 76, 40, now());
 
     println!("{text}");
 
-    assert!(snap.found);
+    assert!(snap.found && buffer.area.width == 76);
 }
 
-#[test]
-fn renders() {
-    let now = 1_000_000;
-    let snap = render_snapshot(now);
-    let (width, height) = (56, 16);
-    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+/// SNAP drawn WIDTH x HEIGHT at NOW: the buffer, its rows as text (trailing spaces cut).
+fn render(snap: &Snap, show: Show, width: u16, height: u16, now: u64) -> (Buffer, String) {
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
 
-    term.draw(|frame| draw(frame, &snap, Duration::from_secs(1), now))
-        .unwrap();
-    let buffer = term.backend().buffer().clone();
+    draw_at(&mut buffer, area, snap, now, show);
 
     let text: String = (0..height)
         .map(|y| {
@@ -138,168 +171,199 @@ fn renders() {
         })
         .collect();
 
-    println!("{text}");
-
-    assert!(text.contains("$28.47 thread"));
-    assert!(
-        text.chars()
-            .any(|character| ('\u{2801}'..='\u{28ff}').contains(&character)),
-        "sprite row"
-    );
-    assert!(text.contains("$26.87"));
-    assert!(text.contains("19%"));
-    assert!(text.contains(" 13%  2h") && text.contains(" 95%  3d"), "{text}");
-
-    // compact: the thread view's header, a 400-char message to amon
-    assert_compact_cost(now, &snap);
+    (buffer, text)
 }
 
-fn assert_compact_cost(now: u64, snap: &Snap) {
-    let (width, height) = (56, 7);
+/// The column of the 1st cell of ROW with a background (a bar's used part) or `░`.
+fn bar_start(buffer: &Buffer, row: usize) -> Option<u16> {
+    (0..buffer.area.width).find(|x| {
+        let cell = &buffer[(*x, row as u16)];
+
+        cell.symbol() == "░" || cell.symbol() == "▒" || cell.bg != ratatui::style::Color::Reset
+    })
+}
+
+#[test]
+fn the_compact_box_groups_agents_by_harness_with_aligned_dithered_bars() {
+    let now = 1_000_000;
+    let snap = render_snapshot(now);
     let next = Next {
         to: vec!["amon".into()],
         chars: 400,
     };
-    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    let show = Show {
+        next: &next,
+        expanded: None,
+    };
 
-    term.draw(|frame| {
-        let area = frame.area();
-
-        draw_at(frame.buffer_mut(), area, snap, Duration::from_secs(1), now, &next);
-    })
-    .unwrap();
-
-    let buffer = term.backend().buffer().clone();
-
-    let text: String = (0..height)
-        .map(|y| {
-            (0..width)
-                .map(|x| buffer[(x, y)].symbol().to_string())
-                .collect::<String>()
-                .trim_end()
-                .to_string()
-                + "\n"
-        })
-        .collect();
+    let (buffer, text) = render(&snap, show, 60, 4, now);
 
     println!("{text}");
-    let first = text.lines().next().unwrap();
+    let rows: Vec<&str> = text.lines().collect();
 
-    assert!(first.contains("tok") && first.ends_with("$28.47 thread"), "{text}");
-    assert!(text.contains("$26.87") && !text.contains("9 turns"), "{text}");
-    assert!(!text.contains("q close") && !text.contains("◆"), "{text}");
-
-    // amon's context line: ━ in amon's color up to 19 %, ─ rest, the % after it
-    assert_compact_context(width, &buffer, &text);
-
-    // the window bars: used ━ in text (7d: error from 90 %), the next message's share ━ in info, ─ rest
-    assert_compact_limits(width, &buffer, &text);
-
-    // the next message: ≥ context + text tokens, $, share per window (0 rate: ?)
-    assert!(text.contains("≥38.1k tok ~$0.38 · 5h +0.2% · 7d ?"), "{text}");
-}
-
-fn assert_compact_context(width: u16, buffer: &Buffer, text: &String) {
-    let row = text
-        .lines()
-        .position(|line| line.starts_with(" amon"))
-        .expect("amon row");
-    let cells: Vec<_> = (0..width).map(|x| buffer[(x, row as u16)].clone()).collect();
-    let amon = agents::color(Some("orange"));
-    let fill = cells
-        .iter()
-        .filter(|cell| cell.symbol() == "━" && cell.fg == amon)
-        .count();
-    let rest = cells.iter().filter(|cell| cell.symbol() == "─").count();
-
-    assert!(fill > 0 && rest > fill * 3, "{text}");
-    assert!(text.lines().nth(row).unwrap().ends_with(" 19%"), "{text}");
-
-    // lilith: 0 context yet, all ─
+    // claude: 5h + 7d side by side, amon below; codex: its window, gigas below
     assert!(
-        text.lines().any(|line| line.starts_with(" lilith")
-            && line.contains('─')
-            && !line.contains('━')
-            && line.ends_with('·')),
+        rows[0].starts_with("claude") && rows[0].contains("5h") && rows[0].contains("7d"),
+        "{text}"
+    );
+    assert!(rows[1].starts_with("amon") && rows[1].ends_with(" 19%"), "{text}");
+    assert!(rows[2].starts_with("codex") && rows[2].contains(" 94%"), "{text}");
+    assert!(rows[3].starts_with("gigas") && rows[3].ends_with('·'), "{text}");
+
+    // every 1st bar starts in 1 column
+    let starts: Vec<Option<u16>> = (0..3).map(|row| bar_start(&buffer, row)).collect();
+
+    assert!(
+        starts.iter().all(|start| *start == starts[0] && start.is_some()),
+        "{starts:?}\n{text}"
+    );
+
+    // dithered: used on a background, rest ░, the next message's share ▒ (5h has a rate)
+    assert!(rows[0].contains('▒') && rows[0].contains('░'), "{text}");
+
+    let amon = agents::color(Some("orange"));
+
+    assert!(
+        (0..60).any(|x| buffer[(x, 1)].bg == amon),
+        "amon's context on amon's color: {text}"
+    );
+
+    // 7d ≥ 90 %: error
+    assert!((0..60).any(|x| buffer[(x, 0)].bg == theme::pal().error()), "{text}");
+
+    // 0 "all", 0 "next", 0 "working"
+    assert!(
+        !text.contains("all") && !text.contains("next") && !text.contains("working"),
         "{text}"
     );
 }
 
-fn assert_compact_limits(width: u16, buffer: &ratatui::buffer::Buffer, text: &String) {
-    let row = text.lines().position(|line| line.starts_with(" 5h")).expect("5h row");
-    let cells: Vec<_> = (0..width).map(|x| buffer[(x, row as u16)].clone()).collect();
+#[test]
+fn the_expanded_box_shows_the_details_over_the_compact_rows() {
+    let now = 1_000_000;
+    let snap = render_snapshot(now);
+    let next = Next {
+        to: vec!["amon".into()],
+        chars: 400,
+    };
+    let all = AllThreads {
+        threads: vec![ThreadCost {
+            id: "t1".into(),
+            title: "codehead v2".into(),
+            usd: 28.47,
+            tokens: 98_299,
+            turns: 9,
+        }],
+        usd: 40.0,
+        tokens: 200_000,
+        day_usd: 12.5,
+    };
+    let show = Show {
+        next: &next,
+        expanded: Some(Expanded {
+            all: Some(&all),
+            scroll: 0,
+        }),
+    };
+
+    let (_, text) = render(&snap, show, 62, 40, now);
+
+    println!("{text}");
+
+    for want in [
+        "codehead v2",
+        "$28.47 · 98.2k tok",
+        "cache 12.8M read · 534.0k write · hit 99%",
+        "last hour",
+        "cache r",
+        "1 session · context 38.0k of 200.0k (19%)",
+        "resets in 2h · next +0.2% · $2.00 per 1%",
+        "@amon  ≥38.1k tok ~$0.38",
+        "all threads",
+        "$40.00 · 200.0k tok · last 24h $12.50",
+        "› ",
+    ] {
+        assert!(text.contains(want), "{want}:\n{text}");
+    }
+
+    // the compact rows stay at the bottom
+    let rows: Vec<&str> = text.lines().collect();
 
     assert!(
-        cells
-            .iter()
-            .any(|cell| cell.symbol() == "━" && cell.fg == theme::pal().text),
-        "used part: {text}"
+        rows[rows.len() - 1].starts_with("gigas") && rows[rows.len() - 4].starts_with("claude"),
+        "{text}"
     );
-    assert!(
-        cells
-            .iter()
-            .any(|cell| cell.symbol() == "━" && cell.fg == theme::pal().info()),
-        "share: {text}"
-    );
-    assert!(
-        cells
-            .iter()
-            .any(|cell| cell.symbol() == "━" && cell.fg == theme::pal().error()),
-        "7d near the limit: {text}"
-    );
-    assert!(cells.iter().any(|cell| cell.symbol() == "─"), "rest: {text}");
-    assert!(!text.contains('░') && !text.contains('▒'), "{text}");
-
-    // the windows side by side: 5h and 7d on 1 row
-    assert!(text.lines().nth(row).unwrap().contains(" 7d "), "{text}");
 }
 
 fn render_snapshot(now: u64) -> Snap {
     Snap {
         found: true,
-        status: "working · turn 3".into(),
+        id: "t1".into(),
+        title: "codehead v2".into(),
         cost: 28.47,
-        input: 250,
-        output: 98_049,
-        cache_read: 12_812_803,
-        cache_write: 534_032,
-        turns: 9,
         agents: vec![
             AgentRow {
                 name: "amon".into(),
                 color: Some("orange".into()),
-                tokens: 98_000,
-                usd: 26.87,
                 ctx: Some(19),
                 live: true,
-                sprite: Some(crate::domain::sprites::default_for("amon")),
                 ctx_tokens: 38_000,
-                usd_per_token: 0.000_01,
+                usage: AgentUse {
+                    agent: "amon".into(),
+                    harness: "claude".into(),
+                    sessions: 1,
+                    live: true,
+                    input: 250,
+                    output: 98_000,
+                    cache_read: 12_812_803,
+                    cache_write: 534_032,
+                    turns: 9,
+                    usd: 28.47,
+                    ctx: Some((38_000, 200_000)),
+                    samples: vec![(now - 60, 5000)],
+                    usd_per_token: 0.000_01,
+                },
             },
             AgentRow {
-                name: "lilith".into(),
-                tokens: 92,
-                usd: 1.6,
+                name: "gigas".into(),
+                usage: AgentUse {
+                    agent: "gigas".into(),
+                    harness: "codex".into(),
+                    output: 49,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         ],
-        limits: vec![
-            Limit {
-                harness: "claude".into(),
-                label: "five_hour".into(),
-                pct: 13.0,
-                resets: Some(now + 7200),
-                usd_per_pct: Some(2.0),
-            },
-            Limit {
-                harness: "claude".into(),
-                label: "seven_day".into(),
-                pct: 95.0,
-                resets: Some(now + 3 * 86_400),
-                usd_per_pct: None,
-            },
-        ],
+        limits: render_limits(now),
     }
+}
+
+/// claude 5h (a rate) + 7d near the limit, codex 5h.
+fn render_limits(now: u64) -> Vec<Limit> {
+    vec![
+        Limit {
+            harness: "claude".into(),
+            label: "five_hour".into(),
+            pct: 13.0,
+            resets: Some(now + 7200),
+            usd_per_pct: Some(2.0),
+        },
+        Limit {
+            harness: "claude".into(),
+            label: "seven_day".into(),
+            pct: 95.0,
+            resets: Some(now + 3 * 86_400),
+            usd_per_pct: None,
+        },
+        Limit {
+            harness: "codex".into(),
+            label: "five_hour".into(),
+            pct: 94.0,
+            resets: Some(now + 7200),
+            usd_per_pct: None,
+        },
+    ]
 }
 
 #[test]
