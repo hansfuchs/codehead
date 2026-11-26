@@ -43,6 +43,18 @@ impl View {
         &self.dir
     }
 
+    /// Tests: when the last git read came in.
+    #[cfg(test)]
+    pub(crate) fn last_read(&self) -> Option<std::time::Instant> {
+        self.loaded
+    }
+
+    /// Tests: the data version (up with each read whose new diffs dissolve in).
+    #[cfg(test)]
+    pub(crate) fn data_version(&self) -> u64 {
+        self.layout.version
+    }
+
     pub(crate) fn new(id: &str, dir: &Path) -> View {
         View {
             operation_state: operation_state::OperationState::new(),

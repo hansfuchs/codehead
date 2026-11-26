@@ -127,8 +127,7 @@ pub(crate) fn archive(id: &str) -> Result<String, String> {
             done.push(format!("{label}: {}", if ok { "ran" } else { "failed" }));
         }
 
-        let (_, dirty, _) = git(path, &["status", "--porcelain"]);
-        let dirty_files = dirty.lines().count();
+        let dirty_files = crate::domain::landed::dirty_count(path);
 
         if let Some(failed) = stash_dirty_worktree(&mut done, branch, path, dirty_files) {
             return failed;

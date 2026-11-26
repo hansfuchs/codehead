@@ -270,6 +270,29 @@ fn landed_refresh_after_commit() {
     super::landed::run();
 }
 
+/// The owner's case: the changes view on an agent's worktree, the real watcher. 1 edit, atomic
+/// writes (temp file + rename), a burst of edits: the git reads and dissolves they cost.
+#[test]
+#[ignore = "perf: just perf"]
+fn changes_reads_per_edit() {
+    let cases = super::changes_reads::run();
+
+    assert_eq!(cases.edit.reads, 1, "1 edit: {:?}", cases.edit);
+    assert_eq!(
+        cases.same_text.reads, 1,
+        "the read wrote the index: {:?}",
+        cases.same_text
+    );
+    assert!(cases.burst.reads <= 2, "burst: {:?}", cases.burst);
+    assert_eq!(cases.atomic.stray_rows, 0, "temp files showed: {:?}", cases.atomic);
+    assert_eq!(
+        (cases.nested.stray_rows, cases.nested.dissolves),
+        (0, 0),
+        "nested worktree: {:?}",
+        cases.nested
+    );
+}
+
 #[test]
 #[ignore = "perf: just perf"]
 fn fuzzy_rank_10k_paths() {

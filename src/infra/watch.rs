@@ -411,10 +411,11 @@ fn collect_topics(
             verdicts.clear();
         }
 
+        // a nested repo or worktree (a subagent's): ignored like a gitignored dir
         for dir in ask {
-            let i = ignored.contains(&dir);
+            let skip = ignored.contains(&dir) || work.join(&dir).join(".git").exists();
 
-            verdicts.insert(dir, i);
+            verdicts.insert(dir, skip);
         }
 
         if rels.iter().any(|rel| watch.verdict(&work, rel) == Some(false)) {
@@ -442,6 +443,9 @@ fn ignore_verdict(watch: &Watch, work: &Path, rel: &Path) -> Option<bool> {
 #[path = "watch_runtime.rs"]
 mod runtime;
 use runtime::run;
+
+#[path = "watch_settle.rs"]
+mod settle;
 
 fn add_plain_root(dir: &Path, shown: &[PathBuf], works: &mut HashSet<PathBuf>) {
     if shown.iter().any(|path| path == dir) && dir.is_dir() {
@@ -474,6 +478,26 @@ fn classify_work(
     // a changed ignore file: every verdict of this work tree again
     if rel.file_name().is_some_and(|name| name == ".gitignore") {
         watch.ignores.remove(&work);
+    }
+
+    // a temp file of an atomic write: its rename brings the real path
+    if crate::infra::stray_paths::transient(&rel.to_string_lossy()) {
+        return;
+    }
+
+    // a nested repo or worktree came (its `.git`): its dir and all below it are not this work
+    // tree's (a verdict of the dir from before its `.git`: replaced)
+    if let Some(parent) = rel
+        .parent()
+        .filter(|_| rel.file_name().is_some_and(|name| name == ".git"))
+    {
+        watch
+            .ignores
+            .entry(work)
+            .or_default()
+            .insert(parent.to_path_buf(), true);
+
+        return;
     }
 
     match watch.verdict(&work, &rel) {

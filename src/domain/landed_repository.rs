@@ -90,11 +90,24 @@ pub(crate) fn task_branch(dir: &Path, branch: Option<&str>) -> Result<(String, O
 }
 /// Uncommitted + untracked files of checkout DIR.
 pub(crate) fn dirty_count(dir: &Path) -> usize {
-    // 0 index refresh: a write of the index would come back as a topic (a loop)
-    git(dir, &["--no-optional-locks", "status", "--porcelain"])
-        .1
-        .lines()
-        .count()
+    // 0 index refresh: a write of the index would come back as a topic (a loop); every untracked
+    // file on its own line: a dir that holds only a nested worktree (`.claude/` of a subagent's)
+    // shows as that worktree's `dir/`, which counts 0
+    let status = git(
+        dir,
+        &["--no-optional-locks", "status", "--porcelain", "--untracked-files=all"],
+    )
+    .1;
+
+    status.lines().filter(|line| counts_as_dirty(line)).count()
+}
+/// LINE of `git status --porcelain`: work of the checkout (0: a nested repo, a temp file).
+pub(crate) fn counts_as_dirty(line: &str) -> bool {
+    let Some(path) = line.strip_prefix("?? ") else {
+        return !line.is_empty();
+    };
+
+    !path.ends_with('/') && !crate::infra::stray_paths::transient(path)
 }
 /// The refs state of branch B in checkout DIR (DEF: the repo's default branch).
 pub(super) fn refs(dir: &Path, branch: &str, def: Option<&str>, seen: &mut Seen) -> Refs {

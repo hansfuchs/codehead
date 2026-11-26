@@ -1,7 +1,8 @@
 use super::{
-    Changes, Command, EMPTY_TREE, HashSet, MAX_UNTRACKED, Path, PathBuf, Pr, Stdio, commits, order, parse, untracked,
-    z_paths,
+    Changes, Command, EMPTY_TREE, FileDiff, HashSet, MAX_UNTRACKED, Path, PathBuf, Pr, Stdio, commits, order, parse,
+    untracked, z_paths,
 };
+use crate::infra::stray_paths;
 
 pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
@@ -89,27 +90,27 @@ pub(crate) fn load_from(dir: &Path, all: bool) -> Result<Changes, String> {
     };
 
     let rev = if all { mb.clone() } else { head };
-    let diff = git(dir, &["diff", "-M", "--no-color", "--no-ext-diff", "-U3", &rev])?;
-    let mut files = parse(&diff);
-    let others = git(dir, &["ls-files", "--others", "--exclude-standard", "-z"]).unwrap_or_default();
-    let mut fresh = HashSet::new();
 
-    for path in others.split('\0').filter(|path| !path.is_empty()).take(MAX_UNTRACKED) {
-        files.push(untracked(dir, path));
-        fresh.insert(path.to_string());
-    }
+    // plumbing: `git diff` refreshes the index and writes it (stat-only changes, even with
+    // --no-optional-locks), the watcher sees the write: 1 more read per read
+    let diff = git(
+        dir,
+        &["diff-index", "-p", "-M", "--no-color", "--no-ext-diff", "-U3", &rev],
+    )?;
+    let mut files = parse(&diff);
+    let fresh = add_untracked(dir, &mut files);
 
     order(&mut files);
 
     // staged: in the index diff; a part: also in the worktree diff
     let cached = z_paths(&git(dir, &["diff", "--cached", "--name-only", "-z"]).unwrap_or_default());
-    let unstaged = z_paths(&git(dir, &["diff", "--name-only", "-z"]).unwrap_or_default());
+    let unstaged = numstat_paths(&git(dir, &["diff-files", "--numstat", "-z"]).unwrap_or_default());
     let staged = cached
         .into_iter()
         .map(|path| (path.clone(), !unstaged.contains(&path)))
         .collect();
-    let stopped =
-        stopped(dir).then(|| z_paths(&git(dir, &["diff", "--name-only", "--diff-filter=U", "-z"]).unwrap_or_default()));
+    let stopped = stopped(dir)
+        .then(|| z_paths(&git(dir, &["diff-files", "--name-only", "--diff-filter=U", "-z"]).unwrap_or_default()));
 
     let (ahead, behind) = if label == "HEAD" {
         (0, 0)
@@ -140,6 +141,35 @@ pub(crate) fn load_from(dir: &Path, all: bool) -> Result<Changes, String> {
         committed: Vec::new(),
         git_dir,
     })
+}
+/// The untracked files of DIR as new-file diffs into FILES: their paths. Nested repos (a
+/// subagent's worktree) and temp files of atomic writes stay out.
+fn add_untracked(dir: &Path, files: &mut Vec<FileDiff>) -> HashSet<String> {
+    let others = git(dir, &["ls-files", "--others", "--exclude-standard", "-z"]).unwrap_or_default();
+    let mut fresh = HashSet::new();
+
+    let paths = others
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .filter(|path| !stray_paths::transient(path) && !stray_paths::nested_repository(dir, path))
+        .take(MAX_UNTRACKED);
+
+    for path in paths {
+        files.push(untracked(dir, path));
+        fresh.insert(path.to_string());
+    }
+
+    fresh
+}
+/// The paths of `git diff-files --numstat -z` output TEXT (`<added>\t<removed>\t<path>\0`).
+/// Numstat compares contents: a file with a new stat and the same text is not in it (`--name-only`
+/// lists it, the index unrefreshed).
+pub(crate) fn numstat_paths(text: &str) -> HashSet<String> {
+    text.split('\0')
+        .filter_map(|entry| entry.splitn(3, '\t').nth(2))
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 /// The pull request of DIR's branch (gh pr view). None: 0 PR, 0 gh.
 pub(crate) fn pr_state(dir: &Path) -> Option<Pr> {

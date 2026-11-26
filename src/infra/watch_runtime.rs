@@ -1,8 +1,11 @@
+use super::settle::Settle;
 use super::{
     ControlFlow, Git, HashMap, HashSet, Msg, Part, PathBuf, Receiver, Topic, Watch, Watcher, bus, canon, check_ignore,
     roots, store,
 };
 use std::path::Path;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Instant;
 /// The watcher thread: roots, classify, publish.
 pub(super) fn run(mut watcher: notify::RecommendedWatcher, threads: &Path, rx: &Receiver<Msg>) {
     let threads = canon(threads);
@@ -21,6 +24,7 @@ pub(super) fn run(mut watcher: notify::RecommendedWatcher, threads: &Path, rx: &
         .map(|thread| (thread.id.clone(), thread))
         .collect();
     let mut roots_due = true;
+    let mut settle = Settle::default();
 
     loop {
         if let ControlFlow::Break(()) = run_once(WatchLoop {
@@ -32,6 +36,7 @@ pub(super) fn run(mut watcher: notify::RecommendedWatcher, threads: &Path, rx: &
             shown: &mut shown,
             all: &mut all,
             roots_due: &mut roots_due,
+            settle: &mut settle,
         }) {
             return;
         }
@@ -48,6 +53,7 @@ fn run_once(settings: WatchLoop<'_>) -> ControlFlow<()> {
         shown,
         all,
         roots_due,
+        settle,
     } = settings;
 
     if *roots_due {
@@ -55,28 +61,48 @@ fn run_once(settings: WatchLoop<'_>) -> ControlFlow<()> {
         update_watch_roots(watcher, threads, watch, roots_watched, shown, all);
     }
 
-    let Ok(first) = rx.recv() else {
+    let Ok(next) = next_message(rx, settle) else {
         return ControlFlow::Break(());
     };
 
-    let paths = Vec::new();
+    if let Some(first) = next {
+        handle_events(
+            first,
+            Vec::new(),
+            WatchEvents {
+                rx,
+                threads,
+                watch,
+                roots_watched,
+                shown,
+                all,
+                roots_due,
+                settle: &mut *settle,
+            },
+        );
+    }
 
-    handle_events(
-        first,
-        paths,
-        WatchEvents {
-            rx,
-            threads,
-            watch,
-            roots_watched,
-            shown,
-            all,
-            roots_due,
-        },
-    )
+    for work in settle.due(Instant::now()) {
+        bus::publish(&Topic::Work(work));
+    }
+
+    ControlFlow::Continue(())
 }
 
-fn handle_events(first: Msg, mut paths: Vec<PathBuf>, settings: WatchEvents<'_>) -> ControlFlow<()> {
+/// The next message; None: a held work tree's deadline came first. Err: the senders are gone.
+fn next_message(rx: &Receiver<Msg>, settle: &Settle) -> Result<Option<Msg>, ()> {
+    let Some(deadline) = settle.next() else {
+        return rx.recv().map(Some).map_err(|_| ());
+    };
+
+    match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(message) => Ok(Some(message)),
+        Err(RecvTimeoutError::Timeout) => Ok(None),
+        Err(RecvTimeoutError::Disconnected) => Err(()),
+    }
+}
+
+fn handle_events(first: Msg, mut paths: Vec<PathBuf>, settings: WatchEvents<'_>) {
     let WatchEvents {
         rx,
         threads,
@@ -85,6 +111,7 @@ fn handle_events(first: Msg, mut paths: Vec<PathBuf>, settings: WatchEvents<'_>)
         shown,
         all,
         roots_due,
+        settle,
     } = settings;
 
     for message in std::iter::once(first).chain(std::iter::from_fn(|| rx.try_recv().ok())) {
@@ -105,7 +132,16 @@ fn handle_events(first: Msg, mut paths: Vec<PathBuf>, settings: WatchEvents<'_>)
         }
     }
 
+    let now = Instant::now();
+
     for topic in watch.topics(&paths, &mut check_ignore) {
+        // a work tree edit: out when its burst settled (`run_once`)
+        if let Topic::Work(work) = topic {
+            settle.hold(work, now);
+
+            continue;
+        }
+
         // a thread's checkouts or a branch switch: other roots
         if let Topic::Thread(id, Part::Meta) = &topic {
             match store::load_in(threads, id) {
@@ -119,8 +155,6 @@ fn handle_events(first: Msg, mut paths: Vec<PathBuf>, settings: WatchEvents<'_>)
         *roots_due |= matches!(topic, Topic::Git(_, Git::Worktree(_)));
         bus::publish(&(topic));
     }
-
-    ControlFlow::Continue(())
 }
 
 struct WatchLoop<'context> {
@@ -132,6 +166,7 @@ struct WatchLoop<'context> {
     shown: &'context mut HashMap<u64, PathBuf>,
     all: &'context mut HashMap<String, store::Thread>,
     roots_due: &'context mut bool,
+    settle: &'context mut Settle,
 }
 
 struct WatchEvents<'context> {
@@ -142,6 +177,7 @@ struct WatchEvents<'context> {
     shown: &'context mut HashMap<u64, PathBuf>,
     all: &'context mut HashMap<String, store::Thread>,
     roots_due: &'context mut bool,
+    settle: &'context mut Settle,
 }
 
 fn update_watch_roots(

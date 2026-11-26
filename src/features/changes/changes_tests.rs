@@ -176,6 +176,9 @@ mod navigation;
 #[path = "changes_git_tests.rs"]
 mod git;
 
+#[path = "changes_read_tests.rs"]
+mod read;
+
 #[path = "changes_comment_threads_tests.rs"]
 mod comment_threads;
 

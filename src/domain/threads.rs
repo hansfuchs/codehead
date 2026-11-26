@@ -118,7 +118,8 @@ fn shortstat(dir: &Path) -> Option<(usize, usize, usize)> {
         })
         .unwrap_or_else(|| "HEAD".into());
 
-    let stat = git(dir, &["diff", "--shortstat", &base]).1;
+    // plumbing: `git diff` writes the refreshed index, the watcher's topic reads every view again
+    let stat = git(dir, &["diff-index", "--shortstat", &base]).1;
 
     let num = |key: &str| {
         stat.split(',')

@@ -268,3 +268,27 @@ fn worker_reads_what_a_topic_names() {
 
     std::fs::remove_dir_all(&base).unwrap();
 }
+
+/// Dirty count: a subagent's worktree and a nested repo inside the checkout, temp files of
+/// atomic writes: 0; each real untracked file and edit: 1.
+#[test]
+fn nested_worktrees_and_temp_files_are_not_dirty() {
+    let dir = std::env::temp_dir().join(format!("ch-landed-nested-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    std::fs::create_dir_all(&dir).unwrap();
+    sh(
+        &dir,
+        "git init -q -b main && echo a > a.txt && git add -A && git commit -qm init \
+         && git worktree add -q -b sub .claude/worktrees/agent-1 && mkdir -p vendor/lib && git -C vendor/lib init -q \
+         && echo t > a.txt.tmp.4821.0123456789ab",
+    );
+
+    assert_eq!(dirty_count(&dir), 0);
+
+    sh(&dir, "echo b >> a.txt && mkdir -p docs && echo n > docs/new.md");
+
+    assert_eq!(dirty_count(&dir), 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

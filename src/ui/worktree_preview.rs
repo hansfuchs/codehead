@@ -37,8 +37,15 @@ pub(crate) fn preview(worktree: &Worktree) -> Vec<Line<'static>> {
         }
     }
 
-    let (_, st, _) = git(dir, &["status", "--porcelain"]);
-    let st: Vec<&str> = st.lines().collect();
+    // the rule of the landed dirty count: 0 index write, 0 nested worktree, 0 temp file
+    let (_, st, _) = git(
+        dir,
+        &["--no-optional-locks", "status", "--porcelain", "--untracked-files=all"],
+    );
+    let st: Vec<&str> = st
+        .lines()
+        .filter(|line| crate::domain::landed::counts_as_dirty(line))
+        .collect();
 
     let col = |bad: bool| {
         Style::default().fg(if bad {
@@ -311,8 +318,7 @@ fn teardown(worktree: &Worktree, out: &mut Vec<Line<'static>>, warn: Style) {
 
 fn stash_changes(worktree: &Worktree, out: &mut Vec<Line<'static>>, warn: Style, danger: Style) -> bool {
     let dir = Path::new(&worktree.path);
-    let (_, dirty, _) = git(dir, &["status", "--porcelain"]);
-    let n_dirty = dirty.lines().count();
+    let n_dirty = crate::domain::landed::dirty_count(dir);
 
     if n_dirty > 0 {
         let msg = format!("codehead: {} before worktree removal", worktree.branch);

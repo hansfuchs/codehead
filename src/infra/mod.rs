@@ -15,6 +15,7 @@ pub(crate) mod models;
 pub(crate) mod portless;
 pub(crate) mod pushlock;
 pub(crate) mod skills;
+pub(crate) mod stray_paths;
 pub(crate) mod styles;
 pub(crate) mod terminal;
 pub(crate) mod update;

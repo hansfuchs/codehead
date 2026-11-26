@@ -158,3 +158,39 @@ fn git_dirs_and_check_ignore() {
 
     std::fs::remove_dir_all(&base).unwrap();
 }
+
+/// A nested repo or worktree (a subagent's, inside the checkout) and temp files of atomic writes:
+/// 0 `Work`; a repo that comes later (its `.git` event) replaces the dir's verdict.
+#[test]
+fn nested_repositories_and_temp_files_publish_nothing() {
+    let base = std::env::temp_dir().join(format!("ch-watch-nested-{}", std::process::id()));
+    let work = base.join("wt");
+    let _ = std::fs::remove_dir_all(&base);
+
+    std::fs::create_dir_all(work.join(".claude/worktrees/agent-1/src")).unwrap();
+    std::fs::create_dir_all(work.join("vendor")).unwrap();
+    std::fs::write(work.join(".claude/worktrees/agent-1/.git"), "gitdir: /elsewhere\n").unwrap();
+
+    let mut watch = Watch {
+        threads: "/d/threads".into(),
+        gits: Vec::new(),
+        works: vec![work.clone()],
+        plain: HashSet::new(),
+        ignores: HashMap::new(),
+    };
+    let mut topics = |rel: &str| watch.topics(&[work.join(rel)], &mut |_: &Path, _: &[PathBuf]| HashSet::new());
+    let edit = vec![Topic::Work(work.clone())];
+
+    assert_eq!(topics(".claude/worktrees/agent-1/src/x.rs"), []);
+    assert_eq!(topics("src/a.rs.tmp.4821.0123456789ab"), []);
+    assert_eq!(topics("src/.a.rs.swp"), []);
+    assert_eq!(topics("src/a.rs"), edit);
+    assert_eq!(topics("vendor/x.rs"), edit);
+
+    std::fs::create_dir_all(work.join("vendor/.git")).unwrap();
+
+    assert_eq!(topics("vendor/.git"), []);
+    assert_eq!(topics("vendor/y.rs"), []);
+
+    std::fs::remove_dir_all(&base).unwrap();
+}
